@@ -4,16 +4,208 @@
 # synkroniseringsprimitivet som ekte trådar (isolerte VM-instansar med
 # meldingsutveksling, jf. plan-tilrådinga) skal bruke bak same API.
 #
-# Køyrer på seed-runtimen i dag som ein *logisk* kanal (éin adresserom,
-# kooperativ). Ekte parallellisme — fire CPU-tunge oppgåver på fire kjerner
-# på ≈1/4 tid — krev trådprimitiv i runtime-laget (plattform-ABI). Sjå planen.
+# To slag:
+#
+# 1. ny_kanal() — ubunden og ikkje-blokkerande (den opphavlege M8-kanalen):
+#    send legg bakerst, motta svarar { "har": usann } når kanalen er tom.
+#    Éin builtin-operasjon per send; trygg med éin mottakar, men ikkje tenkt
+#    for fleire mottakarar i grøne trådar (bruk slag 2).
+#
+# 2. ny_blokkerande_kanal(kapasitet) — bunden og blokkerande (java.util.concurrent
+#    ArrayBlockingQueue / Go-kanal med buffer), bygd på monitoren i std.samtid:
+#      send_vent(k, v)          put: ventar medan kanalen er full
+#      send_innan(k, v, ms)     offer(timeout): usann når fristen går ut
+#      send_straks(k, v)        offer: usann med ein gong når han er full
+#      motta_vent(k)            take: ventar medan kanalen er tom og open;
+#                               { "har": usann, "stengd": sann } når stengd og tømd
+#      motta_innan(k, ms)       poll(timeout): { "har": usann, "stengd": usann } ved tidsavbrot
+#      motta(k)                 poll: ikkje-blokkerande (som for slag 1)
+#      lukk(k) / steng(k)       close: vekkjer alle; send kastar KanalFeil,
+#                               mottakarar tømmer resten og får så har=usann
+#    send(k, v) på ein blokkerande kanal er send_vent (held kapasiteten).
+#    Ein avsendar som ventar når kanalen blir stengd, får KanalFeil.
+#    Grøne trådar (VM): ventande trådar gjev frå seg kontrollen (condition_wait).
+#    Eintråda (AOT i dag, sjå std/samtid.no): full/tom kanal utan frist kastar
+#    «SamtidFeil: … ville blokkert for alltid»; med frist søv han fristen ut.
+#
+# Kø-representasjon: liste + hovud-indeks (O(1) motta, amortisert kompaktering).
+
+bruk std.samtid som samtid
 
 funksjon ny_kanal() -> ordbok {
-    returner { "kø": [], "open": sann }
+    returner { "kø": [], "hovud": 0, "open": sann }
 }
 
-# Legg ei melding bakerst. Kast dersom kanalen er stengd.
+funksjon ny_blokkerande_kanal(kapasitet: heiltall) -> ordbok {
+    hvis kapasitet < 1 {
+        kast "KanalFeil: kapasitet må vere minst 1"
+    }
+    la k = { "kø": [], "hovud": 0, "open": sann, "kapasitet": kapasitet }
+    k["mon"] = samtid.ny_monitor()
+    returner k
+}
+
+funksjon er_blokkerande(k: ordbok) -> bool {
+    returner har_nokkel(k, "kapasitet")
+}
+
+funksjon _hovud(k: ordbok) -> heiltall {
+    hvis har_nokkel(k, "hovud") { returner k["hovud"] }
+    returner 0
+}
+
+funksjon _lengd(k: ordbok) -> heiltall {
+    returner lengde(k["kø"]) - _hovud(k)
+}
+
+# Ta fremste element (kallaren veit at kanalen ikkje er tom). Kompakterer lista
+# når minst halvparten er konsumert, so minnet ikkje veks utan grense.
+funksjon _ta_fremste(k: ordbok) {
+    la kø = k["kø"]
+    la h = _hovud(k)
+    la v = kø[h]
+    kø[h] = ingenting
+    h = h + 1
+    hvis h >= 32 og h * 2 >= lengde(kø) {
+        la rest = []
+        la j = h
+        mens j < lengde(kø) {
+            legg_til(rest, kø[j])
+            j = j + 1
+        }
+        k["kø"] = rest
+        h = 0
+    }
+    k["hovud"] = h
+    returner v
+}
+
+# ─── Blokkerande kanal ────────────────────────────────────────────────────────
+
+funksjon _send_blokk(k: ordbok, v, timeout_ms: heiltall, op: tekst) -> bool {
+    la mon = k["mon"]
+    la frist = samtid.frist_om(timeout_ms)
+    samtid.monitor_lås(mon)
+    mens k["open"] og _lengd(k) >= k["kapasitet"] {
+        la vidare = usann
+        prøv {
+            vidare = samtid.monitor_vent(mon, frist, op)
+        } fang (e) {
+            samtid.monitor_opp(mon)
+            kast e
+        }
+        hvis ikkje vidare {
+            samtid.monitor_opp(mon)
+            returner usann
+        }
+    }
+    hvis ikkje k["open"] {
+        samtid.monitor_opp(mon)
+        kast "KanalFeil: send på stengd kanal"
+    }
+    legg_til(k["kø"], v)
+    samtid.monitor_signal_alle(mon)
+    samtid.monitor_opp(mon)
+    returner sann
+}
+
+funksjon _motta_blokk(k: ordbok, timeout_ms: heiltall, op: tekst) -> ordbok {
+    la mon = k["mon"]
+    la frist = samtid.frist_om(timeout_ms)
+    samtid.monitor_lås(mon)
+    mens k["open"] og _lengd(k) == 0 {
+        la vidare = usann
+        prøv {
+            vidare = samtid.monitor_vent(mon, frist, op)
+        } fang (e) {
+            samtid.monitor_opp(mon)
+            kast e
+        }
+        hvis ikkje vidare {
+            samtid.monitor_opp(mon)
+            returner { "har": usann, "verdi": ingenting, "stengd": usann }
+        }
+    }
+    hvis _lengd(k) == 0 {
+        samtid.monitor_opp(mon)
+        returner { "har": usann, "verdi": ingenting, "stengd": sann }
+    }
+    la v = _ta_fremste(k)
+    samtid.monitor_signal_alle(mon)
+    samtid.monitor_opp(mon)
+    returner { "har": sann, "verdi": v, "stengd": usann }
+}
+
+funksjon _krev_blokkerande(k: ordbok, op: tekst) -> heiltall {
+    hvis ikkje er_blokkerande(k) {
+        kast "KanalFeil: " + op + " krev ein kanal frå ny_blokkerande_kanal"
+    }
+    returner 0
+}
+
+# put(): ventar medan kanalen er full. Kastar KanalFeil når kanalen er/blir stengd.
+funksjon send_vent(k: ordbok, v) -> heiltall {
+    _krev_blokkerande(k, "send_vent")
+    _send_blokk(k, v, -1, "send_vent")
+    returner 0
+}
+
+# offer(v, timeout): sann når verdien kom inn innan fristen.
+funksjon send_innan(k: ordbok, v, timeout_ms: heiltall) -> bool {
+    _krev_blokkerande(k, "send_innan")
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _send_blokk(k, v, timeout_ms, "send_innan")
+}
+
+# offer(v): usann med ein gong når kanalen er full.
+funksjon send_straks(k: ordbok, v) -> bool {
+    _krev_blokkerande(k, "send_straks")
+    returner _send_blokk(k, v, 0, "send_straks")
+}
+
+# take(): ventar på neste verdi. { "har": usann, "stengd": sann } når kanalen er
+# stengd og tømd (som `v, ok := <-ch` i Go).
+funksjon motta_vent(k: ordbok) -> ordbok {
+    _krev_blokkerande(k, "motta_vent")
+    returner _motta_blokk(k, -1, "motta_vent")
+}
+
+# poll(timeout)
+funksjon motta_innan(k: ordbok, timeout_ms: heiltall) -> ordbok {
+    _krev_blokkerande(k, "motta_innan")
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _motta_blokk(k, timeout_ms, "motta_innan")
+}
+
+# Kapasiteten til ein blokkerande kanal; -1 for ein ubunden kanal.
+funksjon kapasitet(k: ordbok) -> heiltall {
+    hvis er_blokkerande(k) { returner k["kapasitet"] }
+    returner -1
+}
+
+# close(): ingen fleire send; alle ventande blir vekte.
+funksjon lukk(k: ordbok) -> heiltall {
+    hvis ikkje er_blokkerande(k) {
+        k["open"] = usann
+        returner 0
+    }
+    la mon = k["mon"]
+    samtid.monitor_lås(mon)
+    k["open"] = usann
+    samtid.monitor_signal_alle(mon)
+    samtid.monitor_opp(mon)
+    returner 0
+}
+
+# ─── Felles API (begge slag) ──────────────────────────────────────────────────
+
+# Legg ei melding bakerst. Kast dersom kanalen er stengd. Blokkerande kanal:
+# ventar medan han er full (send_vent).
 funksjon send(k: ordbok, v) -> heiltall {
+    hvis er_blokkerande(k) {
+        _send_blokk(k, v, -1, "send")
+        returner 0
+    }
     hvis ikkje k["open"] {
         kast "KanalFeil: send på stengd kanal"
     }
@@ -21,35 +213,29 @@ funksjon send(k: ordbok, v) -> heiltall {
     returner 0
 }
 
-# Ta neste melding forrest. { "har": bool, "verdi": <verdi eller ingenting> }.
+# Ta neste melding forrest utan å vente. { "har": bool, "verdi": <verdi eller ingenting> }.
 funksjon motta(k: ordbok) -> ordbok {
-    la kø = k["kø"]
-    hvis lengde(kø) == 0 {
+    hvis er_blokkerande(k) {
+        la r = _motta_blokk(k, 0, "motta")
+        returner { "har": r["har"], "verdi": r["verdi"] }
+    }
+    hvis _lengd(k) == 0 {
         returner { "har": usann, "verdi": ingenting }
     }
-    la fyrst = kø[0]
-    la resten = []
-    la j = 1
-    mens j < lengde(kø) {
-        legg_til(resten, kø[j])
-        j = j + 1
-    }
-    k["kø"] = resten
-    returner { "har": sann, "verdi": fyrst }
+    returner { "har": sann, "verdi": _ta_fremste(k) }
 }
 
 funksjon lengd(k: ordbok) -> heiltall {
-    returner lengde(k["kø"])
+    returner _lengd(k)
 }
 
 funksjon er_tom(k: ordbok) -> bool {
-    returner lengde(k["kø"]) == 0
+    returner _lengd(k) == 0
 }
 
 # Steng kanalen: ingen fleire send, men mottak av det som ligg der er lov.
 funksjon steng(k: ordbok) -> heiltall {
-    k["open"] = usann
-    returner 0
+    returner lukk(k)
 }
 
 funksjon er_open(k: ordbok) -> bool {

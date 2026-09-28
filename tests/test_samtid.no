@@ -1,0 +1,494 @@
+// std.samtid: semafor, nedteljar, barriere, re-entrant lås, lese-skrive-lås,
+// trådlokale verdiar og trådar med lambda-kropp.
+//
+// Med trådar (VM, backend "vm-green") køyrer kvar del fleire grøne trådar og
+// sjekkar invariantane under ekte samtidigheit (preemptive M:1): aldri meir enn
+// løyve-talet inne i semaforen, nedteljaren slepp først etter n tel_ned,
+// barriererundane er skilde, skrivarar er åleine, trådlokale verdiar er private.
+// Utan trådar (AOT i dag, backend "eintråda") blir den eintråda kontrakten sjekka:
+// ikkje-blokkerande operasjonar verkar, venting med frist svarar usann etter
+// fristen, venting utan frist kastar SamtidFeil i staden for å henge.
+//
+// Ingen venting i testen er utan frist på hovudtråden (join med 5 s tak), so ein
+// feil gjev raud test og ikkje heng.
+bruk std.samtid som sm
+bruk std.runtime.atomic som atom
+
+funksjon inneheld(t: tekst, del: tekst) -> boolsk {
+    returner builtin.index_of(t, del) >= 0
+}
+
+funksjon krev_feil(e, del: tekst) -> heiltall {
+    hvis ikkje inneheld(tekst(e), del) {
+        kast "venta feil med «" + del + "», fekk: " + tekst(e)
+    }
+    returner 0
+}
+
+funksjon maks_av(l) -> heiltall {
+    la m: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis l[i] > m { m = l[i] }
+        i = i + 1
+    }
+    returner m
+}
+
+funksjon join_alle(ts) -> liste {
+    la ut = []
+    la i: heiltall = 0
+    mens i < lengde(ts) {
+        hvis ikkje sm.tråd_join_innan(ts[i], 5000) { kast "tråd " + tekst(i) + " vart ikkje ferdig innan 5 s" }
+        legg_til(ut, sm.tråd_resultat(ts[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── semafor ──────────────────────────────────────────────────────────────────
+funksjon w_semafor(s, inne, observert) -> heiltall {
+    la k: heiltall = 0
+    mens k < 3 {
+        sm.semafor_skaff(s)
+        la no = atom.fetch_add(inne, 1, "seq_cst") + 1
+        legg_til(observert, no)
+        sm.sov(8)
+        atom.fetch_add(inne, -1, "seq_cst")
+        sm.semafor_slepp(s)
+        k = k + 1
+    }
+    returner k
+}
+
+funksjon w_slepp_seinare(s, ms: heiltall) -> heiltall {
+    sm.sov(ms)
+    sm.semafor_slepp(s)
+    returner 1
+}
+
+funksjon test_semafor_trådar() -> heiltall {
+    la s = sm.ny_semafor(2)
+    la inne = atom.ny(0)
+    la observert = []
+    la ts = []
+    la i: heiltall = 0
+    mens i < 6 {
+        legg_til(ts, sm.tråd_start(fun() -> w_semafor(s, inne, observert)))
+        i = i + 1
+    }
+    la res = join_alle(ts)
+    assert_eq(res[0], 3)
+    assert_eq(lengde(observert), 18)
+    // Aldri meir enn 2 samtidig inne — og faktisk 2 (trådane overlappa).
+    assert_eq(maks_av(observert), 2)
+    assert_eq(sm.semafor_ledige(s), 2)
+    // tryAcquire / tryAcquire(timeout)
+    assert(sm.semafor_skaff_straks(s))
+    assert(sm.semafor_skaff_straks(s))
+    assert(ikkje sm.semafor_skaff_straks(s))
+    la t0 = builtin.tid_ms()
+    assert(ikkje sm.semafor_skaff_innan(s, 40))
+    assert(builtin.tid_ms() - t0 >= 35)
+    // Ein annan tråd sleppar etter 30 ms: skaff_innan(5000) lukkast snøgt.
+    la t = sm.tråd_start(fun() -> w_slepp_seinare(s, 30))
+    // Vekkinga kjem frå slepp (signal), ikkje frå 2 s-vakta i std.samtid._vent.
+    la tv = builtin.tid_ms()
+    assert(sm.semafor_skaff_innan(s, 5000))
+    assert(builtin.tid_ms() - tv < 1500)
+    assert(sm.tråd_join_innan(t, 5000))
+    assert_eq(sm.semafor_ledige(s), 0)
+    sm.semafor_slepp_n(s, 2)
+    assert_eq(sm.semafor_tøm(s), 2)
+    assert_eq(sm.semafor_ledige(s), 0)
+    sm.frigje(s)
+    returner 0
+}
+
+// ── nedteljar ────────────────────────────────────────────────────────────────
+funksjon w_nedteljar_vent(l, ferdig) -> tekst {
+    sm.nedteljar_vent(l)
+    atom.store(ferdig, 1, "seq_cst")
+    returner "sleppt"
+}
+
+funksjon test_nedteljar_trådar() -> heiltall {
+    la l = sm.ny_nedteljar(3)
+    la ferdig = atom.ny(0)
+    la ventarar = [sm.tråd_start(fun() -> w_nedteljar_vent(l, ferdig)),
+                   sm.tråd_start(fun() -> w_nedteljar_vent(l, ferdig))]
+    sm.sov(30)
+    assert_eq(atom.load(ferdig, "seq_cst"), 0)
+    sm.nedteljar_tel_ned(l)
+    sm.nedteljar_tel_ned(l)
+    sm.sov(30)
+    // To av tre: framleis låst.
+    assert_eq(atom.load(ferdig, "seq_cst"), 0)
+    assert(ikkje sm.tråd_ferdig(ventarar[0]))
+    assert_eq(sm.nedteljar_tal(l), 1)
+    la tn = builtin.tid_ms()
+    sm.nedteljar_tel_ned(l)
+    la res = join_alle(ventarar)
+    assert(builtin.tid_ms() - tn < 1500)
+    assert_eq(res[0], "sleppt")
+    assert_eq(res[1], "sleppt")
+    assert_eq(atom.load(ferdig, "seq_cst"), 1)
+    // Etter 0: tel_ned er no-op, vent returnerer med ein gong.
+    sm.nedteljar_tel_ned(l)
+    assert_eq(sm.nedteljar_tal(l), 0)
+    assert(sm.nedteljar_vent_innan(l, 0))
+    // await(timeout) på ein nedteljar som ikkje når 0.
+    la l2 = sm.ny_nedteljar(1)
+    la t0 = builtin.tid_ms()
+    assert(ikkje sm.nedteljar_vent_innan(l2, 40))
+    assert(builtin.tid_ms() - t0 >= 35)
+    returner 0
+}
+
+// ── barriere ─────────────────────────────────────────────────────────────────
+funksjon w_barriere(b, logg, indeksar, namn: tekst) -> heiltall {
+    la r: heiltall = 0
+    mens r < 4 {
+        legg_til(logg, namn + tekst(r))
+        sm.sov(r * 3)
+        legg_til(indeksar, sm.barriere_vent(b))
+        r = r + 1
+    }
+    returner r
+}
+
+funksjon handling_snapshot(snap, logg) -> heiltall {
+    legg_til(snap, lengde(logg))
+    returner 0
+}
+
+funksjon w_barriere_ein(b) -> tekst {
+    prøv {
+        sm.barriere_vent(b)
+    } fang (e) {
+        returner tekst(e)
+    }
+    returner "passerte"
+}
+
+funksjon test_barriere_trådar() -> heiltall {
+    la logg = []
+    la snap = []
+    la indeksar = []
+    la b = sm.ny_barriere_med(3, fun() -> handling_snapshot(snap, logg))
+    la ts = [sm.tråd_start(fun() -> w_barriere(b, logg, indeksar, "a")),
+             sm.tråd_start(fun() -> w_barriere(b, logg, indeksar, "b")),
+             sm.tråd_start(fun() -> w_barriere(b, logg, indeksar, "c"))]
+    join_alle(ts)
+    // Handlinga køyrer når alle tre har logga runden, før nokon går vidare.
+    assert_eq(lengde(snap), 4)
+    assert_eq(snap[0], 3)
+    assert_eq(snap[1], 6)
+    assert_eq(snap[2], 9)
+    assert_eq(snap[3], 12)
+    // Kvar runde gjev ankomstindeksane {0,1,2} (sum 3), fire rundar → sum 12.
+    assert_eq(lengde(indeksar), 12)
+    la sum: heiltall = 0
+    la i: heiltall = 0
+    mens i < 12 { sum = sum + indeksar[i]  i = i + 1 }
+    assert_eq(sum, 12)
+    assert(ikkje sm.barriere_er_broten(b))
+    // Tidsavbrot bryt barrieren: den ventande tråden får «broten».
+    la b2 = sm.ny_barriere(3)
+    la vent = sm.tråd_start(fun() -> w_barriere_ein(b2))
+    sm.sov(20)
+    assert_eq(sm.barriere_ventande(b2), 1)
+    la feil = ""
+    prøv { sm.barriere_vent_innan(b2, 40) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "BarriereFeil: tidsavbrot")
+    assert(sm.tråd_join_innan(vent, 5000))
+    krev_feil(sm.tråd_resultat(vent), "BarriereFeil: broten")
+    assert(sm.barriere_er_broten(b2))
+    sm.barriere_nullstill(b2)
+    assert(ikkje sm.barriere_er_broten(b2))
+    returner 0
+}
+
+// ── re-entrant lås ───────────────────────────────────────────────────────────
+funksjon w_prøv_lås(l, ms: heiltall) -> boolsk {
+    la ok = sm.lås_skaff_innan(l, ms)
+    hvis ok { sm.lås_slepp(l) }
+    returner ok
+}
+
+funksjon w_slepp_framand(l) -> tekst {
+    prøv { sm.lås_slepp(l) } fang (e) { returner tekst(e) }
+    returner "sleppte"
+}
+
+funksjon w_teljar(l, teljar, n: heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < n {
+        sm.lås_skaff(l)
+        teljar["n"] = teljar["n"] + 1
+        sm.lås_slepp(l)
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon test_lås_trådar() -> heiltall {
+    la l = sm.ny_lås()
+    sm.lås_skaff(l)
+    sm.lås_skaff(l)
+    assert_eq(sm.lås_djupn(l), 2)
+    assert(sm.lås_halden_av_meg(l))
+    // Ein annan tråd får ikkje låsen, og kan ikkje sleppe han.
+    assert_eq(sm.tråd_join(sm.tråd_start(fun() -> w_prøv_lås(l, 30))), usann)
+    krev_feil(sm.tråd_join(sm.tråd_start(fun() -> w_slepp_framand(l))), "SamtidFeil")
+    sm.lås_slepp(l)
+    assert(sm.lås_halden_av_meg(l))
+    sm.lås_slepp(l)
+    assert(ikkje sm.lås_halden_av_meg(l))
+    assert_eq(sm.tråd_join(sm.tråd_start(fun() -> w_prøv_lås(l, 2000))), sann)
+    // Gjensidig utelukking under preemption: 4 × 300 teljar-auk utan tap.
+    la teljar = {"n": 0}
+    la ts = []
+    la k: heiltall = 0
+    mens k < 4 { legg_til(ts, sm.tråd_start(fun() -> w_teljar(l, teljar, 300)))  k = k + 1 }
+    join_alle(ts)
+    assert_eq(teljar["n"], 1200)
+    returner 0
+}
+
+// ── lese-skrive-lås ──────────────────────────────────────────────────────────
+funksjon w_lesar(rw, lesarar_inne, skrivarar_inne, brot, observert) -> heiltall {
+    la k: heiltall = 0
+    mens k < 4 {
+        sm.rwlås_les(rw)
+        la no = atom.fetch_add(lesarar_inne, 1, "seq_cst") + 1
+        legg_til(observert, no)
+        hvis atom.load(skrivarar_inne, "seq_cst") != 0 { atom.fetch_add(brot, 1, "seq_cst") }
+        sm.sov(6)
+        atom.fetch_add(lesarar_inne, -1, "seq_cst")
+        sm.rwlås_les_opp(rw)
+        k = k + 1
+    }
+    returner k
+}
+
+funksjon w_skrivar(rw, lesarar_inne, skrivarar_inne, brot) -> heiltall {
+    la k: heiltall = 0
+    mens k < 3 {
+        sm.rwlås_skriv(rw)
+        la no = atom.fetch_add(skrivarar_inne, 1, "seq_cst") + 1
+        hvis no != 1 eller atom.load(lesarar_inne, "seq_cst") != 0 { atom.fetch_add(brot, 1, "seq_cst") }
+        sm.sov(6)
+        atom.fetch_add(skrivarar_inne, -1, "seq_cst")
+        sm.rwlås_skriv_opp(rw)
+        sm.sov(2)
+        k = k + 1
+    }
+    returner k
+}
+
+funksjon w_skriv_innan(rw, ms: heiltall) -> boolsk {
+    la ok = sm.rwlås_skriv_innan(rw, ms)
+    hvis ok { sm.rwlås_skriv_opp(rw) }
+    returner ok
+}
+
+funksjon test_rwlås_trådar() -> heiltall {
+    la rw = sm.ny_rwlås()
+    la lesarar_inne = atom.ny(0)
+    la skrivarar_inne = atom.ny(0)
+    la brot = atom.ny(0)
+    la observert = []
+    la ts = []
+    la k: heiltall = 0
+    mens k < 4 {
+        legg_til(ts, sm.tråd_start(fun() -> w_lesar(rw, lesarar_inne, skrivarar_inne, brot, observert)))
+        k = k + 1
+    }
+    legg_til(ts, sm.tråd_start(fun() -> w_skrivar(rw, lesarar_inne, skrivarar_inne, brot)))
+    legg_til(ts, sm.tråd_start(fun() -> w_skrivar(rw, lesarar_inne, skrivarar_inne, brot)))
+    join_alle(ts)
+    assert_eq(atom.load(brot, "seq_cst"), 0)
+    assert_eq(lengde(observert), 16)
+    // Lesarar deler låsen.
+    assert(maks_av(observert) >= 2)
+    assert_eq(sm.rwlås_lesarar(rw), 0)
+    assert(ikkje sm.rwlås_skriv_halden(rw))
+    // Hovudtråden held lese-låsen: ein skrivar ventar ut fristen.
+    sm.rwlås_les(rw)
+    sm.rwlås_les(rw)
+    assert_eq(sm.rwlås_lesarar(rw), 2)
+    assert_eq(sm.tråd_join(sm.tråd_start(fun() -> w_skriv_innan(rw, 30))), usann)
+    // Oppgradering les → skriv er ein feil, ikkje vranglås.
+    la feil = ""
+    prøv { sm.rwlås_skriv(rw) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "oppgradere")
+    sm.rwlås_les_opp(rw)
+    sm.rwlås_les_opp(rw)
+    // Skrivar kan ta lese-låsen (nedgradering) og skrive-låsen att (re-entrant).
+    sm.rwlås_skriv(rw)
+    sm.rwlås_skriv(rw)
+    sm.rwlås_les(rw)
+    sm.rwlås_les_opp(rw)
+    sm.rwlås_skriv_opp(rw)
+    assert(sm.rwlås_skriv_halden(rw))
+    sm.rwlås_skriv_opp(rw)
+    assert(ikkje sm.rwlås_skriv_halden(rw))
+    assert_eq(sm.tråd_join(sm.tråd_start(fun() -> w_skriv_innan(rw, 2000))), sann)
+    returner 0
+}
+
+// ── trådlokale verdiar ───────────────────────────────────────────────────────
+funksjon w_trådlokal(tl, tl_tal, n: heiltall) -> tekst {
+    la i: heiltall = 0
+    mens i < 5 {
+        legg_til(sm.trådlokal_hent(tl), n)
+        sm.sov(2)
+        i = i + 1
+    }
+    sm.trådlokal_set(tl_tal, 100 + n)
+    sm.sov(10)
+    la mine = sm.trådlokal_hent(tl)
+    la alle_mine = sann
+    la j: heiltall = 0
+    mens j < lengde(mine) {
+        hvis mine[j] != n { alle_mine = usann }
+        j = j + 1
+    }
+    returner tekst(lengde(mine)) + ":" + tekst(alle_mine) + ":" + tekst(sm.trådlokal_hent(tl_tal))
+}
+
+funksjon test_trådlokal_trådar() -> heiltall {
+    la tl = sm.ny_trådlokal_med(fun() -> [])
+    la tl_tal = sm.ny_trådlokal(7)
+    la ts = [sm.tråd_start(fun() -> w_trådlokal(tl, tl_tal, 1)),
+             sm.tråd_start(fun() -> w_trådlokal(tl, tl_tal, 2)),
+             sm.tråd_start(fun() -> w_trådlokal(tl, tl_tal, 3))]
+    la res = join_alle(ts)
+    assert_eq(res[0], "5:sann:101")
+    assert_eq(res[1], "5:sann:102")
+    assert_eq(res[2], "5:sann:103")
+    assert_eq(lengde(sm.trådlokal_hent(tl)), 0)
+    assert_eq(sm.trådlokal_hent(tl_tal), 7)
+    returner 0
+}
+
+// ── tråd med lambda-kropp: typa resultat og unntak ───────────────────────────
+funksjon bom(n: heiltall) -> heiltall {
+    kast "BomFeil: n=" + tekst(n)
+    returner 0
+}
+
+funksjon test_tråd_lambda() -> heiltall {
+    la k: heiltall = 6
+    la t = sm.tråd_start(fun() -> k * 7)
+    la v = sm.tråd_join(t)
+    assert_eq(builtin.type(v), "heltall")
+    assert_eq(v, 42)
+    la tf = sm.tråd_start(fun() -> bom(5))
+    la feil = ""
+    prøv { sm.tråd_join(tf) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "BomFeil: n=5")
+    returner 0
+}
+
+// ── eintråda kontrakt (AOT) ──────────────────────────────────────────────────
+funksjon test_eintråda() -> heiltall {
+    assert_eq(sm.backend(), "eintråda")
+    assert(ikkje sm.har_trådar())
+    assert_eq(sm.tråd_id(), "hovud")
+    // semafor
+    la s = sm.ny_semafor(2)
+    sm.semafor_skaff(s)
+    assert(sm.semafor_skaff_straks(s))
+    assert(ikkje sm.semafor_skaff_straks(s))
+    la t0 = builtin.tid_ms()
+    assert(ikkje sm.semafor_skaff_innan(s, 30))
+    assert(builtin.tid_ms() - t0 >= 25)
+    la feil = ""
+    prøv { sm.semafor_skaff(s) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ville blokkert for alltid")
+    sm.semafor_slepp(s)
+    assert_eq(sm.semafor_ledige(s), 1)
+    // nedteljar
+    la l = sm.ny_nedteljar(2)
+    assert(ikkje sm.nedteljar_vent_innan(l, 10))
+    feil = ""
+    prøv { sm.nedteljar_vent(l) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ville blokkert for alltid")
+    sm.nedteljar_tel_ned(l)
+    sm.nedteljar_tel_ned(l)
+    sm.nedteljar_vent(l)
+    assert_eq(sm.nedteljar_tal(l), 0)
+    // barriere: éin part passerer straks (handling køyrer), to partar tidsavbrot
+    la runde = {"n": 0}
+    la b1 = sm.ny_barriere_med(1, fun() -> auk(runde))
+    assert_eq(sm.barriere_vent(b1), 0)
+    assert_eq(sm.barriere_vent(b1), 0)
+    assert_eq(runde["n"], 2)
+    la b2 = sm.ny_barriere(2)
+    feil = ""
+    prøv { sm.barriere_vent_innan(b2, 10) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "BarriereFeil: tidsavbrot")
+    assert(sm.barriere_er_broten(b2))
+    sm.barriere_nullstill(b2)
+    feil = ""
+    prøv { sm.barriere_vent(b2) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ville blokkert for alltid")
+    // re-entrant lås
+    la lk = sm.ny_lås()
+    sm.lås_skaff(lk)
+    assert(sm.lås_skaff_straks(lk))
+    assert_eq(sm.lås_djupn(lk), 2)
+    sm.lås_slepp(lk)
+    sm.lås_slepp(lk)
+    feil = ""
+    prøv { sm.lås_slepp(lk) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "SamtidFeil")
+    // lese-skrive-lås
+    la rw = sm.ny_rwlås()
+    sm.rwlås_les(rw)
+    sm.rwlås_les(rw)
+    feil = ""
+    prøv { sm.rwlås_skriv(rw) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "oppgradere")
+    sm.rwlås_les_opp(rw)
+    sm.rwlås_les_opp(rw)
+    assert(sm.rwlås_skriv_innan(rw, 0))
+    sm.rwlås_skriv_opp(rw)
+    // trådlokal
+    la tl = sm.ny_trådlokal(5)
+    assert_eq(sm.trådlokal_hent(tl), 5)
+    sm.trådlokal_set(tl, 9)
+    assert_eq(sm.trådlokal_hent(tl), 9)
+    sm.trådlokal_fjern(tl)
+    assert_eq(sm.trådlokal_hent(tl), 5)
+    // tråd_start feilar tydeleg
+    feil = ""
+    prøv { sm.tråd_start(fun() -> 1) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "trådar er ikkje tilgjengelege")
+    returner 0
+}
+
+funksjon auk(d) -> heiltall {
+    d["n"] = d["n"] + 1
+    returner d["n"]
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje sm.har_trådar() {
+        test_eintråda()
+        skriv("test_samtid OK (eintråda)\n")
+        returner 0
+    }
+    assert_eq(sm.backend(), "vm-green")
+    test_tråd_lambda()
+    test_semafor_trådar()
+    test_nedteljar_trådar()
+    test_barriere_trådar()
+    test_lås_trådar()
+    test_rwlås_trådar()
+    test_trådlokal_trådar()
+    skriv("test_samtid OK (vm-green)\n")
+    returner 0
+}

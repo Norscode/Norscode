@@ -1,0 +1,794 @@
+# std/samtid.no — samtidigheitsprimitiv (java.util.concurrent-paritet)
+#
+# Java                          Norscode (bruk std.samtid som sm)
+# ----------------------------  ------------------------------------------------
+# Semaphore                     sm.ny_semafor(n), semafor_skaff/_straks/_innan, semafor_slepp
+# CountDownLatch                sm.ny_nedteljar(n), nedteljar_tel_ned, nedteljar_vent(_innan)
+# CyclicBarrier                 sm.ny_barriere(n) / ny_barriere_med(n, handling), barriere_vent(_innan)
+# ReentrantReadWriteLock        sm.ny_rwlås(), rwlås_les/_les_opp, rwlås_skriv/_skriv_opp
+# ReentrantLock                 sm.ny_lås(), lås_skaff/_straks/_innan, lås_slepp
+# ThreadLocal(.withInitial)     sm.ny_trådlokal(v) / ny_trådlokal_med(lag), trådlokal_hent/_set/_fjern
+# new Thread(() -> …) / join    sm.tråd_start(fun() -> …), tråd_join(t), tråd_join_innan(t, ms)
+# Object monitor / Condition    sm.ny_monitor(), monitor_lås/_opp/_vent/_signal_alle
+# BlockingQueue (kapasitet)     sjå std/kanal.no: ny_blokkerande_kanal(k), send_vent, motta_vent, lukk
+# parallelStream over prosessar sjå std/multiprocessing.no: prosess_map(f, verdiar, n, kommando)
+#
+# Lambdaer blir kalla direkte (f()), aldri via builtin.ncb_call_fn.
+#
+# ── Backendar (kva som gjeld kvar) ─────────────────────────────────────────────
+# backend() == "vm-green"  — `nc run` / `nc test` på macOS og Linux. Grøne trådar
+#     (M:1, preemptive, éin OS-tråd) i selfhost/vm.no. Primitiva står på
+#     builtin.thread_sync mutex + condition_wait/broadcast, som gjev frå seg
+#     kontrollen i staden for å blokkere OS-tråden. Ventande trådar blokkerer
+#     ikkje kvarandre. Ingen ekte parallellisme (sjå std.multiprocessing.prosess_map
+#     for fleire kjerner).
+# backend() == "eintråda"  — AOT (bygg-native, linux-x86_64 og macos-arm64) i dag:
+#     ingen brukartrådar finst (x86 AOT: thread_pool/thread_spawn svarar null eller
+#     «støttar berre thread.*-primitiv»; macOS AOT: NATIV-GAP). Då kan ingen annan
+#     endre tilstanden medan vi ventar, so:
+#       * ikkje-blokkerande operasjonar (skaff_straks, slepp, tel_ned, …) verkar som vanleg,
+#       * ei venting MED frist som ikkje kan oppfyllast søv fristen ut og svarar
+#         usann / tidsavbrot (som Java etter tidsavbrot),
+#       * ei venting UTAN frist som ikkje kan oppfyllast kastar
+#         «SamtidFeil: … ville blokkert for alltid» i staden for å henge,
+#       * tråd_start kastar SamtidFeil (ingen trådar å starte).
+#     Trådlokale verdiar har éin nøkkel («hovud»).
+#
+# Rettferd: semafor og lås er ikkje rettferdige (som `new Semaphore(n)` /
+# `new ReentrantLock()` utan fair=true). Lese-skrive-låsen prioriterer skrivarar
+# (ein ventande skrivar stoppar nye lesarar) so skrivarar ikkje svelt; ein tråd som
+# alt held lese-låsen får likevel ta han att (re-entrant).
+#
+# Feil blir kasta som tekst med prefiks: «SamtidFeil: …» og «BarriereFeil: …».
+# frigje(obj) slepp mutex/condition-handtaka til eit primitiv når det ikkje skal
+# brukast meir.
+
+# ─── Backend ──────────────────────────────────────────────────────────────────
+
+# "vm-green" når brukarfunksjonar kan køyre som trådar, elles "eintråda".
+# Proben (thread_pool status på eit tomt handtak) har ingen sideverknad.
+funksjon backend() -> tekst {
+    prøv {
+        la r = builtin.thread_pool({"abi": "norscode-native-thread-pool-v1", "operation": "status",
+                                    "workers": "0", "pool_handle": "", "task_handle": "", "timeout_ms": "0"})
+        hvis builtin.type(r) == "ordbok" {
+            hvis har_nokkel(r, "abi") og tekst(r["abi"]) == "norscode-native-thread-pool-v1" {
+                returner "vm-green"
+            }
+        }
+    } fang (e) { }
+    returner "eintråda"
+}
+
+funksjon har_trådar() -> boolsk {
+    returner backend() == "vm-green"
+}
+
+# Søv ms millisekund (grøne trådar: gjev frå seg kontrollen medan dei søv).
+funksjon sov(ms: heiltall) -> heiltall {
+    hvis ms > 0 { builtin.vent.sov(ms) }
+    returner 0
+}
+
+# Identiteten til tråden som køyrer no, som tekst (nøkkel for trådlokale verdiar).
+funksjon tråd_id() -> tekst {
+    hvis backend() != "vm-green" { returner "hovud" }
+    returner tekst(builtin.thread_current_id())
+}
+
+# ─── Monitor (mutex + condition) ──────────────────────────────────────────────
+
+funksjon _sync(op: tekst, h: tekst, mh: tekst, ms: heiltall) {
+    returner builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": op, "handle": h,
+        "thread_id": "samtid", "mutex_handle": mh, "timeout_ms": tekst(ms)})
+}
+
+funksjon _status(r) -> tekst {
+    hvis builtin.type(r) != "ordbok" { returner "" }
+    hvis ikkje har_nokkel(r, "status") { returner "" }
+    returner tekst(r["status"])
+}
+
+funksjon _feiltekst(r) -> tekst {
+    hvis builtin.type(r) != "ordbok" { returner "tomt svar" }
+    hvis har_nokkel(r, "error") { returner tekst(r["error"]) }
+    returner ""
+}
+
+# Fyll inn monitor-felta (_backend, _mutex, _cond) i m og returner m.
+funksjon _monitor_init(m: ordbok) -> ordbok {
+    m["_backend"] = backend()
+    m["_mutex"] = ""
+    m["_cond"] = ""
+    hvis m["_backend"] == "vm-green" {
+        la mr = _sync("mutex_create", "", "", 0)
+        hvis _status(mr) != "ready" { kast "SamtidFeil: kunne ikkje lage mutex: " + _feiltekst(mr) }
+        la cr = _sync("condition_create", "", "", 0)
+        hvis _status(cr) != "ready" {
+            _sync("mutex_destroy", tekst(mr["handle"]), "", 0)
+            kast "SamtidFeil: kunne ikkje lage condition: " + _feiltekst(cr)
+        }
+        m["_mutex"] = tekst(mr["handle"])
+        m["_cond"] = tekst(cr["handle"])
+    }
+    returner m
+}
+
+funksjon ny_monitor() -> ordbok {
+    returner _monitor_init({"_type": "monitor"})
+}
+
+funksjon _krev(obj, type_namn: tekst) -> heiltall {
+    hvis builtin.type(obj) != "ordbok" { kast "SamtidFeil: forventa " + type_namn + ", fekk " + builtin.type(obj) }
+    hvis ikkje har_nokkel(obj, "_type") eller tekst(obj["_type"]) != type_namn {
+        kast "SamtidFeil: forventa " + type_namn
+    }
+    returner 0
+}
+
+# Tråd-id sett frå eit primitiv (unngår ny backend-probe per kall).
+funksjon _meg(m: ordbok) -> tekst {
+    hvis m["_backend"] != "vm-green" { returner "hovud" }
+    returner tekst(builtin.thread_current_id())
+}
+
+funksjon _laas(m: ordbok) -> heiltall {
+    hvis m["_backend"] != "vm-green" {
+        hvis m["_backend"] == "frigjort" { kast "SamtidFeil: primitivet er frigjort" }
+        returner 0
+    }
+    la r = _sync("mutex_lock", m["_mutex"], "", -1)
+    hvis _status(r) != "ready" { kast "SamtidFeil: mutex_lock feila: " + _feiltekst(r) }
+    returner 0
+}
+
+funksjon _opp(m: ordbok) -> heiltall {
+    hvis m["_backend"] != "vm-green" { returner 0 }
+    _sync("mutex_unlock", m["_mutex"], "", 0)
+    returner 0
+}
+
+funksjon _signal_alle(m: ordbok) -> heiltall {
+    hvis m["_backend"] != "vm-green" { returner 0 }
+    _sync("condition_broadcast", m["_cond"], "", 0)
+    returner 0
+}
+
+# Absolutt frist (tid_ms) for eit relativt tidsavbrot; < 0 = ingen frist.
+funksjon frist_om(timeout_ms: heiltall) -> heiltall {
+    hvis timeout_ms < 0 { returner -1 }
+    returner builtin.tid_ms() + timeout_ms
+}
+
+# Vent på eit signal på monitoren. Kallaren held låsen og sjekkar vilkåret sitt
+# i ei lykkje rundt kallet: sann = sjekk vilkåret på nytt, usann = fristen er ute
+# (låsen er framleis halden). Grøne trådar: condition_wait med resten av fristen,
+# men høgst 2 s om gongen (vakt mot tapte signal; vekking skjer elles med ein gong
+# ved monitor_signal_alle, sjå condition_seq i selfhost/vm.no). Eintråda: sjå modulhovudet.
+funksjon _vent(m: ordbok, frist: heiltall, op: tekst) -> boolsk {
+    la no = builtin.tid_ms()
+    hvis frist >= 0 og no >= frist { returner usann }
+    hvis m["_backend"] != "vm-green" {
+        hvis frist < 0 {
+            kast "SamtidFeil: " + op + " ville blokkert for alltid: ingen andre trådar kan endre tilstanden (backend " + tekst(m["_backend"]) + ")"
+        }
+        builtin.vent.sov(frist - no)
+        returner usann
+    }
+    la bit: heiltall = 2000
+    hvis frist >= 0 og frist - no < bit { bit = frist - no }
+    hvis bit < 1 { bit = 1 }
+    la r = _sync("condition_wait", m["_cond"], m["_mutex"], bit)
+    la st = _status(r)
+    hvis st != "ready" og st != "timeout" {
+        kast "SamtidFeil: condition_wait feila i " + op + ": " + _feiltekst(r)
+    }
+    returner sann
+}
+
+funksjon monitor_lås(m: ordbok) -> heiltall { returner _laas(m) }
+funksjon monitor_opp(m: ordbok) -> heiltall { returner _opp(m) }
+funksjon monitor_signal_alle(m: ordbok) -> heiltall { returner _signal_alle(m) }
+# Vent på monitoren til nokon kallar monitor_signal_alle eller fristen (frist_om) går ut;
+# op blir namnet i feilmeldinga. Bruk i ei lykkje: mens ikkje vilkår { hvis ikkje monitor_vent(…) { … } }.
+funksjon monitor_vent(m: ordbok, frist: heiltall, op: tekst) -> boolsk { returner _vent(m, frist, op) }
+
+# Slepp mutex/condition-handtaka til eit primitiv (semafor, nedteljar, …).
+funksjon frigje(obj: ordbok) -> heiltall {
+    hvis har_nokkel(obj, "_backend") og obj["_backend"] == "vm-green" {
+        hvis obj["_cond"] != "" { _sync("condition_destroy", obj["_cond"], "", 0) }
+        hvis obj["_mutex"] != "" { _sync("mutex_destroy", obj["_mutex"], "", 0) }
+        obj["_cond"] = ""
+        obj["_mutex"] = ""
+        obj["_backend"] = "frigjort"
+    }
+    returner 0
+}
+
+# ─── Semafor (java.util.concurrent.Semaphore) ─────────────────────────────────
+
+funksjon ny_semafor(løyve: heiltall) -> ordbok {
+    hvis løyve < 0 { kast "SamtidFeil: semafor treng løyve >= 0" }
+    returner _monitor_init({"_type": "semafor", "loyve": løyve})
+}
+
+funksjon _semafor_skaff(s: ordbok, n: heiltall, timeout_ms: heiltall, op: tekst) -> boolsk {
+    _krev(s, "semafor")
+    hvis n < 0 { kast "SamtidFeil: " + op + " med negativt tal" }
+    la frist = frist_om(timeout_ms)
+    _laas(s)
+    mens s["loyve"] < n {
+        hvis ikkje _vent(s, frist, op) {
+            _opp(s)
+            returner usann
+        }
+    }
+    s["loyve"] = s["loyve"] - n
+    _opp(s)
+    returner sann
+}
+
+# acquire(): ventar til eit løyve er ledig.
+funksjon semafor_skaff(s: ordbok) -> heiltall {
+    _semafor_skaff(s, 1, -1, "semafor_skaff")
+    returner 0
+}
+
+funksjon semafor_skaff_n(s: ordbok, n: heiltall) -> heiltall {
+    _semafor_skaff(s, n, -1, "semafor_skaff_n")
+    returner 0
+}
+
+# tryAcquire(): usann med ein gong om inga løyve er ledige.
+funksjon semafor_skaff_straks(s: ordbok) -> boolsk {
+    returner _semafor_skaff(s, 1, 0, "semafor_skaff_straks")
+}
+
+# tryAcquire(timeout): usann når fristen går ut.
+funksjon semafor_skaff_innan(s: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _semafor_skaff(s, 1, timeout_ms, "semafor_skaff_innan")
+}
+
+funksjon semafor_slepp_n(s: ordbok, n: heiltall) -> heiltall {
+    _krev(s, "semafor")
+    hvis n < 0 { kast "SamtidFeil: semafor_slepp med negativt tal" }
+    _laas(s)
+    s["loyve"] = s["loyve"] + n
+    _signal_alle(s)
+    _opp(s)
+    returner 0
+}
+
+# release()
+funksjon semafor_slepp(s: ordbok) -> heiltall {
+    returner semafor_slepp_n(s, 1)
+}
+
+# availablePermits()
+funksjon semafor_ledige(s: ordbok) -> heiltall {
+    _krev(s, "semafor")
+    returner s["loyve"]
+}
+
+# drainPermits(): tek alle ledige løyve og returnerer kor mange.
+funksjon semafor_tøm(s: ordbok) -> heiltall {
+    _krev(s, "semafor")
+    _laas(s)
+    la n = s["loyve"]
+    s["loyve"] = 0
+    _opp(s)
+    returner n
+}
+
+# ─── Nedteljar (java.util.concurrent.CountDownLatch) ──────────────────────────
+
+funksjon ny_nedteljar(tal: heiltall) -> ordbok {
+    hvis tal < 0 { kast "SamtidFeil: nedteljar treng tal >= 0" }
+    returner _monitor_init({"_type": "nedteljar", "tal": tal})
+}
+
+# countDown(): når talet når 0 blir alle ventande sleppte. Etter 0 er kallet ein no-op.
+funksjon nedteljar_tel_ned(l: ordbok) -> heiltall {
+    _krev(l, "nedteljar")
+    _laas(l)
+    hvis l["tal"] > 0 {
+        l["tal"] = l["tal"] - 1
+        hvis l["tal"] == 0 { _signal_alle(l) }
+    }
+    _opp(l)
+    returner 0
+}
+
+funksjon _nedteljar_vent(l: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
+    _krev(l, "nedteljar")
+    la frist = frist_om(timeout_ms)
+    _laas(l)
+    mens l["tal"] > 0 {
+        hvis ikkje _vent(l, frist, op) {
+            _opp(l)
+            returner usann
+        }
+    }
+    _opp(l)
+    returner sann
+}
+
+# await(): ventar til talet er 0.
+funksjon nedteljar_vent(l: ordbok) -> heiltall {
+    _nedteljar_vent(l, -1, "nedteljar_vent")
+    returner 0
+}
+
+# await(timeout): sann når talet nådde 0 innan fristen.
+funksjon nedteljar_vent_innan(l: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _nedteljar_vent(l, timeout_ms, "nedteljar_vent_innan")
+}
+
+# getCount()
+funksjon nedteljar_tal(l: ordbok) -> heiltall {
+    _krev(l, "nedteljar")
+    returner l["tal"]
+}
+
+# ─── Barriere (java.util.concurrent.CyclicBarrier) ────────────────────────────
+
+funksjon ny_barriere(partar: heiltall) -> ordbok {
+    hvis partar < 1 { kast "SamtidFeil: barriere treng partar >= 1" }
+    returner _monitor_init({"_type": "barriere", "partar": partar, "ventande": 0,
+                            "generasjon": 0, "broten": usann, "har_handling": usann, "handling": null})
+}
+
+# Med barrierehandling: handling() blir kalla éin gong per runde av den siste
+# tråden som kjem fram, før nokon blir sleppt (som CyclicBarrier(n, Runnable)).
+funksjon ny_barriere_med(partar: heiltall, handling) -> ordbok {
+    la b = ny_barriere(partar)
+    b["har_handling"] = sann
+    b["handling"] = handling
+    returner b
+}
+
+funksjon _barriere_bryt(b: ordbok) -> heiltall {
+    b["broten"] = sann
+    b["ventande"] = 0
+    _signal_alle(b)
+    returner 0
+}
+
+# Kjem fram til barrieren og ventar til alle partar er der. Returnerer
+# ankomstindeksen: partar-1 for den første, 0 for den siste (som Java).
+# Tidsavbrot (timeout_ms >= 0) bryt barrieren: denne tråden får
+# «BarriereFeil: tidsavbrot», dei andre ventande «BarriereFeil: broten».
+funksjon _barriere_vent(b: ordbok, timeout_ms: heiltall) -> heiltall {
+    _krev(b, "barriere")
+    la frist = frist_om(timeout_ms)
+    _laas(b)
+    hvis b["broten"] {
+        _opp(b)
+        kast "BarriereFeil: broten"
+    }
+    la gen = b["generasjon"]
+    b["ventande"] = b["ventande"] + 1
+    la indeks = b["partar"] - b["ventande"]
+    hvis indeks == 0 {
+        hvis b["har_handling"] {
+            la h = b["handling"]
+            prøv {
+                h()
+            } fang (e) {
+                _barriere_bryt(b)
+                _opp(b)
+                kast e
+            }
+        }
+        b["ventande"] = 0
+        b["generasjon"] = gen + 1
+        _signal_alle(b)
+        _opp(b)
+        returner 0
+    }
+    mens b["generasjon"] == gen og ikkje b["broten"] {
+        la vidare = usann
+        prøv {
+            vidare = _vent(b, frist, "barriere_vent")
+        } fang (e) {
+            // Eintråda utan frist: ingen andre partar kan kome → bryt og kast vidare.
+            _barriere_bryt(b)
+            _opp(b)
+            kast e
+        }
+        hvis ikkje vidare {
+            hvis b["generasjon"] == gen og ikkje b["broten"] {
+                _barriere_bryt(b)
+                _opp(b)
+                kast "BarriereFeil: tidsavbrot"
+            }
+        }
+    }
+    hvis b["generasjon"] == gen {
+        _opp(b)
+        kast "BarriereFeil: broten"
+    }
+    _opp(b)
+    returner indeks
+}
+
+funksjon barriere_vent(b: ordbok) -> heiltall {
+    returner _barriere_vent(b, -1)
+}
+
+funksjon barriere_vent_innan(b: ordbok, timeout_ms: heiltall) -> heiltall {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _barriere_vent(b, timeout_ms)
+}
+
+# reset(): bryt runden som pågår (ventande får BarriereFeil) og start ein ny.
+funksjon barriere_nullstill(b: ordbok) -> heiltall {
+    _krev(b, "barriere")
+    _laas(b)
+    hvis b["ventande"] > 0 {
+        _barriere_bryt(b)
+    }
+    b["broten"] = usann
+    b["ventande"] = 0
+    b["generasjon"] = b["generasjon"] + 1
+    _signal_alle(b)
+    _opp(b)
+    returner 0
+}
+
+funksjon barriere_er_broten(b: ordbok) -> boolsk {
+    _krev(b, "barriere")
+    returner b["broten"]
+}
+
+# getNumberWaiting()
+funksjon barriere_ventande(b: ordbok) -> heiltall {
+    _krev(b, "barriere")
+    returner b["ventande"]
+}
+
+funksjon barriere_partar(b: ordbok) -> heiltall {
+    _krev(b, "barriere")
+    returner b["partar"]
+}
+
+# ─── Re-entrant lås (java.util.concurrent.locks.ReentrantLock) ────────────────
+
+funksjon ny_lås() -> ordbok {
+    returner _monitor_init({"_type": "laas", "eigar": "", "djupn": 0})
+}
+
+funksjon _laas_skaff(l: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
+    _krev(l, "laas")
+    la meg = _meg(l)
+    la frist = frist_om(timeout_ms)
+    _laas(l)
+    hvis l["eigar"] == meg {
+        l["djupn"] = l["djupn"] + 1
+        _opp(l)
+        returner sann
+    }
+    mens l["eigar"] != "" {
+        hvis ikkje _vent(l, frist, op) {
+            _opp(l)
+            returner usann
+        }
+    }
+    l["eigar"] = meg
+    l["djupn"] = 1
+    _opp(l)
+    returner sann
+}
+
+# lock(): same tråd kan ta låsen fleire gonger (må sleppe like mange gonger).
+funksjon lås_skaff(l: ordbok) -> heiltall {
+    _laas_skaff(l, -1, "lås_skaff")
+    returner 0
+}
+
+funksjon lås_skaff_straks(l: ordbok) -> boolsk {
+    returner _laas_skaff(l, 0, "lås_skaff_straks")
+}
+
+funksjon lås_skaff_innan(l: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _laas_skaff(l, timeout_ms, "lås_skaff_innan")
+}
+
+# unlock(): kastar SamtidFeil når kallaren ikkje held låsen (IllegalMonitorStateException).
+funksjon lås_slepp(l: ordbok) -> heiltall {
+    _krev(l, "laas")
+    la meg = _meg(l)
+    _laas(l)
+    hvis l["eigar"] != meg {
+        _opp(l)
+        kast "SamtidFeil: lås_slepp frå ein tråd som ikkje held låsen"
+    }
+    l["djupn"] = l["djupn"] - 1
+    hvis l["djupn"] == 0 {
+        l["eigar"] = ""
+        _signal_alle(l)
+    }
+    _opp(l)
+    returner 0
+}
+
+# isHeldByCurrentThread()
+funksjon lås_halden_av_meg(l: ordbok) -> boolsk {
+    _krev(l, "laas")
+    returner l["eigar"] == _meg(l)
+}
+
+# getHoldCount() for tråden som kallar.
+funksjon lås_djupn(l: ordbok) -> heiltall {
+    _krev(l, "laas")
+    hvis l["eigar"] != _meg(l) { returner 0 }
+    returner l["djupn"]
+}
+
+# ─── Lese-skrive-lås (java.util.concurrent.locks.ReentrantReadWriteLock) ──────
+
+funksjon ny_rwlås() -> ordbok {
+    returner _monitor_init({"_type": "rwlaas", "lesarar": {}, "lesar_tal": 0, "skrivar": "",
+                            "skrive_djupn": 0, "ventande_skrivarar": 0})
+}
+
+funksjon _rw_mine_les(rw: ordbok, meg: tekst) -> heiltall {
+    la l = rw["lesarar"]
+    hvis har_nokkel(l, meg) { returner l[meg] }
+    returner 0
+}
+
+funksjon _rw_les(rw: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
+    _krev(rw, "rwlaas")
+    la meg = _meg(rw)
+    la frist = frist_om(timeout_ms)
+    _laas(rw)
+    // Skrivaren kan ta lese-låsen (nedgradering); ein lesar kan ta han att.
+    // Elles ventar nye lesarar på aktive OG ventande skrivarar (skrivar-prioritet).
+    mens ikkje (rw["skrivar"] == meg eller (rw["skrivar"] == "" og (rw["ventande_skrivarar"] == 0 eller _rw_mine_les(rw, meg) > 0))) {
+        hvis ikkje _vent(rw, frist, op) {
+            _opp(rw)
+            returner usann
+        }
+    }
+    la lesarar = rw["lesarar"]
+    lesarar[meg] = _rw_mine_les(rw, meg) + 1
+    rw["lesar_tal"] = rw["lesar_tal"] + 1
+    _opp(rw)
+    returner sann
+}
+
+funksjon rwlås_les(rw: ordbok) -> heiltall {
+    _rw_les(rw, -1, "rwlås_les")
+    returner 0
+}
+
+funksjon rwlås_les_innan(rw: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _rw_les(rw, timeout_ms, "rwlås_les_innan")
+}
+
+funksjon rwlås_les_opp(rw: ordbok) -> heiltall {
+    _krev(rw, "rwlaas")
+    la meg = _meg(rw)
+    _laas(rw)
+    la mine = _rw_mine_les(rw, meg)
+    hvis mine <= 0 {
+        _opp(rw)
+        kast "SamtidFeil: rwlås_les_opp utan lese-lås"
+    }
+    la lesarar = rw["lesarar"]
+    hvis mine == 1 {
+        fjern_nokkel(lesarar, meg)
+    } ellers {
+        lesarar[meg] = mine - 1
+    }
+    rw["lesar_tal"] = rw["lesar_tal"] - 1
+    hvis rw["lesar_tal"] == 0 { _signal_alle(rw) }
+    _opp(rw)
+    returner 0
+}
+
+funksjon _rw_skriv(rw: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
+    _krev(rw, "rwlaas")
+    la meg = _meg(rw)
+    la frist = frist_om(timeout_ms)
+    _laas(rw)
+    hvis rw["skrivar"] == meg {
+        rw["skrive_djupn"] = rw["skrive_djupn"] + 1
+        _opp(rw)
+        returner sann
+    }
+    hvis _rw_mine_les(rw, meg) > 0 {
+        _opp(rw)
+        kast "SamtidFeil: kan ikkje oppgradere lese-lås til skrive-lås (ville gitt vranglås)"
+    }
+    rw["ventande_skrivarar"] = rw["ventande_skrivarar"] + 1
+    mens rw["skrivar"] != "" eller rw["lesar_tal"] > 0 {
+        la vidare = usann
+        prøv {
+            vidare = _vent(rw, frist, op)
+        } fang (e) {
+            rw["ventande_skrivarar"] = rw["ventande_skrivarar"] - 1
+            _signal_alle(rw)
+            _opp(rw)
+            kast e
+        }
+        hvis ikkje vidare {
+            rw["ventande_skrivarar"] = rw["ventande_skrivarar"] - 1
+            _signal_alle(rw)
+            _opp(rw)
+            returner usann
+        }
+    }
+    rw["ventande_skrivarar"] = rw["ventande_skrivarar"] - 1
+    rw["skrivar"] = meg
+    rw["skrive_djupn"] = 1
+    _opp(rw)
+    returner sann
+}
+
+funksjon rwlås_skriv(rw: ordbok) -> heiltall {
+    _rw_skriv(rw, -1, "rwlås_skriv")
+    returner 0
+}
+
+funksjon rwlås_skriv_innan(rw: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _rw_skriv(rw, timeout_ms, "rwlås_skriv_innan")
+}
+
+funksjon rwlås_skriv_opp(rw: ordbok) -> heiltall {
+    _krev(rw, "rwlaas")
+    la meg = _meg(rw)
+    _laas(rw)
+    hvis rw["skrivar"] != meg {
+        _opp(rw)
+        kast "SamtidFeil: rwlås_skriv_opp frå ein tråd som ikkje held skrive-låsen"
+    }
+    rw["skrive_djupn"] = rw["skrive_djupn"] - 1
+    hvis rw["skrive_djupn"] == 0 {
+        rw["skrivar"] = ""
+        _signal_alle(rw)
+    }
+    _opp(rw)
+    returner 0
+}
+
+# Talet på lese-låsar som er haldne no (alle trådar).
+funksjon rwlås_lesarar(rw: ordbok) -> heiltall {
+    _krev(rw, "rwlaas")
+    returner rw["lesar_tal"]
+}
+
+funksjon rwlås_skriv_halden(rw: ordbok) -> boolsk {
+    _krev(rw, "rwlaas")
+    returner rw["skrivar"] != ""
+}
+
+# ─── Trådlokale verdiar (java.lang.ThreadLocal) ───────────────────────────────
+
+# Alle trådar startar med same startverdi. For muterbare startverdiar
+# (liste/ordbok) skal ny_trådlokal_med brukast, elles deler trådane objektet.
+funksjon ny_trådlokal(startverdi) -> ordbok {
+    returner {"_type": "traadlokal", "_backend": backend(), "verdiar": {}, "start": startverdi,
+              "har_lag": usann, "lag": null}
+}
+
+# ThreadLocal.withInitial(lag): lag() blir kalla éin gong per tråd, ved første hent.
+funksjon ny_trådlokal_med(lag) -> ordbok {
+    returner {"_type": "traadlokal", "_backend": backend(), "verdiar": {}, "start": null,
+              "har_lag": sann, "lag": lag}
+}
+
+funksjon trådlokal_hent(tl: ordbok) {
+    _krev(tl, "traadlokal")
+    la meg = _meg(tl)
+    la v = tl["verdiar"]
+    hvis har_nokkel(v, meg) { returner v[meg] }
+    la start = tl["start"]
+    hvis tl["har_lag"] {
+        la lag = tl["lag"]
+        start = lag()
+    }
+    v[meg] = start
+    returner start
+}
+
+funksjon trådlokal_set(tl: ordbok, verdi) -> heiltall {
+    _krev(tl, "traadlokal")
+    la v = tl["verdiar"]
+    v[_meg(tl)] = verdi
+    returner 0
+}
+
+# remove(): neste hent i denne tråden startar frå startverdien att.
+funksjon trådlokal_fjern(tl: ordbok) -> heiltall {
+    _krev(tl, "traadlokal")
+    la meg = _meg(tl)
+    la v = tl["verdiar"]
+    hvis har_nokkel(v, meg) { fjern_nokkel(v, meg) }
+    returner 0
+}
+
+# ─── Trådar med lambda-kropp ──────────────────────────────────────────────────
+
+# Trådkropp: køyrer boks.f() og legg resultat eller unntak i boksen, so
+# tråd_join kan gi tilbake den typa verdien (thread_join sjølv gjer alt til tekst).
+funksjon _trad_kropp(args) -> tekst {
+    la boks = args["boks"]
+    la f = boks["f"]
+    prøv {
+        boks["verdi"] = f()
+        boks["status"] = "ferdig"
+    } fang (e) {
+        boks["feil"] = e
+        boks["status"] = "feil"
+    }
+    returner ""
+}
+
+# new Thread(f).start(): f er ein lambda utan parameter, t.d. fun() -> arbeid(x).
+funksjon tråd_start(f) -> ordbok {
+    hvis backend() != "vm-green" {
+        kast "SamtidFeil: trådar er ikkje tilgjengelege på denne plattforma (backend " + backend() + ")"
+    }
+    la boks = {"f": f, "verdi": null, "feil": null, "status": "køyrer"}
+    la r = builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
+        "fn": "std.samtid._trad_kropp", "args": {"boks": boks}, "name": "samtid", "stack_bytes": "65536"})
+    hvis _status(r) != "started" {
+        kast "SamtidFeil: tråd_start feila: " + _feiltekst(r)
+    }
+    returner {"_type": "traad", "handle": tekst(r["handle"]), "thread_id": tekst(r["thread_id"]),
+              "boks": boks, "joina": usann}
+}
+
+funksjon _trad_join(t: ordbok, timeout_ms: heiltall) -> boolsk {
+    _krev(t, "traad")
+    hvis ikkje t["joina"] {
+        la r = builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+            "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": tekst(timeout_ms)})
+        la st = _status(r)
+        hvis st == "timeout" { returner usann }
+        hvis st != "finished" og st != "error" {
+            kast "SamtidFeil: tråd_join feila: " + _feiltekst(r)
+        }
+        t["joina"] = sann
+        la boks = t["boks"]
+        hvis st == "error" og boks["status"] == "køyrer" {
+            boks["status"] = "feil"
+            boks["feil"] = "SamtidFeil: tråden feila: " + _feiltekst(r)
+        }
+    }
+    returner sann
+}
+
+# join(): ventar på tråden og returnerer verdien f() gav (typa). Kasta f eit
+# unntak, blir det same unntaket kasta her (som Future.get, men utan innpakking).
+funksjon tråd_join(t: ordbok) {
+    _trad_join(t, -1)
+    returner tråd_resultat(t)
+}
+
+# join(ms): sann når tråden er ferdig innan fristen; hent verdien med tråd_resultat.
+funksjon tråd_join_innan(t: ordbok, timeout_ms: heiltall) -> boolsk {
+    hvis timeout_ms < 0 { timeout_ms = 0 }
+    returner _trad_join(t, timeout_ms)
+}
+
+funksjon tråd_resultat(t: ordbok) {
+    _krev(t, "traad")
+    la boks = t["boks"]
+    hvis boks["status"] == "feil" { kast boks["feil"] }
+    hvis boks["status"] != "ferdig" { kast "SamtidFeil: tråden er ikkje ferdig" }
+    returner boks["verdi"]
+}
+
+funksjon tråd_ferdig(t: ordbok) -> boolsk {
+    _krev(t, "traad")
+    la boks = t["boks"]
+    returner boks["status"] != "køyrer"
+}
