@@ -1,0 +1,1348 @@
+# tidspunkt.no — java.time-liknande verdityper for tid og dato
+# Java: java.time.Instant, Duration, LocalDate, LocalDateTime, ZonedDateTime
+#
+# Bruk:
+#   bruk std.tidspunkt som tp
+#   la t = tp.tidspunkt_frå_sekund(1735646400)
+#   tp.tidspunkt_til_tekst(t)                                   # => "2024-12-31T12:00:00Z"
+#   la d = tp.dato_pluss_år(tp.dato(2024, 2, 29), 1)
+#   tp.dato_til_tekst(d)                                        # => "2025-02-28"
+#   tp.varigheit_til_tekst(tp.varigheit_av_minutt(90))          # => "PT1H30M"
+#   la z = tp.sonetid_frå_tidspunkt(t, "Europe/Oslo")
+#   tp.sonetid_til_tekst(z)                                     # => "2024-12-31T13:00+01:00[Europe/Oslo]"
+#
+# Alle verdiar er ordbøker med eit "type"-felt og heiltalsfelt, så dei kan
+# lesast direkte (d["år"]) og samanliknast med *_samanlikn-funksjonane:
+#   Tidspunkt (Instant)        {type, sekund, nano}             sekund sidan 1970-01-01T00:00:00Z, 0 <= nano < 10^9
+#   Varigheit (Duration)       {type, sekund, nano}             same normalform som Java: nano er alltid 0..999999999
+#   Dato (LocalDate)           {type, år, månad, dag}
+#   Datotid (LocalDateTime)    {type, år, månad, dag, time, minutt, sekund, nano}
+#   Sonetid (ZonedDateTime)    {type, år, månad, dag, time, minutt, sekund, nano, offset, sone}
+#                              offset = sekund aust for UTC, sone = sone-ID (t.d. "Europe/Oslo")
+#
+# Kalenderen er den proleptisk gregorianske (ISO-8601), rekna ut med reine
+# heiltalsformlar (days_from_civil / civil_from_days). Modulen er ikkje
+# avhengig av std.tid eller std.sone; berre tidspunkt_nå() og dei andre *_nå-
+# funksjonane les klokka (builtin.tid_ms).
+#
+# Tekstformat følgjer Java sine toString()-reglar:
+#   Tidspunkt: ISO_INSTANT, alltid med sekund: 2024-12-31T12:00:00Z, 2024-12-31T12:00:00.123Z
+#   Datotid:   sekund berre når dei (eller nano) ikkje er 0: 2024-12-31T12:00, 2024-12-31T12:00:05
+#   Brøkdelar: 3, 6 eller 9 siffer etter behov (.123, .000001, .000000001)
+#   År utanfor 0000–9999: "+12345-01-01", "-0001-01-01"
+#   Varigheit: ISO-8601 PTnHnMnS utan dagar, som Duration.toString: PT48H, PT1H30M, PT-1.5S, PT0S
+#   Sonetid:   2024-07-01T14:00+02:00[Europe/Oslo]; faste offset utan [..]: 2024-07-01T12:00Z
+#
+# Tidssoner:
+#   "UTC", "GMT", "Etc/UTC"   offset 0 (skrive som Z[UTC] osb.)
+#   "Z", "+02:00", "-05:30", "+02", "+0200"   faste offset (normalisert til "+02:00"/"Z")
+#   "Europe/Oslo" (og same regel: "Arctic/Longyearbyen", "Europe/Stockholm",
+#   "Europe/Copenhagen", "Europe/Berlin"): CET (+01:00) / CEST (+02:00) etter EU-regelen
+#   som Noreg har følgt sidan 1980: sommartid frå siste sundag i mars 01:00 UTC til
+#   siste sundag i oktober 01:00 UTC (1981–1995: siste sundag i september; 1980:
+#   6. april – 28. september). Før 1980 blir sona rekna som CET heile året; dei
+#   historiske sommartidsperiodane (1916, 1940–45, 1959–65) er IKKJE modellerte.
+#
+# Lokal tid → sonetid (sonetid_av) følgjer ZonedDateTime.ofLocal:
+#   i eit hol (vår, 02:00–03:00 finst ikkje) blir tida flytta fram med lengda av holet
+#   (02:30 → 03:30+02:00); i ein overlapp (haust, 02:00–03:00 to gonger) blir det
+#   tidlegare offsetet (+02:00) valt, med mindre det føretrekte offsetet er gyldig.
+#   sonetid_pluss_dagar/månader/år reknar på lokal tid (som plusDays), medan
+#   sonetid_pluss_timar/minutt/sekund og sonetid_pluss(varigheit) reknar på tidslina.
+#
+# Ugyldige verdiar og teksttolkingsfeil blir kasta som tekst med typen
+# DatoTidFeil (t.d. "DatoTidFeil: ugyldig dato 2023-02-29"), så `fang (e: DatoTidFeil)` fangar dei.
+# Tidspunkt_til_ns/varigheit_til_ns kan berre representere om lag ±292 år (64-bit nanosekund).
+
+# ─── Heiltalshjelp ────────────────────────────────────────────────────────────
+
+funksjon _golvdiv(a: heiltall, b: heiltall) -> heiltall {
+    la q: heiltall = a / b
+    hvis (a % b) != 0 og a < 0 {
+        q = q - 1
+    }
+    returner q
+}
+
+funksjon _golvmod(a: heiltall, b: heiltall) -> heiltall {
+    returner a - _golvdiv(a, b) * b
+}
+
+funksjon _pad(n: heiltall, breidd: heiltall) -> tekst {
+    la s: tekst = tekst(n)
+    mens lengde(s) < breidd {
+        s = "0" + s
+    }
+    returner s
+}
+
+funksjon _feil(melding: tekst) {
+    kast "DatoTidFeil: " + melding
+}
+
+funksjon _krev(v, typenamn: tekst) {
+    hvis builtin.type(v) != "ordbok" {
+        _feil("venta " + typenamn + ", fekk " + builtin.type(v))
+    }
+    hvis v["type"] != typenamn {
+        _feil("venta " + typenamn + ", fekk " + tekst(v["type"]))
+    }
+}
+
+# ─── Kalender (proleptisk gregoriansk) ────────────────────────────────────────
+
+funksjon er_skotår(år: heiltall) -> boolsk {
+    returner (år % 4 == 0 og år % 100 != 0) eller år % 400 == 0
+}
+
+funksjon dagar_i_år(år: heiltall) -> heiltall {
+    hvis er_skotår(år) {
+        returner 366
+    }
+    returner 365
+}
+
+funksjon dagar_i_månad(år: heiltall, månad: heiltall) -> heiltall {
+    hvis månad == 2 {
+        hvis er_skotår(år) {
+            returner 29
+        }
+        returner 28
+    }
+    hvis månad == 4 eller månad == 6 eller månad == 9 eller månad == 11 {
+        returner 30
+    }
+    returner 31
+}
+
+# Dagar sidan 1970-01-01 (days_from_civil, Howard Hinnant).
+funksjon epoch_dag(år: heiltall, månad: heiltall, dag: heiltall) -> heiltall {
+    la y: heiltall = år
+    la mp: heiltall = månad - 3
+    hvis månad <= 2 {
+        y = y - 1
+        mp = månad + 9
+    }
+    la era: heiltall = _golvdiv(y, 400)
+    la yoe: heiltall = y - era * 400
+    la doy: heiltall = (153 * mp + 2) / 5 + dag - 1
+    la doe: heiltall = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    returner era * 146097 + doe - 719468
+}
+
+# [år, månad, dag] for ein epoch-dag (civil_from_days).
+funksjon frå_epoch_dag(z: heiltall) -> liste_heltall {
+    la zz: heiltall = z + 719468
+    la era: heiltall = _golvdiv(zz, 146097)
+    la doe: heiltall = zz - era * 146097
+    la yoe: heiltall = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y: heiltall = yoe + era * 400
+    la doy: heiltall = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp: heiltall = (5 * doy + 2) / 153
+    la d: heiltall = doy - (153 * mp + 2) / 5 + 1
+    la m: heiltall = mp + 3
+    hvis mp >= 10 {
+        m = mp - 9
+    }
+    hvis m <= 2 {
+        y = y + 1
+    }
+    returner [y, m, d]
+}
+
+# ISO-vekedag for ein epoch-dag: 1 = måndag … 7 = sundag.
+funksjon vekedag_for_epoch_dag(z: heiltall) -> heiltall {
+    returner _golvmod(z + 3, 7) + 1
+}
+
+funksjon vekedag_namn(vekedag: heiltall) -> tekst {
+    la namn: liste_tekst = ["måndag", "tysdag", "onsdag", "torsdag", "fredag", "laurdag", "sundag"]
+    hvis vekedag < 1 eller vekedag > 7 {
+        _feil("ugyldig vekedag " + tekst(vekedag))
+    }
+    returner namn[vekedag - 1]
+}
+
+funksjon _sjekk_dato(år: heiltall, månad: heiltall, dag: heiltall) {
+    hvis år < -999999999 eller år > 999999999 {
+        _feil("år utanfor gyldig område: " + tekst(år))
+    }
+    hvis månad < 1 eller månad > 12 {
+        _feil("ugyldig månad " + tekst(månad))
+    }
+    hvis dag < 1 eller dag > dagar_i_månad(år, månad) {
+        _feil("ugyldig dato " + _år_tekst(år) + "-" + _pad(månad, 2) + "-" + _pad(dag, 2))
+    }
+}
+
+funksjon _sjekk_klokke(time: heiltall, minutt: heiltall, sekund: heiltall, nano: heiltall) {
+    hvis time < 0 eller time > 23 {
+        _feil("ugyldig time " + tekst(time))
+    }
+    hvis minutt < 0 eller minutt > 59 {
+        _feil("ugyldig minutt " + tekst(minutt))
+    }
+    hvis sekund < 0 eller sekund > 59 {
+        _feil("ugyldig sekund " + tekst(sekund))
+    }
+    hvis nano < 0 eller nano > 999999999 {
+        _feil("ugyldig nanosekund " + tekst(nano))
+    }
+}
+
+# ─── Tekstformatering ─────────────────────────────────────────────────────────
+
+# År som i LocalDate.toString: minst fire siffer, "+" over 9999, "-" for negative.
+funksjon _år_tekst(år: heiltall) -> tekst {
+    hvis år < 0 {
+        returner "-" + _pad(-år, 4)
+    }
+    hvis år > 9999 {
+        returner "+" + tekst(år)
+    }
+    returner _pad(år, 4)
+}
+
+# Brøkdel av sekund: "", ".123", ".123456" eller ".123456789".
+funksjon _nano_tekst(nano: heiltall) -> tekst {
+    hvis nano == 0 {
+        returner ""
+    }
+    hvis nano % 1000000 == 0 {
+        returner "." + _pad(nano / 1000000, 3)
+    }
+    hvis nano % 1000 == 0 {
+        returner "." + _pad(nano / 1000, 6)
+    }
+    returner "." + _pad(nano, 9)
+}
+
+funksjon _dato_tekst(år: heiltall, månad: heiltall, dag: heiltall) -> tekst {
+    returner _år_tekst(år) + "-" + _pad(månad, 2) + "-" + _pad(dag, 2)
+}
+
+# LocalTime.toString: HH:mm, så :ss og brøk berre når dei trengst.
+funksjon _klokke_tekst(time: heiltall, minutt: heiltall, sekund: heiltall, nano: heiltall) -> tekst {
+    la s: tekst = _pad(time, 2) + ":" + _pad(minutt, 2)
+    hvis sekund > 0 eller nano > 0 {
+        s = s + ":" + _pad(sekund, 2) + _nano_tekst(nano)
+    }
+    returner s
+}
+
+# ZoneOffset.toString: "Z" for 0, elles ±HH:MM (og :SS om naudsynt).
+funksjon offset_tekst(offset: heiltall) -> tekst {
+    hvis offset == 0 {
+        returner "Z"
+    }
+    la forteikn: tekst = "+"
+    la a: heiltall = offset
+    hvis offset < 0 {
+        forteikn = "-"
+        a = -offset
+    }
+    la s: tekst = forteikn + _pad(a / 3600, 2) + ":" + _pad((a / 60) % 60, 2)
+    hvis a % 60 != 0 {
+        s = s + ":" + _pad(a % 60, 2)
+    }
+    returner s
+}
+
+# ─── Teksttolking ─────────────────────────────────────────────────────────────
+
+funksjon _b(s: tekst, i: heiltall) -> heiltall {
+    returner builtin.char_code(s[i])
+}
+
+funksjon _er_siffer_på(s: tekst, i: heiltall) -> boolsk {
+    hvis i >= lengde(s) {
+        returner usann
+    }
+    la b: heiltall = _b(s, i)
+    returner b >= 48 og b <= 57
+}
+
+# Les nøyaktig n siffer frå pos, eller kast.
+funksjon _siffer(s: tekst, pos: heiltall, n: heiltall, kva: tekst) -> heiltall {
+    la v: heiltall = 0
+    la i: heiltall = 0
+    mens i < n {
+        hvis ikkje _er_siffer_på(s, pos + i) {
+            _feil("kan ikkje tolke '" + s + "': venta " + kva + " ved posisjon " + tekst(pos))
+        }
+        v = v * 10 + (_b(s, pos + i) - 48)
+        i = i + 1
+    }
+    returner v
+}
+
+funksjon _forvent(s: tekst, pos: heiltall, teikn: tekst) {
+    hvis pos >= lengde(s) eller builtin.slice(s, pos, pos + 1) != teikn {
+        _feil("kan ikkje tolke '" + s + "': venta '" + teikn + "' ved posisjon " + tekst(pos))
+    }
+}
+
+# Dato frå pos: [±]YYYY-MM-DD → [år, månad, dag, neste_pos]. Validerer datoen.
+funksjon _les_dato(s: tekst, pos: heiltall) -> liste_heltall {
+    la p: heiltall = pos
+    la neg: boolsk = usann
+    hvis p < lengde(s) og (_b(s, p) == 45 eller _b(s, p) == 43) {
+        neg = _b(s, p) == 45
+        p = p + 1
+    }
+    la start: heiltall = p
+    mens _er_siffer_på(s, p) {
+        p = p + 1
+    }
+    hvis p - start < 4 eller p - start > 9 {
+        _feil("kan ikkje tolke '" + s + "': året må ha 4–9 siffer")
+    }
+    la år: heiltall = _siffer(s, start, p - start, "år")
+    hvis neg {
+        år = -år
+    }
+    _forvent(s, p, "-")
+    la månad: heiltall = _siffer(s, p + 1, 2, "månad")
+    _forvent(s, p + 3, "-")
+    la dag: heiltall = _siffer(s, p + 4, 2, "dag")
+    _sjekk_dato(år, månad, dag)
+    returner [år, månad, dag, p + 6]
+}
+
+# Klokke frå pos: HH:MM[:SS[.fffffffff]] → [time, minutt, sekund, nano, neste_pos].
+funksjon _les_klokke(s: tekst, pos: heiltall) -> liste_heltall {
+    la time: heiltall = _siffer(s, pos, 2, "time")
+    _forvent(s, pos + 2, ":")
+    la minutt: heiltall = _siffer(s, pos + 3, 2, "minutt")
+    la p: heiltall = pos + 5
+    la sekund: heiltall = 0
+    la nano: heiltall = 0
+    hvis p < lengde(s) og _b(s, p) == 58 {
+        sekund = _siffer(s, p + 1, 2, "sekund")
+        p = p + 3
+        hvis p < lengde(s) og (_b(s, p) == 46 eller _b(s, p) == 44) {
+            p = p + 1
+            la start: heiltall = p
+            mens _er_siffer_på(s, p) {
+                p = p + 1
+            }
+            la n: heiltall = p - start
+            hvis n < 1 eller n > 9 {
+                _feil("kan ikkje tolke '" + s + "': brøkdel må ha 1–9 siffer")
+            }
+            nano = _siffer(s, start, n, "brøkdel")
+            la k: heiltall = n
+            mens k < 9 {
+                nano = nano * 10
+                k = k + 1
+            }
+        }
+    }
+    _sjekk_klokke(time, minutt, sekund, nano)
+    returner [time, minutt, sekund, nano, p]
+}
+
+# Offset frå pos: Z | ±HH | ±HHMM | ±HH:MM | ±HH:MM:SS → [offset_sekund, neste_pos].
+funksjon _les_offset(s: tekst, pos: heiltall) -> liste_heltall {
+    hvis pos >= lengde(s) {
+        _feil("kan ikkje tolke '" + s + "': manglar offset")
+    }
+    la b: heiltall = _b(s, pos)
+    hvis b == 90 eller b == 122 {
+        returner [0, pos + 1]
+    }
+    hvis b != 43 og b != 45 {
+        _feil("kan ikkje tolke '" + s + "': venta Z eller ±HH:MM ved posisjon " + tekst(pos))
+    }
+    la timar: heiltall = _siffer(s, pos + 1, 2, "offset-timar")
+    la p: heiltall = pos + 3
+    la minutt: heiltall = 0
+    la sek: heiltall = 0
+    hvis p < lengde(s) og _b(s, p) == 58 {
+        minutt = _siffer(s, p + 1, 2, "offset-minutt")
+        p = p + 3
+        hvis p < lengde(s) og _b(s, p) == 58 {
+            sek = _siffer(s, p + 1, 2, "offset-sekund")
+            p = p + 3
+        }
+    } ellers hvis _er_siffer_på(s, p) {
+        minutt = _siffer(s, p, 2, "offset-minutt")
+        p = p + 2
+    }
+    hvis timar > 18 eller minutt > 59 eller sek > 59 {
+        _feil("ugyldig offset i '" + s + "'")
+    }
+    la off: heiltall = timar * 3600 + minutt * 60 + sek
+    hvis off > 64800 {
+        _feil("offset utanfor ±18:00 i '" + s + "'")
+    }
+    hvis b == 45 {
+        off = -off
+    }
+    returner [off, p]
+}
+
+# ─── Varigheit (Duration) ─────────────────────────────────────────────────────
+
+# Duration.ofSeconds(sekund, nanojustering): nano blir normalisert til 0..999999999.
+funksjon varigheit(sekund: heiltall, nano: heiltall) {
+    returner {type: "Varigheit", sekund: sekund + _golvdiv(nano, 1000000000), nano: _golvmod(nano, 1000000000)}
+}
+
+funksjon varigheit_null() {
+    returner varigheit(0, 0)
+}
+
+funksjon varigheit_av_dagar(n: heiltall) {
+    returner varigheit(n * 86400, 0)
+}
+
+funksjon varigheit_av_timar(n: heiltall) {
+    returner varigheit(n * 3600, 0)
+}
+
+funksjon varigheit_av_minutt(n: heiltall) {
+    returner varigheit(n * 60, 0)
+}
+
+funksjon varigheit_av_sekund(n: heiltall) {
+    returner varigheit(n, 0)
+}
+
+funksjon varigheit_av_ms(n: heiltall) {
+    returner varigheit(_golvdiv(n, 1000), _golvmod(n, 1000) * 1000000)
+}
+
+funksjon varigheit_av_ns(n: heiltall) {
+    returner varigheit(0, n)
+}
+
+funksjon varigheit_pluss(a, b) {
+    _krev(a, "Varigheit")
+    _krev(b, "Varigheit")
+    returner varigheit(a["sekund"] + b["sekund"], a["nano"] + b["nano"])
+}
+
+funksjon varigheit_neger(a) {
+    _krev(a, "Varigheit")
+    returner varigheit(-a["sekund"], -a["nano"])
+}
+
+funksjon varigheit_minus(a, b) {
+    returner varigheit_pluss(a, varigheit_neger(b))
+}
+
+funksjon varigheit_gonger(a, k: heiltall) {
+    _krev(a, "Varigheit")
+    returner varigheit(a["sekund"] * k, a["nano"] * k)
+}
+
+funksjon varigheit_abs(a) {
+    hvis varigheit_er_negativ(a) {
+        returner varigheit_neger(a)
+    }
+    returner a
+}
+
+funksjon varigheit_er_null(a) -> boolsk {
+    _krev(a, "Varigheit")
+    returner a["sekund"] == 0 og a["nano"] == 0
+}
+
+funksjon varigheit_er_negativ(a) -> boolsk {
+    _krev(a, "Varigheit")
+    returner a["sekund"] < 0
+}
+
+# getSeconds(): golvsekund (nano er alltid positiv).
+funksjon varigheit_sekund(a) -> heiltall {
+    _krev(a, "Varigheit")
+    returner a["sekund"]
+}
+
+funksjon varigheit_nano(a) -> heiltall {
+    _krev(a, "Varigheit")
+    returner a["nano"]
+}
+
+# toMillis(): trunkert mot null, som Java.
+funksjon varigheit_til_ms(a) -> heiltall {
+    _krev(a, "Varigheit")
+    la s: heiltall = a["sekund"]
+    la n: heiltall = a["nano"]
+    hvis s < 0 {
+        s = s + 1
+        n = n - 1000000000
+    }
+    returner s * 1000 + n / 1000000
+}
+
+# toNanos(): trunkert mot null (overflyt over ±292 år).
+funksjon varigheit_til_ns(a) -> heiltall {
+    _krev(a, "Varigheit")
+    la s: heiltall = a["sekund"]
+    la n: heiltall = a["nano"]
+    hvis s < 0 {
+        s = s + 1
+        n = n - 1000000000
+    }
+    returner s * 1000000000 + n
+}
+
+# toDays()/toHours()/toMinutes(): golvsekund delt og trunkert, som Java.
+funksjon varigheit_til_dagar(a) -> heiltall {
+    returner varigheit_sekund(a) / 86400
+}
+
+funksjon varigheit_til_timar(a) -> heiltall {
+    returner varigheit_sekund(a) / 3600
+}
+
+funksjon varigheit_til_minutt(a) -> heiltall {
+    returner varigheit_sekund(a) / 60
+}
+
+funksjon varigheit_samanlikn(a, b) -> heiltall {
+    _krev(a, "Varigheit")
+    _krev(b, "Varigheit")
+    hvis a["sekund"] != b["sekund"] {
+        hvis a["sekund"] < b["sekund"] {
+            returner -1
+        }
+        returner 1
+    }
+    hvis a["nano"] < b["nano"] {
+        returner -1
+    }
+    hvis a["nano"] > b["nano"] {
+        returner 1
+    }
+    returner 0
+}
+
+# Duration.toString(): PT[nH][nM][n.nnnS], utan dagar; PT0S for null.
+funksjon varigheit_til_tekst(a) -> tekst {
+    _krev(a, "Varigheit")
+    la sek: heiltall = a["sekund"]
+    la nano: heiltall = a["nano"]
+    hvis sek == 0 og nano == 0 {
+        returner "PT0S"
+    }
+    la eff: heiltall = sek
+    hvis sek < 0 og nano > 0 {
+        eff = eff + 1
+    }
+    la timar: heiltall = eff / 3600
+    la minutt: heiltall = (eff % 3600) / 60
+    la s: heiltall = eff % 60
+    la ut: tekst = "PT"
+    hvis timar != 0 {
+        ut = ut + tekst(timar) + "H"
+    }
+    hvis minutt != 0 {
+        ut = ut + tekst(minutt) + "M"
+    }
+    hvis s == 0 og nano == 0 og lengde(ut) > 2 {
+        returner ut
+    }
+    hvis sek < 0 og nano > 0 {
+        hvis s == 0 {
+            ut = ut + "-0"
+        } ellers {
+            ut = ut + tekst(s)
+        }
+    } ellers {
+        ut = ut + tekst(s)
+    }
+    hvis nano > 0 {
+        la brøk: heiltall = nano + 1000000000
+        hvis sek < 0 {
+            brøk = 2000000000 - nano
+        }
+        la bt: tekst = tekst(brøk)
+        la slutt_i: heiltall = lengde(bt)
+        mens slutt_i > 1 og _b(bt, slutt_i - 1) == 48 {
+            slutt_i = slutt_i - 1
+        }
+        ut = ut + "." + builtin.slice(bt, 1, slutt_i)
+    }
+    returner ut + "S"
+}
+
+funksjon _stor_bokstav(b: heiltall) -> heiltall {
+    hvis b >= 97 og b <= 122 {
+        returner b - 32
+    }
+    returner b
+}
+
+# Les [±]siffer frå pos → [verdi, neste_pos, negativ(0/1)].
+funksjon _les_forteikna(s: tekst, pos: heiltall) -> liste_heltall {
+    la p: heiltall = pos
+    la neg: heiltall = 0
+    hvis p < lengde(s) og (_b(s, p) == 45 eller _b(s, p) == 43) {
+        hvis _b(s, p) == 45 {
+            neg = 1
+        }
+        p = p + 1
+    }
+    la start: heiltall = p
+    mens _er_siffer_på(s, p) {
+        p = p + 1
+    }
+    hvis p == start {
+        _feil("kan ikkje tolke varigheit '" + s + "': venta tal ved posisjon " + tekst(pos))
+    }
+    hvis p - start > 18 {
+        _feil("kan ikkje tolke varigheit '" + s + "': talet er for stort")
+    }
+    la v: heiltall = _siffer(s, start, p - start, "tal")
+    hvis neg == 1 {
+        v = -v
+    }
+    returner [v, p, neg]
+}
+
+# Duration.parse: [±]P[nD][T[nH][nM][n[.f]S]], store eller små bokstavar.
+funksjon varigheit_frå_tekst(s: tekst) {
+    la n: heiltall = lengde(s)
+    la p: heiltall = 0
+    la neg_alt: boolsk = usann
+    hvis p < n og (_b(s, p) == 45 eller _b(s, p) == 43) {
+        neg_alt = _b(s, p) == 45
+        p = p + 1
+    }
+    hvis p >= n eller _stor_bokstav(_b(s, p)) != 80 {
+        _feil("kan ikkje tolke varigheit '" + s + "': venta 'P'")
+    }
+    p = p + 1
+    la sum = varigheit_null()
+    la fann_del: boolsk = usann
+    # Datodel: berre dagar.
+    hvis p < n og _stor_bokstav(_b(s, p)) != 84 {
+        la r: liste_heltall = _les_forteikna(s, p)
+        p = r[1]
+        hvis p >= n eller _stor_bokstav(_b(s, p)) != 68 {
+            _feil("kan ikkje tolke varigheit '" + s + "': venta 'D' ved posisjon " + tekst(p))
+        }
+        p = p + 1
+        sum = varigheit_pluss(sum, varigheit_av_dagar(r[0]))
+        fann_del = sann
+    }
+    # Tidsdel.
+    hvis p < n {
+        hvis _stor_bokstav(_b(s, p)) != 84 {
+            _feil("kan ikkje tolke varigheit '" + s + "': venta 'T' ved posisjon " + tekst(p))
+        }
+        p = p + 1
+        la fann_tid: boolsk = usann
+        la steg_nr: heiltall = 0
+        mens p < n {
+            la r: liste_heltall = _les_forteikna(s, p)
+            p = r[1]
+            la nano: heiltall = 0
+            la brøk: boolsk = usann
+            hvis p < n og (_b(s, p) == 46 eller _b(s, p) == 44) {
+                p = p + 1
+                la start: heiltall = p
+                mens _er_siffer_på(s, p) {
+                    p = p + 1
+                }
+                la nd: heiltall = p - start
+                hvis nd > 9 {
+                    _feil("kan ikkje tolke varigheit '" + s + "': brøkdel med meir enn 9 siffer")
+                }
+                hvis nd > 0 {
+                    nano = _siffer(s, start, nd, "brøkdel")
+                }
+                la k: heiltall = nd
+                mens k < 9 {
+                    nano = nano * 10
+                    k = k + 1
+                }
+                brøk = sann
+            }
+            hvis p >= n {
+                _feil("kan ikkje tolke varigheit '" + s + "': manglar eining")
+            }
+            la u: heiltall = _stor_bokstav(_b(s, p))
+            p = p + 1
+            hvis u == 72 og steg_nr < 1 og ikkje brøk {
+                sum = varigheit_pluss(sum, varigheit_av_timar(r[0]))
+                steg_nr = 1
+            } ellers hvis u == 77 og steg_nr < 2 og ikkje brøk {
+                sum = varigheit_pluss(sum, varigheit_av_minutt(r[0]))
+                steg_nr = 2
+            } ellers hvis u == 83 og steg_nr < 3 {
+                la del = varigheit(r[0], nano)
+                hvis r[2] == 1 {
+                    del = varigheit(r[0], -nano)
+                }
+                sum = varigheit_pluss(sum, del)
+                steg_nr = 3
+            } ellers {
+                _feil("kan ikkje tolke varigheit '" + s + "': uventa eining ved posisjon " + tekst(p - 1))
+            }
+            fann_tid = sann
+        }
+        hvis ikkje fann_tid {
+            _feil("kan ikkje tolke varigheit '" + s + "': 'T' utan timar, minutt eller sekund")
+        }
+        fann_del = sann
+    }
+    hvis ikkje fann_del {
+        _feil("kan ikkje tolke varigheit '" + s + "': ingen delar")
+    }
+    hvis neg_alt {
+        returner varigheit_neger(sum)
+    }
+    returner sum
+}
+
+# ─── Tidspunkt (Instant) ──────────────────────────────────────────────────────
+
+# Instant.ofEpochSecond(sekund, nanojustering).
+funksjon tidspunkt(sekund: heiltall, nano: heiltall) {
+    returner {type: "Tidspunkt", sekund: sekund + _golvdiv(nano, 1000000000), nano: _golvmod(nano, 1000000000)}
+}
+
+funksjon tidspunkt_frå_sekund(sekund: heiltall) {
+    returner tidspunkt(sekund, 0)
+}
+
+funksjon tidspunkt_frå_ms(ms: heiltall) {
+    returner tidspunkt(_golvdiv(ms, 1000), _golvmod(ms, 1000) * 1000000)
+}
+
+funksjon tidspunkt_frå_ns(ns: heiltall) {
+    returner tidspunkt(0, ns)
+}
+
+funksjon tidspunkt_nå() {
+    la ms: heiltall = 0
+    prøv {
+        ms = builtin.tid_ms()
+    } fang (e) {
+        _feil("klokka er ikkje tilgjengeleg: " + tekst(e))
+    }
+    returner tidspunkt_frå_ms(ms)
+}
+
+funksjon tidspunkt_sekund(t) -> heiltall {
+    _krev(t, "Tidspunkt")
+    returner t["sekund"]
+}
+
+funksjon tidspunkt_nano(t) -> heiltall {
+    _krev(t, "Tidspunkt")
+    returner t["nano"]
+}
+
+# toEpochMilli(): golv (nano er alltid positiv).
+funksjon tidspunkt_til_ms(t) -> heiltall {
+    _krev(t, "Tidspunkt")
+    returner t["sekund"] * 1000 + t["nano"] / 1000000
+}
+
+funksjon tidspunkt_til_ns(t) -> heiltall {
+    _krev(t, "Tidspunkt")
+    returner t["sekund"] * 1000000000 + t["nano"]
+}
+
+funksjon tidspunkt_pluss(t, v) {
+    _krev(t, "Tidspunkt")
+    _krev(v, "Varigheit")
+    returner tidspunkt(t["sekund"] + v["sekund"], t["nano"] + v["nano"])
+}
+
+funksjon tidspunkt_minus(t, v) {
+    returner tidspunkt_pluss(t, varigheit_neger(v))
+}
+
+# Duration.between(a, b) = b - a.
+funksjon tidspunkt_mellom(a, b) {
+    _krev(a, "Tidspunkt")
+    _krev(b, "Tidspunkt")
+    returner varigheit(b["sekund"] - a["sekund"], b["nano"] - a["nano"])
+}
+
+funksjon tidspunkt_samanlikn(a, b) -> heiltall {
+    _krev(a, "Tidspunkt")
+    _krev(b, "Tidspunkt")
+    hvis a["sekund"] != b["sekund"] {
+        hvis a["sekund"] < b["sekund"] {
+            returner -1
+        }
+        returner 1
+    }
+    hvis a["nano"] < b["nano"] {
+        returner -1
+    }
+    hvis a["nano"] > b["nano"] {
+        returner 1
+    }
+    returner 0
+}
+
+funksjon tidspunkt_er_før(a, b) -> boolsk {
+    returner tidspunkt_samanlikn(a, b) < 0
+}
+
+funksjon tidspunkt_er_etter(a, b) -> boolsk {
+    returner tidspunkt_samanlikn(a, b) > 0
+}
+
+# ISO_INSTANT: 2024-12-31T12:00:00Z (alltid sekund, brøk i grupper på 3).
+funksjon tidspunkt_til_tekst(t) -> tekst {
+    _krev(t, "Tidspunkt")
+    la sek: heiltall = t["sekund"]
+    la ymd: liste_heltall = frå_epoch_dag(_golvdiv(sek, 86400))
+    la sod: heiltall = _golvmod(sek, 86400)
+    returner _dato_tekst(ymd[0], ymd[1], ymd[2]) + "T" + _pad(sod / 3600, 2) + ":" + _pad((sod / 60) % 60, 2) + ":" + _pad(sod % 60, 2) + _nano_tekst(t["nano"]) + "Z"
+}
+
+# Instant.parse: YYYY-MM-DDTHH:MM[:SS[.f]] etterfølgt av Z eller ±HH:MM.
+funksjon tidspunkt_frå_tekst(s: tekst) {
+    la d: liste_heltall = _les_dato(s, 0)
+    hvis d[3] >= lengde(s) eller _stor_bokstav(_b(s, d[3])) != 84 {
+        _feil("kan ikkje tolke '" + s + "': venta 'T' etter datoen")
+    }
+    la k: liste_heltall = _les_klokke(s, d[3] + 1)
+    la o: liste_heltall = _les_offset(s, k[4])
+    hvis o[1] != lengde(s) {
+        _feil("kan ikkje tolke '" + s + "': uventa tekst etter offset")
+    }
+    la lokal: heiltall = epoch_dag(d[0], d[1], d[2]) * 86400 + k[0] * 3600 + k[1] * 60 + k[2]
+    returner tidspunkt(lokal - o[0], k[3])
+}
+
+# ─── Dato (LocalDate) ─────────────────────────────────────────────────────────
+
+funksjon dato(år: heiltall, månad: heiltall, dag: heiltall) {
+    _sjekk_dato(år, månad, dag)
+    returner {type: "Dato", år: år, månad: månad, dag: dag}
+}
+
+funksjon dato_frå_epoch_dag(n: heiltall) {
+    la ymd: liste_heltall = frå_epoch_dag(n)
+    returner dato(ymd[0], ymd[1], ymd[2])
+}
+
+funksjon dato_epoch_dag(d) -> heiltall {
+    _krev(d, "Dato")
+    returner epoch_dag(d["år"], d["månad"], d["dag"])
+}
+
+# Dagens dato i den gitte tidssona (t.d. "Europe/Oslo" eller "UTC").
+funksjon dato_i_dag(sone: tekst) {
+    la z = sonetid_frå_tidspunkt(tidspunkt_nå(), sone)
+    returner dato(z["år"], z["månad"], z["dag"])
+}
+
+funksjon dato_pluss_dagar(d, n: heiltall) {
+    returner dato_frå_epoch_dag(dato_epoch_dag(d) + n)
+}
+
+funksjon dato_pluss_veker(d, n: heiltall) {
+    returner dato_pluss_dagar(d, n * 7)
+}
+
+# plusMonths: dagen blir klemd til siste gyldige dag i månaden (31. jan + 1 → 28./29. feb).
+funksjon dato_pluss_månader(d, n: heiltall) {
+    _krev(d, "Dato")
+    la mt: heiltall = d["år"] * 12 + (d["månad"] - 1) + n
+    la år: heiltall = _golvdiv(mt, 12)
+    la månad: heiltall = _golvmod(mt, 12) + 1
+    la dag: heiltall = d["dag"]
+    la maks: heiltall = dagar_i_månad(år, månad)
+    hvis dag > maks {
+        dag = maks
+    }
+    returner dato(år, månad, dag)
+}
+
+# plusYears: 29. februar + 1 år → 28. februar.
+funksjon dato_pluss_år(d, n: heiltall) {
+    returner dato_pluss_månader(d, n * 12)
+}
+
+funksjon dato_vekedag(d) -> heiltall {
+    returner vekedag_for_epoch_dag(dato_epoch_dag(d))
+}
+
+funksjon dato_vekedag_namn(d) -> tekst {
+    returner vekedag_namn(dato_vekedag(d))
+}
+
+funksjon dato_dag_i_år(d) -> heiltall {
+    _krev(d, "Dato")
+    returner epoch_dag(d["år"], d["månad"], d["dag"]) - epoch_dag(d["år"], 1, 1) + 1
+}
+
+funksjon dato_er_skotår(d) -> boolsk {
+    _krev(d, "Dato")
+    returner er_skotår(d["år"])
+}
+
+funksjon dato_lengd_månad(d) -> heiltall {
+    _krev(d, "Dato")
+    returner dagar_i_månad(d["år"], d["månad"])
+}
+
+# ChronoUnit.DAYS.between(a, b).
+funksjon dato_dagar_mellom(a, b) -> heiltall {
+    returner dato_epoch_dag(b) - dato_epoch_dag(a)
+}
+
+funksjon dato_samanlikn(a, b) -> heiltall {
+    la x: heiltall = dato_epoch_dag(a)
+    la y: heiltall = dato_epoch_dag(b)
+    hvis x < y {
+        returner -1
+    }
+    hvis x > y {
+        returner 1
+    }
+    returner 0
+}
+
+funksjon dato_er_før(a, b) -> boolsk {
+    returner dato_samanlikn(a, b) < 0
+}
+
+funksjon dato_er_etter(a, b) -> boolsk {
+    returner dato_samanlikn(a, b) > 0
+}
+
+funksjon dato_til_tekst(d) -> tekst {
+    _krev(d, "Dato")
+    returner _dato_tekst(d["år"], d["månad"], d["dag"])
+}
+
+funksjon dato_frå_tekst(s: tekst) {
+    la r: liste_heltall = _les_dato(s, 0)
+    hvis r[3] != lengde(s) {
+        _feil("kan ikkje tolke dato '" + s + "': uventa tekst etter datoen")
+    }
+    returner dato(r[0], r[1], r[2])
+}
+
+# atTime: Dato + klokkeslett → Datotid.
+funksjon dato_ved_tid(d, time: heiltall, minutt: heiltall, sekund: heiltall) {
+    _krev(d, "Dato")
+    returner datotid(d["år"], d["månad"], d["dag"], time, minutt, sekund)
+}
+
+# ─── Datotid (LocalDateTime) ──────────────────────────────────────────────────
+
+funksjon datotid_nano(år: heiltall, månad: heiltall, dag: heiltall, time: heiltall, minutt: heiltall, sekund: heiltall, nano: heiltall) {
+    _sjekk_dato(år, månad, dag)
+    _sjekk_klokke(time, minutt, sekund, nano)
+    returner {type: "Datotid", år: år, månad: månad, dag: dag, time: time, minutt: minutt, sekund: sekund, nano: nano}
+}
+
+funksjon datotid(år: heiltall, månad: heiltall, dag: heiltall, time: heiltall, minutt: heiltall, sekund: heiltall) {
+    returner datotid_nano(år, månad, dag, time, minutt, sekund, 0)
+}
+
+# Lokale sekund sidan 1970-01-01T00:00 (som om tida var UTC).
+funksjon _lokal_sek(dt) -> heiltall {
+    returner epoch_dag(dt["år"], dt["månad"], dt["dag"]) * 86400 + dt["time"] * 3600 + dt["minutt"] * 60 + dt["sekund"]
+}
+
+funksjon _datotid_frå_lokal(lokal: heiltall, nano: heiltall) {
+    la sek: heiltall = lokal + _golvdiv(nano, 1000000000)
+    la ns: heiltall = _golvmod(nano, 1000000000)
+    la ymd: liste_heltall = frå_epoch_dag(_golvdiv(sek, 86400))
+    la sod: heiltall = _golvmod(sek, 86400)
+    returner datotid_nano(ymd[0], ymd[1], ymd[2], sod / 3600, (sod / 60) % 60, sod % 60, ns)
+}
+
+# LocalDateTime.ofEpochSecond(sekund, nano, offset).
+funksjon datotid_frå_epoch_sekund(sekund: heiltall, nano: heiltall, offset: heiltall) {
+    returner _datotid_frå_lokal(sekund + offset, nano)
+}
+
+# toEpochSecond(offset).
+funksjon datotid_til_epoch_sekund(dt, offset: heiltall) -> heiltall {
+    _krev(dt, "Datotid")
+    returner _lokal_sek(dt) - offset
+}
+
+funksjon datotid_dato(dt) {
+    _krev(dt, "Datotid")
+    returner dato(dt["år"], dt["månad"], dt["dag"])
+}
+
+funksjon datotid_pluss_sekund(dt, n: heiltall) {
+    _krev(dt, "Datotid")
+    returner _datotid_frå_lokal(_lokal_sek(dt) + n, dt["nano"])
+}
+
+funksjon datotid_pluss_minutt(dt, n: heiltall) {
+    returner datotid_pluss_sekund(dt, n * 60)
+}
+
+funksjon datotid_pluss_timar(dt, n: heiltall) {
+    returner datotid_pluss_sekund(dt, n * 3600)
+}
+
+funksjon datotid_pluss_nano(dt, n: heiltall) {
+    _krev(dt, "Datotid")
+    returner _datotid_frå_lokal(_lokal_sek(dt), dt["nano"] + n)
+}
+
+funksjon datotid_pluss(dt, v) {
+    _krev(dt, "Datotid")
+    _krev(v, "Varigheit")
+    returner _datotid_frå_lokal(_lokal_sek(dt) + v["sekund"], dt["nano"] + v["nano"])
+}
+
+funksjon _med_dato(dt, d) {
+    returner datotid_nano(d["år"], d["månad"], d["dag"], dt["time"], dt["minutt"], dt["sekund"], dt["nano"])
+}
+
+funksjon datotid_pluss_dagar(dt, n: heiltall) {
+    returner _med_dato(dt, dato_pluss_dagar(datotid_dato(dt), n))
+}
+
+funksjon datotid_pluss_månader(dt, n: heiltall) {
+    returner _med_dato(dt, dato_pluss_månader(datotid_dato(dt), n))
+}
+
+funksjon datotid_pluss_år(dt, n: heiltall) {
+    returner _med_dato(dt, dato_pluss_år(datotid_dato(dt), n))
+}
+
+funksjon datotid_vekedag(dt) -> heiltall {
+    returner dato_vekedag(datotid_dato(dt))
+}
+
+funksjon datotid_samanlikn(a, b) -> heiltall {
+    _krev(a, "Datotid")
+    _krev(b, "Datotid")
+    la x: heiltall = _lokal_sek(a)
+    la y: heiltall = _lokal_sek(b)
+    hvis x != y {
+        hvis x < y {
+            returner -1
+        }
+        returner 1
+    }
+    hvis a["nano"] < b["nano"] {
+        returner -1
+    }
+    hvis a["nano"] > b["nano"] {
+        returner 1
+    }
+    returner 0
+}
+
+funksjon datotid_til_tekst(dt) -> tekst {
+    _krev(dt, "Datotid")
+    returner _dato_tekst(dt["år"], dt["månad"], dt["dag"]) + "T" + _klokke_tekst(dt["time"], dt["minutt"], dt["sekund"], dt["nano"])
+}
+
+funksjon _les_datotid(s: tekst) -> liste_heltall {
+    la d: liste_heltall = _les_dato(s, 0)
+    hvis d[3] >= lengde(s) eller _stor_bokstav(_b(s, d[3])) != 84 {
+        _feil("kan ikkje tolke '" + s + "': venta 'T' etter datoen")
+    }
+    la k: liste_heltall = _les_klokke(s, d[3] + 1)
+    returner [d[0], d[1], d[2], k[0], k[1], k[2], k[3], k[4]]
+}
+
+funksjon datotid_frå_tekst(s: tekst) {
+    la r: liste_heltall = _les_datotid(s)
+    hvis r[7] != lengde(s) {
+        _feil("kan ikkje tolke datotid '" + s + "': uventa tekst etter klokkeslettet")
+    }
+    returner datotid_nano(r[0], r[1], r[2], r[3], r[4], r[5], r[6])
+}
+
+# ─── Tidssoner ────────────────────────────────────────────────────────────────
+
+funksjon _er_cet_sone(sone: tekst) -> boolsk {
+    returner sone == "Europe/Oslo" eller sone == "Arctic/Longyearbyen" eller sone == "Europe/Stockholm" eller sone == "Europe/Copenhagen" eller sone == "Europe/Berlin"
+}
+
+funksjon _er_utc_sone(sone: tekst) -> boolsk {
+    returner sone == "UTC" eller sone == "GMT" eller sone == "Etc/UTC" eller sone == "Etc/GMT" eller sone == "UT"
+}
+
+# Normaliser sone-ID: CET-soner og UTC-namn blir ståande, faste offset blir "Z"/"±HH:MM".
+funksjon normaliser_sone(sone: tekst) -> tekst {
+    hvis _er_cet_sone(sone) eller _er_utc_sone(sone) {
+        returner sone
+    }
+    hvis sone == "Z" eller sone == "z" {
+        returner "Z"
+    }
+    hvis lengde(sone) > 0 og (_b(sone, 0) == 43 eller _b(sone, 0) == 45) {
+        # ±H eller ±HH… : utvid einsifra time.
+        la s: tekst = sone
+        hvis lengde(s) == 2 {
+            s = builtin.slice(s, 0, 1) + "0" + builtin.slice(s, 1, 2)
+        }
+        la o: liste_heltall = _les_offset(s, 0)
+        hvis o[1] != lengde(s) {
+            _feil("ugyldig offset '" + sone + "'")
+        }
+        returner offset_tekst(o[0])
+    }
+    _feil("ukjend tidssone '" + sone + "'")
+    returner ""
+}
+
+# Fast offset for UTC- og offset-soner.
+funksjon _fast_offset(sone: tekst) -> heiltall {
+    hvis _er_utc_sone(sone) eller sone == "Z" {
+        returner 0
+    }
+    la o: liste_heltall = _les_offset(sone, 0)
+    returner o[0]
+}
+
+funksjon _siste_sundag(år: heiltall, månad: heiltall) -> heiltall {
+    la z: heiltall = epoch_dag(år, månad, dagar_i_månad(år, månad))
+    returner z - (vekedag_for_epoch_dag(z) % 7)
+}
+
+funksjon _første_sundag(år: heiltall, månad: heiltall) -> heiltall {
+    la z: heiltall = epoch_dag(år, månad, 1)
+    returner z + (7 - vekedag_for_epoch_dag(z)) % 7
+}
+
+# [start, slutt] i epoch-sekund (UTC) for sommartid i CET-sonene, eller [] før 1980.
+funksjon _cet_overgangar(år: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    hvis år < 1980 {
+        returner r
+    }
+    la start_dag: heiltall = _siste_sundag(år, 3)
+    hvis år == 1980 {
+        start_dag = _første_sundag(år, 4)
+    }
+    la slutt_dag: heiltall = _siste_sundag(år, 10)
+    hvis år <= 1995 {
+        slutt_dag = _siste_sundag(år, 9)
+    }
+    legg_til(r, start_dag * 86400 + 3600)
+    legg_til(r, slutt_dag * 86400 + 3600)
+    returner r
+}
+
+funksjon _cet_offset(epoch_sek: heiltall) -> heiltall {
+    la ymd: liste_heltall = frå_epoch_dag(_golvdiv(epoch_sek, 86400))
+    la år: heiltall = ymd[0]
+    la ov: liste_heltall = _cet_overgangar(år)
+    hvis lengde(ov) == 2 og epoch_sek >= ov[0] og epoch_sek < ov[1] {
+        returner 7200
+    }
+    returner 3600
+}
+
+# Offset (sekund aust for UTC) i sona på eit tidspunkt (epoch-sekund).
+funksjon offset_i_sone(sone: tekst, epoch_sek: heiltall) -> heiltall {
+    la s: tekst = normaliser_sone(sone)
+    hvis _er_cet_sone(s) {
+        returner _cet_offset(epoch_sek)
+    }
+    returner _fast_offset(s)
+}
+
+# Sommartidsovergangar for Europe/Oslo eit år: [start, slutt] som Tidspunkt, eller [] før 1980.
+funksjon sommartid_overgangar(år: heiltall) {
+    la ov: liste_heltall = _cet_overgangar(år)
+    la r = []
+    hvis lengde(ov) == 2 {
+        legg_til(r, tidspunkt_frå_sekund(ov[0]))
+        legg_til(r, tidspunkt_frå_sekund(ov[1]))
+    }
+    returner r
+}
+
+# Løys lokal tid i sona: [offset, justert_lokal_sek]. føretrekt < -100000 = ingen preferanse.
+funksjon _løys_lokal(sone: tekst, lokal: heiltall, føretrekt: heiltall) -> liste_heltall {
+    hvis ikkje _er_cet_sone(sone) {
+        returner [_fast_offset(sone), lokal]
+    }
+    la sommar_ok: boolsk = _cet_offset(lokal - 7200) == 7200
+    la vinter_ok: boolsk = _cet_offset(lokal - 3600) == 3600
+    hvis sommar_ok og vinter_ok {
+        hvis føretrekt == 3600 {
+            returner [3600, lokal]
+        }
+        returner [7200, lokal]
+    }
+    hvis sommar_ok {
+        returner [7200, lokal]
+    }
+    hvis vinter_ok {
+        returner [3600, lokal]
+    }
+    # Hol: flytt fram med lengda av holet (1 time) inn i sommartid.
+    returner [7200, lokal + 3600]
+}
+
+# ─── Sonetid (ZonedDateTime) ──────────────────────────────────────────────────
+
+funksjon _sonetid_lag(lokal: heiltall, nano: heiltall, offset: heiltall, sone: tekst) {
+    la dt = _datotid_frå_lokal(lokal, nano)
+    returner {type: "Sonetid", år: dt["år"], månad: dt["månad"], dag: dt["dag"], time: dt["time"], minutt: dt["minutt"], sekund: dt["sekund"], nano: dt["nano"], offset: offset, sone: sone}
+}
+
+# ZonedDateTime.ofInstant(t, sone).
+funksjon sonetid_frå_tidspunkt(t, sone: tekst) {
+    _krev(t, "Tidspunkt")
+    la s: tekst = normaliser_sone(sone)
+    la off: heiltall = offset_i_sone(s, t["sekund"])
+    returner _sonetid_lag(t["sekund"] + off, t["nano"], off, s)
+}
+
+funksjon _sonetid_frå_lokal(dt, sone: tekst, føretrekt: heiltall) {
+    la s: tekst = normaliser_sone(sone)
+    la r: liste_heltall = _løys_lokal(s, _lokal_sek(dt), føretrekt)
+    returner _sonetid_lag(r[1], dt["nano"], r[0], s)
+}
+
+# ZonedDateTime.of(localDateTime, sone) — sjå reglane for hol og overlapp i hovudet.
+funksjon sonetid_av(dt, sone: tekst) {
+    _krev(dt, "Datotid")
+    returner _sonetid_frå_lokal(dt, sone, -999999)
+}
+
+funksjon sonetid(år: heiltall, månad: heiltall, dag: heiltall, time: heiltall, minutt: heiltall, sekund: heiltall, sone: tekst) {
+    returner sonetid_av(datotid(år, månad, dag, time, minutt, sekund), sone)
+}
+
+funksjon sonetid_nå(sone: tekst) {
+    returner sonetid_frå_tidspunkt(tidspunkt_nå(), sone)
+}
+
+funksjon sonetid_datotid(z) {
+    _krev(z, "Sonetid")
+    returner datotid_nano(z["år"], z["månad"], z["dag"], z["time"], z["minutt"], z["sekund"], z["nano"])
+}
+
+funksjon sonetid_dato(z) {
+    _krev(z, "Sonetid")
+    returner dato(z["år"], z["månad"], z["dag"])
+}
+
+funksjon sonetid_til_tidspunkt(z) {
+    _krev(z, "Sonetid")
+    returner tidspunkt(_lokal_sek(z) - z["offset"], z["nano"])
+}
+
+funksjon sonetid_til_epoch_sekund(z) -> heiltall {
+    _krev(z, "Sonetid")
+    returner _lokal_sek(z) - z["offset"]
+}
+
+funksjon sonetid_offset(z) -> heiltall {
+    _krev(z, "Sonetid")
+    returner z["offset"]
+}
+
+funksjon sonetid_offset_tekst(z) -> tekst {
+    returner offset_tekst(sonetid_offset(z))
+}
+
+funksjon sonetid_er_sommartid(z) -> boolsk {
+    _krev(z, "Sonetid")
+    returner _er_cet_sone(z["sone"]) og z["offset"] == 7200
+}
+
+# Forkorting: CET/CEST for CET-sonene, UTC for UTC-namn, elles offset-teksten.
+funksjon sonetid_forkorting(z) -> tekst {
+    _krev(z, "Sonetid")
+    hvis _er_cet_sone(z["sone"]) {
+        hvis z["offset"] == 7200 {
+            returner "CEST"
+        }
+        returner "CET"
+    }
+    hvis _er_utc_sone(z["sone"]) {
+        returner "UTC"
+    }
+    returner offset_tekst(z["offset"])
+}
+
+# withZoneSameInstant.
+funksjon sonetid_med_sone(z, sone: tekst) {
+    returner sonetid_frå_tidspunkt(sonetid_til_tidspunkt(z), sone)
+}
+
+# Tidslinjearitmetikk (plusHours/plusMinutes/plusSeconds/plus(Duration)).
+funksjon sonetid_pluss(z, v) {
+    _krev(z, "Sonetid")
+    returner sonetid_frå_tidspunkt(tidspunkt_pluss(sonetid_til_tidspunkt(z), v), z["sone"])
+}
+
+funksjon sonetid_pluss_sekund(z, n: heiltall) {
+    returner sonetid_pluss(z, varigheit_av_sekund(n))
+}
+
+funksjon sonetid_pluss_minutt(z, n: heiltall) {
+    returner sonetid_pluss(z, varigheit_av_minutt(n))
+}
+
+funksjon sonetid_pluss_timar(z, n: heiltall) {
+    returner sonetid_pluss(z, varigheit_av_timar(n))
+}
+
+# Lokal aritmetikk (plusDays/plusMonths/plusYears) med gjeldande offset som føretrekt.
+funksjon sonetid_pluss_dagar(z, n: heiltall) {
+    _krev(z, "Sonetid")
+    returner _sonetid_frå_lokal(datotid_pluss_dagar(sonetid_datotid(z), n), z["sone"], z["offset"])
+}
+
+funksjon sonetid_pluss_månader(z, n: heiltall) {
+    _krev(z, "Sonetid")
+    returner _sonetid_frå_lokal(datotid_pluss_månader(sonetid_datotid(z), n), z["sone"], z["offset"])
+}
+
+funksjon sonetid_pluss_år(z, n: heiltall) {
+    _krev(z, "Sonetid")
+    returner _sonetid_frå_lokal(datotid_pluss_år(sonetid_datotid(z), n), z["sone"], z["offset"])
+}
+
+funksjon sonetid_samanlikn(a, b) -> heiltall {
+    returner tidspunkt_samanlikn(sonetid_til_tidspunkt(a), sonetid_til_tidspunkt(b))
+}
+
+funksjon _er_offset_sone(sone: tekst) -> boolsk {
+    returner sone == "Z" eller _b(sone, 0) == 43 eller _b(sone, 0) == 45
+}
+
+# ZonedDateTime.toString: 2024-07-01T14:00+02:00[Europe/Oslo].
+funksjon sonetid_til_tekst(z) -> tekst {
+    _krev(z, "Sonetid")
+    la s: tekst = _dato_tekst(z["år"], z["månad"], z["dag"]) + "T" + _klokke_tekst(z["time"], z["minutt"], z["sekund"], z["nano"]) + offset_tekst(z["offset"])
+    hvis ikkje _er_offset_sone(z["sone"]) {
+        s = s + "[" + z["sone"] + "]"
+    }
+    returner s
+}
+
+# ZonedDateTime.parse: datotid + offset + valfri [sone]. Som i Java blir tidspunktet
+# rekna frå offsetet i teksten og så lagt i sona (ofInstant): i ein overlapp vel
+# offsetet kva for ei av dei to tidene som er meint; eit offset som ikkje passar
+# sona (t.d. +01:00 om sommaren) gjev same tidspunkt med sona sitt eige offset.
+# Utan [sone] blir offsetet sjølv sona.
+funksjon sonetid_frå_tekst(s: tekst) {
+    la r: liste_heltall = _les_datotid(s)
+    la o: liste_heltall = _les_offset(s, r[7])
+    la p: heiltall = o[1]
+    la dt = datotid_nano(r[0], r[1], r[2], r[3], r[4], r[5], r[6])
+    la t = tidspunkt(_lokal_sek(dt) - o[0], dt["nano"])
+    hvis p == lengde(s) {
+        returner sonetid_frå_tidspunkt(t, offset_tekst(o[0]))
+    }
+    _forvent(s, p, "[")
+    hvis _b(s, lengde(s) - 1) != 93 {
+        _feil("kan ikkje tolke '" + s + "': manglar ']'")
+    }
+    returner sonetid_frå_tidspunkt(t, builtin.slice(s, p + 1, lengde(s) - 1))
+}
