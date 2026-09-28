@@ -1,7 +1,209 @@
 # Fase 5 - LSP grunnmur
 # Minimal JSON-RPC-flate for seinare utviding.
+#
+# `nc lsp` rutar hit via nc_køyr_verktøy (frå kjelde, ingen reseed). Modusar:
+#   NORSCODE_LSP_USE_STDIN=1  batch-LSP over stdin: les ALLE Content-Length-
+#       ramma meldingar til EOF (fil_les("/dev/stdin")), handterer dei i
+#       rekkjefølgje og skriv ramma JSON-RPC-svar + publishDiagnostics-varsel
+#       til stdout. VM-disk-scopet må tillate /dev/stdin, t.d.
+#       NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp,/dev/stdin".
+#       Vedvarande dialog med ein editor krev ein strøymande stdin-builtin i
+#       vm.no (reseed) og er ikkje støtta enno.
+#   NORSCODE_LSP_PAYLOAD / NORSCODE_LSP_STREAM  diagnosemodus: same handtering,
+#       men skriv statusoppsummeringar og uramma svar (éin per linje).
+# Diagnostikk ved didOpen/didChange kjem frå selfhost/linter_kjerne.no:
+# syntaksfeil og typefeil (severity 1), ubrukte variablar, re-deklarasjon,
+# uoppnåeleg kode og import-reglar (severity 2). Posisjonar er 0-baserte
+# linjer/byte-kolonnar. hover/definition tek standard textDocument+position
+# (ordet under markøren; definisjon = `funksjon <ord>` i same dokument) og
+# den eldre {"symbol": …}-forma.
 
-bruk std.sys som sys
+bruk selfhost.linter_kjerne som lk
+
+// ─── JSON- og protokollhjelparar ─────────────────────────────────────────────
+
+funksjon lsp_json_tekst(t) -> tekst {
+    hvis t == null { returner "null" }
+    la s = tekst(t)
+    la ut = "\""
+    la i = 0
+    la n = lengde(s)
+    mens i < n {
+        la c = builtin.slice(s, i, i + 1)
+        la k = builtin.char_code(c)
+        hvis c == "\"" {
+            ut = ut + "\\\""
+        } ellers hvis k == 92 {
+            ut = ut + "\\\\"
+        } ellers hvis k == 10 {
+            ut = ut + "\\n"
+        } ellers hvis k == 13 {
+            ut = ut + "\\r"
+        } ellers hvis k == 9 {
+            ut = ut + "\\t"
+        } ellers hvis k < 32 {
+            ut = ut + " "
+        } ellers {
+            ut = ut + c
+        }
+        i = i + 1
+    }
+    returner ut + "\""
+}
+
+funksjon lsp_id_json(id) -> tekst {
+    hvis id == null { returner "null" }
+    hvis type(id) == "tekst" { returner lsp_json_tekst(id) }
+    returner tekst(id)
+}
+
+funksjon lsp_ramme(body: tekst) -> tekst {
+    returner "Content-Length: " + tekst(lengde(body)) + "\r\n\r\n" + body
+}
+
+funksjon lsp_har_id(req) -> boolsk {
+    hvis type(req) != "ordbok" { returner usann }
+    hvis ikkje finnes_nøkkel(req, "id") { returner usann }
+    returner req["id"] != null
+}
+
+// Tekst for didOpen/didChange: textDocument.text, contentChanges (full sync,
+// siste endring vinn) eller den eldre params.content-forma.
+funksjon lsp_dokument_tekst(params) {
+    hvis params == null { returner "" }
+    la td = params["textDocument"]
+    hvis td != null og td["text"] != null { returner tekst(td["text"]) }
+    la endringar = params["contentChanges"]
+    hvis endringar != null og type(endringar) == "liste" og lengde(endringar) > 0 {
+        la siste = endringar[lengde(endringar) - 1]
+        hvis siste != null og siste["text"] != null { returner tekst(siste["text"]) }
+    }
+    hvis params["content"] != null { returner tekst(params["content"]) }
+    returner ""
+}
+
+funksjon lsp_severity(s: tekst) -> heiltall {
+    hvis s == "error" { returner 1 }
+    hvis s == "warning" { returner 2 }
+    hvis s == "info" { returner 3 }
+    returner 4
+}
+
+// Lint-funn → LSP-diagnostikk (0-baserte posisjonar).
+funksjon lsp_diagnostikk_fra_kjelde(content: tekst) {
+    la ut = []
+    la funn = []
+    prøv {
+        funn = lk.lint_kjelde(content)
+    } fang (e) {
+        la d0 = {}
+        d0["message"] = "norscode-lint stoppa: " + tekst(e)
+        d0["severity"] = 3
+        d0["source"] = "norscode-lint"
+        d0["code"] = "lint-internal"
+        d0["line"] = 0
+        d0["character"] = 0
+        legg_til(ut, d0)
+        returner ut
+    }
+    la i = 0
+    mens i < lengde(funn) {
+        la f = funn[i]
+        la d = {}
+        d["message"] = f["melding"]
+        d["severity"] = lsp_severity(f["severity"])
+        d["source"] = "norscode-lint"
+        d["code"] = f["code"]
+        la linje = f["linje"] - 1
+        la kol = f["kolonne"] - 1
+        hvis linje < 0 { linje = 0 }
+        hvis kol < 0 { kol = 0 }
+        d["line"] = linje
+        d["character"] = kol
+        legg_til(ut, d)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lsp_diagnose_json(d) -> tekst {
+    la linje = 0
+    la kol = 0
+    hvis d["line"] != null { linje = d["line"] }
+    hvis d["character"] != null { kol = d["character"] }
+    la kode = ""
+    hvis d["code"] != null { kode = ",\"code\":" + lsp_json_tekst(d["code"]) }
+    la severity = 1
+    hvis d["severity"] != null { severity = d["severity"] }
+    la kjelde = "norscode-lsp"
+    hvis d["source"] != null { kjelde = tekst(d["source"]) }
+    returner "{\"range\":{\"start\":{\"line\":" + tekst(linje) + ",\"character\":" + tekst(kol) +
+        "},\"end\":{\"line\":" + tekst(linje) + ",\"character\":" + tekst(kol + 1) + "}},\"severity\":" +
+        tekst(severity) + kode + ",\"source\":" + lsp_json_tekst(kjelde) + ",\"message\":" +
+        lsp_json_tekst(d["message"]) + "}"
+}
+
+funksjon lsp_er_ordteikn(c: tekst) -> boolsk {
+    hvis c == "" { returner usann }
+    la k = builtin.char_code(c)
+    returner (k >= 97 og k <= 122) eller (k >= 65 og k <= 90) eller (k >= 48 og k <= 57) eller k == 95 eller k >= 128
+}
+
+// Ordet under (linje, teikn) i dokumentet, 0-basert.
+funksjon lsp_ord_ved(content, linje, teikn) -> tekst {
+    hvis content == null eller linje == null eller teikn == null { returner "" }
+    la linjer = builtin.split(tekst(content), "\n")
+    hvis linje < 0 eller linje >= lengde(linjer) { returner "" }
+    la l = linjer[linje]
+    la pos = teikn
+    hvis pos > lengde(l) { pos = lengde(l) }
+    la a = pos
+    mens a > 0 og lsp_er_ordteikn(builtin.slice(l, a - 1, a)) { a = a - 1 }
+    la b = pos
+    mens b < lengde(l) og lsp_er_ordteikn(builtin.slice(l, b, b + 1)) { b = b + 1 }
+    hvis b <= a { returner "" }
+    returner builtin.slice(l, a, b)
+}
+
+// Finn `funksjon <namn>(` i dokumentet: [linje, teikn, signaturlinje] eller null.
+funksjon lsp_finn_definisjon(content, namn: tekst) {
+    hvis content == null eller namn == "" { returner null }
+    la linjer = builtin.split(tekst(content), "\n")
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = linjer[i]
+        la p = builtin.index_of(l, "funksjon " + namn + "(")
+        hvis p >= 0 {
+            la sig = builtin.trim(l)
+            hvis builtin.ends_with(sig, "{") { sig = builtin.trim(builtin.slice(sig, 0, lengde(sig) - 1)) }
+            returner [i, p + lengde("funksjon "), sig]
+        }
+        i = i + 1
+    }
+    returner null
+}
+
+// Symbolet ein hover/definition-førespurnad gjeld: eldre {"symbol": …} eller
+// ordet under textDocument+position.
+funksjon lsp_symbol_for(server, params) -> tekst {
+    hvis params == null { returner "" }
+    hvis params["symbol"] != null { returner tekst(params["symbol"]) }
+    la td = params["textDocument"]
+    la pos = params["position"]
+    hvis td == null eller pos == null { returner "" }
+    la uri = td["uri"]
+    hvis uri == null { returner "" }
+    la content = server.documents[uri]
+    returner lsp_ord_ved(content, pos["line"], pos["character"])
+}
+
+funksjon lsp_dokument_for(server, params) {
+    hvis params == null { returner null }
+    la td = params["textDocument"]
+    hvis td == null { returner null }
+    hvis td["uri"] == null { returner null }
+    returner server.documents[td["uri"]]
+}
 
 funksjon lsp_server()
     returner {
@@ -42,7 +244,7 @@ funksjon lsp_notifications_overview_summary(session)
 slutt
 
 funksjon lsp_notification_type_summary(notification)
-    hvis inneheld(notification, "textDocument/publishDiagnostics")
+    hvis builtin.contains(notification, "textDocument/publishDiagnostics")
         returner "notification=textDocument/publishDiagnostics"
     slutt
     returner "notification=unknown"
@@ -53,7 +255,7 @@ funksjon lsp_output_summary(server, session)
 slutt
 
 funksjon lsp_document_health_summary(server)
-    la keys = ordbok_nyklar(server.documents)
+    la keys = nøkler(server.documents)
     hvis lengde(keys) == 0
         returner "document_health=empty"
     slutt
@@ -74,20 +276,20 @@ slutt
 
 funksjon lsp_document_health_state_summary(server)
     la health = lsp_document_health_summary(server)
-    hvis inneheld(health, "document_health=empty")
+    hvis builtin.contains(health, "document_health=empty")
         returner "document_health_state=empty"
     slutt
-    hvis inneheld(health, "0/")
+    hvis builtin.contains(health, "0/")
         returner "document_health_state=unhealthy"
     slutt
-    hvis inneheld(health, "/")
+    hvis builtin.contains(health, "/")
         returner "document_health_state=partial"
     slutt
     returner "document_health_state=unknown"
 slutt
 
 funksjon lsp_document_versions_summary(server)
-    la keys = ordbok_nyklar(server.document_versions)
+    la keys = nøkler(server.document_versions)
     hvis lengde(keys) == 0
         returner "document_versions=empty"
     slutt
@@ -103,7 +305,7 @@ funksjon lsp_document_versions_summary(server)
 slutt
 
 funksjon lsp_latest_document_version_summary(server)
-    la keys = ordbok_nyklar(server.document_versions)
+    la keys = nøkler(server.document_versions)
     hvis lengde(keys) == 0
         returner "latest_document_version=empty"
     slutt
@@ -126,13 +328,13 @@ slutt
 
 funksjon lsp_version_health_summary(server)
     la versions = lsp_document_versions_summary(server)
-    hvis inneheld(versions, "document_versions=empty")
+    hvis builtin.contains(versions, "document_versions=empty")
         returner "version_health=empty"
     slutt
-    hvis inneheld(versions, "total=0")
+    hvis builtin.contains(versions, "total=0")
         returner "version_health=stalled"
     slutt
-    hvis inneheld(versions, "total=")
+    hvis builtin.contains(versions, "total=")
         returner "version_health=active"
     slutt
     returner "version_health=unknown"
@@ -193,13 +395,13 @@ slutt
 
 funksjon lsp_banner_summary(server, session)
     la status = lsp_top_status_summary(server, session)
-    hvis inneheld(status, "document_health_state=empty") eller inneheld(status, "activity_health=idle")
+    hvis builtin.contains(status, "document_health_state=empty") eller builtin.contains(status, "activity_health=idle")
         returner "banner=uklar"
     slutt
-    hvis inneheld(status, "version_health=stalled")
+    hvis builtin.contains(status, "version_health=stalled")
         returner "banner=delvis"
     slutt
-    hvis inneheld(status, "activity_health=quiet") eller inneheld(status, "notifications_health=idle")
+    hvis builtin.contains(status, "activity_health=quiet") eller builtin.contains(status, "notifications_health=idle")
         returner "banner=delvis"
     slutt
     returner "banner=klar"
@@ -267,22 +469,25 @@ funksjon lsp_has_document(server, path)
     returner sann
 slutt
 
+// Køyr lint-kjerna (syntaks, typesjekk, AST-reglar) og lagra diagnostikken
+// som publishDiagnostics-varselet for dokumentet blir laga av.
 funksjon lsp_validate_document(server, path, content)
     lsp_clear_diagnostics(server, path)
-
-    la probe = lsp_semantic_probe_from_document(server, path)
-    hvis probe.ok
-        returner sann
+    la diagnostikk = lsp_diagnostikk_fra_kjelde(content)
+    la ok = sann
+    la i = 0
+    mens i < lengde(diagnostikk)
+        la d = diagnostikk[i]
+        lsp_publish_diagnostic(server, path, d)
+        hvis d["severity"] == 1
+            ok = usann
+        slutt
+        i = i + 1
     slutt
-
-    lsp_publish_diagnostic(server, path, {
-        message: probe.message,
-        severity: probe.severity,
-        source: "norscode-lsp"
-    })
-    returner usann
+    returner ok
 slutt
 
+// Oppsummering av eit dokument frå den lagra diagnostikken (ingen ny lint).
 funksjon lsp_semantic_probe_from_document(server, path)
     hvis lsp_has_document(server, path) == usann
         returner {
@@ -291,39 +496,30 @@ funksjon lsp_semantic_probe_from_document(server, path)
             message: "Dokumentet finst ikkje i servertilstand"
         }
     slutt
-    returner lsp_semantic_probe(server.documents[path])
+    returner lsp_probe_fra_diagnostikk(server.diagnostics[path])
+slutt
+
+funksjon lsp_probe_fra_diagnostikk(diagnostikk)
+    hvis diagnostikk == null
+        returner { ok: sann, severity: 0, message: "OK" }
+    slutt
+    la i = 0
+    mens i < lengde(diagnostikk)
+        la d = diagnostikk[i]
+        hvis d["severity"] == 1
+            returner { ok: usann, severity: 1, message: d["message"] }
+        slutt
+        i = i + 1
+    slutt
+    hvis lengde(diagnostikk) > 0
+        la fyrste = diagnostikk[0]
+        returner { ok: sann, severity: fyrste["severity"], message: fyrste["message"] }
+    slutt
+    returner { ok: sann, severity: 0, message: "OK" }
 slutt
 
 funksjon lsp_semantic_probe(content)
-    hvis inneheld(content, "returner") og inneheld(content, "funksjon") == usann
-        returner {
-            ok: usann,
-            severity: 1,
-            message: "returner utanfor funksjon"
-        }
-    slutt
-
-    hvis inneheld(content, "funksjon") == usann
-        returner {
-            ok: usann,
-            severity: 1,
-            message: "Dokumentet manglar nøkkelordet funksjon"
-        }
-    slutt
-
-    hvis inneheld(content, "feil")
-        returner {
-            ok: usann,
-            severity: 2,
-            message: "Funne ordet feil i dokumentet"
-        }
-    slutt
-
-    returner {
-        ok: sann,
-        severity: 0,
-        message: "OK"
-    }
+    returner lsp_probe_fra_diagnostikk(lsp_diagnostikk_fra_kjelde(content))
 slutt
 
 funksjon lsp_semantic_probe_summary(probe)
@@ -334,7 +530,7 @@ funksjon lsp_document_summary(server)
     la doc_count = lengde(server.documents)
     la version_count = lengde(server.document_versions)
     la diag_count = 0
-    la keys = ordbok_nyklar(server.diagnostics)
+    la keys = nøkler(server.diagnostics)
     la i = 0
     mens i < lengde(keys)
         diag_count = diag_count + lengde(server.diagnostics[keys[i]])
@@ -406,24 +602,39 @@ slutt
 
 funksjon lsp_format_diagnostics_notification(path, diagnostics)
     la items = "["
-    la i = 0
-    mens i < lengde(diagnostics)
-        hvis i > 0
-            items = items + ","
+    hvis diagnostics != null
+        la i = 0
+        mens i < lengde(diagnostics)
+            hvis i > 0
+                items = items + ","
+            slutt
+            items = items + lsp_diagnose_json(diagnostics[i])
+            i = i + 1
         slutt
-        la d = diagnostics[i]
-        items = items + '{"message":"' + d.message + '","severity":' + til_tekst(d.severity) + ',"source":"' + d.source + '"}'
-        i = i + 1
     slutt
     items = items + "]"
-    returner '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"' + path + '","diagnostics":' + items + '}}'
+    returner '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":' + lsp_json_tekst(path) + ',"diagnostics":' + items + '}}'
 slutt
 
 funksjon lsp_hover(server, symbol)
     hvis server.initialized == usann
         returner '"LSP ikkje initialisert"'
     slutt
-    returner '{"contents":{"kind":"markdown","value":"' + symbol + '"}}'
+    hvis symbol == null eller symbol == ""
+        returner 'null'
+    slutt
+    returner '{"contents":{"kind":"markdown","value":' + lsp_json_tekst(symbol) + '}}'
+slutt
+
+// hover med dokumentkontekst: signaturen til ein funksjon i same dokument.
+funksjon lsp_hover_i_dokument(server, params)
+    la symbol = lsp_symbol_for(server, params)
+    la content = lsp_dokument_for(server, params)
+    la def = lsp_finn_definisjon(content, symbol)
+    hvis def == null eller server.initialized == usann
+        returner lsp_hover(server, symbol)
+    slutt
+    returner '{"contents":{"kind":"markdown","value":' + lsp_json_tekst("```norscode\n" + def[2] + "\n```") + '}}'
 slutt
 
 funksjon lsp_definition(server, symbol)
@@ -431,6 +642,26 @@ funksjon lsp_definition(server, symbol)
         returner 'null'
     slutt
     returner '{"uri":"file:///norscode/' + symbol + '.no","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}'
+slutt
+
+// definition med dokumentkontekst: `funksjon <ord>` i same dokument, elles null.
+funksjon lsp_definition_i_dokument(server, params)
+    hvis params != null og params["symbol"] != null
+        returner lsp_definition(server, tekst(params["symbol"]))
+    slutt
+    hvis server.initialized == usann
+        returner 'null'
+    slutt
+    la symbol = lsp_symbol_for(server, params)
+    la def = lsp_finn_definisjon(lsp_dokument_for(server, params), symbol)
+    hvis def == null
+        returner 'null'
+    slutt
+    la uri = params["textDocument"]["uri"]
+    la l = tekst(def[0])
+    la start = tekst(def[1])
+    la slutt_kol = tekst(def[1] + lengde(symbol))
+    returner '{"uri":' + lsp_json_tekst(uri) + ',"range":{"start":{"line":' + l + ',"character":' + start + '},"end":{"line":' + l + ',"character":' + slutt_kol + '}}}'
 slutt
 
 funksjon lsp_completion(server, prefix)
@@ -464,6 +695,9 @@ funksjon lsp_supports_method(method)
     hvis method == "shutdown" eller method == "exit" eller method == "initialize"
         returner sann
     slutt
+    hvis method == "initialized" eller method == "textDocument/didClose" eller method == "textDocument/didSave"
+        returner sann
+    slutt
     hvis method == "textDocument/didOpen" eller method == "textDocument/didChange" eller method == "textDocument/hover"
         returner sann
     slutt
@@ -480,12 +714,16 @@ funksjon lsp_supports_method(method)
 slutt
 
 funksjon lsp_handle_request(server, method, id, params)
+    la idj = lsp_id_json(id)
+    hvis params == null
+        params = {}
+    slutt
     hvis lsp_supports_method(method) == usann
-        returner '{"jsonrpc":"2.0","id":' + id + ',"error":{"code":-32601,"message":"Metode ikkje støtta"}}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"error":{"code":-32601,"message":"Metode ikkje støtta"}}'
     slutt
 
     hvis method == "shutdown"
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":null}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":null}'
     slutt
 
     hvis method == "exit"
@@ -493,60 +731,60 @@ funksjon lsp_handle_request(server, method, id, params)
     slutt
 
     hvis method == "initialize"
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":{"capabilities":{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true,"completionProvider":true,"documentSymbolProvider":true,"documentFormattingProvider":true}}}'
+        server.initialized = sann
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":{"capabilities":{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true,"completionProvider":true,"documentSymbolProvider":true,"documentFormattingProvider":true}}}'
+    slutt
+
+    hvis method == "initialized" eller method == "textDocument/didSave"
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":null}'
+    slutt
+
+    hvis method == "textDocument/didClose"
+        la lukka = params["textDocument"]["uri"]
+        lsp_clear_diagnostics(server, lukka)
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":null}'
     slutt
 
     hvis method == "textDocument/didOpen"
         la path = params["textDocument"]["uri"]
-        la content = params["textDocument"]["text"]
+        la content = lsp_dokument_tekst(params)
         lsp_open_document(server, path, content)
         lsp_validate_document(server, path, content)
-        la note = lsp_format_diagnostics_notification(path, server.diagnostics[path])
-        hvis note == null
-            returner '{"jsonrpc":"2.0","id":' + id + ',"result":null}'
-        slutt
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":null}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":null}'
     slutt
 
     hvis method == "textDocument/didChange"
         la path = params["textDocument"]["uri"]
-        la content = params["content"]
+        la content = lsp_dokument_tekst(params)
         lsp_open_document(server, path, content)
         lsp_validate_document(server, path, content)
-        la note = lsp_format_diagnostics_notification(path, server.diagnostics[path])
-        hvis note == null
-            returner '{"jsonrpc":"2.0","id":' + id + ',"result":null}'
-        slutt
-
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":null}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":null}'
     slutt
 
     hvis method == "textDocument/hover"
-        la sym = params["symbol"]
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":' + lsp_hover(server, sym) + '}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":' + lsp_hover_i_dokument(server, params) + '}'
     slutt
 
     hvis method == "textDocument/definition"
-        la sym = params["symbol"]
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":' + lsp_definition(server, sym) + '}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":' + lsp_definition_i_dokument(server, params) + '}'
     slutt
 
     hvis method == "textDocument/completion"
         la prefix = params["prefix"]
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":' + lsp_completion(server, prefix) + '}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":' + lsp_completion(server, prefix) + '}'
     slutt
 
     hvis method == "textDocument/documentSymbol"
         la path = params["textDocument"]["uri"]
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":' + lsp_document_symbols(server, path) + '}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":' + lsp_document_symbols(server, path) + '}'
     slutt
 
     hvis method == "textDocument/formatting"
         la path = params["textDocument"]["uri"]
-        returner '{"jsonrpc":"2.0","id":' + id + ',"result":' + lsp_format_document(server, path) + '}'
+        returner '{"jsonrpc":"2.0","id":' + idj + ',"result":' + lsp_format_document(server, path) + '}'
     slutt
 
-    returner '{"jsonrpc":"2.0","id":' + id + ',"error":{"code":-32601,"message":"Metode ikkje støtta"}}'
+    returner '{"jsonrpc":"2.0","id":' + idj + ',"error":{"code":-32601,"message":"Metode ikkje støtta"}}'
 slutt
 
 funksjon lsp_handle_batch(server, requests)
@@ -590,7 +828,7 @@ funksjon lsp_session_summary(session)
     la version_events = 0
     la i = 0
     mens i < lengde(session.notifications)
-        hvis inneheld(session.notifications[i], "textDocument/publishDiagnostics")
+        hvis builtin.contains(session.notifications[i], "textDocument/publishDiagnostics")
             diagnostics_count = diagnostics_count + 1
         slutt
         i = i + 1
@@ -622,7 +860,7 @@ funksjon lsp_request_summary(req)
 slutt
 
 funksjon lsp_extract_body_from_framed_payload(payload)
-    hvis inneheld(payload, "Content-Length:") == usann
+    hvis builtin.contains(payload, "Content-Length:") == usann
         returner payload
     slutt
 
@@ -645,7 +883,7 @@ funksjon lsp_parse_content_length(header)
     la i = 0
     mens i < lengde(lines)
         la line = lines[i]
-        hvis inneheld(line, "Content-Length:")
+        hvis builtin.contains(line, "Content-Length:")
             la parts = builtin.split(line, ":")
             hvis lengde(parts) >= 2
                 returner heltall(builtin.trim(parts[1]))
@@ -657,7 +895,7 @@ funksjon lsp_parse_content_length(header)
 slutt
 
 funksjon lsp_peel_framed_request(payload)
-    hvis inneheld(payload, "Content-Length:") == usann
+    hvis builtin.contains(payload, "Content-Length:") == usann
         returner { body: payload, rest: "" }
     slutt
 
@@ -668,12 +906,12 @@ funksjon lsp_peel_framed_request(payload)
         hvis builtin.slice(payload, i, i + 4) == "\r\n\r\n"
             header_end = i
             body_start = i + 4
-            stopp
+            bryt
         slutt
         hvis builtin.slice(payload, i, i + 2) == "\n\n"
             header_end = i
             body_start = i + 2
-            stopp
+            bryt
         slutt
         i = i + 1
     slutt
@@ -709,12 +947,12 @@ funksjon lsp_requests_from_stdin(payload)
     la rest = builtin.trim(payload)
     la requests = []
     la trykker = 0
-    mens lengde(rest) > 0 og trykker < 64
+    mens lengde(rest) > 0 og trykker < 100000
         la part = lsp_peel_framed_request(rest)
         la body = part.body
         rest = builtin.trim(part.rest)
         hvis body == ""
-            stopp
+            bryt
         slutt
         la parsed = json_parse_raw(body)
         hvis parsed == null
@@ -731,7 +969,7 @@ funksjon lsp_requests_from_stdin(payload)
         slutt
         trykker = trykker + 1
         hvis rest == ""
-            stopp
+            bryt
         slutt
     slutt
 
@@ -746,9 +984,9 @@ funksjon lsp_input_mode_summary(payload)
     hvis payload == ""
         returner "input_mode=empty"
     slutt
-    hvis inneheld(payload, "Content-Length:")
-        hvis inneheld(payload, "\r\n\r\n") eller inneheld(payload, "\n\n")
-            hvis inneheld(payload, "Content-Length:") og inneheld(builtin.trim(payload), "Content-Length:") og inneheld(payload, "}\r\n\r\nContent-Length:") eller inneheld(payload, "}]Content-Length:")
+    hvis builtin.contains(payload, "Content-Length:")
+        hvis builtin.contains(payload, "\r\n\r\n") eller builtin.contains(payload, "\n\n")
+            hvis builtin.contains(payload, "Content-Length:") og builtin.contains(builtin.trim(payload), "Content-Length:") og builtin.contains(payload, "}\r\n\r\nContent-Length:") eller builtin.contains(payload, "}]Content-Length:")
                 returner "input_mode=content-length-batch"
             slutt
             returner "input_mode=content-length"
@@ -813,7 +1051,7 @@ funksjon lsp_stream_payloads_from_text(raw)
         returner null
     slutt
 
-    hvis inneheld(raw, "\n")
+    hvis builtin.contains(raw, "\n")
         la deler = builtin.split(raw, "\n")
         la chunks = []
         la i = 0
@@ -894,31 +1132,99 @@ funksjon lsp_env_true(namn)
     returner usann
 slutt
 
-funksjon lsp_read_stdin_payload()
+// Les heile stdin til EOF. VM-en har ingen strøymande stdin-builtin, så
+// /dev/stdin blir lesen som fil (krev at stien er i NORSCODE_VM_DISK_ROOT).
+// Returnerer {"ok": boolsk, "data": tekst, "feil": tekst}.
+funksjon lsp_les_stdin() {
+    la r = {}
+    r["ok"] = usann
+    r["data"] = ""
+    r["feil"] = ""
     prøv {
-        returner sys.stdin_les()
+        r["data"] = fil_les("/dev/stdin")
+        r["ok"] = sann
     } fang (e) {
-        returner ""
+        r["feil"] = tekst(e)
     }
-    returner ""
+    returner r
+}
+
+funksjon lsp_read_stdin_payload()
+    la r = lsp_les_stdin()
+    returner r["data"]
 slutt
 
 funksjon lsp_read_stdin_stream_until_empty()
-    la chunks = []
-    la guard = 0
-    mens guard < 1024
-        la line = lsp_read_stdin_payload()
-        hvis line == ""
-            stopp
-        slutt
-        legg_til(chunks, line)
-        guard = guard + 1
-    slutt
-    hvis lengde(chunks) == 0
+    la data = lsp_read_stdin_payload()
+    hvis data == ""
         returner null
     slutt
-    returner chunks
+    returner [data]
 slutt
+
+// Batch-LSP over stdin: kvar ramma melding blir handtert i rekkjefølgje.
+// Førespurnader (med id) får eit ramma svar; didOpen/didChange/didClose gjev
+// eit ramma textDocument/publishDiagnostics-varsel. Ugyldig JSON gjev
+// JSON-RPC-feil -32700. `exit` stoppar handteringa.
+funksjon lsp_stdin_batch(server) -> boolsk {
+    la inn = lsp_les_stdin()
+    hvis ikkje inn["ok"] {
+        skriv("nc lsp: kan ikkje lese stdin: " + inn["feil"] + "\n")
+        skriv("nc lsp: NORSCODE_LSP_USE_STDIN=1 krev /dev/stdin i NORSCODE_VM_DISK_ROOT\n")
+        returner usann
+    }
+    la rest = builtin.trim(inn["data"])
+    la vakt = 0
+    mens lengde(rest) > 0 og vakt < 100000 {
+        la del = lsp_peel_framed_request(rest)
+        la body = del.body
+        rest = builtin.trim(del.rest)
+        vakt = vakt + 1
+        hvis builtin.trim(body) == "" { fortsett }
+        la req = null
+        prøv {
+            req = json_parse_raw(body)
+        } fang (e) {
+            req = null
+        }
+        hvis req == null eller (type(req) != "ordbok" og type(req) != "liste") {
+            skriv(lsp_ramme("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Ugyldig JSON\"}}"))
+            fortsett
+        }
+        // Ei JSON-liste er ein batch (òg uramma, på éi linje).
+        la meldingar = [req]
+        hvis type(req) == "liste" { meldingar = req }
+        la mi = 0
+        la avslutt = usann
+        mens mi < lengde(meldingar) og ikkje avslutt {
+            avslutt = lsp_stdin_melding(server, meldingar[mi])
+            mi = mi + 1
+        }
+        hvis avslutt { bryt }
+    }
+    returner sann
+}
+
+// Handter éi melding i batch-stdin-modus. Returnerer sann ved `exit`.
+funksjon lsp_stdin_melding(server, req) -> boolsk {
+    hvis req == null eller type(req) != "ordbok" {
+        skriv(lsp_ramme("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Ugyldig førespurnad\"}}"))
+        returner usann
+    }
+    la method = tekst(req["method"])
+    legg_til(server.methods, method)
+    la params = req["params"]
+    hvis params == null { params = {} }
+    la svar = lsp_handle_request(server, method, req["id"], params)
+    hvis lsp_har_id(req) og svar != "" {
+        skriv(lsp_ramme(svar))
+    }
+    hvis method == "textDocument/didOpen" eller method == "textDocument/didChange" eller method == "textDocument/didClose" {
+        la uri = params["textDocument"]["uri"]
+        skriv(lsp_ramme(lsp_format_diagnostics_notification(uri, server.diagnostics[uri])))
+    }
+    returner method == "exit"
+}
 
 funksjon lsp_join_payloads(payloads)
     hvis payloads == null
@@ -1038,49 +1344,49 @@ funksjon lsp_main()
     la version_health_summary = lsp_version_health_summary(server)
     la status_bundle = lsp_status_bundle_summary(server, session, lsp_semantic_probe_from_document(server, "file:///tmp/lsp.no"))
 
-    skriv("=== lsp_main ===")
-    skriv("LSP demo-runner starta")
-    skriv(stream_source_summary)
-    skriv(input_mode_summary)
-    skriv(request_kind_summary)
-    skriv(transport_report)
-    skriv(status_bundle)
-    skriv(caps_summary)
-    skriv(notifications_summary)
-    skriv(transport_summary)
-    skriv(methods_summary)
-    skriv(io_summary)
-    skriv(framing_summary)
-    skriv(entrypoint_summary)
-    skriv(messages_summary)
-    skriv(session_methods_summary)
-    skriv(full_summary)
-    skriv(route_summary)
-    skriv(doc_exists_summary)
-    skriv(doc_version_summary)
-    skriv(notification_type_summary)
-    skriv(output_summary)
-    skriv(document_health_summary)
-    skriv(document_health_state_summary)
-    skriv(document_versions_summary)
-    skriv(latest_document_version_summary)
-    skriv(version_health_summary)
+    skriv("=== lsp_main ===" + "\n")
+    skriv("LSP demo-runner starta" + "\n")
+    skriv(stream_source_summary + "\n")
+    skriv(input_mode_summary + "\n")
+    skriv(request_kind_summary + "\n")
+    skriv(transport_report + "\n")
+    skriv(status_bundle + "\n")
+    skriv(caps_summary + "\n")
+    skriv(notifications_summary + "\n")
+    skriv(transport_summary + "\n")
+    skriv(methods_summary + "\n")
+    skriv(io_summary + "\n")
+    skriv(framing_summary + "\n")
+    skriv(entrypoint_summary + "\n")
+    skriv(messages_summary + "\n")
+    skriv(session_methods_summary + "\n")
+    skriv(full_summary + "\n")
+    skriv(route_summary + "\n")
+    skriv(doc_exists_summary + "\n")
+    skriv(doc_version_summary + "\n")
+    skriv(notification_type_summary + "\n")
+    skriv(output_summary + "\n")
+    skriv(document_health_summary + "\n")
+    skriv(document_health_state_summary + "\n")
+    skriv(document_versions_summary + "\n")
+    skriv(latest_document_version_summary + "\n")
+    skriv(version_health_summary + "\n")
     la i = 0
     mens i < lengde(session.responses)
-        skriv(session.responses[i])
+        skriv(session.responses[i] + "\n")
         i = i + 1
     slutt
     la j = 0
     mens j < lengde(trace)
-        skriv(trace[j])
+        skriv(trace[j] + "\n")
         j = j + 1
     slutt
     la k = 0
     mens k < lengde(session.notifications)
-        skriv(session.notifications[k])
+        skriv(session.notifications[k] + "\n")
         k = k + 1
     slutt
-    skriv("lsp_main OK")
+    skriv("lsp_main OK" + "\n")
     returner sann
 slutt
 
@@ -1099,13 +1405,7 @@ funksjon lsp_stdio_main()
     la stream_payloads = lsp_stream_payloads_from_text(raw_stream)
     la stream_source_summary = lsp_stream_source_summary(raw_stream, single_payload)
     hvis stdin_mode og raw_stream == "" og single_payload == ""
-        la stdin_chunks = lsp_read_stdin_stream_until_empty()
-        hvis stdin_chunks != null
-            stream_payloads = stdin_chunks
-            raw_stream = lsp_join_payloads(stdin_chunks)
-            single_payload = ""
-            stream_source_summary = lsp_stream_source_summary(raw_stream, "")
-        slutt
+        returner lsp_stdin_batch(server)
     slutt
     la payload = single_payload
     hvis payload == ""
@@ -1147,37 +1447,37 @@ funksjon lsp_stdio_main()
         la banner_summary = lsp_banner_summary(server, stream_session)
         la status_bundle = lsp_status_bundle_summary(server, stream_session, lsp_semantic_probe_from_document(server, "file:///tmp/lsp.no"))
 
-        skriv("=== lsp_stdio_main ===")
-        skriv("LSP JSON-stream over stdio starta")
-        skriv(stdin_summary)
-        skriv(input_mode_summary)
-        skriv(stream_source_summary)
-        skriv(stream_mode_summary)
-        skriv(stream_chunk_count_summary)
-        skriv(lsp_stream_summary(stream_payloads))
-        skriv(stream_overview)
-        skriv("transport_report=" + lsp_transport_probe_summary(json_skriv(stream_payloads), stream_run.methods))
-        skriv(status_bundle)
+        skriv("=== lsp_stdio_main ===" + "\n")
+        skriv("LSP JSON-stream over stdio starta" + "\n")
+        skriv(stdin_summary + "\n")
+        skriv(input_mode_summary + "\n")
+        skriv(stream_source_summary + "\n")
+        skriv(stream_mode_summary + "\n")
+        skriv(stream_chunk_count_summary + "\n")
+        skriv(lsp_stream_summary(stream_payloads) + "\n")
+        skriv(stream_overview + "\n")
+        skriv("transport_report=" + lsp_transport_probe_summary(json_skriv(stream_payloads), stream_run.methods) + "\n")
+        skriv(status_bundle + "\n")
 
         la i = 0
         mens i < lengde(stream_run.responses)
-            skriv(stream_run.responses[i])
+            skriv(stream_run.responses[i] + "\n")
             i = i + 1
         slutt
 
         la j = 0
         mens j < lengde(trace)
-            skriv(trace[j])
+            skriv(trace[j] + "\n")
             j = j + 1
         slutt
 
         la k = 0
         mens k < lengde(stream_run.notifications)
-            skriv(stream_run.notifications[k])
+            skriv(stream_run.notifications[k] + "\n")
             k = k + 1
         slutt
 
-        skriv("lsp_stdio_main OK")
+        skriv("lsp_stdio_main OK" + "\n")
         returner sann
     slutt
 
@@ -1197,36 +1497,36 @@ funksjon lsp_stdio_main()
     la banner_summary = lsp_banner_summary(server, session)
     la status_bundle = lsp_status_bundle_summary(server, session, lsp_semantic_probe_from_document(server, "file:///tmp/lsp.no"))
 
-    skriv("=== lsp_stdio_main ===")
-    skriv("LSP JSON-batch over stdio starta")
-    skriv(stdin_summary)
-    skriv(input_mode_summary)
-    skriv(stream_source_summary)
+    skriv("=== lsp_stdio_main ===" + "\n")
+    skriv("LSP JSON-batch over stdio starta" + "\n")
+    skriv(stdin_summary + "\n")
+    skriv(input_mode_summary + "\n")
+    skriv(stream_source_summary + "\n")
     la payload_list = builtin.split(payload, "\n---payload-break---\n")
-    skriv(lsp_stream_mode_summary(payload_list))
-    skriv(lsp_stream_summary(payload_list))
-    skriv("transport_report=" + lsp_transport_probe_summary(payload, requests))
-    skriv(status_bundle)
+    skriv(lsp_stream_mode_summary(payload_list) + "\n")
+    skriv(lsp_stream_summary(payload_list) + "\n")
+    skriv("transport_report=" + lsp_transport_probe_summary(payload, requests) + "\n")
+    skriv(status_bundle + "\n")
 
     la i = 0
     mens i < lengde(session.responses)
-        skriv(session.responses[i])
+        skriv(session.responses[i] + "\n")
         i = i + 1
     slutt
 
     la j = 0
     mens j < lengde(trace)
-        skriv(trace[j])
+        skriv(trace[j] + "\n")
         j = j + 1
     slutt
 
     la k = 0
     mens k < lengde(session.notifications)
-        skriv(session.notifications[k])
+        skriv(session.notifications[k] + "\n")
         k = k + 1
     slutt
 
-    skriv("lsp_stdio_main OK")
+    skriv("lsp_stdio_main OK" + "\n")
     returner sann
 slutt
 
@@ -1262,19 +1562,19 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(init, "hoverProvider") == usann
+    hvis builtin.contains(init, "hoverProvider") == usann
         returner usann
     slutt
 
-    hvis inneheld(hov, "main") == usann
+    hvis builtin.contains(hov, "main") == usann
         returner usann
     slutt
 
-    hvis inneheld(def, "file:///norscode/main.no") == usann
+    hvis builtin.contains(def, "file:///norscode/main.no") == usann
         returner usann
     slutt
 
-    hvis inneheld(comp, "funksjon") == usann
+    hvis builtin.contains(comp, "funksjon") == usann
         returner usann
     slutt
 
@@ -1306,15 +1606,15 @@ funksjon lsp_selftest()
         { "method": "textDocument/didChange", "id": "14", "params": { "textDocument": { "uri": "file:///tmp/session.no" }, "content": "funksjon main()" } }
     ])
 
-    hvis inneheld(rpc_init, "hoverProvider") == usann
+    hvis builtin.contains(rpc_init, "hoverProvider") == usann
         returner usann
     slutt
 
-    hvis inneheld(rpc_open, "\"result\":null") == usann
+    hvis builtin.contains(rpc_open, "\"result\":null") == usann
         returner usann
     slutt
 
-    hvis inneheld(rpc_change, "\"result\":null") == usann
+    hvis builtin.contains(rpc_change, "\"result\":null") == usann
         returner usann
     slutt
 
@@ -1333,12 +1633,12 @@ funksjon lsp_selftest()
     slutt
 
     la diag2 = lsp_handle_request(server, "textDocument/didOpen", "8", { "textDocument": { "uri": "file:///tmp/missing.no", "text": "skriv \"hei\"" } })
-    hvis inneheld(diag2, "\"result\":null") == usann
+    hvis builtin.contains(diag2, "\"result\":null") == usann
         returner usann
     slutt
 
     la notif = lsp_format_diagnostics_notification("file:///tmp/missing.no", server.diagnostics["file:///tmp/missing.no"])
-    hvis inneheld(notif, "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(notif, "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
@@ -1347,7 +1647,7 @@ funksjon lsp_selftest()
     slutt
 
     la bad = lsp_handle_request(server, "textDocument/didOpen", "9", { "textDocument": { "uri": "file:///tmp/bad.no", "text": "returner a" } })
-    hvis inneheld(bad, "\"result\":null") == usann
+    hvis builtin.contains(bad, "\"result\":null") == usann
         returner usann
     slutt
 
@@ -1355,11 +1655,11 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(rpc_hover, "main") == usann
+    hvis builtin.contains(rpc_hover, "main") == usann
         returner usann
     slutt
 
-    hvis inneheld(rpc_shutdown, "\"result\":null") == usann
+    hvis builtin.contains(rpc_shutdown, "\"result\":null") == usann
         returner usann
     slutt
 
@@ -1383,15 +1683,15 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(session.notifications[0], "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(session.notifications[0], "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(batch[0], "hoverProvider") == usann
+    hvis builtin.contains(batch[0], "hoverProvider") == usann
         returner usann
     slutt
 
-    hvis inneheld(batch[2], "main") == usann
+    hvis builtin.contains(batch[2], "main") == usann
         returner usann
     slutt
 
@@ -1403,28 +1703,28 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(trace[0], "#") == usann
+    hvis builtin.contains(trace[0], "#") == usann
         returner usann
     slutt
 
     la summary = lsp_session_summary(session)
-    hvis inneheld(summary, "responses=") == usann
+    hvis builtin.contains(summary, "responses=") == usann
         returner usann
     slutt
 
-    hvis inneheld(summary, "diagnostics=") == usann
+    hvis builtin.contains(summary, "diagnostics=") == usann
         returner usann
     slutt
 
-    hvis inneheld(summary, "methods=") == usann
+    hvis builtin.contains(summary, "methods=") == usann
         returner usann
     slutt
 
-    hvis inneheld(summary, "version_events=") == usann
+    hvis builtin.contains(summary, "version_events=") == usann
         returner usann
     slutt
 
-    hvis inneheld(summary, "methods=7") == usann
+    hvis builtin.contains(summary, "methods=7") == usann
         returner usann
     slutt
 
@@ -1432,123 +1732,123 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(probe_summary, "ok=") == usann
+    hvis builtin.contains(probe_summary, "ok=") == usann
         returner usann
     slutt
 
-    hvis inneheld(probe_summary, "Dokumentet") == usann og inneheld(probe_summary, "OK") == usann
+    hvis builtin.contains(probe_summary, "Dokumentet") == usann og builtin.contains(probe_summary, "OK") == usann
         returner usann
     slutt
 
-    hvis inneheld(document_summary, "documents=") == usann
+    hvis builtin.contains(document_summary, "documents=") == usann
         returner usann
     slutt
 
-    hvis inneheld(document_summary, "versions=") == usann
+    hvis builtin.contains(document_summary, "versions=") == usann
         returner usann
     slutt
 
-    hvis inneheld(state_summary, "documents=") == usann
+    hvis builtin.contains(state_summary, "documents=") == usann
         returner usann
     slutt
 
-    hvis inneheld(state_summary, "methods_seen=") == usann
+    hvis builtin.contains(state_summary, "methods_seen=") == usann
         returner usann
     slutt
 
-    hvis inneheld(state_summary, "notifications_health=") == usann
+    hvis builtin.contains(state_summary, "notifications_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(state_summary, "notifications_overview=") == usann
+    hvis builtin.contains(state_summary, "notifications_overview=") == usann
         returner usann
     slutt
 
-    hvis inneheld(caps_summary, "hoverProvider=true") == usann
+    hvis builtin.contains(caps_summary, "hoverProvider=true") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "protocol=JSON-RPC") == usann
+    hvis builtin.contains(protocol_summary, "protocol=JSON-RPC") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "notifications=textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(protocol_summary, "notifications=textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "notifications_count=") == usann
+    hvis builtin.contains(protocol_summary, "notifications_count=") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "notifications_health=") == usann
+    hvis builtin.contains(protocol_summary, "notifications_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "notifications_overview=") == usann
+    hvis builtin.contains(protocol_summary, "notifications_overview=") == usann
         returner usann
     slutt
 
-    hvis inneheld(lsp_stream_source_summary("", json_skriv(lsp_demo_requests())), "stream_source=NORSCODE_LSP_PAYLOAD") == usann
+    hvis builtin.contains(lsp_stream_source_summary("", json_skriv(lsp_demo_requests())), "stream_source=NORSCODE_LSP_PAYLOAD") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "transport=batch/session,json-batch-stdio,content-length") == usann
+    hvis builtin.contains(status_bundle, "transport=batch/session,json-batch-stdio,content-length") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "io=json-batch-stdio,content-length") == usann
+    hvis builtin.contains(status_bundle, "io=json-batch-stdio,content-length") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "stream_source=NORSCODE_LSP_PAYLOAD") == usann
+    hvis builtin.contains(status_bundle, "stream_source=NORSCODE_LSP_PAYLOAD") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "stream_mode=hybrid") == usann
+    hvis builtin.contains(status_bundle, "stream_mode=hybrid") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "stream_overview=chunks=2") == usann
+    hvis builtin.contains(status_bundle, "stream_overview=chunks=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "framing=json-batch+content-length") == usann
+    hvis builtin.contains(status_bundle, "framing=json-batch+content-length") == usann
         returner usann
     slutt
 
-    hvis inneheld(protocol_summary, "methods=") == usann
+    hvis builtin.contains(protocol_summary, "methods=") == usann
         returner usann
     slutt
 
-    hvis inneheld(notifications_summary, "notifications=textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(notifications_summary, "notifications=textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(transport_summary, "json-batch-stdio") == usann
+    hvis builtin.contains(transport_summary, "json-batch-stdio") == usann
         returner usann
     slutt
 
-    hvis inneheld(methods_summary, "initialize") == usann
+    hvis builtin.contains(methods_summary, "initialize") == usann
         returner usann
     slutt
 
-    hvis inneheld(methods_summary, "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(methods_summary, "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(route_summary, "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(route_summary, "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(io_summary, "json-batch-stdio") == usann
+    hvis builtin.contains(io_summary, "json-batch-stdio") == usann
         returner usann
     slutt
 
-    hvis inneheld(framing_summary, "framing=") == usann
+    hvis builtin.contains(framing_summary, "framing=") == usann
         returner usann
     slutt
 
-    hvis inneheld(entrypoint_summary, "lsp_stdio_main") == usann
+    hvis builtin.contains(entrypoint_summary, "lsp_stdio_main") == usann
         returner usann
     slutt
 
@@ -1620,51 +1920,51 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(raw_input_mode, "input_mode=raw-json") == usann
+    hvis builtin.contains(raw_input_mode, "input_mode=raw-json") == usann
         returner usann
     slutt
 
-    hvis inneheld(framed_input_mode, "input_mode=content-length") == usann
+    hvis builtin.contains(framed_input_mode, "input_mode=content-length") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_summary, "stream_chunks=2") == usann
+    hvis builtin.contains(stream_summary, "stream_chunks=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(none_stream_summary, "stream=none") == usann
+    hvis builtin.contains(none_stream_summary, "stream=none") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_mode, "stream_mode=stream") == usann
+    hvis builtin.contains(stream_mode, "stream_mode=stream") == usann
         returner usann
     slutt
 
-    hvis inneheld(none_stream_mode, "stream_mode=none") == usann
+    hvis builtin.contains(none_stream_mode, "stream_mode=none") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_chunk_count, "stream_chunk_count=2") == usann
+    hvis builtin.contains(stream_chunk_count, "stream_chunk_count=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_chunk_count_none, "stream_chunk_count=0") == usann
+    hvis builtin.contains(stream_chunk_count_none, "stream_chunk_count=0") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_source, "stream_source=NORSCODE_LSP_STREAM") == usann
+    hvis builtin.contains(stream_source, "stream_source=NORSCODE_LSP_STREAM") == usann
         returner usann
     slutt
 
-    hvis inneheld(combined_source, "stream_source=NORSCODE_LSP_STREAM+NORSCODE_LSP_PAYLOAD") == usann
+    hvis builtin.contains(combined_source, "stream_source=NORSCODE_LSP_STREAM+NORSCODE_LSP_PAYLOAD") == usann
         returner usann
     slutt
 
-    hvis inneheld(empty_stream_source, "stream_source=empty") == usann
+    hvis builtin.contains(empty_stream_source, "stream_source=empty") == usann
         returner usann
     slutt
 
-    hvis inneheld(combined_mode, "stream_mode=hybrid") == usann
+    hvis builtin.contains(combined_mode, "stream_mode=hybrid") == usann
         returner usann
     slutt
 
@@ -1676,15 +1976,15 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(none_notification_type, "notification=unknown") == usann
+    hvis builtin.contains(none_notification_type, "notification=unknown") == usann
         returner usann
     slutt
 
-    hvis inneheld(lsp_notifications_overview_summary(empty_notifications_session), "notifications_count=0") == usann
+    hvis builtin.contains(lsp_notifications_overview_summary(empty_notifications_session), "notifications_count=0") == usann
         returner usann
     slutt
 
-    hvis inneheld(lsp_notifications_overview_summary(empty_notifications_session), "notifications_health=idle") == usann
+    hvis builtin.contains(lsp_notifications_overview_summary(empty_notifications_session), "notifications_health=idle") == usann
         returner usann
     slutt
 
@@ -1692,7 +1992,7 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(lsp_stream_summary(newline_stream_payloads), "stream_chunks=2") == usann
+    hvis builtin.contains(lsp_stream_summary(newline_stream_payloads), "stream_chunks=2") == usann
         returner usann
     slutt
 
@@ -1706,163 +2006,163 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld(stream_overview, "stream_overview=chunks=2") == usann
+    hvis builtin.contains(stream_overview, "stream_overview=chunks=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_overview, "requests=2") == usann
+    hvis builtin.contains(stream_overview, "requests=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_overview_none, "stream_overview=none") == usann
+    hvis builtin.contains(stream_overview_none, "stream_overview=none") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_overview, "responses=2") == usann
+    hvis builtin.contains(stream_overview, "responses=2") == usann
         returner usann
     slutt
 
-    hvis inneheld(stream_transport_report, "request_kind=batch") == usann
+    hvis builtin.contains(stream_transport_report, "request_kind=batch") == usann
         returner usann
     slutt
 
-    hvis inneheld(stdin_summary, "stdin_bytes=") == usann
+    hvis builtin.contains(stdin_summary, "stdin_bytes=") == usann
         returner usann
     slutt
 
-    hvis inneheld(transport_report, "transport_report=") == usann
+    hvis builtin.contains(transport_report, "transport_report=") == usann
         returner usann
     slutt
 
-    hvis inneheld(transport_report, "stage=") == usann
+    hvis builtin.contains(transport_report, "stage=") == usann
         returner usann
     slutt
 
-    hvis inneheld(decode_fallback_report, "stage=decode-fallback") == usann
+    hvis builtin.contains(decode_fallback_report, "stage=decode-fallback") == usann
         returner usann
     slutt
 
-    hvis inneheld(empty_transport_report, "stage=fallback") == usann
+    hvis builtin.contains(empty_transport_report, "stage=fallback") == usann
         returner usann
     slutt
 
-    hvis inneheld(empty_transport_report, "request_kind=none") == usann
+    hvis builtin.contains(empty_transport_report, "request_kind=none") == usann
         returner usann
     slutt
 
-    hvis inneheld(batch_kind, "request_kind=batch") == usann
+    hvis builtin.contains(batch_kind, "request_kind=batch") == usann
         returner usann
     slutt
 
-    hvis inneheld(none_kind, "request_kind=none") == usann
+    hvis builtin.contains(none_kind, "request_kind=none") == usann
         returner usann
     slutt
 
-    hvis inneheld(single_kind, "request_kind=single") == usann
+    hvis builtin.contains(single_kind, "request_kind=single") == usann
         returner usann
     slutt
 
-    hvis inneheld(lsp_extract_body_from_framed_payload("Content-Length: 46\r\n\r\n[{\"method\":\"initialize\",\"id\":\"1\",\"params\":{}}]"), "\"method\":\"initialize\"") == usann
+    hvis builtin.contains(lsp_extract_body_from_framed_payload("Content-Length: 46\r\n\r\n[{\"method\":\"initialize\",\"id\":\"1\",\"params\":{}}]"), "\"method\":\"initialize\"") == usann
         returner usann
     slutt
 
-    hvis inneheld(messages_summary, "messages=") == usann
+    hvis builtin.contains(messages_summary, "messages=") == usann
         returner usann
     slutt
 
-    hvis inneheld(session_methods_summary, "session_methods=") == usann
+    hvis builtin.contains(session_methods_summary, "session_methods=") == usann
         returner usann
     slutt
 
-    hvis inneheld(activity_summary, "messages=") == usann
+    hvis builtin.contains(activity_summary, "messages=") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "notifications_count=") == usann
+    hvis builtin.contains(status_bundle, "notifications_count=") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "notifications_health=") == usann
+    hvis builtin.contains(status_bundle, "notifications_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(status_bundle, "notifications_count=") == usann
+    hvis builtin.contains(status_bundle, "notifications_count=") == usann
         returner usann
     slutt
 
-    hvis inneheld(activity_health_summary, "activity_health=") == usann
+    hvis builtin.contains(activity_health_summary, "activity_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(overall_health_summary, "document_health=") == usann
+    hvis builtin.contains(overall_health_summary, "document_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(overall_health_summary, "notifications_health=") == usann
+    hvis builtin.contains(overall_health_summary, "notifications_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(top_status_summary, "top_status=") == usann
+    hvis builtin.contains(top_status_summary, "top_status=") == usann
         returner usann
     slutt
 
-    hvis inneheld(banner_summary, "banner=") == usann
+    hvis builtin.contains(banner_summary, "banner=") == usann
         returner usann
     slutt
 
-    hvis inneheld(input_mode_summary, "input_mode=") == usann
+    hvis builtin.contains(input_mode_summary, "input_mode=") == usann
         returner usann
     slutt
 
-    hvis inneheld(banner_summary, "banner=klar") == usann og inneheld(banner_summary, "banner=delvis") == usann og inneheld(banner_summary, "banner=uklar") == usann
+    hvis builtin.contains(banner_summary, "banner=klar") == usann og builtin.contains(banner_summary, "banner=delvis") == usann og builtin.contains(banner_summary, "banner=uklar") == usann
         returner usann
     slutt
 
-    hvis inneheld(full_summary, "full=ok") == usann
+    hvis builtin.contains(full_summary, "full=ok") == usann
         returner usann
     slutt
 
-    hvis inneheld(doc_exists_summary, "document_exists=true") == usann
+    hvis builtin.contains(doc_exists_summary, "document_exists=true") == usann
         returner usann
     slutt
 
-    hvis inneheld(doc_version_summary, "document_version=") == usann
+    hvis builtin.contains(doc_version_summary, "document_version=") == usann
         returner usann
     slutt
 
-    hvis inneheld(notification_type_summary, "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(notification_type_summary, "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
-    hvis inneheld(output_summary, "output=") == usann
+    hvis builtin.contains(output_summary, "output=") == usann
         returner usann
     slutt
 
-    hvis inneheld(document_health_summary, "document_health=") == usann
+    hvis builtin.contains(document_health_summary, "document_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(document_health_state_summary, "document_health_state=") == usann
+    hvis builtin.contains(document_health_state_summary, "document_health_state=") == usann
         returner usann
     slutt
 
-    hvis inneheld(document_versions_summary, "document_versions=") == usann
+    hvis builtin.contains(document_versions_summary, "document_versions=") == usann
         returner usann
     slutt
 
-    hvis inneheld(latest_document_version_summary, "latest_document_version=") == usann
+    hvis builtin.contains(latest_document_version_summary, "latest_document_version=") == usann
         returner usann
     slutt
 
-    hvis inneheld(version_health_summary, "version_health=") == usann
+    hvis builtin.contains(version_health_summary, "version_health=") == usann
         returner usann
     slutt
 
-    hvis inneheld(route_summary, "routes=") == usann
+    hvis builtin.contains(route_summary, "routes=") == usann
         returner usann
     slutt
 
-    hvis inneheld(route_summary, "textDocument/publishDiagnostics") == usann
+    hvis builtin.contains(route_summary, "textDocument/publishDiagnostics") == usann
         returner usann
     slutt
 
@@ -1870,7 +2170,7 @@ funksjon lsp_selftest()
         returner usann
     slutt
 
-    hvis inneheld("LSP demo-runner starta", "LSP demo-runner") == usann
+    hvis builtin.contains("LSP demo-runner starta", "LSP demo-runner") == usann
         returner usann
     slutt
 
