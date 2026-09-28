@@ -16,9 +16,12 @@
 //   type-error         (error)   statisk typefeil frå selfhost/compiler/typecheck.no
 //                                (argument, returverdi, la x: T, tilordning til typa
 //                                variabel). Meldinga har forma «Typefeil L:K - …».
-//   unused-variable    (warning) `la x` i ein funksjon som aldri blir lesen
-//   redeclaration      (warning) `la x` når x alt er deklarert i same scope
-//                                (same blokk, eller parameter i funksjonsblokka)
+//   unused-variable    (warning) `la x` i ein funksjon der x aldri blir lesen
+//                                nokon stad i funksjonen (la er funksjonsskopa)
+//   redeclaration      (warning) `la x` når x alt er deklarert i same blokk
+//                                (eller er parameter i funksjonsblokka), eller i
+//                                ei omsluttande blokk (den indre la-en skriv over
+//                                den ytre variabelen); ikkje for søskenblokker
 //   unreachable-code   (warning) setning etter returner/bryt/fortsett/kast (eller
 //                                etter hvis/ellers der alle greiner avsluttar)
 //   duplicate-import   (warning) same alias importert to gonger
@@ -175,70 +178,107 @@ funksjon lk_import_reglar(tokens, funn) {
     returner 0
 }
 
-// ─── AST-reglar: scope, ubrukte variablar, re-deklarasjon, uoppnåeleg kode ──
+// ─── AST-reglar: ubrukte variablar, re-deklarasjon, uoppnåeleg kode ─────────
+//
+// `la` er FUNKSJONSSKOPA i Norscode (som `var` i JavaScript): ein variabel frå
+// ein `la` inni hvis/ellers/for/mens er synleg etter blokka, og ein indre `la x`
+// skriv over den ytre x-en (same variabel). Reglane følgjer det:
+//   - ubrukt: ein `la x` er ubrukt berre når x ALDRI blir lesen nokon stad i
+//     funksjonen (òg i nøsta lambdaer/funksjonar, som kan fange han).
+//   - re-deklarasjon: `la x` (eller ein for-variabel x) når x alt er deklarert
+//     i same blokk, eller i ei omsluttande blokk i same funksjon (inkludert
+//     parametrar). I det siste tilfellet skriv den indre deklarasjonen over den
+//     ytre variabelen — Java avviser det same. `la v` i to søskenblokker
+//     (hvis { la v … } ellers { la v … }) er ikkje re-deklarasjon.
+//
+// Funksjonskonteksten (ctx["fn_stakk"], øvst = gjeldande funksjon) er ei ordbok:
+//   "lest"     namn -> sann for alle namn som blir lesne i funksjonskroppen
+//   "decls"    `la`-deklarasjonar som skal meldast om dei er ubrukte
+//   "blokker"  blokkstakk; kvar blokk er namn -> deklarasjon {linje, kolonne}
+// Toppnivået (modulglobalar, skript-stil) har ingen funksjonskontekst: der blir
+// deklarasjonar ikkje registrerte, fordi globalar kan brukast frå andre modular.
 
-// Ein scope er ei ordbok namn -> deklarasjon. Ein deklarasjon er ei ordbok med
-// "linje", "kolonne", "brukt" (boolsk) og "rapporter" (boolsk: skal ubrukt meldast).
-funksjon lk_ny_scope() {
-    returner {}
+funksjon lk_forkast_namn(namn: tekst) -> boolsk {
+    returner builtin.starts_with(namn, "_") eller builtin.starts_with(namn, "ignorert")
 }
 
-funksjon lk_deklarer(ctx, namn: tekst, linje, kolonne, rapporter: boolsk) {
-    la scopes = ctx["scopes"]
-    la topp = scopes[lengde(scopes) - 1]
-    la forkast = builtin.starts_with(namn, "_") eller builtin.starts_with(namn, "ignorert")
-    hvis finnes_nøkkel(topp, namn) og ikkje forkast {
-        la gammal = topp[namn]
-        legg_til(ctx["funn"], lk_funn("warning", "redeclaration", linje, kolonne,
-            "Re-deklarasjon av " + namn + " i same scope (fyrst deklarert på linje " + tekst(gammal["linje"]) + ")"))
-        lk_meld_ubrukt(ctx, namn, gammal)
+funksjon lk_fn(ctx) {
+    la stakk = ctx["fn_stakk"]
+    hvis lengde(stakk) == 0 { returner null }
+    returner stakk[lengde(stakk) - 1]
+}
+
+funksjon lk_push_blokk(ctx) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    legg_til(fnc["blokker"], {})
+    returner 0
+}
+
+funksjon lk_pop_blokk(ctx) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    fjern_siste(fnc["blokker"])
+    returner 0
+}
+
+// Deklarasjonen av namn i ei omsluttande blokk (ikkje den øvste), eller null.
+funksjon lk_finn_ytre(blokker, namn: tekst) {
+    la i = lengde(blokker) - 2
+    mens i >= 0 {
+        la b = blokker[i]
+        hvis finnes_nøkkel(b, namn) { returner b[namn] }
+        i = i - 1
+    }
+    returner null
+}
+
+funksjon lk_deklarer(ctx, namn: tekst, linje, kolonne, rapporter: boolsk, sjekk_ytre: boolsk) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    la blokker = fnc["blokker"]
+    hvis lengde(blokker) == 0 { returner 0 }
+    la topp = blokker[lengde(blokker) - 1]
+    hvis ikkje lk_forkast_namn(namn) {
+        hvis finnes_nøkkel(topp, namn) {
+            la gammal = topp[namn]
+            legg_til(ctx["funn"], lk_funn("warning", "redeclaration", linje, kolonne,
+                "Re-deklarasjon av " + namn + " i same scope (fyrst deklarert på linje " + tekst(gammal["linje"]) + ")"))
+        } ellers hvis sjekk_ytre {
+            la ytre = lk_finn_ytre(blokker, namn)
+            hvis ytre != null {
+                legg_til(ctx["funn"], lk_funn("warning", "redeclaration", linje, kolonne,
+                    "Re-deklarasjon av " + namn + " i indre blokk: la er funksjonsskopa, så dette skriv over " +
+                    namn + " frå linje " + tekst(ytre["linje"])))
+            }
+        }
     }
     la d = {}
+    d["namn"] = namn
     d["linje"] = linje
     d["kolonne"] = kolonne
-    d["brukt"] = usann
-    d["rapporter"] = rapporter
     topp[namn] = d
+    hvis rapporter { legg_til(fnc["decls"], d) }
     returner 0
 }
 
-funksjon lk_meld_ubrukt(ctx, namn: tekst, d) {
-    hvis d["rapporter"] og ikkje d["brukt"] og ikkje builtin.starts_with(namn, "_") og ikkje builtin.starts_with(namn, "ignorert") {
-        legg_til(ctx["funn"], lk_funn("warning", "unused-variable", d["linje"], d["kolonne"], "Ubrukt variabel: " + namn))
+// Alle namn som blir LESNE i node (Ident-ar), inkludert i nøsta lambdaer og
+// funksjonar. Målet for ei rein tilordning (x = …) er ikkje ei lesing; x += …
+// les x og tel difor.
+funksjon lk_samle_lest(node, ut) {
+    hvis node == null { returner 0 }
+    hvis type(node) != "ordbok" { returner 0 }
+    la t = node["type"]
+    hvis t == "Ident" {
+        ut[tekst(node["verdi"])] = sann
+        returner 0
     }
-    returner 0
-}
-
-funksjon lk_push_scope(ctx) {
-    legg_til(ctx["scopes"], lk_ny_scope())
-    returner 0
-}
-
-funksjon lk_pop_scope(ctx) {
-    la scopes = ctx["scopes"]
-    la topp = scopes[lengde(scopes) - 1]
-    la namn_liste = nøkler(topp)
+    la barn = node["barn"]
     la i = 0
-    mens i < lengde(namn_liste) {
-        la namn = namn_liste[i]
-        lk_meld_ubrukt(ctx, namn, topp[namn])
+    hvis t == "Sett" og lengde(barn) > 0 og barn[0]["type"] == "Ident" { i = 1 }
+    mens i < lengde(barn) {
+        lk_samle_lest(barn[i], ut)
         i = i + 1
-    }
-    fjern_siste(scopes)
-    returner 0
-}
-
-funksjon lk_bruk_namn(ctx, namn: tekst) {
-    la scopes = ctx["scopes"]
-    la i = lengde(scopes) - 1
-    mens i >= 0 {
-        la s = scopes[i]
-        hvis finnes_nøkkel(s, namn) {
-            la d = s[namn]
-            d["brukt"] = sann
-            returner 0
-        }
-        i = i - 1
     }
     returner 0
 }
@@ -289,14 +329,18 @@ funksjon lk_siste_blokk(node) {
     returner null
 }
 
-// Blokk: ny scope, setningar i rekkjefølgje, uoppnåeleg kode etter avslutning.
+// Blokk: ny blokk på blokkstakken, setningar i rekkjefølgje, uoppnåeleg kode
+// etter avslutning. parametrar: [{namn, linje, kolonne, ytre}] som blir
+// deklarerte i blokka (funksjonsparametrar, for-variabel, fang-variabel);
+// «ytre» = sjekk re-deklarasjon mot omsluttande blokker.
 funksjon lk_blokk(ctx, blokk, parametrar) {
-    lk_push_scope(ctx)
+    lk_push_blokk(ctx)
     hvis parametrar != null {
         la pi = 0
         mens pi < lengde(parametrar) {
             la p = parametrar[pi]
-            lk_deklarer(ctx, p["namn"], p["linje"], p["kolonne"], usann)
+            la ytre = finnes_nøkkel(p, "ytre") og p["ytre"] == sann
+            lk_deklarer(ctx, p["namn"], p["linje"], p["kolonne"], usann, ytre)
             pi = pi + 1
         }
     }
@@ -314,7 +358,7 @@ funksjon lk_blokk(ctx, blokk, parametrar) {
         }
         i = i + 1
     }
-    lk_pop_scope(ctx)
+    lk_pop_blokk(ctx)
     returner 0
 }
 
@@ -327,7 +371,16 @@ funksjon lk_avslutt_namn(stmt) -> tekst {
     returner "hvis/ellers der alle greiner avsluttar"
 }
 
-// Parametrar frå ein Parametere-node: [{namn, linje, kolonne}], og besøk
+funksjon lk_param(namn: tekst, linje, kolonne, ytre: boolsk) {
+    la d = {}
+    d["namn"] = namn
+    d["linje"] = linje
+    d["kolonne"] = kolonne
+    d["ytre"] = ytre
+    returner d
+}
+
+// Parametrar frå ein Parametere-node: [{namn, linje, kolonne, ytre}], og besøk
 // standardverdiane (dei kan lese variablar i ytre scope).
 funksjon lk_parametrar(ctx, fn_node) {
     la ut = []
@@ -339,22 +392,43 @@ funksjon lk_parametrar(ctx, fn_node) {
         la p = barn[i]
         la std_node = lk_barn_av_type(p, "Standard")
         hvis std_node != null { lk_barn(ctx, std_node) }
-        la d = {}
-        d["namn"] = tekst(p["verdi"])
-        d["linje"] = p["linje"]
-        d["kolonne"] = p["kolonne"]
-        legg_til(ut, d)
+        legg_til(ut, lk_param(tekst(p["verdi"]), p["linje"], p["kolonne"], usann))
         i = i + 1
     }
     returner ut
+}
+
+// Funksjon, lambda eller test: eigen funksjonskontekst. Ubrukte `la`-variablar
+// blir melde når heile kroppen er gått gjennom.
+funksjon lk_funksjonskropp(ctx, kropp, params) {
+    la fnc = {}
+    la lest = {}
+    lk_samle_lest(kropp, lest)
+    fnc["lest"] = lest
+    fnc["decls"] = []
+    fnc["blokker"] = []
+    legg_til(ctx["fn_stakk"], fnc)
+    // Parameterblokka og kroppsblokka er éi blokk for re-deklarasjon (som Java).
+    lk_blokk(ctx, kropp, params)
+    fjern_siste(ctx["fn_stakk"])
+    la decls = fnc["decls"]
+    la i = 0
+    mens i < lengde(decls) {
+        la d = decls[i]
+        la namn = d["namn"]
+        hvis ikkje finnes_nøkkel(lest, namn) og ikkje lk_forkast_namn(namn) {
+            legg_til(ctx["funn"], lk_funn("warning", "unused-variable", d["linje"], d["kolonne"], "Ubrukt variabel: " + namn))
+        }
+        i = i + 1
+    }
+    returner 0
 }
 
 funksjon lk_funksjon(ctx, fn_node) {
     la params = lk_parametrar(ctx, fn_node)
     la kropp = lk_siste_blokk(fn_node)
     hvis kropp == null { returner 0 }
-    // Parameterscope + kroppscope er eitt scope for re-deklarasjon (som Java).
-    lk_blokk(ctx, kropp, params)
+    lk_funksjonskropp(ctx, kropp, params)
     returner 0
 }
 
@@ -373,7 +447,7 @@ funksjon lk_node(ctx, node) {
     hvis type(node) != "ordbok" { returner 0 }
     la t = node["type"]
     hvis t == "Ident" {
-        lk_bruk_namn(ctx, tekst(node["verdi"]))
+        // Lesingar er samla på førehand per funksjon (lk_samle_lest).
         returner 0
     }
     hvis t == "Funksjon" eller t == "Lambda" {
@@ -382,7 +456,7 @@ funksjon lk_node(ctx, node) {
     }
     hvis t == "Test" {
         la tkropp = lk_siste_blokk(node)
-        hvis tkropp != null { lk_blokk(ctx, tkropp, null) }
+        hvis tkropp != null { lk_funksjonskropp(ctx, tkropp, null) }
         returner 0
     }
     hvis t == "Blokk" {
@@ -397,19 +471,17 @@ funksjon lk_node(ctx, node) {
             hvis lb[li]["type"] != "Type" { lk_node(ctx, lb[li]) }
             li = li + 1
         }
-        hvis ctx["djupn"] > 0 {
-            lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], sann)
-        }
+        lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], sann, sann)
         returner 0
     }
     hvis t == "LaDestrukt" {
         la db = node["barn"]
         hvis lengde(db) > 1 { lk_node(ctx, db[1]) }
-        hvis ctx["djupn"] > 0 og lengde(db) > 0 {
+        hvis lengde(db) > 0 {
             la maal = db[0]["barn"]
             la mi = 0
             mens mi < lengde(maal) {
-                lk_deklarer(ctx, tekst(maal[mi]["verdi"]), maal[mi]["linje"], maal[mi]["kolonne"], usann)
+                lk_deklarer(ctx, tekst(maal[mi]["verdi"]), maal[mi]["linje"], maal[mi]["kolonne"], usann, sann)
                 mi = mi + 1
             }
         }
@@ -417,7 +489,6 @@ funksjon lk_node(ctx, node) {
     }
     hvis t == "Sett" {
         la sb = node["barn"]
-        // Rein tilordning til ein lokal variabel er ikkje ei lesing.
         hvis lengde(sb) > 0 og sb[0]["type"] != "Ident" { lk_node(ctx, sb[0]) }
         hvis lengde(sb) > 1 { lk_node(ctx, sb[1]) }
         returner 0
@@ -435,11 +506,9 @@ funksjon lk_node(ctx, node) {
             fi = fi + 1
         }
         hvis kropp != null {
-            la lv = {}
-            lv["namn"] = tekst(node["verdi"])
-            lv["linje"] = node["linje"]
-            lv["kolonne"] = node["kolonne"]
-            lk_blokk(ctx, kropp, [lv])
+            // For-variabelen er funksjonsskopa òg: ein nøsta `for i` inni ein
+            // ytre `for i` skriv over den ytre løkkevariabelen.
+            lk_blokk(ctx, kropp, [lk_param(tekst(node["verdi"]), node["linje"], node["kolonne"], sann)])
         }
         returner 0
     }
@@ -447,11 +516,8 @@ funksjon lk_node(ctx, node) {
         la pb = node["barn"]
         hvis lengde(pb) > 0 { lk_blokk(ctx, pb[0], null) }
         hvis lengde(pb) > 1 {
-            la fv = {}
-            fv["namn"] = tekst(node["verdi"])
-            fv["linje"] = node["linje"]
-            fv["kolonne"] = node["kolonne"]
-            lk_blokk(ctx, pb[1], [fv])
+            // fang (e) inni ein ytre fang (e) er vanleg og ufarleg: ikkje meld.
+            lk_blokk(ctx, pb[1], [lk_param(tekst(node["verdi"]), node["linje"], node["kolonne"], usann)])
         }
         hvis lengde(pb) > 2 { lk_blokk(ctx, pb[2], null) }
         returner 0
@@ -459,14 +525,14 @@ funksjon lk_node(ctx, node) {
     hvis t == "ListeKomprehensjon" {
         la kb = node["barn"]
         hvis lengde(kb) > 0 { lk_node(ctx, kb[0]) }
-        lk_push_scope(ctx)
-        lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], usann)
+        lk_push_blokk(ctx)
+        lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], usann, usann)
         la ki = 1
         mens ki < lengde(kb) {
             lk_node(ctx, kb[ki])
             ki = ki + 1
         }
-        lk_pop_scope(ctx)
+        lk_pop_blokk(ctx)
         returner 0
     }
     lk_barn(ctx, node)
@@ -476,8 +542,7 @@ funksjon lk_node(ctx, node) {
 funksjon lk_ast_reglar(ast, funn) {
     la ctx = {}
     ctx["funn"] = funn
-    ctx["scopes"] = []
-    ctx["djupn"] = 1
+    ctx["fn_stakk"] = []
     // Toppnivå: modulglobalar kan brukast frå andre modular, så dei blir ikkje
     // rapporterte som ubrukte og deklarasjonar der blir ikkje registrerte.
     la barn = ast["barn"]
@@ -489,10 +554,8 @@ funksjon lk_ast_reglar(ast, funn) {
             lk_node(ctx, node)
         } ellers hvis t != "Bruk" og t != "La" og t != "Struktur" og t != "Enum" og t != "Grensesnitt" {
             // Toppnivå-setningar (skript-stil): besøk for uoppnåeleg kode o.l.
-            // inni blokkar, men utan scope for sjølve toppnivået.
-            ctx["djupn"] = 0
+            // inni blokkar, men utan funksjonskontekst for sjølve toppnivået.
             lk_node(ctx, node)
-            ctx["djupn"] = 1
         }
         i = i + 1
     }
