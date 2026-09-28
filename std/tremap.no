@@ -41,7 +41,11 @@
 #   kopi(t) / til_tekst(t)     "{a=1, b=2}"                (clone / toString)
 #                              nøklar og verdiar via std.verdiform.vis, så lister
 #                              og ordbøker blir viste med innhald: {1=[a, b]}
+#   ny_som(t)                  nytt tomt kart med same ordning som t
+#                              (new TreeMap<>(t.comparator()))
 #   sjekk_invariant(t) -> tekst  "" når AVL- og sorteringsinvarianten held (for testar)
+#   statistikk(t) -> ordbok    {"storleik", "høgd", "arena", "fri"} (for testar og
+#                              diagnose: tre-høgd og nodearenaen med friliste)
 #
 # Iterasjon (nøklar/verdiar/par) returnerer eit øyeblikksbilete som liste; bruk
 # std.straum.frå_liste(tm.nøklar(t)) for late kjeder.
@@ -51,26 +55,33 @@
 # Fjerna nodar går på ei friliste og blir gjenbrukte. Komparatoren blir kalla
 # direkte (komp(a, b)) frå ein namngjeven funksjon, ikkje via builtin.ncb_call_fn,
 # så modulen verkar på VM og i native AOT.
+#
+# Representasjon og kostnad: kartet er ei ordbok med skalarane (modus, rot, n)
+# og a = [nøklar, verdiar, [venstre, høgre, høgd, fri], komparator]. Kvar
+# offentleg operasjon hentar a éin gong og sender ho vidare. Grunnen er VM-en
+# utan NORSCODE_VM_FAST (standard for nc run og nc test): der blir kvar liste
+# eller ordbok som blir lesen ut av ei ordbok (eller av ei liste med meir enn
+# fire element) registrert i skuggeheapen, med kostnad som veks med storleiken.
+# Oppslag i lister med høgst fire element og lesing av tal er gratis, så
+# hjelparane når arena-listene via a utan slik kostnad.
 
 bruk std.verdiform som vfm
 
 # ── Konstruktørar ─────────────────────────────────────────────────────────
 
+funksjon _ny_arena(komp) -> liste {
+    returner [[], [], [[], [], [], []], komp]
+}
+
 funksjon _ny_tom(modus: heiltall, komp) -> ordbok {
     returner {
         "__tremap__": sann,
         "modus": modus,
-        "cmp": komp,
         "rot": -1,
         "n": 0,
-        "k": [],
-        "v": [],
-        "l": [],
-        "r": [],
-        "h": [],
-        "fri": [],
         "ny_nokkel": usann,
-        "fann": usann
+        "fann": usann,
+        "a": _ny_arena(komp)
     }
 }
 
@@ -89,6 +100,12 @@ funksjon ny_med(komparator) -> ordbok {
     returner _ny_tom(2, komparator)
 }
 
+# Nytt tomt kart med same ordning (modus og komparator) som t.
+funksjon ny_som(t: ordbok) -> ordbok {
+    la a = t["a"]
+    returner _ny_tom(t["modus"], a[3])
+}
+
 # Naturleg samanlikning (-1, 0, 1); kan òg brukast som komparator-byggjestein.
 funksjon naturleg(a, b) -> heiltall {
     hvis a < b { returner -1 }
@@ -96,12 +113,22 @@ funksjon naturleg(a, b) -> heiltall {
     returner 0
 }
 
-funksjon _cmp(t: ordbok, a, b) -> heiltall {
+# Naturleg orden er skriven ut her (ikkje via naturleg()): funksjonskall er
+# det dyraste i den tolka VM-en, og _cmp ligg på den varme vegen.
+funksjon _cmp(t: ordbok, a: liste, x, y) -> heiltall {
     la modus = t["modus"]
-    hvis modus == 0 { returner naturleg(a, b) }
-    hvis modus == 1 { returner naturleg(b, a) }
-    la komp = t["cmp"]
-    la r = komp(a, b)
+    hvis modus == 0 {
+        hvis x < y { returner -1 }
+        hvis x > y { returner 1 }
+        returner 0
+    }
+    hvis modus == 1 {
+        hvis y < x { returner -1 }
+        hvis y > x { returner 1 }
+        returner 0
+    }
+    la komp = a[3]
+    la r = komp(x, y)
     hvis r < 0 { returner -1 }
     hvis r > 0 { returner 1 }
     returner 0
@@ -109,13 +136,14 @@ funksjon _cmp(t: ordbok, a, b) -> heiltall {
 
 # ── Nodearena ─────────────────────────────────────────────────────────────
 
-funksjon _ny_node(t: ordbok, k, v) -> heiltall {
-    la ks = t["k"]
-    la vs = t["v"]
-    la ls = t["l"]
-    la rs = t["r"]
-    la hs = t["h"]
-    la fri = t["fri"]
+funksjon _ny_node(t: ordbok, a: liste, k, v) -> heiltall {
+    la ks = a[0]
+    la vs = a[1]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    la hs = st[2]
+    la fri = st[3]
     t["n"] = t["n"] + 1
     hvis lengde(fri) > 0 {
         la i = fri[lengde(fri) - 1]
@@ -135,12 +163,13 @@ funksjon _ny_node(t: ordbok, k, v) -> heiltall {
     returner lengde(ks) - 1
 }
 
-funksjon _frigjer(t: ordbok, i: heiltall) {
-    la ks = t["k"]
-    la vs = t["v"]
+funksjon _frigjer(t: ordbok, a: liste, i: heiltall) {
+    la ks = a[0]
+    la vs = a[1]
+    la st = a[2]
     ks[i] = ingenting
     vs[i] = ingenting
-    legg_til(t["fri"], i)
+    legg_til(st[3], i)
     t["n"] = t["n"] - 1
 }
 
@@ -151,122 +180,138 @@ funksjon _hd(hs, i: heiltall) -> heiltall {
     returner hs[i]
 }
 
-funksjon _oppdater(t: ordbok, i: heiltall) {
-    la ls = t["l"]
-    la rs = t["r"]
-    la hs = t["h"]
+funksjon _oppdater(a: liste, i: heiltall) {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    la hs = st[2]
     la hl = _hd(hs, ls[i])
     la hr = _hd(hs, rs[i])
     hvis hl > hr { hs[i] = hl + 1 } ellers { hs[i] = hr + 1 }
 }
 
-funksjon _roter_høgre(t: ordbok, y: heiltall) -> heiltall {
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _roter_høgre(a: liste, y: heiltall) -> heiltall {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la x = ls[y]
     ls[y] = rs[x]
     rs[x] = y
-    _oppdater(t, y)
-    _oppdater(t, x)
+    _oppdater(a, y)
+    _oppdater(a, x)
     returner x
 }
 
-funksjon _roter_venstre(t: ordbok, x: heiltall) -> heiltall {
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _roter_venstre(a: liste, x: heiltall) -> heiltall {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la y = rs[x]
     rs[x] = ls[y]
     ls[y] = x
-    _oppdater(t, x)
-    _oppdater(t, y)
+    _oppdater(a, x)
+    _oppdater(a, y)
     returner y
 }
 
-funksjon _balanser(t: ordbok, i: heiltall) -> heiltall {
-    _oppdater(t, i)
-    la ls = t["l"]
-    la rs = t["r"]
-    la hs = t["h"]
-    la bf = _hd(hs, ls[i]) - _hd(hs, rs[i])
+# Oppdaterer høgda til i og roterer ved ubalanse; returnerer ny rot for deltreet.
+# Høgdene til barna er skrivne ut her (ikkje via _oppdater/_hd), sidan
+# _balanser blir kalla på kvart nivå ved kvar innsetjing og fjerning.
+funksjon _balanser(a: liste, i: heiltall) -> heiltall {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    la hs = st[2]
+    la li = ls[i]
+    la ri = rs[i]
+    la hl = 0
+    hvis li >= 0 { hl = hs[li] }
+    la hr = 0
+    hvis ri >= 0 { hr = hs[ri] }
+    hvis hl > hr { hs[i] = hl + 1 } ellers { hs[i] = hr + 1 }
+    la bf = hl - hr
     hvis bf > 1 {
         la v = ls[i]
-        hvis _hd(hs, ls[v]) < _hd(hs, rs[v]) { ls[i] = _roter_venstre(t, v) }
-        returner _roter_høgre(t, i)
+        hvis _hd(hs, ls[v]) < _hd(hs, rs[v]) { ls[i] = _roter_venstre(a, v) }
+        returner _roter_høgre(a, i)
     }
     hvis bf < -1 {
         la h = rs[i]
-        hvis _hd(hs, rs[h]) < _hd(hs, ls[h]) { rs[i] = _roter_høgre(t, h) }
-        returner _roter_venstre(t, i)
+        hvis _hd(hs, rs[h]) < _hd(hs, ls[h]) { rs[i] = _roter_høgre(a, h) }
+        returner _roter_venstre(a, i)
     }
     returner i
 }
 
 # ── Innsetjing og fjerning ────────────────────────────────────────────────
 
-funksjon _sett_inn(t: ordbok, i: heiltall, k, v) -> heiltall {
+funksjon _sett_inn(t: ordbok, a: liste, i: heiltall, k, v) -> heiltall {
     hvis i < 0 {
         t["ny_nokkel"] = sann
-        returner _ny_node(t, k, v)
+        returner _ny_node(t, a, k, v)
     }
-    la ks = t["k"]
-    la c = _cmp(t, k, ks[i])
+    la ks = a[0]
+    la c = _cmp(t, a, k, ks[i])
     hvis c == 0 {
-        la vs = t["v"]
+        la vs = a[1]
         vs[i] = v
         returner i
     }
-    la ls = t["l"]
-    la rs = t["r"]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     hvis c < 0 {
-        la nl = _sett_inn(t, ls[i], k, v)
+        la nl = _sett_inn(t, a, ls[i], k, v)
         ls[i] = nl
     } ellers {
-        la nr = _sett_inn(t, rs[i], k, v)
+        la nr = _sett_inn(t, a, rs[i], k, v)
         rs[i] = nr
     }
-    returner _balanser(t, i)
+    returner _balanser(a, i)
 }
 
 # Fjernar minste node i deltreet i; returnerer ny rot for deltreet.
-funksjon _fjern_min(t: ordbok, i: heiltall) -> heiltall {
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _fjern_min(t: ordbok, a: liste, i: heiltall) -> heiltall {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     hvis ls[i] < 0 {
         la høgre = rs[i]
-        _frigjer(t, i)
+        _frigjer(t, a, i)
         returner høgre
     }
-    la nl = _fjern_min(t, ls[i])
+    la nl = _fjern_min(t, a, ls[i])
     ls[i] = nl
-    returner _balanser(t, i)
+    returner _balanser(a, i)
 }
 
-funksjon _fjern_node(t: ordbok, i: heiltall, k) -> heiltall {
+funksjon _fjern_node(t: ordbok, a: liste, i: heiltall, k) -> heiltall {
     hvis i < 0 { returner -1 }
-    la ks = t["k"]
-    la vs = t["v"]
-    la ls = t["l"]
-    la rs = t["r"]
-    la c = _cmp(t, k, ks[i])
+    la ks = a[0]
+    la vs = a[1]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    la c = _cmp(t, a, k, ks[i])
     hvis c < 0 {
-        la nl = _fjern_node(t, ls[i], k)
+        la nl = _fjern_node(t, a, ls[i], k)
         ls[i] = nl
-        returner _balanser(t, i)
+        returner _balanser(a, i)
     }
     hvis c > 0 {
-        la nr = _fjern_node(t, rs[i], k)
+        la nr = _fjern_node(t, a, rs[i], k)
         rs[i] = nr
-        returner _balanser(t, i)
+        returner _balanser(a, i)
     }
     t["fann"] = sann
     hvis ls[i] < 0 {
         la høgre = rs[i]
-        _frigjer(t, i)
+        _frigjer(t, a, i)
         returner høgre
     }
     hvis rs[i] < 0 {
         la venstre = ls[i]
-        _frigjer(t, i)
+        _frigjer(t, a, i)
         returner venstre
     }
     # To barn: flytt etterfølgjaren (minste i høgre deltre) hit.
@@ -274,21 +319,22 @@ funksjon _fjern_node(t: ordbok, i: heiltall, k) -> heiltall {
     mens ls[m] >= 0 { m = ls[m] }
     ks[i] = ks[m]
     vs[i] = vs[m]
-    la nr2 = _fjern_min(t, rs[i])
+    la nr2 = _fjern_min(t, a, rs[i])
     rs[i] = nr2
-    returner _balanser(t, i)
+    returner _balanser(a, i)
 }
 
 # ── Oppslag ───────────────────────────────────────────────────────────────
 
 # Indeks til noden med nøkkel k, eller -1.
-funksjon _finn(t: ordbok, k) -> heiltall {
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _finn(t: ordbok, a: liste, k) -> heiltall {
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la i = t["rot"]
     mens i >= 0 {
-        la c = _cmp(t, k, ks[i])
+        la c = _cmp(t, a, k, ks[i])
         hvis c == 0 { returner i }
         hvis c < 0 { i = ls[i] } ellers { i = rs[i] }
     }
@@ -296,14 +342,15 @@ funksjon _finn(t: ordbok, k) -> heiltall {
 }
 
 # streng=usann: største nøkkel <= k; streng=sann: største nøkkel < k. -1 viss ingen.
-funksjon _golv_node(t: ordbok, k, streng: bool) -> heiltall {
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _golv_node(t: ordbok, a: liste, k, streng: bool) -> heiltall {
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la i = t["rot"]
     la best = -1
     mens i >= 0 {
-        la c = _cmp(t, k, ks[i])
+        la c = _cmp(t, a, k, ks[i])
         hvis c == 0 og ikkje streng { returner i }
         hvis c > 0 {
             best = i
@@ -316,14 +363,15 @@ funksjon _golv_node(t: ordbok, k, streng: bool) -> heiltall {
 }
 
 # streng=usann: minste nøkkel >= k; streng=sann: minste nøkkel > k. -1 viss ingen.
-funksjon _tak_node(t: ordbok, k, streng: bool) -> heiltall {
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _tak_node(t: ordbok, a: liste, k, streng: bool) -> heiltall {
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la i = t["rot"]
     la best = -1
     mens i >= 0 {
-        la c = _cmp(t, k, ks[i])
+        la c = _cmp(t, a, k, ks[i])
         hvis c == 0 og ikkje streng { returner i }
         hvis c < 0 {
             best = i
@@ -335,15 +383,16 @@ funksjon _tak_node(t: ordbok, k, streng: bool) -> heiltall {
     returner best
 }
 
-funksjon _nøkkel_eller_ingenting(t: ordbok, i: heiltall) {
+funksjon _nøkkel_eller_ingenting(a: liste, i: heiltall) {
     hvis i < 0 { returner ingenting }
-    la ks = t["k"]
+    la ks = a[0]
     returner ks[i]
 }
 
-funksjon _ytst(t: ordbok, venstre: bool) -> heiltall {
-    la ls = t["l"]
-    la rs = t["r"]
+funksjon _ytst(t: ordbok, a: liste, venstre: bool) -> heiltall {
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la i = t["rot"]
     hvis i < 0 { returner -1 }
     hvis venstre {
@@ -357,93 +406,118 @@ funksjon _ytst(t: ordbok, venstre: bool) -> heiltall {
 # ── Traversering ──────────────────────────────────────────────────────────
 
 # Hent-modus: 0 = nøklar, 1 = verdiar, 2 = [k, v]-par.
-funksjon _element(t: ordbok, i: heiltall, hva: heiltall) {
-    la ks = t["k"]
-    la vs = t["v"]
+funksjon _element(a: liste, i: heiltall, hva: heiltall) {
+    la ks = a[0]
+    la vs = a[1]
     hvis hva == 0 { returner ks[i] }
     hvis hva == 1 { returner vs[i] }
     returner [ks[i], vs[i]]
 }
 
-funksjon _inorden(t: ordbok, i: heiltall, hva: heiltall, ut) {
+funksjon _inorden(a: liste, i: heiltall, hva: heiltall, ut) {
     hvis i < 0 { returner }
-    la ls = t["l"]
-    la rs = t["r"]
-    _inorden(t, ls[i], hva, ut)
-    legg_til(ut, _element(t, i, hva))
-    _inorden(t, rs[i], hva, ut)
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    _inorden(a, ls[i], hva, ut)
+    legg_til(ut, _element(a, i, hva))
+    _inorden(a, rs[i], hva, ut)
 }
 
-funksjon _inorden_synkande(t: ordbok, i: heiltall, ut) {
+funksjon _inorden_synkande(a: liste, i: heiltall, ut) {
     hvis i < 0 { returner }
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
-    _inorden_synkande(t, rs[i], ut)
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    _inorden_synkande(a, rs[i], ut)
     legg_til(ut, ks[i])
-    _inorden_synkande(t, ls[i], ut)
+    _inorden_synkande(a, ls[i], ut)
 }
 
 # Samlar nøklar i intervallet. har_lo/har_hi = om grensa finst; hi_inkl = om
 # øvre grense er inkludert. Nedre grense er alltid inkludert.
-funksjon _område(t: ordbok, i: heiltall, lo, har_lo: bool, hi, har_hi: bool, hi_inkl: bool, ut) {
+funksjon _område(t: ordbok, a: liste, i: heiltall, lo, har_lo: bool, hi, har_hi: bool, hi_inkl: bool, ut) {
     hvis i < 0 { returner }
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
     la k = ks[i]
     la over_lo = sann
-    hvis har_lo { over_lo = _cmp(t, k, lo) >= 0 }
+    hvis har_lo { over_lo = _cmp(t, a, k, lo) >= 0 }
     la under_hi = sann
     hvis har_hi {
-        la ch = _cmp(t, k, hi)
+        la ch = _cmp(t, a, k, hi)
         hvis hi_inkl { under_hi = ch <= 0 } ellers { under_hi = ch < 0 }
     }
     # Venstre deltre kan ha treff berre viss k > lo.
     la gå_venstre = sann
-    hvis har_lo { gå_venstre = _cmp(t, k, lo) > 0 }
-    hvis gå_venstre { _område(t, ls[i], lo, har_lo, hi, har_hi, hi_inkl, ut) }
+    hvis har_lo { gå_venstre = _cmp(t, a, k, lo) > 0 }
+    hvis gå_venstre { _område(t, a, ls[i], lo, har_lo, hi, har_hi, hi_inkl, ut) }
     hvis over_lo og under_hi { legg_til(ut, k) }
     # Høgre deltre kan ha treff berre viss k < hi.
     la gå_høgre = sann
-    hvis har_hi { gå_høgre = _cmp(t, k, hi) < 0 }
-    hvis gå_høgre { _område(t, rs[i], lo, har_lo, hi, har_hi, hi_inkl, ut) }
+    hvis har_hi { gå_høgre = _cmp(t, a, k, hi) < 0 }
+    hvis gå_høgre { _område(t, a, rs[i], lo, har_lo, hi, har_hi, hi_inkl, ut) }
 }
 
 funksjon _kall_par(f, k, v) {
     f(k, v)
 }
 
+funksjon _for_kvar_node(a: liste, i: heiltall, f) {
+    hvis i < 0 { returner }
+    la ks = a[0]
+    la vs = a[1]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    _for_kvar_node(a, ls[i], f)
+    _kall_par(f, ks[i], vs[i])
+    _for_kvar_node(a, rs[i], f)
+}
+
+funksjon _kopi_liste(xs) -> liste {
+    la ut = []
+    for x i xs {
+        legg_til(ut, x)
+    }
+    returner ut
+}
+
 # ── Offentleg API ─────────────────────────────────────────────────────────
 
 funksjon set(t: ordbok, k, v) -> bool {
     t["ny_nokkel"] = usann
-    la rot = _sett_inn(t, t["rot"], k, v)
+    la rot = _sett_inn(t, t["a"], t["rot"], k, v)
     t["rot"] = rot
     returner t["ny_nokkel"]
 }
 
 funksjon hent(t: ordbok, k) {
-    la i = _finn(t, k)
+    la a = t["a"]
+    la i = _finn(t, a, k)
     hvis i < 0 { returner ingenting }
-    la vs = t["v"]
+    la vs = a[1]
     returner vs[i]
 }
 
 funksjon hent_eller(t: ordbok, k, standard) {
-    la i = _finn(t, k)
+    la a = t["a"]
+    la i = _finn(t, a, k)
     hvis i < 0 { returner standard }
-    la vs = t["v"]
+    la vs = a[1]
     returner vs[i]
 }
 
 funksjon finnes(t: ordbok, k) -> bool {
-    returner _finn(t, k) >= 0
+    returner _finn(t, t["a"], k) >= 0
 }
 
 funksjon fjern(t: ordbok, k) -> bool {
     t["fann"] = usann
-    la rot = _fjern_node(t, t["rot"], k)
+    la rot = _fjern_node(t, t["a"], t["rot"], k)
     t["rot"] = rot
     returner t["fann"]
 }
@@ -457,173 +531,181 @@ funksjon er_tom(t: ordbok) -> bool {
 }
 
 funksjon tøm(t: ordbok) {
+    la a = t["a"]
     t["rot"] = -1
     t["n"] = 0
-    t["k"] = []
-    t["v"] = []
-    t["l"] = []
-    t["r"] = []
-    t["h"] = []
-    t["fri"] = []
+    t["a"] = _ny_arena(a[3])
 }
 
 funksjon første(t: ordbok) {
-    returner _nøkkel_eller_ingenting(t, _ytst(t, sann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _ytst(t, a, sann))
 }
 
 funksjon siste(t: ordbok) {
-    returner _nøkkel_eller_ingenting(t, _ytst(t, usann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _ytst(t, a, usann))
 }
 
 funksjon ta_første(t: ordbok) {
-    la i = _ytst(t, sann)
+    la a = t["a"]
+    la i = _ytst(t, a, sann)
     hvis i < 0 { returner ingenting }
-    la k = _nøkkel_eller_ingenting(t, i)
+    la k = _nøkkel_eller_ingenting(a, i)
     fjern(t, k)
     returner k
 }
 
 funksjon ta_siste(t: ordbok) {
-    la i = _ytst(t, usann)
+    la a = t["a"]
+    la i = _ytst(t, a, usann)
     hvis i < 0 { returner ingenting }
-    la k = _nøkkel_eller_ingenting(t, i)
+    la k = _nøkkel_eller_ingenting(a, i)
     fjern(t, k)
     returner k
 }
 
 funksjon golv(t: ordbok, k) {
-    returner _nøkkel_eller_ingenting(t, _golv_node(t, k, usann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _golv_node(t, a, k, usann))
 }
 
 funksjon lågare(t: ordbok, k) {
-    returner _nøkkel_eller_ingenting(t, _golv_node(t, k, sann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _golv_node(t, a, k, sann))
 }
 
 funksjon tak(t: ordbok, k) {
-    returner _nøkkel_eller_ingenting(t, _tak_node(t, k, usann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _tak_node(t, a, k, usann))
 }
 
 funksjon høgare(t: ordbok, k) {
-    returner _nøkkel_eller_ingenting(t, _tak_node(t, k, sann))
+    la a = t["a"]
+    returner _nøkkel_eller_ingenting(a, _tak_node(t, a, k, sann))
 }
 
 funksjon område(t: ordbok, nedre, øvre) -> liste {
     la ut = []
-    _område(t, t["rot"], nedre, sann, øvre, sann, usann, ut)
+    _område(t, t["a"], t["rot"], nedre, sann, øvre, sann, usann, ut)
     returner ut
 }
 
 funksjon område_inkl(t: ordbok, nedre, øvre) -> liste {
     la ut = []
-    _område(t, t["rot"], nedre, sann, øvre, sann, sann, ut)
+    _område(t, t["a"], t["rot"], nedre, sann, øvre, sann, sann, ut)
     returner ut
 }
 
 funksjon hovud(t: ordbok, øvre) -> liste {
     la ut = []
-    _område(t, t["rot"], ingenting, usann, øvre, sann, usann, ut)
+    _område(t, t["a"], t["rot"], ingenting, usann, øvre, sann, usann, ut)
     returner ut
 }
 
 funksjon hale(t: ordbok, nedre) -> liste {
     la ut = []
-    _område(t, t["rot"], nedre, sann, ingenting, usann, usann, ut)
+    _område(t, t["a"], t["rot"], nedre, sann, ingenting, usann, usann, ut)
     returner ut
 }
 
 funksjon nøklar(t: ordbok) -> liste {
     la ut = []
-    _inorden(t, t["rot"], 0, ut)
+    _inorden(t["a"], t["rot"], 0, ut)
     returner ut
 }
 
 funksjon verdiar(t: ordbok) -> liste {
     la ut = []
-    _inorden(t, t["rot"], 1, ut)
+    _inorden(t["a"], t["rot"], 1, ut)
     returner ut
 }
 
 funksjon par(t: ordbok) -> liste {
     la ut = []
-    _inorden(t, t["rot"], 2, ut)
+    _inorden(t["a"], t["rot"], 2, ut)
     returner ut
 }
 
 funksjon nøklar_synkande(t: ordbok) -> liste {
     la ut = []
-    _inorden_synkande(t, t["rot"], ut)
+    _inorden_synkande(t["a"], t["rot"], ut)
     returner ut
 }
 
 funksjon for_kvar(t: ordbok, f) {
-    la alle_par = par(t)
-    la i = 0
-    mens i < lengde(alle_par) {
-        la p = alle_par[i]
-        _kall_par(f, p[0], p[1])
-        i = i + 1
-    }
+    _for_kvar_node(t["a"], t["rot"], f)
 }
 
-# Grunn kopi: nye nodelister, same nøkkel-/verdiobjekt.
+# Grunn kopi: nye nodelister (same form på treet), same nøkkel-/verdiobjekt.
 funksjon kopi(t: ordbok) -> ordbok {
-    la ny_t = _ny_tom(t["modus"], t["cmp"])
-    la alle_par = par(t)
-    la i = 0
-    mens i < lengde(alle_par) {
-        la p = alle_par[i]
-        set(ny_t, p[0], p[1])
-        i = i + 1
-    }
+    la a = t["a"]
+    la st = a[2]
+    la ny_t = _ny_tom(t["modus"], a[3])
+    ny_t["rot"] = t["rot"]
+    ny_t["n"] = t["n"]
+    ny_t["a"] = [_kopi_liste(a[0]), _kopi_liste(a[1]), [_kopi_liste(st[0]), _kopi_liste(st[1]), _kopi_liste(st[2]), _kopi_liste(st[3])], a[3]]
     returner ny_t
 }
 
 funksjon til_tekst(t: ordbok) -> tekst {
-    la alle_par = par(t)
-    la s = "{"
+    la ks = nøklar(t)
+    la vs = verdiar(t)
+    la delar = []
     la i = 0
-    mens i < lengde(alle_par) {
-        la p = alle_par[i]
-        hvis i > 0 { s = s + ", " }
-        s = s + vfm.vis(p[0]) + "=" + vfm.vis(p[1])
+    mens i < lengde(ks) {
+        legg_til(delar, vfm.vis(ks[i]) + "=" + vfm.vis(vs[i]))
         i = i + 1
     }
-    returner s + "}"
+    returner "{" + builtin.join(delar, ", ") + "}"
+}
+
+funksjon statistikk(t: ordbok) -> ordbok {
+    la a = t["a"]
+    la st = a[2]
+    la høgd = 0
+    la rot = t["rot"]
+    hvis rot >= 0 {
+        la hs = st[2]
+        høgd = hs[rot]
+    }
+    returner {"storleik": t["n"], "høgd": høgd, "arena": lengde(a[0]), "fri": lengde(st[3])}
 }
 
 # ── Invariantsjekk (for testar) ───────────────────────────────────────────
 
 # Returnerer høgda til deltreet, eller -1 ved brot (og skriv grunnen i t["_brot"]).
-funksjon _sjekk_node(t: ordbok, i: heiltall) -> heiltall {
+funksjon _sjekk_node(t: ordbok, a: liste, i: heiltall) -> heiltall {
     hvis i < 0 { returner 0 }
-    la ks = t["k"]
-    la ls = t["l"]
-    la rs = t["r"]
-    la hs = t["h"]
-    la hl = _sjekk_node(t, ls[i])
-    la hr = _sjekk_node(t, rs[i])
+    la ks = a[0]
+    la st = a[2]
+    la ls = st[0]
+    la rs = st[1]
+    la hs = st[2]
+    la hl = _sjekk_node(t, a, ls[i])
+    la hr = _sjekk_node(t, a, rs[i])
     hvis hl < 0 eller hr < 0 { returner -1 }
     hvis ls[i] >= 0 {
-        hvis _cmp(t, ks[ls[i]], ks[i]) >= 0 {
-            t["_brot"] = "venstre barn ikkje mindre ved " + tekst(ks[i])
+        hvis _cmp(t, a, ks[ls[i]], ks[i]) >= 0 {
+            t["_brot"] = "venstre barn ikkje mindre ved " + vfm.vis(ks[i])
             returner -1
         }
     }
     hvis rs[i] >= 0 {
-        hvis _cmp(t, ks[rs[i]], ks[i]) <= 0 {
-            t["_brot"] = "høgre barn ikkje større ved " + tekst(ks[i])
+        hvis _cmp(t, a, ks[rs[i]], ks[i]) <= 0 {
+            t["_brot"] = "høgre barn ikkje større ved " + vfm.vis(ks[i])
             returner -1
         }
     }
     la d = hl - hr
     hvis d > 1 eller d < -1 {
-        t["_brot"] = "ubalanse " + tekst(d) + " ved " + tekst(ks[i])
+        t["_brot"] = "ubalanse " + tekst(d) + " ved " + vfm.vis(ks[i])
         returner -1
     }
     la h = hl + 1
     hvis hr > hl { h = hr + 1 }
     hvis hs[i] != h {
-        t["_brot"] = "feil lagra høgd ved " + tekst(ks[i])
+        t["_brot"] = "feil lagra høgd ved " + vfm.vis(ks[i])
         returner -1
     }
     returner h
@@ -631,15 +713,16 @@ funksjon _sjekk_node(t: ordbok, i: heiltall) -> heiltall {
 
 # "" når treet er gyldig (sortert, AVL-balansert, rett storleik), elles feilmelding.
 funksjon sjekk_invariant(t: ordbok) -> tekst {
+    la a = t["a"]
     t["_brot"] = ""
-    hvis _sjekk_node(t, t["rot"]) < 0 { returner t["_brot"] }
+    hvis _sjekk_node(t, a, t["rot"]) < 0 { returner t["_brot"] }
     la ks = nøklar(t)
     hvis lengde(ks) != t["n"] {
         returner "storleik " + tekst(t["n"]) + " men " + tekst(lengde(ks)) + " nodar"
     }
     la i = 1
     mens i < lengde(ks) {
-        hvis _cmp(t, ks[i - 1], ks[i]) >= 0 { returner "ikkje strengt sortert ved " + tekst(i) }
+        hvis _cmp(t, a, ks[i - 1], ks[i]) >= 0 { returner "ikkje strengt sortert ved " + tekst(i) }
         i = i + 1
     }
     returner ""
