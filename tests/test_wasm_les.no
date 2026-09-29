@@ -1,0 +1,264 @@
+# W2 (WASM-sporet): stakk- og typesjekken i std/wasm_les.no.
+#
+#   1. Ein handbygd modul med blokker, if/else, br_if, i64-aritmetikk, struct/array,
+#      try_table + throw med tag, ref.func (deklarert i eit elementsegment) og call_ref,
+#      og globalar, blir GODTEKEN. Han er positiv kontroll for kvar negativ under.
+#   2. Den same modulen med ÉIN feil om gongen blir AVVIST med rett melding: feil stakkhøgd
+#      ved end, stakkunderflyt, i64-operasjon på i32, feil returtype, grein med feil type,
+#      struct.get på eqref, global.set på uforanderleg global, ref.func utan deklarasjon,
+#      catch-etikett med feil type, throw med feil nyttelast, call_ref med feil funksjonstype,
+#      if utan else med resultat, struct.set på uforanderleg felt, select med ulike typar,
+#      local.set med feil type, br_table med ulik aritet og struct.new med feil felttype.
+#   3. Ekte modular frå backenden (W2-korpuset, bygde med CLI-en, som validerer dei) blir
+#      godtekne i ein barneprosess (VM-fastmodus), og avviste når dei blir muterte: utan
+#      elementsegmentet (ref.func til closure-hjelparane er ikkje lenger deklarert) og med
+#      taggen sett til ein annan funksjonstype (throw i atomet «kast» passar ikkje).
+bruk std.wasm_les som les
+bruk std.wasm_binary som w
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon la_til(m: liste, k: liste) -> heltall {
+    la i = 0
+    mens i < lengde(k) {
+        legg_til(m, k[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+# Kropp: lokaldeklarasjonar + instruksjonar + end, med storleiken først.
+funksjon kropp(lokale: liste, instr: liste) -> liste {
+    la b = []
+    la_til(b, lokale)
+    la_til(b, instr)
+    legg_til(b, 11)
+    la ut = w.leb_u(lengde(b))
+    la_til(ut, b)
+    returner ut
+}
+
+# Typar: 0 struct {mut i64}, 1 array (mut i8), 2 (eqref)→() [tag], 3 (i32)→i32,
+#        4 ()→eqref, 5 (eqref)→eqref, 6 struct {i32} (uforanderleg)
+# Funksjonar: f0..f4 med typane 3, 4, 5, 3, 3. Tag 0 av type 2. Globalar: 0 mut i32, 1 i32.
+funksjon standard_kroppar() -> liste {
+    returner [
+        # f0: if/else, br_if med verdi, i64
+        [[1, 1, 126], [32, 0, 172, 33, 1, 2, 127, 32, 0, 4, 127, 65, 1, 5, 65, 2, 11, 32, 0, 65, 5, 74, 13, 0, 26,
+                        32, 1, 66, 3, 126, 167, 11]],
+        # f1: try_table (catch 0 → blokka) med throw av ein struct
+        [[0], [2, 109, 31, 64, 1, 0, 0, 0, 66, 7, 251, 0, 0, 8, 0, 11, 208, 109, 11]],
+        # f2: ref.func (deklarert) og call_ref
+        [[0], [32, 0, 210, 2, 20, 5]],
+        # f3: array.new_default + array.len
+        [[0], [65, 4, 251, 7, 1, 251, 15, 32, 0, 106]],
+        # f4: globalar
+        [[0], [35, 1, 32, 0, 106, 36, 0, 35, 0]]
+    ]
+}
+
+funksjon modul(kroppar: liste, med_elem: bool) -> liste {
+    la m = [0, 97, 115, 109, 1, 0, 0, 0]
+    la_til(m, w.seksjon(1, [7, 95, 1, 126, 1, 94, 120, 1, 96, 1, 109, 0, 96, 1, 127, 1, 127, 96, 0, 1, 109,
+                            96, 1, 109, 1, 109, 95, 1, 127, 0]))
+    la_til(m, w.seksjon(3, [5, 3, 4, 5, 3, 3]))
+    la_til(m, w.seksjon(13, [1, 0, 2]))
+    la_til(m, w.seksjon(6, [2, 127, 1, 65, 0, 11, 127, 0, 65, 5, 11]))
+    hvis med_elem { la_til(m, w.seksjon(9, [1, 3, 0, 1, 2])) }
+    la kp = [lengde(kroppar)]
+    la i = 0
+    mens i < lengde(kroppar) {
+        la_til(kp, kropp(kroppar[i][0], kroppar[i][1]))
+        i = i + 1
+    }
+    la_til(m, w.seksjon(10, kp))
+    returner m
+}
+
+# Standardmodulen med kroppen til funksjon `f` bytt ut.
+funksjon med_kropp(f: heltall, lokale: liste, instr: liste) -> liste {
+    la k = standard_kroppar()
+    k[f] = [lokale, instr]
+    returner modul(k, sann)
+}
+
+funksjon krev_ok(namn: tekst, bytar: liste) -> heltall {
+    la r = les.valider(bytar)
+    hvis ikkje r["ok"] {
+        skriv(namn + ": validatoren avviste: " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon krev_avvist(namn: tekst, bytar: liste, forventa: tekst) -> heltall {
+    la r = les.valider(bytar)
+    hvis r["ok"] {
+        skriv(namn + ": validatoren godtok (skulle avvise)\n")
+        assert(usann)
+    }
+    hvis builtin.index_of(r["feil"], forventa) < 0 {
+        skriv(namn + ": venta «" + forventa + "», fekk: " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+# ─── Modulkirurgi på ekte modular ───────────────────────────────────────────
+
+funksjon les_leb(b: liste, p: heltall) -> liste {
+    la v = 0
+    la skift = 0
+    la q = p
+    mens sann {
+        la x = b[q]
+        q = q + 1
+        v = v | ((x & 127) << skift)
+        skift = skift + 7
+        hvis (x & 128) == 0 { returner [v, q] }
+    }
+    returner [v, q]
+}
+
+# [[id, start_hovud, start_innhald, slutt], …]
+funksjon seksjonar(b: liste) -> liste {
+    la ut = []
+    la p = 8
+    mens p < lengde(b) {
+        la id = b[p]
+        la s = les_leb(b, p + 1)
+        legg_til(ut, [id, p, s[1], s[1] + s[0]])
+        p = s[1] + s[0]
+    }
+    returner ut
+}
+
+funksjon finn_seksjon(b: liste, id: heltall) -> liste {
+    la s = seksjonar(b)
+    la i = 0
+    mens i < lengde(s) {
+        hvis s[i][0] == id { returner s[i] }
+        i = i + 1
+    }
+    returner []
+}
+
+funksjon utan_seksjon(b: liste, id: heltall) -> liste {
+    la s = finn_seksjon(b, id)
+    assert(lengde(s) > 0)
+    la ut = []
+    la i = 0
+    mens i < lengde(b) {
+        hvis i < s[1] eller i >= s[3] { legg_til(ut, b[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Byt seksjonen `id` ut med ein ny med innhaldet `innhald`.
+funksjon byt_seksjon(b: liste, id: heltall, innhald: liste) -> liste {
+    la s = finn_seksjon(b, id)
+    assert(lengde(s) > 0)
+    la ut = []
+    la i = 0
+    mens i < s[1] { legg_til(ut, b[i])  i = i + 1 }
+    la_til(ut, w.seksjon(id, innhald))
+    i = s[3]
+    mens i < lengde(b) { legg_til(ut, b[i])  i = i + 1 }
+    returner ut
+}
+
+# Typeindeksen til den første importen (importseksjonen: n, modul, felt, art 0, type).
+funksjon første_import_type(b: liste) -> heltall {
+    la s = finn_seksjon(b, 2)
+    assert(lengde(s) > 0)
+    la p = les_leb(b, s[2])[1]
+    la ml = les_leb(b, p)
+    p = ml[1] + ml[0]
+    la fl = les_leb(b, p)
+    p = fl[1] + fl[0]
+    assert_eq(b[p], 0)
+    returner les_leb(b, p + 1)[0]
+}
+
+funksjon valider_i_barn(sti: tekst) -> tekst {
+    la rot = hjelp.root()
+    la m = hjelp.grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = rot + "/tests/fixtures/wasm_valider_fil.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_FIL"] = sti
+    la r = hjelp.køyr_nc(m, 300000)
+    hjelp.krev_ok("wasm_valider_fil " + sti, r)
+    la ut = r["stdout"]
+    la p = builtin.index_of(ut, "VALIDERING: ")
+    assert(p >= 0)
+    la linje = builtin.slice(ut, p, lengde(ut))
+    la nl = builtin.index_of(linje, "\n")
+    hvis nl >= 0 { linje = builtin.slice(linje, 0, nl) }
+    returner linje
+}
+
+funksjon skriv_bytar(sti: tekst, b: liste) -> heltall {
+    builtin.fil_skriv_binær(hjelp.root() + "/" + sti, b)
+    returner 0
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir("build/wasm/test_les")
+
+    # ── 1. Positiv kontroll ──
+    krev_ok("standardmodulen", modul(standard_kroppar(), sann))
+
+    # ── 2. Éin feil om gongen ──
+    krev_avvist("ekstra verdi ved end", med_kropp(3, [0], [65, 4, 251, 7, 1, 251, 15, 32, 0, 106, 65, 9]), "feil stakkhøgd ved end")
+    krev_avvist("stakkunderflyt", med_kropp(4, [0], [106]), "stakkunderflyt")
+    krev_avvist("i64.add på i32", med_kropp(3, [0], [65, 4, 251, 7, 1, 251, 15, 32, 0, 124]), "venta i64, fekk i32")
+    krev_avvist("feil returtype", med_kropp(3, [0], [66, 1]), "venta i32, fekk i64")
+    krev_avvist("br med feil type", med_kropp(3, [0], [2, 127, 66, 1, 12, 0, 11]), "venta i32, fekk i64")
+    krev_avvist("struct.get på eqref", med_kropp(2, [0], [32, 0, 251, 2, 0, 0, 26, 208, 109]), "venta (ref null $0), fekk (ref null eq)")
+    krev_avvist("global.set uforanderleg", med_kropp(4, [0], [35, 1, 32, 0, 106, 36, 1, 35, 0]), "global.set på uforanderleg global 1")
+    krev_avvist("ref.func utan deklarasjon", modul(standard_kroppar(), usann), "ikkje deklarert")
+    krev_avvist("catch-etikett med feil type", med_kropp(1, [0], [2, 127, 31, 64, 1, 0, 0, 0, 11, 65, 0, 11, 26, 208, 109]),
+                "catch: taggen gjev (ref null eq), etiketten ventar i32")
+    krev_avvist("throw med i32", med_kropp(1, [0], [2, 109, 31, 64, 1, 0, 0, 0, 65, 7, 8, 0, 11, 208, 109, 11]), "venta (ref null eq), fekk i32")
+    krev_avvist("call_ref feil type", med_kropp(2, [0], [32, 0, 210, 2, 20, 3]), "venta (ref null $3), fekk (ref $5)")
+    krev_avvist("if utan else med resultat", med_kropp(3, [0], [32, 0, 4, 127, 65, 1, 11]), "if utan else")
+    krev_avvist("struct.set uforanderleg felt", med_kropp(3, [0], [65, 1, 251, 0, 6, 65, 2, 251, 5, 6, 0, 65, 0]), "struct.set på uforanderleg felt 0")
+    krev_avvist("select ulike typar", med_kropp(3, [0], [65, 1, 66, 2, 65, 1, 27, 26, 65, 0]), "select: ulike typar")
+    krev_avvist("local.set feil type", med_kropp(0, [1, 1, 126], [65, 1, 33, 1, 65, 0]), "venta i64, fekk i32")
+    krev_avvist("br_table ulik aritet", med_kropp(3, [0], [2, 64, 2, 127, 65, 0, 65, 0, 14, 1, 0, 1, 11, 26, 11, 65, 0]), "ulik aritet")
+    krev_avvist("struct.new feil felttype", med_kropp(1, [0], [65, 7, 251, 0, 0, 26, 208, 109]), "venta i64, fekk i32")
+    skriv("typesjekk: standardmodulen godteken, 17 enkeltfeil avviste\n")
+
+    # ── 3. Ekte modular frå backenden ──
+    la cl = hjelp.bygg_klient("tests/wasm_korpus/closure_fangst.no", "build/wasm/test_les/closure", sann)
+    la un = hjelp.bygg_klient("tests/wasm_korpus/unntak_grunn.no", "build/wasm/test_les/unntak", sann)
+    assert(builtin.index_of(cl, "WASM: app.wasm") >= 0)
+    assert(builtin.index_of(un, "WASM: app.wasm") >= 0)
+    la cb = hjelp.les_bytar("build/wasm/test_les/closure/app.wasm")
+    la ub = hjelp.les_bytar("build/wasm/test_les/unntak/app.wasm")
+    assert(lengde(finn_seksjon(cb, 9)) > 0)
+    assert(lengde(finn_seksjon(ub, 13)) > 0)
+    assert_eq(valider_i_barn("build/wasm/test_les/closure/app.wasm"), "VALIDERING: OK")
+    assert_eq(valider_i_barn("build/wasm/test_les/unntak/app.wasm"), "VALIDERING: OK")
+    # Utan elementsegmentet er ref.func til lambda-hjelparane ikkje deklarert
+    skriv_bytar("build/wasm/test_les/closure_utan_elem.wasm", utan_seksjon(cb, 9))
+    la r1 = valider_i_barn("build/wasm/test_les/closure_utan_elem.wasm")
+    hvis builtin.index_of(r1, "ikkje deklarert") < 0 {
+        skriv("closure utan elementsegment: " + r1 + "\n")
+        assert(usann)
+    }
+    # Taggen med typen til importen logg_test ((i32, i32) → ()): atomet «kast» kastar ein
+    # $tekst der taggen no ventar i32 (første funksjonen med throw blir sjekka først)
+    la it = første_import_type(ub)
+    assert(it < 128)
+    skriv_bytar("build/wasm/test_les/unntak_feil_tag.wasm", byt_seksjon(ub, 13, [1, 0, it]))
+    la r2 = valider_i_barn("build/wasm/test_les/unntak_feil_tag.wasm")
+    hvis builtin.index_of(r2, "venta i32, fekk (ref null $3)") < 0 {
+        skriv("unntak med feil tag-type: " + r2 + "\n")
+        assert(usann)
+    }
+    skriv("ekte modular: godtekne, og avviste etter mutasjon (elementsegment, tag-type)\n")
+    skriv("test_wasm_les OK\n")
+    returner 0
+}
