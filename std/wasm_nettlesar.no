@@ -1,0 +1,655 @@
+# std/wasm_nettlesar.no — nettlesar-testbenk for Norscode-klientmodular i WebAssembly (W5).
+#
+# Éin stad for alt nettlesartestane i WASM-sporet treng, skrive i Norscode:
+#
+#   - Finn Chrome/Chromium (NC_CHROME=<sti>, elles standardstiane) og JavaScriptCore
+#     (NC_JSC=<sti>, elles jsc i JavaScriptCore.framework på macOS).
+#   - Byggjer klientar med tools/nc_wasm.no i ein barneprosess i VM-fastmodus.
+#   - Startar barne-`nc serve` med eksplisitt, ikkje-arva miljø og ventar til han lyttar.
+#   - Køyrer headless Chrome med flagga frå planen (§4.4): utan dei heng Chrome ofte mot
+#     nc serve, som tek éi tilkopling om gongen. Stdout (--dump-dom) blir lesen til </html>,
+#     stderr (--enable-logging=stderr) er konsollen («Uncaught …»), og så blir Chrome stoppa.
+#   - Rydding: kvar økt har ei eiga mappe under build/wasm-nettlesar/ med eit unikt namn.
+#     Chrome-profilane ligg der, så kvar Chrome-prosess (også hjelpeprosessane) har mappa i
+#     kommandolinja. `rydd` stoppar serve-prosessane økta starta, drep berre prosessar med
+#     mappa i kommandolinja (pkill -f <mappe>) og sjekkar med pgrep at ingen er att.
+#   - Resultat: loggen i <pre id="nc-logg">, «MÅL namn=verdi»-linjer som WASM-sida skriv
+#     (app-kjensle målt i sida sjølv med tid_ms), sidelastingstid frå Chrome-netloggen, og
+#     resultatfiler i build/wasm-nettlesar/resultat/ (aldri committa).
+#   - JavaScriptCore: den genererte lastaren køyrer i `jsc -e` med ein liten vertsshim som
+#     blir EMITTERT frå Norscode-data (std/wasm_js.no), som lastaren sjølv. Ingen JS-fil
+#     blir skriven, verken i repoet eller under build/.
+#
+# Brukt av tools/wasm_nettlesar.no (CLI), tests/fixtures/wasm_chrome_hjelp.no og
+# Chrome-testane i tests/test_wasm_*.no.
+bruk std.prosess som prosess
+bruk std.runtime.process_abi som process_abi
+bruk std.wasm_js som js
+
+funksjon basismappe() -> tekst {
+    returner "build/wasm-nettlesar"
+}
+
+funksjon resultatmappe() -> tekst {
+    returner basismappe() + "/resultat"
+}
+
+funksjon rot() -> tekst {
+    returner tekst(builtin.system_info()["cwd"])
+}
+
+funksjon runtime() -> tekst {
+    returner tekst(builtin.system_info()["executable"])
+}
+
+# ─── Prosessar ───────────────────────────────────────────────────────────────
+
+funksjon policy() -> ordbok_tekst {
+    la p = prosess.ny_policy("wasm-nettlesar")
+    prosess.tillat_alle(p)
+    prosess.aktiver_køyring(p)
+    returner p
+}
+
+funksjon nettlesarmiljø() -> ordbok_tekst {
+    returner {"PATH": "/usr/bin:/bin", "HOME": miljo_hent("HOME"), "TMPDIR": "/tmp"}
+}
+
+# Miljøkontrakten for barne-nc: alt eksplisitt, så NORSCODE_CMD/FILE frå ein CI-adapter
+# ikkje kan vinne over barnet sitt eige.
+funksjon grunnmiljø() -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_ROOT": rot(),
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_FAKE_HTTP_REQUESTS": ""
+    }
+}
+
+# Køyr runtimen synkront med miljøet. Gjev {"exit", "stdout", "stderr", "status"}.
+funksjon køyr_nc(miljø: ordbok_tekst, timeout_ms: heltall) -> ordbok {
+    la req = process_abi.request(runtime(), [], rot(), "", timeout_ms, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, miljø)
+    la res = builtin.process_spawn_argv(req)
+    la ec = -1
+    hvis finnes_nøkkel(res, "exit_code") { ec = heltall_fra_tekst(tekst(res["exit_code"])) }
+    returner {"exit": ec, "stdout": tekst(res["stdout"]), "stderr": tekst(res["stderr"]), "status": tekst(res["status"])}
+}
+
+# Køyr eit verktøy (absolutt sti) synkront. Gjev {"exit", "stdout", "stderr", "status"}.
+funksjon køyr_verktøy(program: tekst, argv: liste, timeout_s: heltall) -> ordbok {
+    la plan = prosess.start_argv_plan(program, argv)
+    prosess.med_miljø(plan, nettlesarmiljø())
+    prosess.med_timeout(plan, timeout_s)
+    prosess.med_maks_output(plan, 16777216)
+    prosess.med_sandbox(plan, "none", 8589934592, 4096, usann)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner {"exit": -1, "stdout": "", "stderr": "spawn: " + tekst(h["status"]), "status": "feil"} }
+    la ut = ""
+    la feil = ""
+    la t0 = builtin.tid_ms()
+    la st = "kjorer"
+    la ec = -1
+    mens builtin.tid_ms() - t0 < timeout_s * 1000 {
+        la v = prosess.native_async_vent(h, 250)
+        la r = prosess.native_async_les(h)
+        hvis finnes_nøkkel(r, "stdout") { ut = ut + tekst(r["stdout"]) }
+        hvis finnes_nøkkel(r, "stderr") { feil = feil + tekst(r["stderr"]) }
+        hvis v["status"] != "kjorer" {
+            st = tekst(v["status"])
+            hvis finnes_nøkkel(v, "exit_code") { ec = heltall_fra_tekst(tekst(v["exit_code"])) }
+            bryt
+        }
+    }
+    hvis st == "kjorer" {
+        stopp(h)
+        returner {"exit": -1, "stdout": ut, "stderr": feil, "status": "tidsavbrot"}
+    }
+    la r2 = prosess.native_async_les(h)
+    hvis finnes_nøkkel(r2, "stdout") { ut = ut + tekst(r2["stdout"]) }
+    hvis finnes_nøkkel(r2, "stderr") { feil = feil + tekst(r2["stderr"]) }
+    prosess.native_async_lukk(h)
+    returner {"exit": ec, "stdout": ut, "stderr": feil, "status": st}
+}
+
+funksjon les_meir(h: ordbok_tekst) -> tekst {
+    la r = prosess.native_async_les(h)
+    hvis finnes_nøkkel(r, "stdout") { returner tekst(r["stdout"]) }
+    returner ""
+}
+
+funksjon les_feil(r: ordbok_tekst) -> tekst {
+    hvis finnes_nøkkel(r, "stderr") { returner tekst(r["stderr"]) }
+    returner ""
+}
+
+# Stopp ein prosess som denne prosessen starta: SIGTERM, så SIGKILL etter 5 s.
+funksjon stopp(h: ordbok_tekst) -> heltall {
+    la st = prosess.native_async_poll(h)
+    hvis st["status"] == "kjorer" {
+        prosess.native_async_signal(h, 15)
+        la v = prosess.native_async_vent(h, 5000)
+        hvis v["status"] == "kjorer" {
+            prosess.native_async_signal(h, 9)
+            prosess.native_async_vent(h, 5000)
+        }
+    }
+    prosess.native_async_lukk(h)
+    returner 0
+}
+
+# ─── Nettlesarar ─────────────────────────────────────────────────────────────
+
+funksjon chrome_kandidatar() -> liste {
+    la eigen = miljo_hent("NC_CHROME")
+    hvis eigen != "" { returner [eigen] }
+    returner ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+              "/Applications/Chromium.app/Contents/MacOS/Chromium",
+              "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"]
+}
+
+# Stien til Chrome/Chromium som svarar på --version, eller "". Med NC_CHROME blir berre
+# den stien prøvd.
+funksjon finn_chrome() -> tekst {
+    la k = chrome_kandidatar()
+    la i = 0
+    mens i < lengde(k) {
+        la r = køyr_verktøy(k[i], ["--version"], 30)
+        hvis r["exit"] == 0 og builtin.index_of(r["stdout"], "Chrom") >= 0 { returner k[i] }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Stien til jsc (JavaScriptCore-skalet), eller "". NC_JSC vel binær.
+funksjon finn_jsc() -> tekst {
+    la eigen = miljo_hent("NC_JSC")
+    la k = ["/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc"]
+    hvis eigen != "" { k = [eigen] }
+    la i = 0
+    mens i < lengde(k) {
+        la r = køyr_verktøy(k[i], ["-e", "print(6*7)"], 30)
+        hvis r["exit"] == 0 og builtin.index_of(r["stdout"], "42") >= 0 { returner k[i] }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Flagga frå planen (§4.4). `virtuell_ms` > 0 gjev --virtual-time-budget (tidtakarar og
+# nettverk blir ferdige før DOM-dumpen); `netlog` "" eller ein sti for --log-net-log.
+funksjon chrome_flagg(profil: tekst, url: tekst, virtuell_ms: heltall, netlog: tekst) -> liste {
+    la f = ["--headless=new", "--disable-gpu", "--no-first-run", "--disable-background-networking",
+            "--dns-prefetch-disable", "--disable-features=NetworkPrediction,Prerender2"]
+    hvis virtuell_ms > 0 { legg_til(f, "--virtual-time-budget=" + tekst(virtuell_ms)) }
+    legg_til(f, "--enable-logging=stderr")
+    legg_til(f, "--v=0")
+    hvis netlog != "" { legg_til(f, "--log-net-log=" + netlog) }
+    legg_til(f, "--dump-dom")
+    legg_til(f, "--user-data-dir=" + profil)
+    legg_til(f, url)
+    returner f
+}
+
+# Headless Chrome med --dump-dom: les stdout til </html> (tidsgrense `grense_ms`), les
+# konsollen litt til, stopp Chrome og drep det som er att med profilen i kommandolinja.
+# Gjev {"dom", "konsoll", "ms", "tidsavbrot"}.
+funksjon dump_rå(chrome: tekst, url: tekst, profil: tekst, virtuell_ms: heltall, netlog: tekst, grense_ms: heltall) -> ordbok {
+    la plan = prosess.start_argv_plan(chrome, chrome_flagg(profil, url, virtuell_ms, netlog))
+    prosess.med_miljø(plan, nettlesarmiljø())
+    prosess.med_timeout(plan, 90)
+    prosess.med_maks_output(plan, 4194304)
+    prosess.med_sandbox(plan, "none", 8589934592, 4096, usann)
+    la t0 = builtin.tid_ms()
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner {"dom": "", "konsoll": "spawn: " + tekst(h["status"]), "ms": 0, "tidsavbrot": usann} }
+    la ut = ""
+    la feil = ""
+    mens builtin.tid_ms() - t0 < grense_ms og builtin.index_of(ut, "</html>") < 0 {
+        la r = prosess.native_async_les(h)
+        hvis finnes_nøkkel(r, "stdout") { ut = ut + tekst(r["stdout"]) }
+        feil = feil + les_feil(r)
+        hvis builtin.index_of(ut, "</html>") < 0 {
+            la v = prosess.native_async_vent(h, 100)
+            hvis v["status"] != "kjorer" {
+                la r2 = prosess.native_async_les(h)
+                hvis finnes_nøkkel(r2, "stdout") { ut = ut + tekst(r2["stdout"]) }
+                feil = feil + les_feil(r2)
+                bryt
+            }
+        }
+    }
+    la ms = builtin.tid_ms() - t0
+    la tidsavbrot = builtin.index_of(ut, "</html>") < 0
+    # Konsollmeldingar kan kome etter DOM-dumpen: les litt til før stopp
+    la t1 = builtin.tid_ms()
+    mens builtin.tid_ms() - t1 < 300 {
+        prosess.native_async_vent(h, 100)
+        feil = feil + les_feil(prosess.native_async_les(h))
+    }
+    stopp(h)
+    drep_med(profil)
+    returner {"dom": ut, "konsoll": feil, "ms": ms, "tidsavbrot": tidsavbrot}
+}
+
+# Prosessar med `nål` i kommandolinja (pgrep -f). Gjev talet.
+funksjon tel_prosessar(nål: tekst) -> heltall {
+    la r = køyr_verktøy("/usr/bin/pgrep", ["-f", nål], 30)
+    la n = 0
+    la l = builtin.split(r["stdout"], "\n")
+    la i = 0
+    mens i < lengde(l) {
+        hvis builtin.trim(tekst(l[i])) != "" { n = n + 1 }
+        i = i + 1
+    }
+    returner n
+}
+
+# Drep prosessar med `nål` i kommandolinja. Nåla må vere ei mappe under basismappe(), så
+# berre prosessar denne benken starta (profilen i kommandolinja) kan treffast.
+funksjon drep_med(nål: tekst) -> heltall {
+    hvis builtin.index_of(nål, "/" + basismappe() + "/") < 0 { kast "wasm_nettlesar: nektar å drepe prosessar utan ei benkmappe i kommandolinja: " + nål }
+    la n = tel_prosessar(nål)
+    hvis n == 0 { returner 0 }
+    køyr_verktøy("/usr/bin/pkill", ["-TERM", "-f", nål], 30)
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < 3000 og tel_prosessar(nål) > 0 { }
+    hvis tel_prosessar(nål) > 0 { køyr_verktøy("/usr/bin/pkill", ["-KILL", "-f", nål], 30) }
+    returner n
+}
+
+funksjon slett_mappe(sti: tekst) -> heltall {
+    hvis builtin.index_of(sti, "/" + basismappe() + "/") < 0 eller builtin.index_of(sti, "..") >= 0 {
+        kast "wasm_nettlesar: nektar å slette " + sti
+    }
+    køyr_verktøy("/bin/rm", ["-rf", sti], 60)
+    returner 0
+}
+
+# ─── Økter ───────────────────────────────────────────────────────────────────
+
+# Ei økt: {"namn", "mappe" (absolutt, unik), "serve": [handtak], "sider": n}.
+funksjon ny_økt(namn: tekst) -> ordbok {
+    la mappe = rot() + "/" + basismappe() + "/" + namn + "-" + tekst(builtin.tid_ms())
+    builtin.mkdir_p(mappe)
+    returner {"namn": namn, "mappe": mappe, "serve": [], "sider": 0}
+}
+
+# Start `nc serve` for appen (relativ til rota) på porten og vent til han lyttar (maks 180 s).
+# Gjev handtaket med status «kjorer», eller {"status": "feil", "ut": …}.
+funksjon start_serve(økt: ordbok, app: tekst, port: tekst) -> ordbok {
+    la h = start_serve_rå(app, port)
+    hvis h["status"] == "kjorer" { legg_til(økt["serve"], h) }
+    returner h
+}
+
+funksjon start_serve_rå(app: tekst, port: tekst) -> ordbok_tekst {
+    la m = grunnmiljø()
+    m["NORSCODE_CMD"] = "serve"
+    m["NORSCODE_FILE"] = rot() + "/" + app
+    m["NC_SERVE_PORT"] = port
+    m["NC_SERVE_HOST"] = "127.0.0.1"
+    m["NORSCODE_VM_FAST"] = "1"
+    la plan = prosess.start_argv_plan(runtime(), [])
+    prosess.med_cwd(plan, rot())
+    prosess.med_miljø(plan, m)
+    prosess.med_timeout(plan, 600)
+    prosess.med_sandbox(plan, "none", 4294967296, 1024, usann)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner {"status": "feil", "ut": "spawn: " + tekst(h["status"])} }
+    la ut = ""
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < 180000 {
+        ut = ut + les_meir(h)
+        hvis builtin.index_of(ut, "Socket-lytting aktiv") >= 0 {
+            h["ut"] = ut
+            returner h
+        }
+        la v = prosess.native_async_vent(h, 250)
+        hvis v["status"] != "kjorer" {
+            ut = ut + les_meir(h)
+            prosess.native_async_lukk(h)
+            returner {"status": "feil", "ut": ut}
+        }
+    }
+    stopp(h)
+    returner {"status": "feil", "ut": ut + " (tidsavbrot)"}
+}
+
+# Køyrer serve-prosessen framleis? (Ein testrute kan avslutte han: offline-modus.)
+funksjon serve_køyrer(h: ordbok_tekst) -> bool {
+    returner prosess.native_async_poll(h)["status"] == "kjorer"
+}
+
+funksjon stopp_serve(økt: ordbok) -> heltall {
+    la s = økt["serve"]
+    la i = 0
+    mens i < lengde(s) {
+        stopp(s[i])
+        i = i + 1
+    }
+    økt["serve"] = []
+    returner lengde(s)
+}
+
+# Last ei side i headless Chrome. `op` (alle valfrie):
+#   "profil"        namn på profilen i økta (same namn = same profil, t.d. offline-modus);
+#                   standard er ein fersk profil per kall
+#   "behald_profil" sann: profilen blir ikkje sletta etterpå (til ei ny lasting)
+#   "virtuell_ms"   --virtual-time-budget (standard 5000; 0 = av)
+#   "netlog"        sann: Chrome skriv netloggen i økta, og "sidelasting" blir rekna ut
+#   "grense_ms"     tidsgrense for heile lastinga (standard 60000)
+# Gjev {"dom", "konsoll", "logg", "uncaught", "ms", "tidsavbrot", "mål", "sidelasting"}.
+funksjon last_side(økt: ordbok, url: tekst, op: ordbok) -> ordbok {
+    økt["sider"] = økt["sider"] + 1
+    la pnamn = "p" + tekst(økt["sider"])
+    hvis finnes_nøkkel(op, "profil") { pnamn = tekst(op["profil"]) }
+    la profil = økt["mappe"] + "/profil-" + pnamn
+    la virtuell = 5000
+    hvis finnes_nøkkel(op, "virtuell_ms") { virtuell = op["virtuell_ms"] }
+    la grense = 60000
+    hvis finnes_nøkkel(op, "grense_ms") { grense = op["grense_ms"] }
+    la netlog = ""
+    hvis finnes_nøkkel(op, "netlog") og op["netlog"] { netlog = økt["mappe"] + "/netlog-" + tekst(økt["sider"]) + ".json" }
+    la r = dump_rå(finn_chrome_i_økt(økt), url, profil, virtuell, netlog, grense)
+    la ut = {"dom": r["dom"], "konsoll": r["konsoll"], "ms": r["ms"], "tidsavbrot": r["tidsavbrot"]}
+    ut["logg"] = logg_frå_dom(r["dom"])
+    ut["uncaught"] = har_uncaught(r["konsoll"])
+    ut["mål"] = mål_frå_logg(ut["logg"])
+    ut["sidelasting"] = {}
+    hvis netlog != "" og builtin.fil_finnes(netlog) {
+        ut["sidelasting"] = sidelasting_frå_netlog(fil_les(netlog), url)
+    }
+    la behald = finnes_nøkkel(op, "behald_profil") og op["behald_profil"]
+    hvis ikkje behald { slett_mappe(profil) }
+    returner ut
+}
+
+funksjon finn_chrome_i_økt(økt: ordbok) -> tekst {
+    hvis ikkje finnes_nøkkel(økt, "chrome") { økt["chrome"] = finn_chrome() }
+    returner tekst(økt["chrome"])
+}
+
+# Stopp serve, drep det som er att av Chrome-prosessar med økt-mappa i kommandolinja, og
+# slett profilane. Gjev {"drepne": n, "attverande": n} (attverande skal vere 0).
+funksjon rydd(økt: ordbok) -> ordbok {
+    stopp_serve(økt)
+    la drepne = drep_med(økt["mappe"])
+    la att = tel_prosessar(økt["mappe"])
+    slett_mappe(økt["mappe"])
+    returner {"drepne": drepne, "attverande": att}
+}
+
+# ─── Resultat ────────────────────────────────────────────────────────────────
+
+# Teksten i <pre id="nc-logg"> (der logg_test skriv i testbygg), HTML-avescapa.
+# Gjev "\u0000" (NUL) når elementet manglar, så «tom logg» og «ingen side» ikkje er like.
+funksjon logg_frå_dom(d: tekst) -> tekst {
+    la opn = "<pre id=\"nc-logg\">"
+    la p = builtin.index_of(d, opn)
+    hvis p < 0 { returner builtin.chr(0) }
+    la rest = builtin.slice(d, p + lengde(opn), lengde(d))
+    la s = builtin.index_of(rest, "</pre>")
+    hvis s < 0 { returner builtin.chr(0) }
+    la t = builtin.slice(rest, 0, s)
+    returner builtin.replace(builtin.replace(builtin.replace(t, "&lt;", "<"), "&gt;", ">"), "&amp;", "&")
+}
+
+# Eit unnatak eller ein trap som nådde JavaScript (Chrome skriv «Uncaught …» i konsollen).
+funksjon har_uncaught(konsoll: tekst) -> bool {
+    returner builtin.index_of(konsoll, "Uncaught") >= 0
+}
+
+# «MÅL namn=verdi»-linjer i loggen (WASM-sida måler med tid_ms og skriv dei) → {namn: verdi}.
+funksjon mål_frå_logg(logg: tekst) -> ordbok {
+    la ut = {}
+    la l = builtin.split(logg, "\n")
+    la i = 0
+    mens i < lengde(l) {
+        la s = tekst(l[i])
+        hvis builtin.starts_with(s, "MÅL ") {
+            la kv = builtin.slice(s, lengde("MÅL "), lengde(s))
+            la e = builtin.index_of(kv, "=")
+            hvis e > 0 { ut[builtin.slice(kv, 0, e)] = builtin.slice(kv, e + 1, lengde(kv)) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Tal etter `nøkkel":` i ei netlog-linje (tidene er tekst: "time":"171768933").
+funksjon _nl_felt(linje: tekst, nøkkel: tekst) -> tekst {
+    la n = "\"" + nøkkel + "\":"
+    la p = builtin.index_of(linje, n)
+    hvis p < 0 { returner "" }
+    la rest = builtin.slice(linje, p + lengde(n), lengde(linje))
+    hvis builtin.starts_with(rest, "\"") {
+        rest = builtin.slice(rest, 1, lengde(rest))
+        returner builtin.slice(rest, 0, builtin.index_of(rest, "\""))
+    }
+    la i = 0
+    mens i < lengde(rest) {
+        la c = builtin.char_code(builtin.slice(rest, i, i + 1))
+        hvis ikkje ((c >= 48 og c <= 57) eller c == 45) { bryt }
+        i = i + 1
+    }
+    returner builtin.slice(rest, 0, i)
+}
+
+# Talkoden til ein hendingstype i konstantane øvst i netloggen ("logEventTypes").
+funksjon _nl_type(konstantar: tekst, namn: tekst) -> tekst {
+    la p = builtin.index_of(konstantar, "\"logEventTypes\":{")
+    hvis p < 0 { returner "" }
+    la rest = builtin.slice(konstantar, p, lengde(konstantar))
+    returner _nl_felt(rest, namn)
+}
+
+# Sidelastingstid frå Chrome-netloggen (--log-net-log): éi hending per linje, konstantane
+# (talkodane for hendingstypane) i den første. For kvar førespurnad til same opphav som
+# `url`: start (URL_REQUEST_START_JOB) og slutt (REQUEST_ALIVE, fase 2). Sidelastinga er
+# frå starten av dokumentet til slutten av den siste førespurnaden, altså med lastaren,
+# modulen og det sida hentar sjølv. Gjev {"dokument_ms", "totalt_ms", "førespurnader",
+# "stiar": {sti: ms}} (tom ordbok når loggen manglar det som trengst).
+funksjon sidelasting_frå_netlog(logg: tekst, url: tekst) -> ordbok {
+    la linjer = builtin.split(logg, "\n")
+    hvis lengde(linjer) < 2 { returner {} }
+    la t_start = _nl_type(tekst(linjer[0]), "URL_REQUEST_START_JOB")
+    la t_alive = _nl_type(tekst(linjer[0]), "REQUEST_ALIVE")
+    hvis t_start == "" eller t_alive == "" { returner {} }
+    # opphavet: «http://127.0.0.1:port»
+    la etter_skjema = builtin.index_of(url, "://") + 3
+    la sti_start = builtin.index_of(builtin.slice(url, etter_skjema, lengde(url)), "/")
+    la opphav = url
+    hvis sti_start >= 0 { opphav = builtin.slice(url, 0, etter_skjema + sti_start) }
+    la kjelde_url = {}
+    la kjelde_start = {}
+    la slutt = {}
+    la rekkjefølgje = []
+    la i = 1
+    mens i < lengde(linjer) {
+        la l = tekst(linjer[i])
+        la typ = _nl_felt(l, "type")
+        # «type» finst òg i source; hendingstypen er den siste «"type":» på linja
+        la siste = builtin.index_of(l, "},\"time\"")
+        hvis siste >= 0 { typ = _nl_felt(builtin.slice(l, siste, lengde(l)), "type") }
+        hvis typ == t_start og builtin.index_of(l, "\"url\":\"" + opphav + "/") >= 0 {
+            la kid = _nl_felt(builtin.slice(l, builtin.index_of(l, "\"source\":"), lengde(l)), "id")
+            la u = _nl_felt(l, "url")
+            hvis ikkje finnes_nøkkel(kjelde_url, kid) {
+                kjelde_url[kid] = u
+                kjelde_start[kid] = heltall_fra_tekst(_nl_felt(builtin.slice(l, siste, lengde(l)), "time"))
+                legg_til(rekkjefølgje, kid)
+            }
+        } ellers hvis typ == t_alive og builtin.index_of(l, "\"phase\":2") >= 0 {
+            la kid2 = _nl_felt(builtin.slice(l, builtin.index_of(l, "\"source\":"), lengde(l)), "id")
+            slutt[kid2] = heltall_fra_tekst(_nl_felt(builtin.slice(l, siste, lengde(l)), "time"))
+        }
+        i = i + 1
+    }
+    hvis lengde(rekkjefølgje) == 0 { returner {} }
+    la første = rekkjefølgje[0]
+    la t0 = kjelde_start[første]
+    la t_slutt = t0
+    la stiar = {}
+    la n = 0
+    la j = 0
+    mens j < lengde(rekkjefølgje) {
+        la k = rekkjefølgje[j]
+        hvis finnes_nøkkel(slutt, k) {
+            hvis slutt[k] > t_slutt { t_slutt = slutt[k] }
+            la u2 = tekst(kjelde_url[k])
+            la sti = builtin.slice(u2, lengde(opphav), lengde(u2))
+            la q = builtin.index_of(sti, "?")
+            hvis q >= 0 { sti = builtin.slice(sti, 0, q) }
+            stiar[sti] = slutt[k] - kjelde_start[k]
+            n = n + 1
+        }
+        j = j + 1
+    }
+    la dok = -1
+    hvis finnes_nøkkel(slutt, første) { dok = slutt[første] - t0 }
+    returner {"dokument_ms": dok, "totalt_ms": t_slutt - t0, "førespurnader": n, "stiar": stiar}
+}
+
+# Skriv eit resultat som JSON til build/wasm-nettlesar/resultat/<namn>.json (aldri
+# committa). Gjev stien (relativ til rota).
+funksjon skriv_resultat(namn: tekst, verdi: ordbok) -> tekst {
+    builtin.mkdir_p(rot() + "/" + resultatmappe())
+    la sti = resultatmappe() + "/" + namn + ".json"
+    fil_skriv(rot() + "/" + sti, builtin.json_stringify(verdi) + "\n")
+    returner sti
+}
+
+# ─── Bygg ────────────────────────────────────────────────────────────────────
+
+# Bygg ein klient med tools/nc_wasm.no i ein barneprosess i VM-fastmodus. `app` er "" eller
+# serve-appen (då blir utmappe/serve.no laga). Gjev {"ok", "linje" (WASM-linja), "ut"}.
+funksjon bygg(kjelde: tekst, utmappe: tekst, testbygg: bool, prefiks: tekst, app: tekst) -> ordbok {
+    builtin.mkdir_p(rot() + "/" + utmappe)
+    la m = grunnmiljø()
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = rot() + "/tools/nc_wasm.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_KJELDE"] = kjelde
+    m["NC_WASM_NCB"] = ""
+    m["NC_WASM_UT"] = utmappe
+    m["NC_WASM_APP"] = app
+    m["NC_WASM_RT_CACHE"] = miljo_hent("NC_WASM_RT_CACHE")
+    m["NC_WASM_RT_CACHE_MAPPE"] = ""
+    hvis testbygg { m["NC_WASM_TESTBYGG"] = "1" } ellers { m["NC_WASM_TESTBYGG"] = "" }
+    m["NC_WASM_PREFIKS"] = prefiks
+    la r = køyr_nc(m, 300000)
+    la ut = r["stdout"]
+    la p = builtin.index_of(ut, "WASM: ")
+    hvis r["status"] != "ferdig" eller r["exit"] != 0 eller p < 0 {
+        returner {"ok": usann, "linje": "", "ut": "status=" + r["status"] + " exit=" + tekst(r["exit"]) + "\n" + ut + "\n" + r["stderr"]}
+    }
+    la linje = builtin.slice(ut, p, lengde(ut))
+    la nl = builtin.index_of(linje, "\n")
+    la bs = builtin.index_of(linje, "\\")
+    hvis bs >= 0 og (nl < 0 eller bs < nl) { nl = bs }
+    hvis nl >= 0 { linje = builtin.slice(linje, 0, nl) }
+    returner {"ok": sann, "linje": linje, "ut": ut}
+}
+
+# ─── JavaScriptCore ──────────────────────────────────────────────────────────
+
+# new (Object.bind(null, o))() gjev o: ein konstruerbar «klasse» utan class-syntaks.
+funksjon _klasse(o: liste) -> liste {
+    returner ["kall", ["felt", ["global", "Object"], "bind"], [["global", "null"], o]]
+}
+
+# Vertsshimen for `jsc -e` som JS-tre (emittert med std/wasm_js.no). jsc-skalet har verken
+# DOM, TextDecoder/TextEncoder eller fetch; shimen gjev lastaren det han treng for
+# korpusprogram (logg_test og logg), og kvar loggbit blir skriven som éi JSON-strenglinje
+# (print) så teksten kjem eksakt attende. Modulen blir lesen frå `wasm_sti` med readFile.
+funksjon jsc_shim(wasm_sti: tekst) -> liste {
+    la skriv_json = ["pil", ["a"], ["kall", ["global", "print"], [["kall", ["felt", ["global", "JSON"], "stringify"], [["namn", "a"]]]]]]
+    la dekod = ["pil", ["a"], ["kall", ["global", "decodeURIComponent"], [["kall", ["global", "escape"],
+        [["kall", ["felt", ["kall", ["felt", ["global", "Array"], "from"], [["namn", "a"],
+            ["pil", ["b"], ["kall", ["felt", ["global", "String"], "fromCharCode"], [["namn", "b"]]]]]], "join"], [["streng", ""]]]]]]]]
+    la kod = ["pil", ["a"], ["kall", ["felt", ["global", "Uint8Array"], "from"],
+        [["kall", ["global", "unescape"], [["kall", ["global", "encodeURIComponent"], [["namn", "a"]]]]],
+         ["pil", ["b"], ["kall", ["felt", ["namn", "b"], "charCodeAt"], [["tal", 0]]]]]]]
+    returner [
+        ["uttrykk", ["tildel", ["global", "console"], ["objekt", [["log", skriv_json]]]]],
+        ["uttrykk", ["tildel", ["global", "document"], ["objekt", [["getElementById",
+            ["pil", ["a"], ["objekt", [["append", skriv_json]]]]]]]]],
+        ["uttrykk", ["tildel", ["global", "TextDecoder"], _klasse(["objekt", [["decode", dekod]]])]],
+        ["uttrykk", ["tildel", ["global", "TextEncoder"], _klasse(["objekt", [["encode", kod]]])]],
+        ["uttrykk", ["tildel", ["global", "fetch"], ["pil", ["a"], ["namn", "a"]]]],
+        ["uttrykk", ["tildel", ["felt", ["global", "WebAssembly"], "instantiateStreaming"],
+            ["pil", ["a", "b"], ["kall", ["felt", ["global", "WebAssembly"], "instantiate"],
+                [["kall", ["global", "readFile"], [["streng", wasm_sti], ["streng", "binary"]]], ["namn", "b"]]]]]]
+    ]
+}
+
+# Heile skriptet for `jsc -e`: shimen, så lastarprogrammet (JS-treet frå js.bygg_lastar) med
+# .catch som skriv «Uncaught <feil>» (som Chrome-konsollen) når noko når JavaScript.
+funksjon jsc_skript(wasm_sti: tekst, lastar_program: liste) -> tekst {
+    la setningar = jsc_shim(wasm_sti)
+    legg_til(setningar, ["uttrykk", ["kall", ["felt", lastar_program, "catch"],
+        [["pil", ["a"], ["kall", ["global", "print"], [["kall", ["felt", ["global", "JSON"], "stringify"],
+            [["binær", "+", ["streng", "Uncaught "], ["namn", "a"]]]]]]]]]])
+    returner js.token_til_tekst(js.emit_skript(setningar))
+}
+
+# Køyr ein bygd modul (utmappe med app.wasm, relativ til rota) i jsc. `importar` og
+# `wasm_url` må vere som i bygget (importane frå WASM-linja). Gjev {"logg", "uncaught",
+# "exit", "stderr"}: loggen er bitane frå print, dekoda og sette saman.
+funksjon jsc_køyr(jsc: tekst, utmappe: tekst, importar: liste, har_init: bool) -> ordbok {
+    la wasm_sti = rot() + "/" + utmappe + "/app.wasm"
+    la l = js.bygg_lastar(importar, "app.wasm", har_init)
+    la skript = jsc_skript(wasm_sti, l["program"])
+    la r = køyr_verktøy(jsc, ["-e", skript], 120)
+    la logg = ""
+    la uncaught = usann
+    la linjer = builtin.split(r["stdout"], "\n")
+    la i = 0
+    mens i < lengde(linjer) {
+        la s = tekst(linjer[i])
+        hvis s != "" {
+            la v = builtin.json_parse_raw(s)
+            la t = tekst(v)
+            hvis builtin.starts_with(t, "Uncaught ") { uncaught = sann } ellers { logg = logg + t }
+        }
+        i = i + 1
+    }
+    returner {"logg": logg, "uncaught": uncaught, "exit": r["exit"], "stderr": r["stderr"]}
+}
+
+# ─── WASM-linja frå tools/nc_wasm.no ─────────────────────────────────────────
+
+# Verdien etter «nøkkel=» i ei linje (t.d. v=abc123 i WASM-linja).
+funksjon felt(linje: tekst, nøkkel: tekst) -> tekst {
+    la p = builtin.index_of(linje, nøkkel + "=")
+    hvis p < 0 { returner "" }
+    la rest = builtin.slice(linje, p + lengde(nøkkel) + 1, lengde(linje))
+    la s = builtin.index_of(rest, " ")
+    la k = builtin.index_of(rest, ",")
+    hvis k >= 0 og (s < 0 eller k < s) { s = k }
+    hvis s >= 0 { rest = builtin.slice(rest, 0, s) }
+    returner builtin.trim(rest)
+}
+
+# Liste-verdien etter «nøkkel=» i WASM-linja (komma-separert, fram til neste mellomrom).
+funksjon liste_felt(linje: tekst, nøkkel: tekst) -> liste {
+    la p = builtin.index_of(linje, " " + nøkkel + "=")
+    hvis p < 0 { returner [] }
+    la rest = builtin.slice(linje, p + lengde(nøkkel) + 2, lengde(linje))
+    la s = builtin.index_of(rest, " ")
+    hvis s >= 0 { rest = builtin.slice(rest, 0, s) }
+    rest = builtin.trim(rest)
+    hvis rest == "" { returner [] }
+    returner builtin.split(rest, ",")
+}
