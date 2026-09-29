@@ -1,0 +1,639 @@
+// tools/nc_test_oppdaging.no — testoppdaging for `nc test` (test-blokker og test_*-funksjonar).
+//
+// Kompilatoren legg `test "namn" { ... }`-blokker i ncb["tests"], men ingenting køyrde
+// dei: `nc test` såg berre exit-koden til start(), so ein feilande test-blokk gav falsk
+// grønt, og ei fil med berre test_*-funksjonar (utan start) køyrde ingenting.
+//
+// Denne modulen byggjer ein TESTKØYRAR direkte i bytekoden til den kompilerte test-NCB-en,
+// utan ny kompilator og utan reseed (tools/nc_test.no køyrer frå kjelde):
+//
+//   * Kvar test-blokk i hovudmodulen blir ein vanleg funksjon
+//     `<modul>.__nc_testblokk_<i>__` (koden er uendra; blokka har ingen parametrar).
+//   * Ein ny inngang `<modul>.__nc_testkoyrar__` blir sett som ncb["entry"]. Han køyrer
+//     start() som før når han finst, og deretter kvar test-blokk for seg i prøv/fang
+//     (TRY_BEGIN "*"), so eit unntak i éin test ikkje stoppar dei andre.
+//   * test_*-funksjonar (toppnivå, utan parametrar, ikkje asynk) blir oppdaga og køyrde
+//     BERRE når fila ikkje har start(). Med start() er dei hjelparar som start() kallar
+//     sjølv (slik dei eksisterande testane er skrivne), og blir ikkje køyrde ein gong til.
+//   * Utan test-blokker og utan (test_*-funksjonar utan start) blir NCB-en ikkje rørd:
+//     vanlege testar køyrer byte-identisk som før.
+//
+// Semantikk per test: bestått når testen ikkje kastar og ikkje returnerer eit heiltal
+// ulikt 0 eller usann. Assert-meldinga kjem frå unntaket (tekst(e), t.d.
+// «assert_eq feilet: 4 != 5»). start() er feil berre når han kastar eller returnerer eit
+// heiltal ulikt 0 — same regel som exit-koden gav før (start() -> usann var og er grønt).
+//
+// Fatale feil (F38-gransking): somme feil er ikkje fangbare med prøv/fang, t.d.
+// «Ukjent variabel» frå VM-en (vert-nivå-kast i selfhost/vm.no) og builtin.exit(). Då døyr
+// prosessen midt i ein test. Køyraren skriv difor eit framdriftsmerke før start() og før
+// kvar test; tools/nc_test.no les kva test som var i gang (tolk_segment), rapporterer han
+// som FEIL med den ufanga feillinja, og køyrer RESTEN av testane i ein ny prosess (eit nytt
+// segment, utan start()). Slik stoppar ein fatal feil i éin test ikkje dei andre. Eit nytt
+// segment startar med fersk modultilstand (modulglobalar frå modul-init, ikkje det
+// tidlegare testar eller start() endra). Eit tidsavbrot (exit 124) blir ikkje køyrt vidare.
+//
+// Kjend kompilatoravgrensing (kan ikkje rettast i B0: fiksen er i
+// selfhost/compiler/ir_to_bytecode.no, som ligg i nc_main-lukkinga og krev reseed):
+// kompiler_test() nullstiller ikkje komp["current_locals"] (og anna funksjonstilstand) slik
+// kompiler_funksjon() gjer. Ei test-blokk arvar difor dei lokale namna til funksjonen eller
+// blokka som står rett før i kjelda. Følgjer: (1) ein lambda i blokka fangar desse namna
+// (LOAD_NAME x før kallet til __nc_lambda_N) og feilar med «Ukjent variabel: x» sjølv om
+// testkoden er gyldig; (2) ei blokk som les ein lokal frå ei anna blokk blir ikkje avvist
+// ved kompilering, men feilar ved køyring. Begge blir rapporterte som FEIL på den aktuelle
+// testen (med «Ukjent variabel»-meldinga), og dei andre testane køyrer vidare. Omveg til
+// kompilatoren er retta: legg lambdaen i ein eigen hjelpefunksjon, eller legg blokka med
+// lambda før blokker/funksjonar med lokale.
+//
+// Utskrift frå køyraren (éi linje per hending, prefiksa so testløparen skil dei frå
+// testen sin eigen utskrift):
+//   [nc-test] @start                           (framdriftsmerke før start())
+//   [nc-test] @<i>                             (framdriftsmerke før test nr. i, 0-basert)
+//   [nc-test] OK: <namn>
+//   [nc-test] FEIL: <namn> — <melding>
+//   [nc-test] FEIL: start() — <melding>        (start() kasta eller returnerte heiltal ≠ 0)
+//   [nc-test] <x>/<m> bestått                  (oppsummering for segmentet; start() er
+//                                               ikkje med i m)
+//
+// Exit-kode (returverdien til køyraren): start() sin ikkje-null heiltalskode vinn; elles 1
+// når minst éin test feila; elles start() sin returverdi (0/ingenting utan start).
+
+bruk selfhost.ncb_serde som serde
+
+funksjon markør() -> tekst {
+    returner "[nc-test] "
+}
+
+funksjon koyrar_namn() -> tekst {
+    returner "__nc_testkoyrar__"
+}
+
+// ── Kjelde-førefilter ───────────────────────────────────────────────────────────
+// Billig tekstsjekk før NCB-en blir dekoda. Førefilteret må ALDRI gje falsk bom (då blir
+// test-blokker/test_*-funksjonar stilt hoppa over → falsk grønt); eit falskt treff kostar
+// berre éi NCB-dekoding (målt ~20 ms for 150 KB, ~0,4 s for 2,4 MB). Det ser difor ikkje
+// etter start(): om start() finst, avgjer NCB-en (eit innrykka `funksjon start(` kan høyre
+// til eit grensesnitt eller ein struktur, og kortforma `start() -> heiltall { ... }` har
+// ikkje nøkkelordet `funksjon`).
+//
+// Treff når kjelda har
+//   (a) ordet `test` (heilt ord) følgt av blank/linjeskift og ein streng eller kommentar
+//       — ei mogleg test-blokk, eller
+//   (b) eit ord som byrjar på `test_` følgt av blank og `(` eller `<` — ein mogleg
+//       test_*-funksjon (`funksjon test_x()`, kortforma `test_x() { ... }`) eller eit kall.
+// Er ein bit av kjelda for kort til å avgjere (filslutt, eller `test` inni eit ord som
+// held fram), blir det rekna som treff.
+
+funksjon _ascii_ordteikn(c: heiltall) -> bool {
+    returner (c >= 48 og c <= 57) eller (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller c == 95
+}
+
+// Står teiknet rett før bit nr. `i` (som byrjar etter eit «test») inntil ein ordgrense?
+// Ikkje-ASCII blir rekna som grense (gjev heller falskt treff enn bom).
+funksjon _grense_før(bitar, i: heiltall) -> bool {
+    hvis i == 0 { returner sann }
+    la før = tekst(bitar[i - 1])
+    hvis lengde(før) == 0 {
+        // «testtest»: teiknet før er «t» frå førre «test» — berre filstart er grense.
+        returner i == 1
+    }
+    returner ikkje _ascii_ordteikn(char_code(builtin.slice(før, lengde(før) - 1, lengde(før))))
+}
+
+funksjon _mogleg_testblokk(etter: tekst) -> bool {
+    hvis lengde(etter) == 0 { returner sann }
+    hvis _ascii_ordteikn(char_code(builtin.slice(etter, 0, 1))) { returner usann }
+    la rest = builtin.trim(etter)
+    hvis lengde(rest) == 0 { returner sann }
+    returner builtin.starts_with(rest, "\"") eller builtin.starts_with(rest, "'") eller builtin.starts_with(rest, "/")
+}
+
+funksjon _mogleg_testfunksjon(etter: tekst) -> bool {
+    hvis ikkje builtin.starts_with(etter, "_") { returner usann }
+    la j: heiltall = 1
+    mens j < lengde(etter) {
+        la c = char_code(builtin.slice(etter, j, j + 1))
+        hvis ikkje (_ascii_ordteikn(c) eller c > 127) { bryt }
+        j = j + 1
+    }
+    la rest = builtin.trim(builtin.slice(etter, j, lengde(etter)))
+    hvis lengde(rest) == 0 { returner sann }
+    returner builtin.starts_with(rest, "(") eller builtin.starts_with(rest, "<")
+}
+
+funksjon kjelde_kan_ha_testar(kjelde: tekst) -> bool {
+    la bitar = builtin.split(kjelde, "test")
+    la i: heiltall = 1
+    mens i < lengde(bitar) {
+        hvis _grense_før(bitar, i) {
+            la etter = tekst(bitar[i])
+            hvis _mogleg_testblokk(etter) eller _mogleg_testfunksjon(etter) { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+// ── Testplan frå NCB ────────────────────────────────────────────────────────────
+
+funksjon hovudmodul(ncb) -> tekst {
+    la entry = ""
+    prøv { entry = tekst(ncb["entry"]) } fang (e) { entry = "" }
+    la delar = builtin.split(entry, ".")
+    hvis lengde(delar) < 2 { returner "__main__" }
+    la ut = tekst(delar[0])
+    la i: heiltall = 1
+    mens i < lengde(delar) - 1 {
+        ut = ut + "." + tekst(delar[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _har(d, nøkkel: tekst) -> bool {
+    prøv { returner finnes_nøkkel(d, nøkkel) } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon _fyrste_linje(def) -> heiltall {
+    hvis _har(def, "source_lines") {
+        la linjer = def["source_lines"]
+        prøv {
+            hvis lengde(linjer) > 0 { returner builtin.heltall_fra_tekst(tekst(linjer[0])) }
+        } fang (e) { }
+    }
+    returner 1000000000
+}
+
+funksjon _er_asynk(def) -> bool {
+    hvis ikkje _har(def, "is_async") { returner usann }
+    returner tekst(def["is_async"]) == "sann" eller tekst(def["is_async"]) == "true"
+}
+
+funksjon _tal_parametrar(def) -> heiltall {
+    hvis ikkje _har(def, "params") { returner 0 }
+    la p = def["params"]
+    prøv { returner lengde(p) } fang (e) { }
+    returner 0
+}
+
+// test_*-funksjonar i hovudmodulen (toppnivå, 0 parametrar, ikkje asynk), sorterte
+// etter kjeldelinje (so rapporten følgjer fila); utan source_lines kjem dei sist.
+funksjon testfunksjonar(ncb, modul: tekst) -> liste_tekst {
+    la funksjonar = ncb["functions"]
+    la prefiks = modul + ".test_"
+    la kandidatar = []
+    for nøkkel i nøkler(funksjonar) {
+        la k = tekst(nøkkel)
+        hvis builtin.starts_with(k, prefiks) {
+            la kort = builtin.slice(k, lengde(modul) + 1, lengde(k))
+            la def = funksjonar[k]
+            hvis builtin.index_of(kort, ".") < 0 og builtin.type(def) == "ordbok" og
+               _tal_parametrar(def) == 0 og ikkje _er_asynk(def) {
+                legg_til(kandidatar, {"k": k, "linje": _fyrste_linje(def)})
+            }
+        }
+    }
+    // Innstikksortering (få element).
+    la i: heiltall = 1
+    mens i < lengde(kandidatar) {
+        la j: heiltall = i
+        mens j > 0 og _før(kandidatar[j], kandidatar[j - 1]) {
+            la tmp = kandidatar[j]
+            kandidatar[j] = kandidatar[j - 1]
+            kandidatar[j - 1] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+    la ut: liste_tekst = []
+    i = 0
+    mens i < lengde(kandidatar) {
+        legg_til(ut, tekst(kandidatar[i]["k"]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _før(a, b) -> bool {
+    la linje_a: heiltall = a["linje"]
+    la linje_b: heiltall = b["linje"]
+    returner linje_a < linje_b
+}
+
+// Test-blokkene til hovudmodulen (ncb["tests"] kan òg innehalde blokker frå importerte
+// modular etter bundling; dei høyrer til sin eigen modul og blir ikkje køyrde her).
+funksjon testblokker(ncb, modul: tekst) -> liste {
+    la ut = []
+    hvis ikkje _har(ncb, "tests") { returner ut }
+    la testar = ncb["tests"]
+    hvis testar == null { returner ut }
+    hvis builtin.type(testar) != "liste" { returner ut }
+    la i: heiltall = 0
+    mens i < lengde(testar) {
+        la t = testar[i]
+        hvis builtin.type(t) == "ordbok" og _har(t, "code") {
+            la m = modul
+            hvis _har(t, "module") { m = tekst(t["module"]) }
+            hvis m == modul { legg_til(ut, t) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Bytekode for køyraren ───────────────────────────────────────────────────────
+
+funksjon _op(kode, a: tekst) -> heiltall {
+    legg_til(kode, [a])
+    returner 0
+}
+
+funksjon _op1(kode, a: tekst, b) -> heiltall {
+    legg_til(kode, [a, b])
+    returner 0
+}
+
+funksjon _op2(kode, a: tekst, b, c) -> heiltall {
+    legg_til(kode, [a, b, c])
+    returner 0
+}
+
+funksjon _skriv_konst(kode, t: tekst) -> heiltall {
+    _op1(kode, "PUSH_CONST", t)
+    _op2(kode, "CALL", "builtin.skriv", 1)
+    _op(kode, "POP")
+    returner 0
+}
+
+// skriv(prefiks + tekst(<var>) + etter)
+funksjon _skriv_med_verdi(kode, prefiks: tekst, var: tekst, etter: tekst) -> heiltall {
+    _op1(kode, "PUSH_CONST", prefiks)
+    _op1(kode, "LOAD_NAME", var)
+    _op2(kode, "CALL", "builtin.tekst", 1)
+    _op(kode, "BINARY_ADD")
+    _op1(kode, "PUSH_CONST", etter)
+    _op(kode, "BINARY_ADD")
+    _op2(kode, "CALL", "builtin.skriv", 1)
+    _op(kode, "POP")
+    returner 0
+}
+
+funksjon _auk(kode, var: tekst) -> heiltall {
+    _op1(kode, "LOAD_NAME", var)
+    _op1(kode, "PUSH_CONST", 1)
+    _op(kode, "BINARY_ADD")
+    _op1(kode, "STORE_NAME", var)
+    returner 0
+}
+
+// Hopp til `feil_label` når <var> er eit heiltal ≠ 0, eller (når `usann_er_feil`) usann;
+// elles vidare.
+funksjon _hopp_ved_feil_retur(kode, var: tekst, feil_label: tekst, base: tekst, usann_er_feil: bool) -> heiltall {
+    la ikkje_heiltal = base + "_ikkje_heiltal__"
+    la vidare = base + "_retur_ok__"
+    _op1(kode, "LOAD_NAME", var)
+    _op2(kode, "CALL", "builtin.type", 1)
+    _op1(kode, "PUSH_CONST", "heltall")
+    _op(kode, "COMPARE_EQ")
+    _op1(kode, "JUMP_IF_FALSE", ikkje_heiltal)
+    _op1(kode, "LOAD_NAME", var)
+    _op1(kode, "PUSH_CONST", 0)
+    _op(kode, "COMPARE_EQ")
+    _op1(kode, "JUMP_IF_FALSE", feil_label)
+    _op1(kode, "JUMP", vidare)
+    _op1(kode, "LABEL", ikkje_heiltal)
+    hvis usann_er_feil {
+        _op1(kode, "LOAD_NAME", var)
+        _op2(kode, "CALL", "builtin.type", 1)
+        _op1(kode, "PUSH_CONST", "boolsk")
+        _op(kode, "COMPARE_EQ")
+        _op1(kode, "JUMP_IF_FALSE", vidare)
+        _op1(kode, "LOAD_NAME", var)
+        _op1(kode, "JUMP_IF_FALSE", feil_label)
+    }
+    _op1(kode, "LABEL", vidare)
+    returner 0
+}
+
+funksjon _emit_test(kode, indeks: heiltall, visningsnamn: tekst, fn: tekst) -> heiltall {
+    la base = "__nct_" + tekst_fra_heltall(indeks)
+    la fang_l = base + "_fang__"
+    la retfeil_l = base + "_retfeil__"
+    la ok_l = base + "_ok__"
+    la slutt_l = base + "_slutt__"
+    _skriv_konst(kode, markør() + "@" + tekst_fra_heltall(indeks) + "\n")
+    _op2(kode, "TRY_BEGIN", fang_l, "*")
+    _op2(kode, "CALL", fn, 0)
+    _op1(kode, "STORE_NAME", "__nc_r")
+    _op(kode, "TRY_END")
+    _hopp_ved_feil_retur(kode, "__nc_r", retfeil_l, base, sann)
+    _op1(kode, "JUMP", ok_l)
+    _op1(kode, "LABEL", retfeil_l)
+    _skriv_med_verdi(kode, markør() + "FEIL: " + visningsnamn + " — returnerte ", "__nc_r", "\n")
+    _auk(kode, "__nc_feil")
+    _op1(kode, "JUMP", slutt_l)
+    _op1(kode, "LABEL", ok_l)
+    _skriv_konst(kode, markør() + "OK: " + visningsnamn + "\n")
+    _auk(kode, "__nc_ok")
+    _op1(kode, "JUMP", slutt_l)
+    _op1(kode, "LABEL", fang_l)
+    _op(kode, "TRY_END")
+    _op(kode, "LOAD_EXCEPTION")
+    _op1(kode, "STORE_NAME", "__nc_e")
+    _skriv_med_verdi(kode, markør() + "FEIL: " + visningsnamn + " — ", "__nc_e", "\n")
+    _auk(kode, "__nc_feil")
+    _op1(kode, "LABEL", slutt_l)
+    returner 0
+}
+
+// Koden til køyraren. `testar` er par [visningsnamn, funksjonsnøkkel]; testane frå indeks
+// `frå` blir køyrde (eit nytt segment etter ein fatal feil startar etter testen som døydde).
+funksjon koyrar_kode(modul: tekst, har_start: bool, testar: liste, frå: heiltall) -> liste {
+    la kode = []
+    _op1(kode, "PUSH_CONST", 0)
+    _op1(kode, "STORE_NAME", "__nc_ok")
+    _op1(kode, "PUSH_CONST", 0)
+    _op1(kode, "STORE_NAME", "__nc_feil")
+    _op1(kode, "PUSH_CONST", 0)
+    _op1(kode, "STORE_NAME", "__nc_start_r")
+    hvis har_start {
+        _skriv_konst(kode, markør() + "@start\n")
+        _op2(kode, "TRY_BEGIN", "__nct_start_fang__", "*")
+        _op2(kode, "CALL", modul + ".start", 0)
+        _op1(kode, "STORE_NAME", "__nc_start_r")
+        _op(kode, "TRY_END")
+        _hopp_ved_feil_retur(kode, "__nc_start_r", "__nct_start_retfeil__", "__nct_start", usann)
+        _op1(kode, "JUMP", "__nct_start_slutt__")
+        _op1(kode, "LABEL", "__nct_start_retfeil__")
+        _skriv_med_verdi(kode, markør() + "FEIL: start() — returnerte ", "__nc_start_r", "\n")
+        _op1(kode, "JUMP", "__nct_start_slutt__")
+        _op1(kode, "LABEL", "__nct_start_fang__")
+        _op(kode, "TRY_END")
+        _op(kode, "LOAD_EXCEPTION")
+        _op1(kode, "STORE_NAME", "__nc_e")
+        _skriv_med_verdi(kode, markør() + "FEIL: start() — ", "__nc_e", "\n")
+        _op1(kode, "PUSH_CONST", 1)
+        _op1(kode, "STORE_NAME", "__nc_start_r")
+        _op1(kode, "LABEL", "__nct_start_slutt__")
+    }
+    la i: heiltall = frå
+    mens i < lengde(testar) {
+        _emit_test(kode, i, tekst(testar[i][0]), tekst(testar[i][1]))
+        i = i + 1
+    }
+    la m: heiltall = lengde(testar) - frå
+    hvis m < 0 { m = 0 }
+    _skriv_med_verdi(kode, markør(), "__nc_ok", "/" + tekst_fra_heltall(m) + " bestått\n")
+    // Returverdi: start() sin ikkje-null heiltalskode vinn, so exit-koden er som før;
+    // elles 1 ved testfeil; elles start() sin returverdi.
+    _hopp_ved_feil_retur(kode, "__nc_start_r", "__nct_ret_start__", "__nct_ret", usann)
+    _op1(kode, "LOAD_NAME", "__nc_feil")
+    _op1(kode, "PUSH_CONST", 0)
+    _op(kode, "COMPARE_EQ")
+    _op1(kode, "JUMP_IF_FALSE", "__nct_ret_1__")
+    _op1(kode, "LOAD_NAME", "__nc_start_r")
+    _op(kode, "RETURN")
+    _op1(kode, "LABEL", "__nct_ret_start__")
+    _op1(kode, "LOAD_NAME", "__nc_start_r")
+    _op(kode, "RETURN")
+    _op1(kode, "LABEL", "__nct_ret_1__")
+    _op1(kode, "PUSH_CONST", 1)
+    _op(kode, "RETURN")
+    returner kode
+}
+
+funksjon _funksjonsdef(namn: tekst, modul: tekst, kode) {
+    la def = {}
+    def["name"] = namn
+    def["module"] = modul
+    def["params"] = []
+    def["is_async"] = usann
+    def["string_encoding"] = "decoded-v1"
+    def["code"] = kode
+    returner def
+}
+
+// Legg køyraren inn i `ncb` (muterer) og returnerer testplanen (visningsnamna, i
+// køyreorden), eller ei tom liste når fila ikkje treng køyrar (då er ncb urørd).
+// `frå` > 0 / `med_start` = usann byggjer eit oppfølgingssegment etter ein fatal feil.
+funksjon installer_koyrar_segment(ncb, frå: heiltall, med_start: bool) -> liste_tekst {
+    la plan: liste_tekst = []
+    hvis builtin.type(ncb) != "ordbok" eller ikkje _har(ncb, "functions") { returner plan }
+    la funksjonar = ncb["functions"]
+    hvis builtin.type(funksjonar) != "ordbok" { returner plan }
+    la modul = hovudmodul(ncb)
+    la har_start = _har(funksjonar, modul + ".start")
+    la blokker = testblokker(ncb, modul)
+    la testar = []
+    la i: heiltall = 0
+    mens i < lengde(blokker) {
+        la b = blokker[i]
+        la kort = "__nc_testblokk_" + tekst_fra_heltall(i) + "__"
+        la def = _funksjonsdef(kort, modul, b["code"])
+        hvis _har(b, "string_encoding") { def["string_encoding"] = b["string_encoding"] }
+        funksjonar[modul + "." + kort] = def
+        la namn = ""
+        hvis _har(b, "name") { namn = tekst(b["name"]) }
+        hvis namn == "" { namn = "test-blokk " + tekst_fra_heltall(i + 1) }
+        legg_til(testar, [namn, modul + "." + kort])
+        i = i + 1
+    }
+    hvis ikkje har_start {
+        la fn = testfunksjonar(ncb, modul)
+        i = 0
+        mens i < lengde(fn) {
+            la k = tekst(fn[i])
+            legg_til(testar, [builtin.slice(k, lengde(modul) + 1, lengde(k)), k])
+            i = i + 1
+        }
+    }
+    hvis lengde(testar) == 0 { returner plan }
+    la namn = koyrar_namn()
+    funksjonar[modul + "." + namn] = _funksjonsdef(namn, modul,
+        koyrar_kode(modul, har_start og med_start, testar, frå))
+    ncb["entry"] = modul + "." + namn
+    i = 0
+    mens i < lengde(testar) {
+        legg_til(plan, tekst(testar[i][0]))
+        i = i + 1
+    }
+    returner plan
+}
+
+// Legg køyraren inn i `ncb` (muterer). Returnerer talet på testar køyraren eig, eller 0
+// når fila ikkje treng køyrar (då er ncb urørd).
+funksjon installer_koyrar(ncb) -> heiltall {
+    returner lengde(installer_koyrar_segment(ncb, 0, sann))
+}
+
+// ── Fil-inngang for testløparen ─────────────────────────────────────────────────
+
+funksjon _vert_binær() -> bool {
+    la v = 0
+    prøv { v = builtin.ncb_binaer_versjon() } fang (e) { returner usann }
+    returner v >= 1
+}
+
+// Les NCB-en på `ncb_sti`, installer køyraren (segment frå test nr. `frå`, med start()
+// når `med_start`) og skriv resultatet til `ut_sti` i same format (binær inn → binær ut,
+// JSON inn → JSON ut). Returnerer testplanen (tom = fila treng ingen køyrar; ingenting blir
+// skrive). Kastar ved lese-/skrivefeil, so kallaren kan feile testfila i staden for å
+// hoppe stille over test-blokkene.
+funksjon forbered_ncb(ncb_sti: tekst, ut_sti: tekst, frå: heiltall, med_start: bool) -> liste_tekst {
+    la t = builtin.fil_les(ncb_sti)
+    la binær = serde.er_binaer_tekst(t)
+    la ncb = null
+    hvis binær og _vert_binær() {
+        ncb = builtin.ncb_fra_tekst(t)
+    } ellers {
+        ncb = serde.deserialiser_tekst(t)
+    }
+    la plan = installer_koyrar_segment(ncb, frå, med_start)
+    hvis lengde(plan) == 0 { returner plan }
+    hvis binær {
+        hvis _vert_binær() {
+            builtin.fil_skriv(ut_sti, builtin.ncb_til_binaer(ncb))
+        } ellers {
+            builtin.fil_skriv(ut_sti, serde.serialiser_tekst(ncb))
+        }
+    } ellers {
+        builtin.fil_skriv(ut_sti, json_skriv(ncb))
+    }
+    returner plan
+}
+
+// ── Tolking av utskrifta ────────────────────────────────────────────────────────
+// Rapportlinjene til køyraren (utan markør, framdriftsmerka «@…» medrekna). Prosess-ABI-en
+// kan levere stdout med escapa linjeskift («\n» som to teikn); ei rapportlinje sluttar
+// difor ved fyrste ekte linjeskift, fyrste escapa «\n» eller neste markør.
+funksjon rapportlinjer(utskrift: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la m = markør()
+    la rest = builtin.replace(utskrift, "\r", "")
+    la pos = builtin.index_of(rest, m)
+    mens pos >= 0 {
+        rest = builtin.slice(rest, pos + lengde(m), lengde(rest))
+        la slutt = lengde(rest)
+        la nl = builtin.index_of(rest, "\n")
+        hvis nl >= 0 og nl < slutt { slutt = nl }
+        la esc = builtin.index_of(rest, "\\n")
+        hvis esc >= 0 og esc < slutt { slutt = esc }
+        la neste = builtin.index_of(rest, m)
+        hvis neste >= 0 og neste < slutt { slutt = neste }
+        legg_til(ut, builtin.slice(rest, 0, slutt))
+        rest = builtin.slice(rest, slutt, lengde(rest))
+        pos = builtin.index_of(rest, m)
+    }
+    returner ut
+}
+
+funksjon _berre_siffer(t: tekst) -> bool {
+    hvis lengde(t) == 0 { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la c = char_code(builtin.slice(t, i, i + 1))
+        hvis c < 48 eller c > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// «x/n bestått» → [x, n]; elles [-1, -1].
+funksjon _oppsummeringslinje(l: tekst) -> liste_heiltall {
+    hvis ikkje builtin.ends_with(l, " bestått") { returner [-1, -1] }
+    hvis builtin.starts_with(l, "OK: ") eller builtin.starts_with(l, "FEIL: ") eller builtin.starts_with(l, "@") {
+        returner [-1, -1]
+    }
+    la delar = builtin.split(builtin.slice(l, 0, lengde(l) - lengde(" bestått")), "/")
+    hvis lengde(delar) != 2 { returner [-1, -1] }
+    la x = builtin.trim(tekst(delar[0]))
+    la n = builtin.trim(tekst(delar[1]))
+    hvis ikkje _berre_siffer(x) eller ikkje _berre_siffer(n) { returner [-1, -1] }
+    returner [builtin.heltall_fra_tekst(x), builtin.heltall_fra_tekst(n)]
+}
+
+// Oppsummeringa «x/n bestått» → [x, n], eller [-1, -1] når køyraren ikkje kom så langt
+// (t.d. at prosessen døydde eller start() avslutta prosessen før test-blokkene).
+funksjon oppsummering(linjer: liste_tekst) -> liste_heiltall {
+    la i: heiltall = lengde(linjer) - 1
+    mens i >= 0 {
+        la o = _oppsummeringslinje(tekst(linjer[i]))
+        hvis o[1] >= 0 { returner o }
+        i = i - 1
+    }
+    returner [-1, -1]
+}
+
+// Tolkar utskrifta frå eitt køyrarsegment. `plan` er testplanen frå forbered_ncb,
+// `feillinje` den ufanga feillinja frå runtimen («ERROR: …»/«norscode: …») eller "".
+// Returnerer ei ordbok med
+//   "rapport": visningslinjene (OK:/FEIL:/merknader), utan framdriftsmerke og utan
+//              segment-oppsummeringa (kallaren skriv ein samla «x/n bestått»);
+//   "ferdig":  sann når segmentet nådde oppsummeringa;
+//   "neste":   testindeksen eit nytt segment skal starte på (= lengde(plan) når alt er
+//              køyrt), eller -1 når køyringa ikkje kan halde fram (tidsavbrot, eller
+//              prosessen døydde før køyraren starta).
+// Døydde prosessen midt i ein test, blir testen rapportert som FEIL med feillinja (eller
+// exit-koden). Døydde han i start(): FEIL på start() — unnateke exit 0 utan feillinje
+// (builtin.exit(0) frå start() var grønt før F38 òg), som berre blir notert.
+funksjon tolk_segment(utskrift: tekst, exit_kode: tekst, feillinje: tekst, plan: liste_tekst) -> ordbok {
+    la linjer = rapportlinjer(utskrift)
+    la rapport: liste_tekst = []
+    la siste_merke = ""
+    la merke_avslutta = usann
+    la ferdig = usann
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = tekst(linjer[i])
+        hvis builtin.starts_with(l, "@") {
+            siste_merke = builtin.slice(l, 1, lengde(l))
+            merke_avslutta = usann
+        } ellers hvis _oppsummeringslinje(l)[1] >= 0 {
+            ferdig = sann
+        } ellers {
+            legg_til(rapport, l)
+            hvis builtin.starts_with(l, "OK: ") eller builtin.starts_with(l, "FEIL: ") { merke_avslutta = sann }
+        }
+        i = i + 1
+    }
+    la ut = {"rapport": rapport, "ferdig": ferdig, "neste": -1}
+    hvis ferdig {
+        ut["neste"] = lengde(plan)
+        returner ut
+    }
+    la tidsavbrot = exit_kode == "124"
+    la grunn = feillinje
+    hvis grunn == "" { grunn = "prosessen avslutta (exit " + exit_kode + ") før han var ferdig" }
+    hvis tidsavbrot { grunn = "tidsavbrot (exit 124); resten av testane blir ikkje køyrde" }
+    hvis siste_merke == "" {
+        legg_til(rapport, "FEIL: testkøyraren starta ikkje — " + grunn)
+        returner ut
+    }
+    la neste: heiltall = -1
+    hvis siste_merke == "start" {
+        hvis exit_kode == "0" og feillinje == "" {
+            legg_til(rapport, "start() avslutta prosessen (exit 0); testane held fram i ny prosess")
+        } ellers {
+            legg_til(rapport, "FEIL: start() — " + grunn)
+        }
+        neste = 0
+    } ellers hvis _berre_siffer(siste_merke) {
+        la t = builtin.heltall_fra_tekst(siste_merke)
+        hvis ikkje merke_avslutta {
+            la namn = "test nr. " + tekst_fra_heltall(t + 1)
+            hvis t >= 0 og t < lengde(plan) { namn = tekst(plan[t]) }
+            legg_til(rapport, "FEIL: " + namn + " — " + grunn)
+        }
+        neste = t + 1
+    } ellers {
+        legg_til(rapport, "FEIL: ukjent framdriftsmerke «" + siste_merke + "» — " + grunn)
+    }
+    hvis tidsavbrot { neste = -1 }
+    ut["neste"] = neste
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    skriv("tools/nc_test_oppdaging.no: bibliotek for tools/nc_test.no\n")
+    returner 0
+}
