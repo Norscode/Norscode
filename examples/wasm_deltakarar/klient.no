@@ -1,0 +1,275 @@
+# examples/wasm_deltakarar/klient.no — deltakarliste som blir henta frå og lagra til tenaren
+# (W6): klientlogikk i Norscode, kompilert til WebAssembly av tools/nc_wasm.no (sjå app.no).
+#
+#   - Ved start blir lista henta med nett.hent_json("/api/deltakarar") (fetch mot same opphav).
+#     Medan førespurnaden går, står det «Hentar deltakarlista …» i statusfeltet, og knappane
+#     er av.
+#   - «Legg til» validerer namn og e-post med reglane i reglar.no (dei same som tenaren
+#     brukar) og legg deltakaren til lokalt; «Ulagra endringar» blir synleg. «Fjern» per rad
+#     (delegert klikk) gjer det same.
+#   - «Lagre på tenaren» sender heile lista med nett.send_json("POST", …). Tenaren validerer
+#     ho på nytt; ein 400 med {"feil": […]} blir vist i feilfeltet (role=alert).
+#   - «Hent på nytt» hentar lista frå tenaren igjen (ulagra endringar forsvinn).
+#   - Nettverksfeil, tidsavbrot og andre statusar gjev ei tydeleg melding (feilmelding()),
+#     og lista som alt er vist, blir ståande.
+#
+# Svara kjem gjennom tilbakekall (closures) i den rekkjefølgja førespurnadene vart sende.
+# last_inn og lagre tek ein valfri closure `etter` som blir kalla når sida er oppdatert
+# (testklienten brukar han til å køyre neste steg; i produksjon er han null).
+
+bruk std.wasm_vert som vert
+bruk std.wasm_nett som nett
+bruk std.wasm_rt som rt
+bruk examples.wasm_deltakarar.reglar som reglar
+
+la liste: liste = []
+la neste_id: heltall = 1
+la ulagra: bool = usann
+la liste_h: heltall = 0
+la status_h: heltall = 0
+la ulagra_h: heltall = 0
+la feil_h: heltall = 0
+la skjema_feil_h: heltall = 0
+la namn_h: heltall = 0
+la epost_h: heltall = 0
+la lagre_h: heltall = 0
+la last_h: heltall = 0
+la treff_h: heltall = 0
+
+# ─── Reine funksjonar (same resultat i VM-en og i WASM) ──────────────────────
+
+# Meldinga brukaren ser for ein feil frå std/wasm_nett.no. `kva` er det som mislukkast.
+funksjon feilmelding(kva: tekst, f: ordbok) -> tekst {
+    la art = f["art"]
+    hvis art == "status" og f["status"] == 400 {
+        la frå_tenaren = ""
+        prøv {
+            la v = rt.json_parse(f["kropp"])
+            hvis builtin.type(v) == "ordbok" og finnes_nøkkel(v, "feil") { frå_tenaren = builtin.join(v["feil"], " ") }
+        } fang (e) {
+            frå_tenaren = ""
+        }
+        hvis frå_tenaren != "" { returner kva + ": " + frå_tenaren }
+        returner kva + ": tenaren avviste førespurnaden (status 400)."
+    }
+    hvis art == "status" { returner kva + ": tenaren svara med status " + tekst(f["status"]) + "." }
+    hvis art == "nettverk" { returner kva + ": fekk ikkje kontakt med tenaren." }
+    hvis art == "tidsavbrot" { returner kva + ": tenaren svara ikkje i tide." }
+    hvis art == "avbrote" { returner kva + ": avbrote." }
+    hvis art == "json" { returner kva + ": ugyldig svar frå tenaren." }
+    returner kva + ": " + tekst(f["melding"])
+}
+
+# Lista slik tenaren vil ha ho (utan dei lokale id-ane).
+funksjon til_tenaren(l: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(ut, {"namn": l[i]["namn"], "epost": l[i]["epost"]})
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon antal() -> heltall {
+    returner lengde(liste)
+}
+
+# ─── Visning ─────────────────────────────────────────────────────────────────
+
+funksjon vis_status(t: tekst) -> heltall {
+    vert.sett_tekst(status_h, t)
+    returner 0
+}
+
+funksjon vis_feil(t: tekst) -> heltall {
+    vert.sett_tekst(feil_h, t)
+    vert.vis(feil_h, t != "")
+    vert.sett_klasse(feil_h, "synleg", t != "")
+    returner 0
+}
+
+funksjon opptatt(på: bool) -> heltall {
+    hvis på {
+        vert.sett_attr(lagre_h, "disabled", "disabled")
+        vert.sett_attr(last_h, "disabled", "disabled")
+        vert.sett_attr(liste_h, "aria-busy", "true")
+    } ellers {
+        vert.fjern_attr(lagre_h, "disabled")
+        vert.fjern_attr(last_h, "disabled")
+        vert.sett_attr(liste_h, "aria-busy", "false")
+    }
+    returner 0
+}
+
+funksjon sett_ulagra(på: bool) -> heltall {
+    ulagra = på
+    vert.vis(ulagra_h, på)
+    vert.sett_klasse(ulagra_h, "synleg", på)
+    returner 0
+}
+
+funksjon lag_rad(o: ordbok) -> heltall {
+    la li = vert.lag("li")
+    la namn = vert.lag("strong")
+    vert.sett_tekst(namn, o["namn"])
+    la epost = vert.lag("small")
+    vert.sett_tekst(epost, " " + o["epost"] + " ")
+    la knapp = vert.lag("button")
+    vert.sett_attr(knapp, "type", "button")
+    vert.sett_attr(knapp, "data-id", o["id"])
+    vert.sett_attr(knapp, "aria-label", "Fjern " + o["namn"])
+    vert.sett_handlar(knapp, "klikk", "fjern")
+    vert.sett_tekst(knapp, "Fjern")
+    vert.legg_inn(li, namn)
+    vert.legg_inn(li, epost)
+    vert.legg_inn(li, knapp)
+    vert.legg_inn(liste_h, li)
+    vert.slepp(namn)
+    vert.slepp(epost)
+    vert.slepp(knapp)
+    vert.slepp(li)
+    returner 0
+}
+
+funksjon gjengje() -> heltall {
+    vert.tøm(liste_h)
+    la i = 0
+    mens i < lengde(liste) {
+        lag_rad(liste[i])
+        i = i + 1
+    }
+    vert.sett_tekst(treff_h, tekst(lengde(liste)) + " deltakarar")
+    returner lengde(liste)
+}
+
+funksjon ferdig(etter) -> heltall {
+    hvis etter != null { builtin.ncb_call_fn(etter, lengde(liste)) }
+    returner 0
+}
+
+# ─── Nett ────────────────────────────────────────────────────────────────────
+
+funksjon last_inn(etter) -> heltall {
+    opptatt(sann)
+    vis_feil("")
+    vis_status("Hentar deltakarlista …")
+    nett.hent_json("/api/deltakarar", fun(s) -> lasta(s, etter), fun(f) -> feila("Kunne ikkje hente lista", f, etter))
+    returner 0
+}
+
+funksjon lasta(s: ordbok, etter) -> heltall {
+    la frå = s["json"]["deltakarar"]
+    liste = []
+    la i = 0
+    mens i < lengde(frå) {
+        legg_til(liste, {"id": neste_id, "namn": frå[i]["namn"], "epost": frå[i]["epost"]})
+        neste_id = neste_id + 1
+        i = i + 1
+    }
+    gjengje()
+    sett_ulagra(usann)
+    vis_status(tekst(lengde(liste)) + " deltakarar.")
+    opptatt(usann)
+    returner ferdig(etter)
+}
+
+# Send ei liste (vanlegvis den som er vist) til tenaren.
+funksjon lagre_liste(l: liste, etter) -> heltall {
+    opptatt(sann)
+    vis_feil("")
+    vis_status("Lagrar …")
+    nett.send_json("POST", "/api/deltakarar", {"deltakarar": til_tenaren(l)},
+        fun(s) -> lagra(s, etter), fun(f) -> feila("Kunne ikkje lagre", f, etter))
+    returner 0
+}
+
+funksjon lagre(etter) -> heltall {
+    returner lagre_liste(liste, etter)
+}
+
+funksjon lagra(s: ordbok, etter) -> heltall {
+    sett_ulagra(usann)
+    vis_status("Lagra " + tekst(s["json"]["lagra"]) + " deltakarar.")
+    opptatt(usann)
+    returner ferdig(etter)
+}
+
+funksjon feila(kva: tekst, f: ordbok, etter) -> heltall {
+    vis_status("")
+    vis_feil(feilmelding(kva, f))
+    opptatt(usann)
+    returner ferdig(etter)
+}
+
+# ─── Hendingar (tilbakekall utan parametrar) ─────────────────────────────────
+
+funksjon legg_til_deltakar() -> heltall {
+    la namn = vert.hent_verdi(namn_h)
+    la epost = vert.hent_verdi(epost_h)
+    la f = reglar.gyldig_namn(namn)
+    hvis f == "" { f = reglar.gyldig_epost(epost) }
+    hvis f == "" og lengde(liste) >= reglar.maks_deltakarar() { f = "Lista er full." }
+    vert.sett_tekst(skjema_feil_h, f)
+    hvis f != "" { returner 0 }
+    legg_til(liste, {"id": neste_id, "namn": builtin.trim(namn), "epost": builtin.trim(epost)})
+    neste_id = neste_id + 1
+    vert.sett_verdi(namn_h, "")
+    vert.sett_verdi(epost_h, "")
+    gjengje()
+    sett_ulagra(sann)
+    vert.fokus(namn_h)
+    returner 0
+}
+
+funksjon fjern() -> heltall {
+    la id = heltall(vert.hending_data("id"))
+    la ny = []
+    la i = 0
+    mens i < lengde(liste) {
+        hvis liste[i]["id"] != id { legg_til(ny, liste[i]) }
+        i = i + 1
+    }
+    liste = ny
+    gjengje()
+    sett_ulagra(sann)
+    returner 0
+}
+
+funksjon endra_felt() -> heltall {
+    vert.sett_tekst(skjema_feil_h, "")
+    returner 0
+}
+
+funksjon lagre_klikk() -> heltall {
+    returner lagre(null)
+}
+
+funksjon last_klikk() -> heltall {
+    returner last_inn(null)
+}
+
+# Start med ein closure som blir kalla når lista er henta (testklienten), eller null.
+funksjon start_med(etter) -> heltall {
+    liste_h = vert.finn("#liste")
+    status_h = vert.finn("#status")
+    ulagra_h = vert.finn("#ulagra")
+    feil_h = vert.finn("#feil")
+    skjema_feil_h = vert.finn("#skjema-feil")
+    namn_h = vert.finn("#namn")
+    epost_h = vert.finn("#epost")
+    lagre_h = vert.finn("#lagre")
+    last_h = vert.finn("#last")
+    treff_h = vert.finn("#nc-resultat")
+    vert.lytt(vert.finn("#skjema"), "send", "legg_til_deltakar")
+    vert.lytt(namn_h, "input", "endra_felt")
+    vert.lytt(epost_h, "input", "endra_felt")
+    vert.lytt(lagre_h, "klikk", "lagre_klikk")
+    vert.lytt(last_h, "klikk", "last_klikk")
+    vert.deleger("klikk", "fjern")
+    returner last_inn(etter)
+}
+
+funksjon start() -> heltall {
+    returner start_med(null)
+}

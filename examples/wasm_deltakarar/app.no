@@ -1,0 +1,137 @@
+# examples/wasm_deltakarar/app.no — serve-app for deltakar-demoen (W6 i WASM-sporet).
+#
+# Klientlogikken (examples/wasm_deltakarar/klient.no) er Norscode kompilert til WebAssembly.
+# Lista blir henta frå og lagra til tenaren via JSON-ruta /api/deltakarar med std/wasm_nett.no
+# (fetch mot same opphav), med lastestatus og feilvising. Reglane (examples/wasm_deltakarar/
+# reglar.no) er dei same på begge sider: klienten validerer skjemaet, og tenaren validerer
+# lista på nytt før han lagrar ho.
+#
+#   GET  /                   sida; CSP med 'wasm-unsafe-eval' (berre her)
+#   GET  /api/deltakarar     {"deltakarar": [{namn, epost}, …]} (JSON, no-store)
+#   POST /api/deltakarar     {"deltakarar": […]} → 200 {"lagra": n, "deltakarar": […]} eller
+#                            400 {"feil": ["…", …]} (ugyldig JSON, feil form, for mange eller
+#                            ugyldige deltakarar)
+#   GET  /stil.css           stilark (inline-stil er ikkje lov under CSP-en)
+#
+# Lagring: nc serve har korkje disk eller minne mellom førespurnader, så lista blir lagra i
+# ein HttpOnly-informasjonskapsel per nettlesar (prosentkoda JSON, SameSite=Strict). Ein
+# ekte app ville bruke ein database; API-et til klienten er det same.
+#
+# Bygg og køyr (frå rota i repoet):
+#   NC_WASM_KJELDE=examples/wasm_deltakarar/klient.no NC_WASM_APP=examples/wasm_deltakarar/app.no \
+#       NC_WASM_UT=build/wasm/wasm_deltakarar ./bin/nc run tools/nc_wasm.no
+#   ./bin/nc serve build/wasm/wasm_deltakarar/serve.no --port 8080
+#
+# Utan WebAssembly viser sida skjemaet og ein tom tabell med teksten «Lista krev WebAssembly».
+
+bruk std.web som web
+bruk std.wasm_serve som ws
+bruk std.wasm_rt som rt
+bruk examples.wasm_deltakarar.reglar som reglar
+
+funksjon kapsel_namn() -> tekst {
+    returner "nc_deltakarar"
+}
+
+# Sida. `ekstra` kjem sist i <body> (testappen legg inn <pre id="nc-logg">).
+funksjon side_html(ekstra: tekst) -> tekst {
+    returner "<!doctype html><html lang=\"nn\"><head><meta charset=\"utf-8\">" +
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+        "<title>Deltakarar (WebAssembly og JSON)</title>" +
+        "<link rel=\"stylesheet\" href=\"/stil.css\">" + ws.script_tag() + "</head>" +
+        "<body><main><h1>Deltakarar</h1>" +
+        "<p><span id=\"status\" role=\"status\" aria-live=\"polite\">Lista krev WebAssembly.</span> " +
+        "<span id=\"ulagra\" hidden>Ulagra endringar.</span></p>" +
+        "<p id=\"feil\" class=\"feil\" role=\"alert\" hidden></p>" +
+        "<form id=\"skjema\" novalidate>" +
+        "<p><label for=\"namn\">Namn</label> <input id=\"namn\" name=\"namn\" autocomplete=\"name\"> " +
+        "<label for=\"epost\">E-post</label> <input id=\"epost\" name=\"epost\" type=\"email\" autocomplete=\"email\"> " +
+        "<button id=\"legg-til\" type=\"submit\">Legg til</button></p>" +
+        "<p id=\"skjema-feil\" class=\"feil\" aria-live=\"polite\"></p>" +
+        "</form>" +
+        "<p><button id=\"lagre\" type=\"button\">Lagre på tenaren</button> " +
+        "<button id=\"last\" type=\"button\">Hent på nytt</button> " +
+        "<output id=\"nc-resultat\">–</output></p>" +
+        "<ul id=\"liste\"></ul>" +
+        "</main>" + ekstra + "</body></html>"
+}
+
+# Ein header uavhengig av store og små bokstavar (nc serve gjev namna slik klienten skreiv
+# dei, t.d. «Cookie» frå nettlesaren, og web.request_header samanliknar eksakt).
+funksjon header(ctx: ordbok_tekst, namn: tekst) -> tekst {
+    la h = web.request_headers(ctx)
+    la k = nøkler(h)
+    la i = 0
+    mens i < lengde(k) {
+        hvis tekst_til_liten(tekst(k[i])) == namn { returner tekst(h[k[i]]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Verdien til informasjonskapselen `namn` i Cookie-headeren.
+funksjon kapsel(ctx: ordbok_tekst, namn: tekst) -> tekst {
+    la delar = builtin.split(header(ctx, "cookie"), ";")
+    la i = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(tekst(delar[i]))
+        la e = builtin.index_of(d, "=")
+        hvis e > 0 og builtin.slice(d, 0, e) == namn { returner builtin.slice(d, e + 1, lengde(d)) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon json_svar(status: heltall, verdi) -> ordbok_tekst {
+    la s = ws.svar("application/json; charset=utf-8", builtin.json_stringify(verdi), ws.csp_standard(), "no-store")
+    s["status"] = status
+    returner s
+}
+
+funksjon side(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /")
+    returner ws.side(side_html(""))
+}
+
+funksjon hent_deltakarar(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /api/deltakarar")
+    returner json_svar(200, {"deltakarar": reglar.liste_frå_kapsel(kapsel(ctx, kapsel_namn()))})
+}
+
+funksjon lagre_deltakarar(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /api/deltakarar")
+    la v = null
+    la feil = []
+    prøv {
+        v = rt.json_parse(web.request_body(ctx))
+    } fang (e) {
+        legg_til(feil, "Ugyldig JSON: " + tekst(e))
+    }
+    hvis lengde(feil) == 0 {
+        hvis builtin.type(v) != "ordbok" eller ikkje finnes_nøkkel(v, "deltakarar") {
+            legg_til(feil, "Venta {\"deltakarar\": […]}.")
+        } ellers {
+            feil = reglar.valider_liste(v["deltakarar"])
+        }
+    }
+    hvis lengde(feil) > 0 {
+        returner json_svar(400, {"feil": feil})
+    }
+    la liste = reglar.rydd_liste(v["deltakarar"])
+    la s = json_svar(200, {"lagra": lengde(liste), "deltakarar": liste})
+    s["headers"]["set-cookie"] = kapsel_namn() + "=" + reglar.kapsel_for(liste) + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+    returner s
+}
+
+funksjon stil(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /stil.css")
+    returner ws.svar("text/css; charset=utf-8",
+        "body{font-family:system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem}" +
+        ".feil{color:#b00020}.ugyldig{border-color:#b00020;outline:1px solid #b00020}" +
+        "#liste li{margin:.25rem 0}#liste small{color:#555}button[disabled]{opacity:.5}",
+        ws.csp_standard(), "no-cache")
+}
+
+funksjon start() -> heltall {
+    returner 0
+}
