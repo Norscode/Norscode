@@ -1,0 +1,472 @@
+# kvikk.no — kvikke sider utan klientkode (app-kjensle del 1)
+#
+# Gjer at ein Norscode-webapp kjennest rask utan ein einaste linje JavaScript:
+#
+#   1. Speculation Rules via HTTP-headeren `Speculation-Rules` (ingen <script>):
+#      nettlesaren hentar reglane frå /_nc/spekulasjon.json og førehandslastar
+#      (prefetch) eller førehandsviser (prerender) same-origin-lenkjer når
+#      brukaren held peikaren over dei (eagerness «moderate»).
+#   2. Kryss-dokument View Transitions: `@view-transition { navigation: auto; }`
+#      i eit versjonert stilark (/_nc/stil.css?v=<sha256-prefiks>, immutable),
+#      med respekt for prefers-reduced-motion.
+#   3. bfcache-venleg og cache-riktig HTML: sterk ETag + `no-cache` (offentleg)
+#      eller `private, no-cache` (innlogga), aldri `no-store`, og 304 ved
+#      If-None-Match (òg W/-prefiks og lister, slik nginx med gzip sender).
+#
+# Alle svar følgjer den felles responskontrakten i std/http_cache.no.
+# Modulen har ingen globalar (dei verkar ikkje under nc serve): oppsettet er ei
+# ordbok som appen lagar i ein funksjon og sender inn.
+#
+# Bruk (heile oppsettet):
+#
+#   bruk std.web som web
+#   bruk std.kvikk som kvikk
+#
+#   funksjon fart() -> ordbok_tekst {
+#       returner kvikk.med_unntak(kvikk.oppsett(), "/admin/*")
+#   }
+#
+#   // Éi rute leverer reglane og stilarket.
+#   funksjon nc_ressurs(ctx: ordbok_tekst) -> ordbok_tekst {
+#       web.route("GET /_nc/{fil:tekst}")
+#       returner kvikk.ressurs(ctx, fart())
+#   }
+#
+#   funksjon heim(ctx: ordbok_tekst) -> ordbok_tekst {
+#       web.route("GET /")
+#       returner kvikk.side(ctx, fart(), "<!doctype html>…")
+#   }
+#
+# Sjå docs/APP_KJENSLE.md (del 1) for nettlesarstøtte og vakter.
+
+bruk std.web som web
+bruk std.http_cache som hc
+
+# ─── Faste namn ─────────────────────────────────────────────────────────────
+
+funksjon regler_sti() -> tekst { returner "/_nc/spekulasjon.json" }
+funksjon regler_privat_sti() -> tekst { returner "/_nc/spekulasjon-privat.json" }
+funksjon stil_sti() -> tekst { returner "/_nc/stil.css" }
+funksjon regler_content_type() -> tekst { returner "application/speculationrules+json" }
+funksjon html_content_type() -> tekst { returner "text/html; charset=utf-8" }
+
+# Lenkjer som aldri blir førehandslasta: interne endepunkt og utlogging.
+# `*` i URL Pattern-syntaksen matchar kva som helst (òg `/`).
+funksjon standard_unntak() -> liste_tekst {
+    returner [
+        "/_*",
+        "/*logout*", "/*log-out*", "/*signout*", "/*sign-out*",
+        "/*logg-ut*", "/*loggut*", "/*logg_ut*", "/*utlogg*"
+    ]
+}
+
+# ─── Oppsett ────────────────────────────────────────────────────────────────
+
+# Standard: prefetch og prerender med iver «moderate» på offentlege sider,
+# berre prefetch på private sider, View Transitions på.
+funksjon oppsett() -> ordbok_tekst {
+    la o: ordbok_tekst = {}
+    o["iver"] = "moderate"
+    o["prefetch"] = "sann"
+    o["prerender"] = "sann"
+    o["prerender_privat"] = "usann"
+    o["overgang"] = "sann"
+    o["unntak"] = []
+    o["css"] = ""
+    returner o
+}
+
+funksjon _på(o: ordbok_tekst, nøkkel: tekst) -> boolsk {
+    hvis ikkje finnes_nøkkel(o, nøkkel) { returner usann }
+    returner tekst(o[nøkkel]) == "sann"
+}
+
+# iver: "conservative" (ved klikk), "moderate" (hover), "eager" eller "immediate".
+funksjon med_iver(o: ordbok_tekst, iver: tekst) -> ordbok_tekst {
+    hvis iver != "conservative" og iver != "moderate" og iver != "eager" og iver != "immediate" {
+        kast "kvikk: ukjend iver '" + iver + "' (conservative, moderate, eager eller immediate)"
+    }
+    o["iver"] = iver
+    returner o
+}
+
+funksjon utan_prefetch(o: ordbok_tekst) -> ordbok_tekst {
+    o["prefetch"] = "usann"
+    returner o
+}
+
+funksjon utan_prerender(o: ordbok_tekst) -> ordbok_tekst {
+    o["prerender"] = "usann"
+    o["prerender_privat"] = "usann"
+    returner o
+}
+
+# Prerender køyrer sida i bakgrunnen før brukaren klikkar. På innlogga sider
+# kan det utløyse ting appen ikkje ventar seg, so det må slåast på eksplisitt.
+funksjon med_prerender_privat(o: ordbok_tekst) -> ordbok_tekst {
+    o["prerender_privat"] = "sann"
+    returner o
+}
+
+funksjon utan_overgang(o: ordbok_tekst) -> ordbok_tekst {
+    o["overgang"] = "usann"
+    returner o
+}
+
+# Eit ekstra URL Pattern-mønster (t.d. "/admin/*" eller "/*/slett") som aldri
+# blir førehandslasta. Må byrje med «/» (same origin).
+funksjon med_unntak(o: ordbok_tekst, mønster: tekst) -> ordbok_tekst {
+    hvis ikkje builtin.starts_with(mønster, "/") {
+        kast "kvikk: unntaksmønster må byrje med '/': " + mønster
+    }
+    hc.header_trygg(mønster)
+    la u: liste_tekst = []
+    hvis finnes_nøkkel(o, "unntak") og o["unntak"] != null {
+        la gamle = o["unntak"]
+        la i: heiltall = 0
+        mens i < lengde(gamle) {
+            legg_til(u, tekst(gamle[i]))
+            i = i + 1
+        }
+    }
+    legg_til(u, mønster)
+    o["unntak"] = u
+    returner o
+}
+
+# Appen sitt eige stilark blir lagt etter kvikk-stilen i /_nc/stil.css.
+funksjon med_stil(o: ordbok_tekst, css: tekst) -> ordbok_tekst {
+    la før = ""
+    hvis finnes_nøkkel(o, "css") { før = tekst(o["css"]) }
+    o["css"] = før + css
+    returner o
+}
+
+# ─── Speculation Rules (JSON) ───────────────────────────────────────────────
+
+# JSON-streng med sitatteikn. Escapar ", \ og alle kontrollteikn (< 0x20, 0x7F).
+funksjon json_tekst(verdi: tekst) -> tekst {
+    la ut = "\""
+    la hex = "0123456789abcdef"
+    la i: heiltall = 0
+    la n = lengde(verdi)
+    mens i < n {
+        la t = builtin.slice(verdi, i, i + 1)
+        la c = builtin.char_code(t)
+        hvis t == "\"" {
+            ut = ut + "\\\""
+        } ellers hvis t == "\\" {
+            ut = ut + "\\\\"
+        } ellers hvis c == 10 {
+            ut = ut + "\\n"
+        } ellers hvis c == 13 {
+            ut = ut + "\\r"
+        } ellers hvis c == 9 {
+            ut = ut + "\\t"
+        } ellers hvis c == 127 {
+            ut = ut + "\\u007f"
+        } ellers hvis c < 32 {
+            la hi: heiltall = 0
+            hvis c >= 16 { hi = 1 }
+            la lo: heiltall = c - hi * 16
+            ut = ut + "\\u00" + tekst(hi) + builtin.slice(hex, lo, lo + 1)
+        } ellers {
+            ut = ut + t
+        }
+        i = i + 1
+    }
+    returner ut + "\""
+}
+
+funksjon _unntak(o: ordbok_tekst) -> liste_tekst {
+    la alle: liste_tekst = []
+    la std_u = standard_unntak()
+    la i: heiltall = 0
+    mens i < lengde(std_u) {
+        legg_til(alle, std_u[i])
+        i = i + 1
+    }
+    hvis finnes_nøkkel(o, "unntak") og o["unntak"] != null {
+        la eigne = o["unntak"]
+        la j: heiltall = 0
+        mens j < lengde(eigne) {
+            legg_til(alle, tekst(eigne[j]))
+            j = j + 1
+        }
+    }
+    returner alle
+}
+
+# Eit mønster i ordbokform: berre pathname er gitt, so protokoll, vert og port
+# kjem frå dokumentet (same origin), medan søk og fragment er jokerteikn.
+# Dermed dekkjer "/logout" òg "/logout?neste=/".
+funksjon _sti_mønster(mønster: tekst) -> tekst {
+    returner "{\"pathname\":" + json_tekst(mønster) + "}"
+}
+
+# where-leddet: alle same-origin-lenkjer, minus unntaka (href_matches og
+# selector_matches tek lister, so kvart unntak blir eitt listeelement).
+funksjon _kvar(o: ordbok_tekst, for_prerender: boolsk) -> tekst {
+    la mønster: liste_tekst = []
+    la u = _unntak(o)
+    la i: heiltall = 0
+    mens i < lengde(u) {
+        legg_til(mønster, _sti_mønster(u[i]))
+        i = i + 1
+    }
+    la veljarar: liste_tekst = [json_tekst("[data-nc-prefetch='false']"), json_tekst("[rel~='nofollow']")]
+    hvis for_prerender {
+        legg_til(veljarar, json_tekst("[data-nc-prerender='false']"))
+    }
+    returner "{\"and\":[{\"href_matches\":" + _sti_mønster("/*") + "}," +
+        "{\"not\":{\"href_matches\":[" + builtin.join(mønster, ",") + "]}}," +
+        "{\"not\":{\"selector_matches\":[" + builtin.join(veljarar, ",") + "]}}]}"
+}
+
+funksjon _regel(o: ordbok_tekst, for_prerender: boolsk) -> tekst {
+    returner "[{\"source\":\"document\",\"where\":" + _kvar(o, for_prerender) +
+        ",\"eagerness\":" + json_tekst(tekst(o["iver"])) + "}]"
+}
+
+funksjon _prerender_på(o: ordbok_tekst, privat: boolsk) -> boolsk {
+    hvis privat { returner _på(o, "prerender") og _på(o, "prerender_privat") }
+    returner _på(o, "prerender")
+}
+
+funksjon har_regler(o: ordbok_tekst, privat: boolsk) -> boolsk {
+    returner _på(o, "prefetch") eller _prerender_på(o, privat)
+}
+
+# Reglane som JSON-tekst (application/speculationrules+json).
+funksjon regler_json(o: ordbok_tekst, privat: boolsk) -> tekst {
+    la delar: liste_tekst = []
+    hvis _på(o, "prefetch") {
+        legg_til(delar, "\"prefetch\":" + _regel(o, usann))
+    }
+    hvis _prerender_på(o, privat) {
+        legg_til(delar, "\"prerender\":" + _regel(o, sann))
+    }
+    returner "{" + builtin.join(delar, ",") + "}"
+}
+
+funksjon regler_url(o: ordbok_tekst, privat: boolsk) -> tekst {
+    la sti = regler_sti()
+    hvis privat { sti = regler_privat_sti() }
+    returner hc.versjonert_url(sti, regler_json(o, privat))
+}
+
+# Verdien til Speculation-Rules-headeren: ei structured-field-liste med éin
+# streng. URL-en har berre [/_a-z.?=0-9-], so han treng inga escaping.
+funksjon regler_header(o: ordbok_tekst, privat: boolsk) -> tekst {
+    returner "\"" + regler_url(o, privat) + "\""
+}
+
+# ─── Stilark (View Transitions) ─────────────────────────────────────────────
+
+funksjon overgang_css() -> tekst {
+    la l: liste_tekst = [
+        "/* kvikk: kryss-dokument View Transitions (std/kvikk.no) */",
+        "@view-transition { navigation: auto; }",
+        "::view-transition-old(root), ::view-transition-new(root) { animation-duration: 160ms; animation-timing-function: ease-out; }",
+        ".app-header { view-transition-name: nc-topp; }",
+        "@media (prefers-reduced-motion: reduce) {",
+        "  @view-transition { navigation: none; }",
+        "  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }",
+        "}",
+        ""
+    ]
+    returner builtin.join(l, "\n")
+}
+
+funksjon stil_css(o: ordbok_tekst) -> tekst {
+    la css = ""
+    hvis _på(o, "overgang") { css = overgang_css() }
+    hvis finnes_nøkkel(o, "css") { css = css + tekst(o["css"]) }
+    returner css
+}
+
+# /_nc/stil.css?v=<12 hex av SHA-256> — til stylesheet_href i std/frontend.
+funksjon stil_href(o: ordbok_tekst) -> tekst {
+    returner hc.versjonert_url(stil_sti(), stil_css(o))
+}
+
+# Ekstra <head>-innhald til frontend.layout_app_med_head / page_med_head.
+# Berre meta og link, aldri <script>.
+funksjon head(o: ordbok_tekst) -> tekst {
+    la h = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    hvis _på(o, "overgang") {
+        # Blokker første måling til hovudinnhaldet er tolka, so overgangen
+        # ikkje viser ei halvferdig side (ignorert av nettlesarar utan støtte).
+        h = h + "<link rel=\"expect\" href=\"#app-main\" blocking=\"render\">"
+    }
+    returner h
+}
+
+# ─── Spekulative førespurnader (Sec-Purpose) ────────────────────────────────
+
+# Chromium sender `Sec-Purpose: prefetch` ved prefetch og
+# `Sec-Purpose: prefetch;prerender` ved prerender (eldre: `Purpose: prefetch`).
+funksjon er_spekulativ(ctx: ordbok_tekst) -> boolsk {
+    la sp = tekst_til_liten(web.request_header(ctx, "sec-purpose"))
+    hvis builtin.contains(sp, "prefetch") eller builtin.contains(sp, "prerender") { returner sann }
+    la p = tekst_til_liten(web.request_header(ctx, "purpose"))
+    returner builtin.contains(p, "prefetch")
+}
+
+funksjon er_prerender(ctx: ordbok_tekst) -> boolsk {
+    returner builtin.contains(tekst_til_liten(web.request_header(ctx, "sec-purpose")), "prerender")
+}
+
+# Vakter for ruter med sideeffektar ved GET. Ein spekulativ førespurnad får
+# 403, og nettlesaren kastar han og hentar sida vanleg ved klikk.
+# Totale (vakt-regelen i docs/APP_KJENSLE.md). Bruk appen sitt modulalias:
+#   web.use_guard("kvikk.vakt_ingen_spekulasjon")
+funksjon vakt_ingen_spekulasjon(ctx: ordbok_tekst) -> bool {
+    web.guard()
+    prøv {
+        returner ikkje er_spekulativ(ctx)
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+funksjon vakt_ingen_prerender(ctx: ordbok_tekst) -> bool {
+    web.guard()
+    prøv {
+        returner ikkje er_prerender(ctx)
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+# Svar som skil mellom spekulativ og vanleg henting må seie det til cachar.
+funksjon med_vary_spekulasjon(s: ordbok_tekst) -> ordbok_tekst {
+    returner hc.med_vary(s, "Sec-Purpose")
+}
+
+# ─── Svar ───────────────────────────────────────────────────────────────────
+
+# If-None-Match med svak samanlikning (RFC 9110 §13.1.2): lister, W/-prefiks
+# (nginx med gzip) og «*».
+funksjon etag_treff(if_none_match: tekst, etag: tekst) -> boolsk {
+    hvis if_none_match == "" eller etag == "" { returner usann }
+    la mål = etag
+    hvis builtin.starts_with(mål, "W/") { mål = builtin.slice(mål, 2, lengde(mål)) }
+    la deler = builtin.split(if_none_match, ",")
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la d = builtin.trim(deler[i])
+        hvis d == "*" { returner sann }
+        hvis builtin.starts_with(d, "W/") { d = builtin.slice(d, 2, lengde(d)) }
+        hvis d == mål { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# 304 med dei same cache-headerane som 200-svaret ville hatt (RFC 9110 §15.4.5).
+funksjon _som_304(s: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = 304
+    r["body"] = ""
+    r["etag"] = s["etag"]
+    la h: ordbok_tekst = {}
+    la kjelde = s["headers"]
+    la ks = nøkler(kjelde)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis k == "cache-control" eller k == "vary" eller k == "speculation-rules" {
+            h[k] = kjelde[k]
+        }
+        i = i + 1
+    }
+    r["headers"] = h
+    returner r
+}
+
+funksjon _med_revalidering(ctx: ordbok_tekst, s: ordbok_tekst) -> ordbok_tekst {
+    hvis ctx != null og finnes_nøkkel(s, "etag") {
+        la inm = web.request_header(ctx, "if-none-match")
+        hvis etag_treff(inm, tekst(s["etag"])) { returner _som_304(s) }
+    }
+    returner s
+}
+
+funksjon _med_regler(o: ordbok_tekst, s: ordbok_tekst, privat: boolsk) -> ordbok_tekst {
+    hvis har_regler(o, privat) {
+        s = hc.med_header(s, "speculation-rules", regler_header(o, privat))
+    }
+    returner hc.med_tryggleik(s)
+}
+
+# Offentleg HTML-side: sterk ETag, `no-cache` (bfcache-venleg, 304 ved uendra
+# innhald), tryggleiksheaderar og Speculation-Rules.
+funksjon side(ctx: ordbok_tekst, o: ordbok_tekst, html: tekst) -> ordbok_tekst {
+    la s = _med_regler(o, hc.svar_revalider(html, html_content_type()), usann)
+    returner _med_revalidering(ctx, s)
+}
+
+# Innlogga/privat HTML-side: `private, no-cache` og private reglar (prefetch,
+# prerender berre med med_prerender_privat).
+funksjon privat_side(ctx: ordbok_tekst, o: ordbok_tekst, html: tekst) -> ordbok_tekst {
+    la s = _med_regler(o, hc.svar_privat(html, html_content_type()), sann)
+    returner _med_revalidering(ctx, s)
+}
+
+# HTML med annan status (t.d. 422 for eit skjema med feil): utan ETag,
+# `private, no-cache` (inneheld det brukaren skreiv, men blokkerer ikkje bfcache).
+funksjon side_med_status(ctx: ordbok_tekst, o: ordbok_tekst, status: heiltall, html: tekst) -> ordbok_tekst {
+    la s = hc.med_header(hc.nytt_svar(status, html_content_type(), html), "cache-control", "private, no-cache")
+    returner _med_regler(o, s, sann)
+}
+
+# 303 See Other etter vellukka POST (Post/Redirect/Get): tilbake-knappen viser
+# sida før skjemaet utan å sende det på nytt.
+funksjon sjå_anna(sti: tekst) -> ordbok_tekst {
+    hvis ikkje builtin.starts_with(sti, "/") eller builtin.starts_with(sti, "//") {
+        kast "kvikk: sjå_anna tek berre lokale stiar: " + sti
+    }
+    la s = hc.nytt_svar(303, "text/plain; charset=utf-8", "")
+    s = hc.med_header(s, "location", sti)
+    returner hc.med_header(s, "cache-control", "no-store")
+}
+
+funksjon _query_v(ctx: ordbok_tekst) -> tekst {
+    prøv {
+        returner web.request_query_param(ctx, "v")
+    } fang (e) {
+        returner ""
+    }
+    returner ""
+}
+
+funksjon regler_svar(ctx: ordbok_tekst, o: ordbok_tekst, privat: boolsk) -> ordbok_tekst {
+    la json = regler_json(o, privat)
+    la s = hc.svar_immutable(json, regler_content_type(), _query_v(ctx))
+    s = hc.med_header(s, "x-content-type-options", "nosniff")
+    returner _med_revalidering(ctx, s)
+}
+
+funksjon stil_svar(ctx: ordbok_tekst, o: ordbok_tekst) -> ordbok_tekst {
+    la css = stil_css(o)
+    la s = hc.svar_immutable(css, "text/css; charset=utf-8", _query_v(ctx))
+    s = hc.med_header(s, "x-content-type-options", "nosniff")
+    returner _med_revalidering(ctx, s)
+}
+
+# Éin handlar for alle kvikk-ressursar under /_nc/:
+#   funksjon nc_ressurs(ctx: ordbok_tekst) -> ordbok_tekst {
+#       web.route("GET /_nc/{fil:tekst}")
+#       returner kvikk.ressurs(ctx, fart())
+#   }
+funksjon ressurs(ctx: ordbok_tekst, o: ordbok_tekst) -> ordbok_tekst {
+    la fil = web.request_param(ctx, "fil")
+    hvis fil == "spekulasjon.json" { returner regler_svar(ctx, o, usann) }
+    hvis fil == "spekulasjon-privat.json" { returner regler_svar(ctx, o, sann) }
+    hvis fil == "stil.css" { returner stil_svar(ctx, o) }
+    la s = hc.nytt_svar(404, "text/plain; charset=utf-8", "Ikkje funne")
+    returner hc.med_header(s, "cache-control", "no-cache")
+}
