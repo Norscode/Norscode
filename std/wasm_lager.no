@@ -1,0 +1,874 @@
+# std/wasm_lager.no — lokal lagring i IndexedDB for Norscode-klientmodular i WebAssembly (W7).
+#
+#   bruk std.wasm_lager som lager
+#
+#   la skjema = [lager.lager("deltakarar", "id", [lager.indeks("epost", "epost", sann)])]
+#   la db = lager.opne(lager.brukar_db_namn("nc-app", uid), 1, skjema, fun(d) -> klar(d), fun(f) -> vis_feil(f))
+#   lager.put(db, "deltakarar", {"id": 1, "namn": "Åse", "epost": "a@b.no"}, fun(k) -> 0, fun(f) -> vis_feil(f))
+#   lager.liste(db, "deltakarar", null, fun(l) -> vis(l), fun(f) -> vis_feil(f))
+#   lager.køyr(db, [lager.op_tøm("deltakarar"), lager.op_put("deltakarar", v)], fun(r) -> 0, fun(f) -> 0)
+#
+# Alle kall er asynkrone. Kvar førespurnad får nøyaktig eitt tilbakekall seinare (closure med
+# éin parameter), i den rekkjefølgja førespurnadene vart gjorde, same kva rekkjefølgje
+# IndexedDB svarar i. Eit tilbakekall som kastar, gjev «ERROR: <tekst>» og stoppar ikkje dei
+# neste. Ingenting når JavaScript («Uncaught»).
+#
+# Modell (all logikk her; lastaren har berre hjelparen I, som gjer IndexedDB-kalla):
+#   - Ein database har eit skjema: lager (object stores) med nøkkelsti og indeksar, deklarerte
+#     her. Opning med ein høgare versjon oppgraderer: lager og indeksar som manglar, blir laga,
+#     indeksar som ikkje lenger er i skjemaet, blir fjerna, og lager blir berre fjerna når
+#     skjemaet seier det eksplisitt (lager.fjerna("namn")), så data ikkje forsvinn ved ein feil.
+#   - Kvar batch (køyr) er éin IndexedDB-transaksjon: readwrite når ein op skriv, elles
+#     readonly. Feilar éin op, blir heile batchen rulla tilbake.
+#   - Verdiar blir lagra som JSON-TEKST (rt.json_stringify), i ein post {k: nøkkel, v: tekst,
+#     i: {indeks: verdi}}, og lesne med rt.json_parse. Grunngjeving: same verdiar attende som i
+#     VM-en (heltall og desimaltall held typen, heiltal over 2^53 er eksakte, kontrollteikn og
+#     æøå går uendra), og ingen omvending til JS-objekt og attende (lastaren ser berre tekst).
+#     Nøklar og indeksverdiar er JS-verdiar (tal eller tekst), sidan IndexedDB må kunne sortere
+#     dei. Storleik: JSON-teksten er om lag like stor som ein strukturert kopi.
+#   - Nøklar: heltall (|k| ≤ 2^53 − 1), endeleg desimaltall eller tekst. Tal sorterer før
+#     tekst, tal etter verdi (1 == 1.0 er same nøkkel), tekst etter UTF-16-kodeeiningar
+#     (som bytevis for tekst utan teikn over U+FFFF). Anna gjev LagerFeil «data».
+#
+# Feil er ei LagerFeil-ordbok {"type": "LagerFeil", "art", "id", "op", "database", "namn",
+# "melding"}; `type` gjer at `kast feil` blir fanga av `fang (e: LagerFeil)`. art er
+#   "open"        databasen kunne ikkje opnast (ingen IndexedDB, avslått, anna opningsfeil)
+#   "blokkert"    ein annan fane held ein eldre versjon open (sjå under)
+#   "kvote"       lagringskvoten er full (QuotaExceededError)
+#   "transaksjon" transaksjonen feila og vart rulla tilbake (ukjent lager eller indeks,
+#                 unik indeks brote, databasen lukka)
+#   "versjon"     databasen på eininga har ein høgare versjon enn den som vart bede om
+#   "data"        ugyldig nøkkel eller verdi (kasta med ein gong, før noko blir sendt), eller
+#                 ein lagra verdi som ikkje er gyldig JSON
+# Utan feil-tilbakekall (null) blir feilen skriven som «ERROR: LagerFeil: …».
+#
+# Personvern: databasenamnet er per brukar (brukar_db_namn: prefiks + 16 hex-teikn av
+# sha256(uid), så uid-en ikkje står i klartekst i nettlesaren), og logg_ut lukkar databasen,
+# slettar han og fjernar lokale nøklar i localStorage. Innlogga data skal berre lagrast når
+# brukaren har valt det (appen spør; sjå examples/wasm_deltakarar/).
+#
+# Opne tilkoplingar lukkar seg sjølve når ein annan fane oppgraderer eller slettar databasen
+# (versionchange), så ein ny versjon blir ikkje blokkert av ein gamal fane med denne koden.
+#
+# Funksjonane som ikkje rører IndexedDB (skjema, område, op-ar, førespurnad-JSON, konvolutten,
+# resultat, feilklassar), er reine og køyrer likt i VM-en og i WASM (paritetskorpuset w7_lager).
+bruk std.wasm_vert som vert
+bruk std.wasm_rt som rt
+
+la _neste_id: heltall = 1
+la _ventar: ordbok = {}
+la _kø: liste = []
+la _kø_start: heltall = 0
+# id-ar til opningar som alt er leverte som «blokkert»: ei seinare opning blir lukka straks
+la _seine: ordbok = {}
+
+funksjon maks_nøkkel() -> heltall {
+    returner 9007199254740991
+}
+
+# ─── Skjema (reine) ──────────────────────────────────────────────────────────
+
+# Ein indeks på feltet `sti` (t.d. "epost" eller "adresse.post") i verdiane. `unik`: to
+# verdiar kan ikkje ha same indeksverdi (put som bryt det, rullar batchen tilbake).
+funksjon indeks(namn: tekst, sti: tekst, unik: bool) -> ordbok {
+    returner {"namn": namn, "sti": sti, "unik": unik}
+}
+
+# Eit lager med nøkkelsti (feltet i verdien som er nøkkelen), eller "" for nøklar som blir
+# gjevne eksplisitt (put_med_nøkkel).
+funksjon lager(namn: tekst, nøkkelsti: tekst, indeksar: liste) -> ordbok {
+    returner {"namn": namn, "nøkkelsti": nøkkelsti, "auto": usann, "indeksar": indeksar, "fjerna": usann}
+}
+
+# Som lager, men IndexedDB lagar nøkkelen (1, 2, 3, …) når verdien manglar feltet. Nøkkelen
+# kjem i ok-tilbakekallet til put og blir sett inn i verdien ved lesing.
+funksjon lager_auto(namn: tekst, nøkkelsti: tekst, indeksar: liste) -> ordbok {
+    la l = lager(namn, nøkkelsti, indeksar)
+    l["auto"] = sann
+    returner l
+}
+
+# Fjern lageret `namn` (og alle data i det) ved oppgradering.
+funksjon fjerna(namn: tekst) -> ordbok {
+    la l = lager(namn, "", [])
+    l["fjerna"] = sann
+    returner l
+}
+
+# Namn på lager og indeksar, og felta i nøkkel- og indeksstiar: ASCII-bokstavar, siffer og _,
+# ikkje siffer først (IndexedDB les indeksstien "i.<namn>" som ein JS-identifikator).
+funksjon gyldig_namn(n: tekst) -> bool {
+    hvis lengde(n) == 0 eller lengde(n) > 64 { returner usann }
+    la i = 0
+    mens i < lengde(n) {
+        la c = builtin.char_code(builtin.slice(n, i, i + 1))
+        la ok = (c >= 97 og c <= 122) eller (c >= 65 og c <= 90) eller c == 95 eller (i > 0 og c >= 48 og c <= 57)
+        hvis ikkje ok { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon gyldig_sti(s: tekst) -> bool {
+    la d = builtin.split(s, ".")
+    la i = 0
+    mens i < lengde(d) {
+        hvis ikkje gyldig_namn(tekst(d[i])) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# "" når skjemaet er gyldig, elles grunnen.
+funksjon valider_skjema(skjema) -> tekst {
+    hvis builtin.type(skjema) != "liste" { returner "skjemaet må vere ei liste av lager" }
+    la sett = {}
+    la i = 0
+    mens i < lengde(skjema) {
+        la l = skjema[i]
+        hvis builtin.type(l) != "ordbok" eller ikkje finnes_nøkkel(l, "namn") { returner "lager " + tekst(i + 1) + " er ikkje laga med lager.lager" }
+        la n = tekst(l["namn"])
+        hvis ikkje gyldig_namn(n) { returner "ugyldig lagernamn «" + n + "»" }
+        hvis finnes_nøkkel(sett, n) { returner "lageret «" + n + "» står to gonger" }
+        sett[n] = sann
+        hvis l["nøkkelsti"] != "" og ikkje gyldig_sti(tekst(l["nøkkelsti"])) { returner "ugyldig nøkkelsti «" + tekst(l["nøkkelsti"]) + "» i «" + n + "»" }
+        hvis l["auto"] og builtin.contains(tekst(l["nøkkelsti"]), ".") { returner "lager_auto «" + n + "» må ha ein nøkkelsti utan punktum" }
+        la ix = l["indeksar"]
+        la isett = {}
+        la j = 0
+        mens j < lengde(ix) {
+            la x = ix[j]
+            la xn = tekst(x["namn"])
+            hvis ikkje gyldig_namn(xn) { returner "ugyldig indeksnamn «" + xn + "» i «" + n + "»" }
+            hvis finnes_nøkkel(isett, xn) { returner "indeksen «" + xn + "» står to gonger i «" + n + "»" }
+            isett[xn] = sann
+            hvis ikkje gyldig_sti(tekst(x["sti"])) { returner "ugyldig indekssti «" + tekst(x["sti"]) + "» i «" + n + "»" }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Skjemaet slik lastaren vil ha det: {"s": {lager: {"a": auto, "x": {indeks: unik}}},
+# "f": [lager som skal fjernast]}.
+funksjon skjema_json(skjema: liste) -> ordbok {
+    la s = {}
+    la f = []
+    la i = 0
+    mens i < lengde(skjema) {
+        la l = skjema[i]
+        hvis l["fjerna"] {
+            legg_til(f, l["namn"])
+        } ellers {
+            la x = {}
+            la j = 0
+            mens j < lengde(l["indeksar"]) {
+                x[tekst(l["indeksar"][j]["namn"])] = l["indeksar"][j]["unik"] == sann
+                j = j + 1
+            }
+            s[tekst(l["namn"])] = {"a": l["auto"] == sann, "x": x}
+        }
+        i = i + 1
+    }
+    returner {"s": s, "f": f}
+}
+
+funksjon _lager_i(skjema: liste, namn: tekst) -> ordbok {
+    la i = 0
+    mens i < lengde(skjema) {
+        hvis skjema[i]["namn"] == namn og ikkje skjema[i]["fjerna"] { returner skjema[i] }
+        i = i + 1
+    }
+    returner {}
+}
+
+# ─── Nøklar og område (reine) ────────────────────────────────────────────────
+
+funksjon er_nøkkel(k) -> bool {
+    la t = builtin.type(k)
+    hvis t == "tekst" { returner sann }
+    hvis t == "heltall" { returner k >= 0 - maks_nøkkel() og k <= maks_nøkkel() }
+    hvis t == "desimaltall" { returner k - k == 0.0 }
+    returner usann
+}
+
+funksjon _område(art: tekst, args: liste) -> ordbok {
+    returner {"område": art, "args": args}
+}
+
+# Nøyaktig nøkkelen k.
+funksjon lik(k) -> ordbok {
+    returner _område("only", [k])
+}
+
+# Frå og med a (open: utan a).
+funksjon frå(a, open: bool) -> ordbok {
+    returner _område("lowerBound", [a, open])
+}
+
+# Til og med b (open: utan b).
+funksjon opp_til(b, open: bool) -> ordbok {
+    returner _område("upperBound", [b, open])
+}
+
+# Mellom a og b, med dei same valfrie opne endane.
+funksjon mellom(a, b, a_open: bool, b_open: bool) -> ordbok {
+    returner _område("bound", [a, b, a_open, b_open])
+}
+
+# Alle nøklar som byrjar med tekstprefikset p (p ≤ k < p + U+FFFF).
+funksjon prefiks(p: tekst) -> ordbok {
+    returner mellom(p, p + builtin.chr(239) + builtin.chr(191) + builtin.chr(191), usann, usann)
+}
+
+# "" når området er gyldig (null er «alt»), elles grunnen.
+funksjon valider_område(q) -> tekst {
+    hvis q == null { returner "" }
+    hvis builtin.type(q) != "ordbok" eller ikkje finnes_nøkkel(q, "område") { returner "området må vere laga med lager.lik/frå/opp_til/mellom/prefiks" }
+    la n = 1
+    hvis q["område"] == "bound" { n = 2 }
+    la i = 0
+    mens i < n {
+        hvis ikkje er_nøkkel(q["args"][i]) { returner "ugyldig nøkkel i området: " + tekst(q["args"][i]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+# ─── Op-ar (reine) ───────────────────────────────────────────────────────────
+
+funksjon _op(art: tekst, lagernamn: tekst) -> ordbok {
+    returner {"op": art, "lager": lagernamn, "indeks": "", "område": null, "grense": 0, "verdi": null, "nøkkel": null, "har_nøkkel": usann}
+}
+
+# Lagre verdien (nøkkelen er feltet nøkkelsti i verdien; lager_auto kan mangle han).
+funksjon op_put(lagernamn: tekst, verdi) -> ordbok {
+    la o = _op("put", lagernamn)
+    o["verdi"] = verdi
+    returner o
+}
+
+# Lagre verdien under ein eksplisitt nøkkel (lager utan nøkkelsti).
+funksjon op_put_med_nøkkel(lagernamn: tekst, nøkkel, verdi) -> ordbok {
+    la o = op_put(lagernamn, verdi)
+    o["nøkkel"] = nøkkel
+    o["har_nøkkel"] = sann
+    returner o
+}
+
+# Verdien med nøkkelen (null når han ikkje finst).
+funksjon op_hent(lagernamn: tekst, nøkkel) -> ordbok {
+    la o = _op("hent", lagernamn)
+    o["område"] = lik(nøkkel)
+    returner o
+}
+
+# Slett nøkkelen, eller alle i eit område (lager.mellom …).
+funksjon op_slett(lagernamn: tekst, nøkkel_eller_område) -> ordbok {
+    la o = _op("slett", lagernamn)
+    hvis builtin.type(nøkkel_eller_område) == "ordbok" og finnes_nøkkel(nøkkel_eller_område, "område") {
+        o["område"] = nøkkel_eller_område
+    } ellers {
+        o["område"] = lik(nøkkel_eller_område)
+    }
+    returner o
+}
+
+# Verdiane i området (null: alle) i nøkkelrekkjefølgje, høgst `grense` (0: alle).
+funksjon op_liste(lagernamn: tekst, område, grense: heltall) -> ordbok {
+    la o = _op("liste", lagernamn)
+    o["område"] = område
+    o["grense"] = grense
+    returner o
+}
+
+# Nøklane i området, i rekkjefølgje.
+funksjon op_nøklar(lagernamn: tekst, område, grense: heltall) -> ordbok {
+    la o = op_liste(lagernamn, område, grense)
+    o["op"] = "nøklar"
+    returner o
+}
+
+funksjon op_tel(lagernamn: tekst, område) -> ordbok {
+    la o = _op("tel", lagernamn)
+    o["område"] = område
+    returner o
+}
+
+# Tøm lageret.
+funksjon op_tøm(lagernamn: tekst) -> ordbok {
+    returner _op("tøm", lagernamn)
+}
+
+# Spørjingar på ein indeks: verdiane der indeksverdien er i området, sorterte etter
+# indeksverdien (så etter nøkkelen), talet på dei, og den første med indeksverdien k.
+funksjon op_indeks_liste(lagernamn: tekst, indeksnamn: tekst, område, grense: heltall) -> ordbok {
+    la o = op_liste(lagernamn, område, grense)
+    o["indeks"] = indeksnamn
+    returner o
+}
+
+funksjon op_indeks_tel(lagernamn: tekst, indeksnamn: tekst, område) -> ordbok {
+    la o = op_tel(lagernamn, område)
+    o["indeks"] = indeksnamn
+    returner o
+}
+
+funksjon op_indeks_hent(lagernamn: tekst, indeksnamn: tekst, k) -> ordbok {
+    la o = op_hent(lagernamn, k)
+    o["indeks"] = indeksnamn
+    returner o
+}
+
+funksjon skriv_op(o: ordbok) -> bool {
+    returner o["op"] == "put" eller o["op"] == "slett" eller o["op"] == "tøm"
+}
+
+# Feltet `sti` ("a" eller "a.b") i verdien v, eller null.
+funksjon hent_sti(v, sti: tekst) {
+    la d = builtin.split(sti, ".")
+    la x = v
+    la i = 0
+    mens i < lengde(d) {
+        hvis builtin.type(x) != "ordbok" { returner null }
+        la n = tekst(d[i])
+        hvis ikkje finnes_nøkkel(x, n) { returner null }
+        x = x[n]
+        i = i + 1
+    }
+    returner x
+}
+
+funksjon _data_feil(melding: tekst) -> ordbok {
+    returner {"type": "LagerFeil", "art": "data", "id": 0, "op": "køyr", "database": "", "namn": "", "melding": melding}
+}
+
+# Op-en slik lastaren vil ha han: {"s": lager, "x": indeks, "m": IDB-metode, "a": argument,
+# "q": område}. Kastar LagerFeil «data» for ugyldige nøklar, verdiar og område.
+funksjon op_js(skjema: liste, o: ordbok) -> ordbok {
+    la art = tekst(o["op"])
+    la ln = tekst(o["lager"])
+    hvis ikkje gyldig_namn(ln) { kast _data_feil("ugyldig lagernamn «" + ln + "»") }
+    hvis o["indeks"] != "" og ikkje gyldig_namn(tekst(o["indeks"])) { kast _data_feil("ugyldig indeksnamn «" + tekst(o["indeks"]) + "»") }
+    la grunn = valider_område(o["område"])
+    hvis grunn != "" { kast _data_feil(grunn) }
+    la ut = {"s": ln}
+    hvis o["indeks"] != "" { ut["x"] = o["indeks"] }
+    hvis o["område"] != null { ut["q"] = _område_js(o["område"]) }
+    hvis art == "put" {
+        la l = _lager_i(skjema, ln)
+        hvis lengde(l) == 0 { kast _data_feil("put til lageret «" + ln + "», som ikkje er i skjemaet") }
+        la v = o["verdi"]
+        la post = {}
+        la sti = tekst(l["nøkkelsti"])
+        hvis o["har_nøkkel"] {
+            hvis sti != "" { kast _data_feil("lageret «" + ln + "» har nøkkelsti «" + sti + "»: bruk put") }
+            hvis ikkje er_nøkkel(o["nøkkel"]) { kast _data_feil("ugyldig nøkkel: " + tekst(o["nøkkel"])) }
+            post["k"] = o["nøkkel"]
+        } ellers hvis sti == "" {
+            kast _data_feil("lageret «" + ln + "» har ingen nøkkelsti: bruk put_med_nøkkel")
+        } ellers {
+            la k = hent_sti(v, sti)
+            hvis k == null og l["auto"] {
+                # IndexedDB lagar nøkkelen
+            } ellers hvis ikkje er_nøkkel(k) {
+                kast _data_feil("verdien har ingen gyldig nøkkel i «" + sti + "»: " + tekst(k))
+            } ellers {
+                post["k"] = k
+            }
+        }
+        post["v"] = builtin.json_stringify(v)
+        la ix = {}
+        la j = 0
+        mens j < lengde(l["indeksar"]) {
+            la iv = hent_sti(v, tekst(l["indeksar"][j]["sti"]))
+            hvis iv != null og er_nøkkel(iv) { ix[tekst(l["indeksar"][j]["namn"])] = iv }
+            j = j + 1
+        }
+        post["i"] = ix
+        ut["m"] = "put"
+        ut["a"] = [post]
+    } ellers hvis art == "hent" {
+        ut["m"] = "get"
+        ut["a"] = [null]
+    } ellers hvis art == "slett" {
+        hvis o["indeks"] != "" { kast _data_feil("slett går berre på lageret, ikkje på ein indeks") }
+        ut["m"] = "delete"
+        ut["a"] = [null]
+    } ellers hvis art == "liste" eller art == "nøklar" {
+        ut["m"] = "getAll"
+        hvis art == "nøklar" { ut["m"] = "getAllKeys" }
+        la g = o["grense"]
+        hvis builtin.type(g) != "heltall" eller g < 0 { kast _data_feil("grensa må vere eit heiltal ≥ 0") }
+        ut["a"] = [null]
+        hvis g > 0 { ut["a"] = [null, g] }
+    } ellers hvis art == "tel" {
+        ut["m"] = "count"
+        ut["a"] = [null]
+    } ellers hvis art == "tøm" {
+        ut["m"] = "clear"
+        ut["a"] = []
+    } ellers {
+        kast _data_feil("ukjend op «" + art + "»")
+    }
+    returner ut
+}
+
+funksjon _område_js(q: ordbok) -> liste {
+    la ut = [q["område"]]
+    la i = 0
+    mens i < lengde(q["args"]) {
+        legg_til(ut, q["args"][i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# Lagera batchen rører, i første rekkjefølgje (transaksjonsomfanget).
+funksjon omfang(ops: liste) -> liste {
+    la sett = {}
+    la ut = []
+    la i = 0
+    mens i < lengde(ops) {
+        la n = tekst(ops[i]["lager"])
+        hvis ikkje finnes_nøkkel(sett, n) {
+            sett[n] = sann
+            legg_til(ut, n)
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# JSON-tekst utan rå kontrollteikn: json_stringify escapar berre \n, \r og \t, og JSON.parse
+# i nettlesaren avviser andre kontrollteikn i strengar. Dei står berre inne i strengar, så
+# \u00XX gjev same verdi attende (også i rt.json_parse).
+funksjon json_trygg(t: tekst) -> tekst {
+    la hex = "0123456789abcdef"
+    la ut = ""
+    la start = 0
+    la i = 0
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c < 32 {
+            ut = ut + builtin.slice(t, start, i) + "\\u00" + builtin.slice(hex, c >> 4, (c >> 4) + 1) + builtin.slice(hex, c & 15, (c & 15) + 1)
+            start = i + 1
+        }
+        i = i + 1
+    }
+    hvis start == 0 { returner t }
+    returner ut + builtin.slice(t, start, lengde(t))
+}
+
+# Førespurnaden for ein batch til lastaren: {"h": handtak, "s": omfang, "m": modus, "o": op-ar}.
+funksjon batch_json(db: ordbok, ops: liste) -> tekst {
+    hvis builtin.type(ops) != "liste" eller lengde(ops) == 0 { kast _data_feil("ein batch må ha minst éin op") }
+    la jo = []
+    la skriv_modus = usann
+    la i = 0
+    mens i < lengde(ops) {
+        legg_til(jo, op_js(db["skjema"], ops[i]))
+        hvis skriv_op(ops[i]) { skriv_modus = sann }
+        i = i + 1
+    }
+    la modus = "readonly"
+    hvis skriv_modus { modus = "readwrite" }
+    returner json_trygg(builtin.json_stringify({"h": db["h"], "s": omfang(ops), "m": modus, "o": jo}))
+}
+
+funksjon opne_json(namn: tekst, versjon: heltall, skjema: liste) -> tekst {
+    la s = skjema_json(skjema)
+    returner json_trygg(builtin.json_stringify({"n": namn, "v": versjon, "s": s["s"], "f": s["f"]}))
+}
+
+# ─── Konvolutt, resultat og feil (reine) ─────────────────────────────────────
+
+# Konvolutten frå lastaren (JSON): [id, feilnamn, melding, data]. Feilnamnet er ""/null/0 når
+# det gjekk bra. Gjev {"id", "namn", "melding", "data"}.
+funksjon tolk_konvolutt(k: tekst) -> ordbok {
+    la v = rt.json_parse(k)
+    la namn = ""
+    hvis builtin.type(v[1]) == "tekst" { namn = v[1] }
+    la melding = ""
+    hvis builtin.type(v[2]) == "tekst" { melding = v[2] }
+    la data = null
+    hvis lengde(v) > 3 { data = v[3] }
+    returner {"id": v[0], "namn": namn, "melding": melding, "data": data}
+}
+
+# Feilklassen for eit DOM-feilnamn. `op` er "opne", "slett_database", "køyr" eller "lukk".
+funksjon feil_art(namn: tekst, op: tekst) -> tekst {
+    hvis namn == "blocked" { returner "blokkert" }
+    hvis namn == "VersionError" { returner "versjon" }
+    hvis namn == "QuotaExceededError" { returner "kvote" }
+    hvis namn == "DataError" eller namn == "DataCloneError" { returner "data" }
+    hvis op == "opne" eller op == "slett_database" { returner "open" }
+    returner "transaksjon"
+}
+
+funksjon lager_feil(art: tekst, id: heltall, op: tekst, database: tekst, namn: tekst, melding: tekst) -> ordbok {
+    returner {"type": "LagerFeil", "art": art, "id": id, "op": op, "database": database, "namn": namn, "melding": melding}
+}
+
+# «LagerFeil: <art> <op> <database>: <namn>: <melding>» (for ERROR-linja og for `kast`).
+funksjon feil_tekst(f: ordbok) -> tekst {
+    la t = "LagerFeil: " + tekst(f["art"]) + " " + tekst(f["op"]) + " " + tekst(f["database"]) + ": "
+    hvis f["namn"] != "" { t = t + tekst(f["namn"]) + ": " }
+    returner t + tekst(f["melding"])
+}
+
+funksjon kast_feil(f: ordbok) -> heltall {
+    kast feil_tekst(f)
+}
+
+# Verdien i ein post {k, v, i} frå lastaren. Manglar verdien nøkkelfeltet (lager_auto), blir
+# nøkkelen sett inn.
+funksjon post_verdi(l: ordbok, post) {
+    hvis post == null { returner null }
+    la v = rt.json_parse(post["v"])
+    la sti = ""
+    hvis lengde(l) > 0 { sti = tekst(l["nøkkelsti"]) }
+    hvis sti != "" og ikkje builtin.contains(sti, ".") og builtin.type(v) == "ordbok" og ikkje finnes_nøkkel(v, sti) {
+        v[sti] = post["k"]
+    }
+    returner v
+}
+
+# Resultatet av éin op frå rådata r (lastaren).
+funksjon op_resultat(skjema: liste, o: ordbok, r) {
+    la art = o["op"]
+    la l = _lager_i(skjema, tekst(o["lager"]))
+    hvis art == "put" { returner r }
+    hvis art == "hent" { returner post_verdi(l, r) }
+    hvis art == "liste" {
+        la ut = []
+        la i = 0
+        mens i < lengde(r) {
+            legg_til(ut, post_verdi(l, r[i]))
+            i = i + 1
+        }
+        returner ut
+    }
+    hvis art == "nøklar" { returner r }
+    hvis art == "tel" { returner r }
+    returner null
+}
+
+# Klassifiser ein konvolutt for ein batch (ops) i databasen db. Gjev {"ok", "verdi"}: verdi
+# er lista av resultat (éin per op) eller LagerFeil.
+funksjon batch_resultat(db: ordbok, ops: liste, k: ordbok) -> ordbok {
+    hvis k["namn"] != "" {
+        returner {"ok": usann, "verdi": lager_feil(feil_art(k["namn"], "køyr"), k["id"], "køyr", db["namn"], k["namn"], k["melding"])}
+    }
+    la ut = []
+    la feilmelding = ""
+    prøv {
+        la i = 0
+        mens i < lengde(ops) {
+            la r = null
+            hvis builtin.type(k["data"]) == "liste" og i < lengde(k["data"]) { r = k["data"][i] }
+            legg_til(ut, op_resultat(db["skjema"], ops[i], r))
+            i = i + 1
+        }
+    } fang (e) {
+        feilmelding = "ugyldig lagra verdi: " + tekst(e)
+    }
+    hvis feilmelding != "" {
+        returner {"ok": usann, "verdi": lager_feil("data", k["id"], "køyr", db["namn"], "", feilmelding)}
+    }
+    returner {"ok": sann, "verdi": ut}
+}
+
+# Databasenamnet for brukaren uid: prefiks + "-" + dei 16 første hex-teikna av sha256(uid).
+funksjon brukar_db_namn(prefiks: tekst, uid: tekst) -> tekst {
+    returner prefiks + "-" + builtin.slice(builtin.sha256(uid), 0, 16)
+}
+
+# ─── Kø og levering ──────────────────────────────────────────────────────────
+
+# Ein database: {"namn", "versjon", "skjema", "h": handtak (-1 før opning), "tilstand":
+# "opnar"/"open"/"feil"/"lukka", "ventar": [id-ar som ventar på opninga], "feil",
+# "oppgradert_frå": versjonen før oppgraderinga (0 for ein ny database) eller null}.
+funksjon _ny_db(namn: tekst, versjon: heltall, skjema: liste) -> ordbok {
+    returner {"namn": namn, "versjon": versjon, "skjema": skjema, "h": -1, "tilstand": "opnar", "ventar": [],
+              "feil": null, "oppgradert_frå": null, "lukk_etter": usann}
+}
+
+funksjon _registrer(art: tekst, db: ordbok, ops: liste, ok, feil) -> heltall {
+    la id = _neste_id
+    _neste_id = _neste_id + 1
+    la nøkkel = tekst(id)
+    _ventar[nøkkel] = {"art": art, "db": db, "ops": ops, "ok": ok, "feil": feil, "ferdig": usann, "resultat": null, "utsett": null}
+    legg_til(_kø, nøkkel)
+    returner id
+}
+
+funksjon _send(id: heltall, json: tekst) -> heltall {
+    vert.lager_start(id, json, "_lager_ferdig")
+    returner id
+}
+
+# Send ein tom førespurnad: lastaren svarar straks (asynkront) utan å røre IndexedDB. Brukt når
+# svaret alt er kjent (databasen vart ikkje opna eller er lukka), så tilbakekallet likevel kjem
+# seinare og i rekkjefølgje.
+funksjon _send_utsett(id: heltall, feil: ordbok) -> heltall {
+    _ventar[tekst(id)]["utsett"] = feil
+    returner _send(id, "{\"h\":-1}")
+}
+
+# Opne databasen `namn` med `versjon` (heiltal ≥ 1) og `skjema`. Gjev databasen med ein gong;
+# køyr og dei andre kan kallast straks (dei ventar på opninga). ok(db) når han er open
+# (db["oppgradert_frå"] er versjonen før ei oppgradering, 0 for ein ny database), feil(LagerFeil)
+# elles. Ugyldig namn, versjon eller skjema kastar LagerFeil «data» med ein gong.
+funksjon opne(namn: tekst, versjon: heltall, skjema: liste, ok, feil) -> ordbok {
+    hvis builtin.type(namn) != "tekst" eller lengde(namn) == 0 { kast _data_feil("databasen må ha eit namn") }
+    hvis builtin.type(versjon) != "heltall" eller versjon < 1 eller versjon > maks_nøkkel() { kast _data_feil("versjonen må vere eit heiltal ≥ 1") }
+    la grunn = valider_skjema(skjema)
+    hvis grunn != "" { kast _data_feil(grunn) }
+    la db = _ny_db(namn, versjon, skjema)
+    la id = _registrer("opne", db, [], ok, feil)
+    _send(id, opne_json(namn, versjon, skjema))
+    returner db
+}
+
+# Køyr ein batch (liste av op_*) som éin transaksjon. ok(liste med eitt resultat per op): put →
+# nøkkelen, hent → verdien eller null, liste → verdiane, nøklar → nøklane, tel → talet, slett og
+# tøm → null. Feilar éin op, blir ingenting i batchen skrive, og feil(LagerFeil) blir kalla.
+# Gjev id-en.
+funksjon køyr(db: ordbok, ops: liste, ok, feil) -> heltall {
+    la json = batch_json(db, ops)
+    la id = _registrer("køyr", db, ops, ok, feil)
+    la t = db["tilstand"]
+    hvis t == "open" {
+        _send(id, json)
+    } ellers hvis t == "opnar" {
+        legg_til(db["ventar"], id)
+    } ellers {
+        _send_utsett(id, _stengd_feil(db, id))
+    }
+    returner id
+}
+
+funksjon _stengd_feil(db: ordbok, id: heltall) -> ordbok {
+    hvis db["tilstand"] == "lukka" {
+        returner lager_feil("transaksjon", id, "køyr", db["namn"], "InvalidStateError", "databasen er lukka")
+    }
+    la f = db["feil"]
+    la melding = "databasen vart ikkje opna"
+    hvis f != null { melding = melding + " (" + feil_tekst(f) + ")" }
+    returner lager_feil("open", id, "køyr", db["namn"], "", melding)
+}
+
+# Enkeltoperasjonar: éin op i éin transaksjon; ok får resultatet til op-en.
+funksjon _éin(db: ordbok, o: ordbok, ok, feil) -> heltall {
+    returner køyr(db, [o], fun(r) -> _kall_éin(ok, r), feil)
+}
+
+funksjon _kall_éin(ok, r: liste) -> heltall {
+    hvis ok != null { builtin.ncb_call_fn(ok, r[0]) }
+    returner 0
+}
+
+funksjon put(db: ordbok, lagernamn: tekst, verdi, ok, feil) -> heltall {
+    returner _éin(db, op_put(lagernamn, verdi), ok, feil)
+}
+
+funksjon put_med_nøkkel(db: ordbok, lagernamn: tekst, nøkkel, verdi, ok, feil) -> heltall {
+    returner _éin(db, op_put_med_nøkkel(lagernamn, nøkkel, verdi), ok, feil)
+}
+
+funksjon hent(db: ordbok, lagernamn: tekst, nøkkel, ok, feil) -> heltall {
+    returner _éin(db, op_hent(lagernamn, nøkkel), ok, feil)
+}
+
+funksjon slett(db: ordbok, lagernamn: tekst, nøkkel_eller_område, ok, feil) -> heltall {
+    returner _éin(db, op_slett(lagernamn, nøkkel_eller_område), ok, feil)
+}
+
+funksjon liste(db: ordbok, lagernamn: tekst, område, ok, feil) -> heltall {
+    returner _éin(db, op_liste(lagernamn, område, 0), ok, feil)
+}
+
+funksjon tel(db: ordbok, lagernamn: tekst, område, ok, feil) -> heltall {
+    returner _éin(db, op_tel(lagernamn, område), ok, feil)
+}
+
+funksjon indeks_liste(db: ordbok, lagernamn: tekst, indeksnamn: tekst, område, ok, feil) -> heltall {
+    returner _éin(db, op_indeks_liste(lagernamn, indeksnamn, område, 0), ok, feil)
+}
+
+funksjon indeks_hent(db: ordbok, lagernamn: tekst, indeksnamn: tekst, k, ok, feil) -> heltall {
+    returner _éin(db, op_indeks_hent(lagernamn, indeksnamn, k), ok, feil)
+}
+
+# Lukk databasen (etter det som alt er sendt). Seinare køyr gjev LagerFeil «transaksjon».
+funksjon lukk(db: ordbok) -> heltall {
+    la t = db["tilstand"]
+    hvis t == "opnar" {
+        db["lukk_etter"] = sann
+        db["tilstand"] = "lukka"
+        returner 0
+    }
+    hvis t != "open" { returner 0 }
+    db["tilstand"] = "lukka"
+    la id = _registrer("lukk", db, [], null, null)
+    _send(id, "{\"h\":" + tekst(db["h"]) + "}")
+    returner id
+}
+
+# Slett databasen `namn` på eininga. Opne tilkoplingar i andre faner lukkar seg sjølve.
+funksjon slett_database(namn: tekst, ok, feil) -> heltall {
+    hvis builtin.type(namn) != "tekst" eller lengde(namn) == 0 { kast _data_feil("databasen må ha eit namn") }
+    la db = _ny_db(namn, 0, [])
+    la id = _registrer("slett_database", db, [], ok, feil)
+    _send(id, json_trygg(builtin.json_stringify({"n": namn, "v": 0})))
+    returner id
+}
+
+# Utlogging (personvern): lukk databasen (db kan vere null), fjern nøklane i localStorage og
+# slett databasen. ok(null) når databasen er sletta.
+funksjon logg_ut(db, namn: tekst, lokale_nøklar: liste, ok, feil) -> heltall {
+    hvis db != null { lukk(db) }
+    la i = 0
+    mens i < lengde(lokale_nøklar) {
+        vert.fjern_lokalt(lokale_nøklar[i])
+        i = i + 1
+    }
+    returner slett_database(namn, ok, feil)
+}
+
+# Talet på førespurnader som ikkje er leverte.
+funksjon ventande() -> heltall {
+    returner lengde(_kø) - _kø_start
+}
+
+funksjon _kall(v: ordbok, r: ordbok) -> heltall {
+    hvis r["ok"] {
+        hvis v["ok"] != null {
+            prøv {
+                builtin.ncb_call_fn(v["ok"], r["verdi"])
+            } fang (e) {
+                skriv("ERROR: " + tekst(e) + "\n")
+            }
+        }
+    } ellers hvis v["feil"] == null {
+        skriv("ERROR: " + feil_tekst(r["verdi"]) + "\n")
+    } ellers {
+        prøv {
+            builtin.ncb_call_fn(v["feil"], r["verdi"])
+        } fang (e) {
+            skriv("ERROR: " + tekst(e) + "\n")
+        }
+    }
+    returner 0
+}
+
+funksjon _lever() -> heltall {
+    la n = 0
+    mens _kø_start < lengde(_kø) {
+        la nøkkel = _kø[_kø_start]
+        la v = _ventar[nøkkel]
+        hvis ikkje v["ferdig"] { bryt }
+        _kø_start = _kø_start + 1
+        fjern_nokkel(_ventar, nøkkel)
+        _kall(v, v["resultat"])
+        n = n + 1
+    }
+    hvis _kø_start == lengde(_kø) {
+        _kø = []
+        _kø_start = 0
+    }
+    returner n
+}
+
+# Opninga er ferdig: send det som venta (eller gje det opningsfeilen).
+funksjon _opna(db: ordbok) -> heltall {
+    la vl = db["ventar"]
+    db["ventar"] = []
+    la i = 0
+    mens i < lengde(vl) {
+        la id = vl[i]
+        la v = _ventar[tekst(id)]
+        hvis db["tilstand"] == "open" {
+            _send(id, batch_json(db, v["ops"]))
+        } ellers {
+            _send_utsett(id, _stengd_feil(db, id))
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+# Resultatet for førespurnaden v frå konvolutten k.
+funksjon resultat(v: ordbok, k: ordbok) -> ordbok {
+    la db = v["db"]
+    la art = v["art"]
+    hvis v["utsett"] != null { returner {"ok": usann, "verdi": v["utsett"]} }
+    hvis art == "køyr" { returner batch_resultat(db, v["ops"], k) }
+    hvis k["namn"] != "" {
+        returner {"ok": usann, "verdi": lager_feil(feil_art(k["namn"], art), k["id"], art, db["namn"], k["namn"], k["melding"])}
+    }
+    returner {"ok": sann, "verdi": k["data"]}
+}
+
+funksjon _motta(konvolutt: tekst) -> heltall {
+    la k = tolk_konvolutt(konvolutt)
+    la nøkkel = tekst(k["id"])
+    hvis ikkje finnes_nøkkel(_ventar, nøkkel) eller _ventar[nøkkel]["ferdig"] {
+        # Ei opning som alt er levert som «blokkert», kan lukkast seinare: lukk henne straks.
+        hvis finnes_nøkkel(_seine, nøkkel) og k["namn"] == "" og builtin.type(k["data"]) == "liste" {
+            fjern_nokkel(_seine, nøkkel)
+            _send(_registrer("lukk", _ny_db("", 0, []), [], null, null), "{\"h\":" + tekst(k["data"][0]) + "}")
+        }
+        returner _lever()
+    }
+    la v = _ventar[nøkkel]
+    la r = resultat(v, k)
+    hvis v["art"] == "opne" {
+        la db = v["db"]
+        hvis r["ok"] {
+            db["h"] = r["verdi"][0]
+            db["oppgradert_frå"] = r["verdi"][1]
+            r["verdi"] = db
+            hvis db["lukk_etter"] {
+                db["tilstand"] = "open"
+                lukk(db)
+            } ellers {
+                db["tilstand"] = "open"
+            }
+        } ellers {
+            db["tilstand"] = "feil"
+            db["feil"] = r["verdi"]
+            hvis r["verdi"]["art"] == "blokkert" { _seine[nøkkel] = sann }
+        }
+        _opna(db)
+    }
+    v["resultat"] = r
+    v["ferdig"] = sann
+    returner _lever()
+}
+
+# Tilbakekallet lastaren kallar når ein førespurnad er ferdig (konvolutten i lager_svar).
+funksjon _lager_ferdig() -> heltall {
+    _motta(vert.lager_svar())
+    returner 0
+}
+
+# Berre for testar utan nettlesar (tests/wasm_korpus/w7_lager_ko.no): registrer ein batch
+# som om han var sendt, og lever ein konvolutt som om lastaren gav han.
+funksjon test_db(namn: tekst, skjema: liste) -> ordbok {
+    la db = _ny_db(namn, 1, skjema)
+    db["tilstand"] = "open"
+    db["h"] = 0
+    returner db
+}
+
+funksjon test_registrer(db: ordbok, ops: liste, ok, feil) -> heltall {
+    batch_json(db, ops)
+    returner _registrer("køyr", db, ops, ok, feil)
+}
+
+funksjon test_motta(konvolutt: tekst) -> heltall {
+    returner _motta(konvolutt)
+}
