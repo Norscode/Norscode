@@ -1,50 +1,67 @@
-# std/wasm_vert.no — vertsbindingar for Norscode-klientmodular kompilerte til WebAssembly (W0, W1, W3).
+# std/wasm_vert.no — vertsbindingar for Norscode-klientmodular kompilerte til WebAssembly (W0–W4).
 #
 # Fila har tre roller:
 #
-#  1. Norscode-API for klientkode: `finn`, `sett_tekst`, `sett_html`, `lytt_klikk`
-#     (og `test_klikk`, berre i testbygg). Funksjonane er stubbar: i VM-en kastar dei,
-#     og WASM-backenden (std/wasm_lowring.no) byter kalla ut med importar frå modulen
-#     «nc». Klientkoden skriv `bruk std.wasm_vert som vert` og `vert.finn("#ut")`.
+#  1. Norscode-API for klientkode (`bruk std.wasm_vert som vert`): DOM (`finn`, `sett_tekst`,
+#     `hent_verdi`, `sett_attr`, `lag`, …), hendingar (`lytt`, `deleger`, `hending_verdi`, …),
+#     tidtakarar (`etter`, `intervall`), navigasjon (`gå_til`, `hent_parameter`) og
+#     handtakstabellen (`slepp`). Funksjonane er stubbar: i VM-en kastar dei, og
+#     WASM-backenden (std/wasm_lowring.no) byter kalla ut med importar frå modulen «nc».
 #
 #  2. Vertstabellen (`vertsfunksjonar`): ein Norscode-datastruktur som skildrar kvar
 #     vertsfunksjon med namn, parametertypar, resultattype og DOM-operasjonen som eit
 #     lite JS-uttrykkstre. Lastaren blir emittert token for token frå denne tabellen av
 #     std/wasm_js.no. Det finst ingen handskriven lastarmal.
 #
-#  3. HTML-escaping (`escape_tabell`, `html_escape`). `sett_html(h, mal, verdi)` er den
-#     einaste vegen til innerHTML. `mal` må vere ein tekstkonstant i kjelda (utviklar-HTML,
-#     kontrollert av kompilatoren), og `verdi` blir ALLTID escapa i nettlesaren med ein
-#     JS-hjelpar som blir emittert frå `escape_tabell`. Tabellen er den same som
-#     std.html.escape brukar, så `html_escape` her gjev identisk tekst i VM-en.
+#  3. Tryggleik: HTML-escaping (`escape_tabell`, `html_escape`) for `sett_html`, og
+#     kompileringstids-lister for attributt (`trygt_attributt`), taggar (`trygg_tag`) og
+#     hendingar (`hendingar`). `sett_html(h, mal, verdi)` er den einaste vegen til innerHTML:
+#     `mal` må vere ein tekstkonstant i kjelda, og `verdi` blir ALLTID escapa i nettlesaren.
+#     `sett_attr` tek berre attributtnamn som er konstantar på lista (aldri on…, href, src,
+#     style eller data-nc-…), og `lag` berre taggar på lista (aldri script, iframe, style …).
 #
 # Parametertypar (Norscode → WASM → JS):
-#   "tekst"    tekstkonstant i kjelda → (i32 peikar, i32 lengd) i minnet «m» → JS-streng (UTF-8)
-#   "funksjon" tekstkonstant som namngjev ein funksjon i same modul, utan parametrar →
-#              eksportnamn (i32, i32) → JS kallar eksporten
-#   "handtak"  heltall (elementhandtak) → i32 → JS-tal (indeks i handtakstabellen)
-#   "heltall"  heltall → i64 → JS BigInt (eksakt, også over 2^53)
-#   "verdi"    kva som helst → tekst(x) som i VM-en → UTF-8 i postkassa (i32 peikar, i32 lengd)
-#              → JS-streng
-#   "desimal"  desimaltall → f64 → JS-tal
+#   "tekst"     tekstkonstant i kjelda → (i32 peikar, i32 lengd) i minnet «m» → JS-streng (UTF-8)
+#   "hending"   som "tekst", men må vere eitt av namna i `hendingar()` (W4)
+#   "attributt" som "tekst", men må vere eit trygt attributtnamn (`trygt_attributt`, W4)
+#   "tag"       som "tekst", men må vere ein trygg tag (`trygg_tag`, W4)
+#   "funksjon"  tekstkonstant som namngjev ein funksjon i same modul, utan parametrar →
+#               eksportnamnet «_<namn>» (i32, i32) → JS kallar eksporten
+#   "handtak"   heltall (handtak) → i32 → JS-tal (indeks i handtakstabellen)
+#   "tal"       heltall → i32 → JS-tal (W4: millisekund til tidtakarar)
+#   "bool"      sanning som i `hvis` → i32 0/1 → JS-tal (W4)
+#   "heltall"   heltall → i64 → JS BigInt (eksakt, også over 2^53)
+#   "verdi"     kva som helst → tekst(x) som i VM-en → UTF-8 i postkassa (i32 peikar, i32 lengd)
+#               → JS-streng. W4: fleire "verdi"-parametrar ligg etter kvarandre i postkassa.
+#   "desimal"   desimaltall → f64 → JS-tal
 #   "postkasse" byteadressa (i32) der JS skriv ein tekst attende (sjå «skriv_tekst»)
 # Resultattypar: "handtak" (i32 → i31ref), "ingen" (→ null), "lengd" (i32, bytar JS
-# skreiv i postkassa) eller "desimal" (f64, berre interne).
-# Kvar vertsfunksjon har høgst éin "verdi"-parameter, sidan alle deler postkassa.
+# skreiv i postkassa), "desimal" (f64, berre interne) eller "tekst" (W4: JS-strengen blir
+# skriven som UTF-8 i postkassa av hjelparen U, som veks minnet ved behov, og innpakkaren
+# byggjer ein Norscode-tekst av bytane med atomet frå_minne).
 #
 # Interne vertsfunksjonar («intern»: sann) blir importerte av runtime-atoma i
-# std/wasm_atom.no (skriv, feilmeldingar, tekst(desimaltall), desimaltall(tekst)) og har ingen
-# Norscode-stubb.
+# std/wasm_atom.no (skriv, feilmeldingar, tekst(desimaltall), desimaltall(tekst), tid_ms())
+# og har ingen Norscode-stubb.
 #
 # JS-uttrykkstreet (noder som lister, første element er nodetypen):
-#   ["arg", i]              i-te Norscode-parameter (tekst/funksjon blir dekoda frå minnet)
+#   ["arg", i]              i-te Norscode-parameter (tekst/funksjon/verdi blir dekoda frå minnet)
+#   ["lokal", i]            den rå JS-parameteren for parameter i (til mellombels bruk)
 #   ["element", i]          elementet som handtaket i parameter i peikar på
-#   ["nytt_handtak", e]     legg elementet e i handtakstabellen og gjev indeksen
+#   ["nytt_handtak", e]     legg e i handtakstabellen og gjev indeksen
+#   ["hjelpar", namn]       ein lastarhjelpar (L, V, T, …) frå std/wasm_js.no
 #   ["global", namn]        global JS-verdi (t.d. document)
 #   ["felt", e, namn]       e.namn
 #   ["kall", f, [args]]     f(args)
+#   ["ny", f, [args]]       new f(args)
 #   ["tildel", mål, e]      mål=e
+#   ["binær", op, a, b]     a op b (op er eitt token: + - == && || ??)
+#   ["vilkår", c, a, b]     c?a:b
+#   ["ikkje", e]            !e
+#   ["sekvens", [e, …]]     (e,…)
+#   ["objekt", [[k, e], …]] {k:e,…}
 #   ["streng", s]           strengliteral
+#   ["tal", n]              talliteral
 #   ["pil", [param], e]     pilfunksjon
 #   ["eksport", e]          eksporten med namnet e frå WASM-modulen
 #   ["escape", e]           HTML-escape av e (emittert frå escape_tabell)
@@ -54,26 +71,146 @@ funksjon _berre_nettlesar(namn: tekst) -> heltall {
     kast "wasm_vert." + namn + " finst berre i nettlesaren: kompiler klientmodulen med tools/nc_wasm.no"
 }
 
+funksjon _berre_nettlesar_tekst(namn: tekst) -> tekst {
+    kast "wasm_vert." + namn + " finst berre i nettlesaren: kompiler klientmodulen med tools/nc_wasm.no"
+}
+
 # ─── Norscode-API (stubbar i VM-en) ──────────────────────────────────────────
 
-funksjon finn(selektor: tekst) -> heltall {
-    returner _berre_nettlesar("finn")
+# DOM: finn og endre element (W0, W3)
+funksjon finn(selektor: tekst) -> heltall { returner _berre_nettlesar("finn") }
+funksjon sett_tekst(handtak: heltall, verdi) -> heltall { returner _berre_nettlesar("sett_tekst") }
+funksjon sett_html(handtak: heltall, mal: tekst, verdi) -> heltall { returner _berre_nettlesar("sett_html") }
+funksjon lytt_klikk(handtak: heltall, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("lytt_klikk") }
+
+# DOM: lese frå sida (W4)
+funksjon hent_verdi(handtak: heltall) -> tekst { returner _berre_nettlesar_tekst("hent_verdi") }
+funksjon hent_tekst(handtak: heltall) -> tekst { returner _berre_nettlesar_tekst("hent_tekst") }
+funksjon hent_attr(handtak: heltall, namn) -> tekst { returner _berre_nettlesar_tekst("hent_attr") }
+
+# DOM: endre (W4)
+funksjon sett_verdi(handtak: heltall, verdi) -> heltall { returner _berre_nettlesar("sett_verdi") }
+funksjon sett_attr(handtak: heltall, namn: tekst, verdi) -> heltall { returner _berre_nettlesar("sett_attr") }
+funksjon fjern_attr(handtak: heltall, namn: tekst) -> heltall { returner _berre_nettlesar("fjern_attr") }
+funksjon sett_klasse(handtak: heltall, klasse, på) -> heltall { returner _berre_nettlesar("sett_klasse") }
+funksjon vis(handtak: heltall, på) -> heltall { returner _berre_nettlesar("vis") }
+funksjon lag(tag: tekst) -> heltall { returner _berre_nettlesar("lag") }
+funksjon legg_inn(forelder: heltall, barn: heltall) -> heltall { returner _berre_nettlesar("legg_inn") }
+funksjon fjern_element(handtak: heltall) -> heltall { returner _berre_nettlesar("fjern_element") }
+funksjon tøm(handtak: heltall) -> heltall { returner _berre_nettlesar("tøm") }
+funksjon fokus(handtak: heltall) -> heltall { returner _berre_nettlesar("fokus") }
+
+# Handtakstabellen (W4): slepp eit element-, lyttar- eller tidtakarhandtak. Ein lyttar blir
+# fjerna (AbortController), ein tidtakar stoppa, og elementet kan frigjerast av nettlesaren.
+funksjon slepp(handtak: heltall) -> heltall { returner _berre_nettlesar("slepp") }
+
+# Hendingar (W4). `hending` er eitt av namna i hendingar(): klikk, input, endring, send
+# (submit, med preventDefault) og tast (keydown). Funksjonen må vere i same modul og
+# utan parametrar; hendingsdata blir lesne med hending_*. Begge gjev eit lyttarhandtak.
+funksjon lytt(handtak: heltall, hending: tekst, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("lytt") }
+# Delegering: éin lyttar på document for alle element med data-nc-<hending>="<funksjonsnamn>".
+funksjon deleger(hending: tekst, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("deleger") }
+# Set data-nc-<hending>="<funksjonsnamn>" på eit element (til deleger). Begge er konstantar.
+funksjon sett_handlar(handtak: heltall, hending: tekst, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("sett_handlar") }
+funksjon hending_verdi() -> tekst { returner _berre_nettlesar_tekst("hending_verdi") }
+funksjon hending_tast() -> tekst { returner _berre_nettlesar_tekst("hending_tast") }
+funksjon hending_id() -> tekst { returner _berre_nettlesar_tekst("hending_id") }
+funksjon hending_data(nøkkel) -> tekst { returner _berre_nettlesar_tekst("hending_data") }
+funksjon hending_mål() -> heltall { returner _berre_nettlesar("hending_mål") }
+
+# Tidtakarar (W4): funksjonen blir kalla etter / kvart `ms` millisekund. Gjev eit handtak.
+funksjon etter(ms: heltall, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("etter") }
+funksjon intervall(ms: heltall, funksjonsnamn: tekst) -> heltall { returner _berre_nettlesar("intervall") }
+
+# Navigasjon (W4). Konsollen: skriv(x) går til console.log.
+funksjon gå_til(url) -> heltall { returner _berre_nettlesar("gå_til") }
+funksjon hent_sti() -> tekst { returner _berre_nettlesar_tekst("hent_sti") }
+funksjon hent_parameter(namn) -> tekst { returner _berre_nettlesar_tekst("hent_parameter") }
+
+# Lokal lagring (W4): localStorage for same opphav. Tom tekst når nøkkelen manglar.
+funksjon lagre_lokalt(nøkkel, verdi) -> heltall { returner _berre_nettlesar("lagre_lokalt") }
+funksjon hent_lokalt(nøkkel) -> tekst { returner _berre_nettlesar_tekst("hent_lokalt") }
+
+# Testkrokar: berre i testbygg (NC_WASM_TESTBYGG=1)
+funksjon test_klikk(handtak: heltall) -> heltall { returner _berre_nettlesar("test_klikk") }
+funksjon test_skriv(handtak: heltall, verdi) -> heltall { returner _berre_nettlesar("test_skriv") }
+funksjon test_tast(handtak: heltall, tast) -> heltall { returner _berre_nettlesar("test_tast") }
+funksjon test_send(handtak: heltall) -> heltall { returner _berre_nettlesar("test_send") }
+
+# ─── Kompileringstids-lister (W4) ────────────────────────────────────────────
+
+# Hendingar: [norsk namn, DOM-hending, preventDefault]. Delegerings-attributtet er
+# data-nc-<norsk namn>.
+funksjon hendingar() -> liste {
+    returner [["klikk", "click", usann], ["input", "input", usann], ["endring", "change", usann],
+              ["send", "submit", sann], ["tast", "keydown", usann]]
 }
 
-funksjon sett_tekst(handtak: heltall, verdi) -> heltall {
-    returner _berre_nettlesar("sett_tekst")
+funksjon er_hending(namn: tekst) -> bool {
+    la h = hendingar()
+    la i = 0
+    mens i < lengde(h) {
+        hvis h[i][0] == namn { returner sann }
+        i = i + 1
+    }
+    returner usann
 }
 
-funksjon sett_html(handtak: heltall, mal: tekst, verdi) -> heltall {
-    returner _berre_nettlesar("sett_html")
+# Prefikset til delegerings-attributta (data-nc-klikk="funksjon").
+funksjon delegering_prefiks() -> tekst {
+    returner "data-nc-"
 }
 
-funksjon lytt_klikk(handtak: heltall, funksjonsnamn: tekst) -> heltall {
-    returner _berre_nettlesar("lytt_klikk")
+# Attributt sett_attr kan skrive (i tillegg til data-* og aria-*). Ingen hendingsattributt
+# (on…), ingen URL-attributt (href, src, action, formaction, srcdoc …) og ikkje style: ein
+# tekstverdi frå brukaren kan då aldri bli kode eller ein lenkje.
+funksjon trygge_attributt() -> liste {
+    returner ["title", "value", "placeholder", "disabled", "hidden", "checked", "selected", "readonly",
+              "required", "id", "name", "role", "alt", "lang", "dir", "tabindex", "min", "max", "step",
+              "minlength", "maxlength", "for", "open", "type", "pattern", "autocomplete", "size", "rows",
+              "cols", "colspan", "rowspan", "class", "inputmode", "spellcheck"]
 }
 
-funksjon test_klikk(handtak: heltall) -> heltall {
-    returner _berre_nettlesar("test_klikk")
+funksjon trygt_attributt(namn: tekst) -> bool {
+    hvis builtin.starts_with(namn, delegering_prefiks()) { returner usann }
+    hvis builtin.starts_with(namn, "data-") eller builtin.starts_with(namn, "aria-") {
+        # berre små bokstavar, siffer og bindestrek etter prefikset
+        la i = 5
+        hvis lengde(namn) <= 5 { returner usann }
+        mens i < lengde(namn) {
+            la c = builtin.char_code(builtin.slice(namn, i, i + 1))
+            hvis ikkje ((c >= 97 og c <= 122) eller (c >= 48 og c <= 57) eller c == 45) { returner usann }
+            i = i + 1
+        }
+        returner sann
+    }
+    la l = trygge_attributt()
+    la j = 0
+    mens j < lengde(l) {
+        hvis l[j] == namn { returner sann }
+        j = j + 1
+    }
+    returner usann
+}
+
+# Taggar `lag` kan lage. Ikkje script, style, iframe, object, embed, link, meta, base, svg
+# eller math.
+funksjon trygge_taggar() -> liste {
+    returner ["div", "span", "p", "li", "ul", "ol", "a", "button", "strong", "em", "b", "i", "small",
+              "label", "input", "option", "select", "textarea", "table", "thead", "tbody", "tr", "td", "th",
+              "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer", "nav", "time",
+              "output", "code", "pre", "br", "hr", "dl", "dt", "dd", "details", "summary", "mark", "abbr",
+              "form", "fieldset", "legend", "caption"]
+}
+
+funksjon trygg_tag(namn: tekst) -> bool {
+    la l = trygge_taggar()
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == namn { returner sann }
+        i = i + 1
+    }
+    returner usann
 }
 
 # ─── Vertstabellen ───────────────────────────────────────────────────────────
@@ -92,6 +229,19 @@ funksjon _vf_intern(namn: tekst, param: liste, resultat: tekst, berre_test: bool
 
 funksjon _element(i: heltall) -> liste {
     returner ["element", i]
+}
+
+funksjon _metode(mål: liste, namn: tekst, args: liste) -> liste {
+    returner ["kall", ["felt", mål, namn], args]
+}
+
+# e ?? ""  (DOM-verdiar som kan vere null blir tom tekst)
+funksjon _eller_tom(e: liste) -> liste {
+    returner ["binær", "??", e, ["streng", ""]]
+}
+
+funksjon _send_hending(e: liste, type: tekst, init: liste) -> liste {
+    returner _metode(e, "dispatchEvent", [["ny", ["global", type], init]])
 }
 
 funksjon vertsfunksjonar() -> liste {
@@ -116,6 +266,90 @@ funksjon vertsfunksjonar() -> liste {
     # test_klikk(h): element.click() — berre i testbygg (NC_WASM_TESTBYGG=1)
     legg_til(ut, _vf("test_klikk", ["handtak"], "ingen", sann,
         ["kall", ["felt", _element(0), "click"], []]))
+
+    # ── W4: lese frå DOM-en (tekst inn i WASM via postkassa) ──
+    legg_til(ut, _vf("hent_verdi", ["handtak"], "tekst", usann, ["felt", _element(0), "value"]))
+    legg_til(ut, _vf("hent_tekst", ["handtak"], "tekst", usann, ["felt", _element(0), "textContent"]))
+    legg_til(ut, _vf("hent_attr", ["handtak", "verdi"], "tekst", usann,
+        _eller_tom(_metode(_element(0), "getAttribute", [["arg", 1]]))))
+    # ── W4: endre DOM-en ──
+    legg_til(ut, _vf("sett_verdi", ["handtak", "verdi"], "ingen", usann,
+        ["tildel", ["felt", _element(0), "value"], ["arg", 1]]))
+    legg_til(ut, _vf("sett_attr", ["handtak", "attributt", "verdi"], "ingen", usann,
+        _metode(_element(0), "setAttribute", [["arg", 1], ["arg", 2]])))
+    legg_til(ut, _vf("fjern_attr", ["handtak", "attributt"], "ingen", usann,
+        _metode(_element(0), "removeAttribute", [["arg", 1]])))
+    legg_til(ut, _vf("sett_klasse", ["handtak", "verdi", "bool"], "ingen", usann,
+        _metode(["felt", _element(0), "classList"], "toggle", [["arg", 1], ["arg", 2]])))
+    legg_til(ut, _vf("vis", ["handtak", "bool"], "ingen", usann,
+        ["tildel", ["felt", _element(0), "hidden"], ["ikkje", ["arg", 1]]]))
+    legg_til(ut, _vf("lag", ["tag"], "handtak", usann,
+        ["nytt_handtak", _metode(["global", "document"], "createElement", [["arg", 0]])]))
+    legg_til(ut, _vf("legg_inn", ["handtak", "handtak"], "ingen", usann,
+        _metode(_element(0), "append", [_element(1)])))
+    legg_til(ut, _vf("fjern_element", ["handtak"], "ingen", usann, _metode(_element(0), "remove", [])))
+    legg_til(ut, _vf("tøm", ["handtak"], "ingen", usann, _metode(_element(0), "replaceChildren", [])))
+    legg_til(ut, _vf("fokus", ["handtak"], "ingen", usann, _metode(_element(0), "focus", [])))
+    # slepp(h): lyttar (AbortController) → abort(); tidtakar (tal) → clearTimeout (stoppar
+    # òg intervall); så blir plassen i tabellen null, så nettlesaren kan frigjere objektet,
+    # og indeksen går til frilista F. Når modulen importerer slepp, gjenbrukar nye handtak
+    # plassar frå F (hjelparen P), så tabellen ikkje veks med kvar gjengjeving.
+    legg_til(ut, _vf("slepp", ["handtak"], "ingen", usann,
+        ["sekvens", [
+            ["vilkår", ["binær", "&&", _element(0), ["felt", _element(0), "abort"]],
+                _metode(_element(0), "abort", []),
+                ["kall", ["global", "clearTimeout"], [_element(0)]]],
+            ["tildel", _element(0), ["global", "null"]],
+            _metode(["hjelpar", "F"], "push", [["lokal", 0]])]]))
+    # ── W4: hendingar ──
+    legg_til(ut, _vf("lytt", ["handtak", "hending", "funksjon"], "handtak", usann,
+        ["kall", ["hjelpar", "L"], [_element(0), ["arg", 1], ["eksport", ["arg", 2]]]]))
+    # deleger(hending, funksjon): L(document, hending, eksport, "<funksjonsnamn>"). Eksportnamnet
+    # er «_<funksjonsnamn>», så namnet i data-nc-attributtet er eksportnamnet utan «_».
+    legg_til(ut, _vf("deleger", ["hending", "funksjon"], "handtak", usann,
+        ["kall", ["hjelpar", "L"], [["global", "document"], ["arg", 0], ["eksport", ["arg", 1]],
+            _metode(["arg", 1], "slice", [["tal", 1]])]]))
+    # sett_handlar(h, hending, funksjon): data-nc-<hending>="<funksjonsnamn>" (til deleger)
+    legg_til(ut, _vf("sett_handlar", ["handtak", "hending", "funksjon"], "ingen", usann,
+        _metode(_element(0), "setAttribute", [["binær", "+", ["streng", delegering_prefiks()], ["arg", 1]],
+            _metode(["arg", 2], "slice", [["tal", 1]])])))
+    legg_til(ut, _vf("hending_verdi", [], "tekst", usann,
+        _eller_tom(["felt", ["felt", ["hjelpar", "V"], "target"], "value"])))
+    legg_til(ut, _vf("hending_tast", [], "tekst", usann, _eller_tom(["felt", ["hjelpar", "V"], "key"])))
+    legg_til(ut, _vf("hending_id", [], "tekst", usann, ["felt", ["hjelpar", "T"], "id"]))
+    legg_til(ut, _vf("hending_data", ["verdi"], "tekst", usann,
+        _eller_tom(_metode(["hjelpar", "T"], "getAttribute", [["binær", "+", ["streng", "data-"], ["arg", 0]]]))))
+    legg_til(ut, _vf("hending_mål", [], "handtak", usann, ["nytt_handtak", ["hjelpar", "T"]]))
+    # ── W4: tidtakarar (tilbakekall utan parametrar) ──
+    legg_til(ut, _vf("etter", ["tal", "funksjon"], "handtak", usann,
+        ["nytt_handtak", ["kall", ["global", "setTimeout"], [["eksport", ["arg", 1]], ["arg", 0]]]]))
+    legg_til(ut, _vf("intervall", ["tal", "funksjon"], "handtak", usann,
+        ["nytt_handtak", ["kall", ["global", "setInterval"], [["eksport", ["arg", 1]], ["arg", 0]]]]))
+    # ── W4: navigasjon (berre same opphav) ──
+    legg_til(ut, _vf("gå_til", ["verdi"], "ingen", usann,
+        ["binær", "&&",
+            ["binær", "==",
+                ["felt", ["tildel", ["lokal", 0], ["ny", ["global", "URL"], [["arg", 0], ["felt", ["global", "location"], "href"]]]], "origin"],
+                ["felt", ["global", "location"], "origin"]],
+            _metode(["global", "location"], "assign", [["lokal", 0]])]))
+    legg_til(ut, _vf("hent_sti", [], "tekst", usann, ["felt", ["global", "location"], "pathname"]))
+    legg_til(ut, _vf("hent_parameter", ["verdi"], "tekst", usann,
+        _eller_tom(_metode(["ny", ["global", "URLSearchParams"], [["felt", ["global", "location"], "search"]]], "get", [["arg", 0]]))))
+    # ── W4: lokal lagring (to tekstverdiar i postkassa) ──
+    legg_til(ut, _vf("lagre_lokalt", ["verdi", "verdi"], "ingen", usann,
+        _metode(["global", "localStorage"], "setItem", [["arg", 0], ["arg", 1]])))
+    legg_til(ut, _vf("hent_lokalt", ["verdi"], "tekst", usann,
+        _eller_tom(_metode(["global", "localStorage"], "getItem", [["arg", 0]]))))
+    # ── W4: testkrokar (berre testbygg) ──
+    la boble = ["objekt", [["bubbles", ["global", "true"]]]]
+    legg_til(ut, _vf("test_skriv", ["handtak", "verdi"], "ingen", sann,
+        ["sekvens", [["tildel", ["felt", _element(0), "value"], ["arg", 1]],
+                     _send_hending(_element(0), "Event", [["streng", "input"], boble])]]))
+    legg_til(ut, _vf("test_tast", ["handtak", "verdi"], "ingen", sann,
+        _send_hending(_element(0), "KeyboardEvent",
+            [["streng", "keydown"], ["objekt", [["key", ["arg", 1]], ["bubbles", ["global", "true"]]]]])))
+    legg_til(ut, _vf("test_send", ["handtak"], "ingen", sann, _metode(_element(0), "requestSubmit", [])))
+
     # ── Interne (runtime-atoma i std/wasm_atom.no) ──
     # logg(s): console.log(s). `skriv(x)` og feilmeldingane («ERROR: …») går hit.
     legg_til(ut, _vf_intern("logg", ["verdi"], "ingen", usann,
@@ -133,7 +367,25 @@ funksjon vertsfunksjonar() -> liste {
     # eller eksponent). parseFloat er korrekt avrunda, som strtod i VM-en.
     legg_til(ut, _vf_intern("tekst_flyt", ["verdi"], "desimal", usann,
         ["kall", ["global", "parseFloat"], [["arg", 0]]]))
+    # nå_ms(): builtin.tid_ms() (W4) — Date.now(), millisekund sidan epoken.
+    legg_til(ut, _vf_intern("nå_ms", [], "desimal", usann,
+        ["kall", ["felt", ["global", "Date"], "now"], []]))
     returner ut
+}
+
+# Parametertypar som blir (i32 peikar, i32 lengd) over grensa (tekst til JS).
+funksjon tekst_parameter(t: tekst) -> bool {
+    returner t == "tekst" eller t == "funksjon" eller t == "verdi" eller konstant_parameter(t)
+}
+
+# Parametertypar som må vere ein tekstkonstant i kjelda (kontrollert ved kompilering).
+funksjon konstant_parameter(t: tekst) -> bool {
+    returner t == "tekst" eller t == "funksjon" eller t == "hending" eller t == "attributt" eller t == "tag"
+}
+
+# Parametertypar som blir éin i32 (JS-tal).
+funksjon i32_parameter(t: tekst) -> bool {
+    returner t == "handtak" eller t == "postkasse" eller t == "tal" eller t == "bool"
 }
 
 funksjon vertsfunksjon(namn: tekst) -> ordbok {

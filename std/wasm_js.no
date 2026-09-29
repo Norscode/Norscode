@@ -85,14 +85,23 @@ funksjon _regex_klasse(teikn: liste, flagg: tekst) -> tekst {
     returner ut + "]" + "/" + flagg
 }
 
+# JS-identifikator: ASCII-bokstavar, siffer (ikkje først), _ og $, og (W4) æ ø å Æ Ø Å,
+# som er bokstavar i JS (ID_Start). Anna UTF-8 gjev usann (namnet blir ein streng).
 funksjon er_identifikator(s: tekst) -> bool {
     hvis lengde(s) == 0 { returner usann }
     la k0 = builtin.char_code(builtin.slice(s, 0, 1))
     hvis k0 >= 48 og k0 <= 57 { returner usann }
     la i = 0
     mens i < lengde(s) {
-        hvis ikkje _er_id_teikn(builtin.slice(s, i, i + 1)) { returner usann }
-        i = i + 1
+        la c = builtin.slice(s, i, i + 1)
+        hvis builtin.char_code(c) == 195 og i + 1 < lengde(s) {
+            la k2 = builtin.char_code(builtin.slice(s, i + 1, i + 2))
+            hvis ikkje (k2 == 166 eller k2 == 184 eller k2 == 165 eller k2 == 134 eller k2 == 152 eller k2 == 133) { returner usann }
+            i = i + 2
+        } ellers {
+            hvis ikkje _er_id_teikn(c) { returner usann }
+            i = i + 1
+        }
     }
     returner sann
 }
@@ -101,7 +110,50 @@ funksjon er_identifikator(s: tekst) -> bool {
 
 funksjon _treng_parentes(e: liste) -> bool {
     la k = tekst(e[0])
-    returner k == "vent" eller k == "binær" eller k == "tildel" eller k == "pil" eller k == "objekt"
+    returner k == "vent" eller k == "binær" eller k == "tildel" eller k == "pil" eller k == "objekt" eller k == "vilkår"
+}
+
+# Presedens for binære operatorar (W4), som i JavaScript: høgare bind sterkare.
+funksjon _prio(op: tekst) -> heltall {
+    hvis op == "??" { returner 2 }
+    hvis op == "||" { returner 3 }
+    hvis op == "&&" { returner 4 }
+    hvis op == "==" eller op == "!=" { returner 8 }
+    hvis op == "<" eller op == ">" eller op == "<=" eller op == ">=" { returner 9 }
+    hvis op == "<<" eller op == ">>" { returner 10 }
+    hvis op == "+" eller op == "-" { returner 11 }
+    hvis op == "*" eller op == "/" eller op == "%" { returner 12 }
+    kast "wasm_js: ukjend operator " + op
+}
+
+# Operand til ein binær operator (eller til ?:): parentes berre når presedensen krev det
+# (lågare, lik på høgre side, eller ?? blanda med || og &&, som JS ikkje tillèt utan).
+funksjon _operand(e: liste, prio: heltall, høgre: bool, op: tekst, ut: liste) -> heltall {
+    la k = tekst(e[0])
+    la treng = usann
+    hvis k == "binær" {
+        la cop = tekst(e[1])
+        la cp = _prio(cop)
+        treng = cp < prio eller (cp == prio og høgre)
+        hvis (cop == "??") != (op == "??") og (cp == 2 eller cp == 3 eller cp == 4) og (prio == 2 eller prio == 3 eller prio == 4) {
+            treng = sann
+        }
+    } ellers hvis k == "vilkår" {
+        treng = prio > 1 eller høgre
+    } ellers hvis op == "?" og prio == 1 {
+        # greinene i c?a:b er AssignmentExpression: tildeling og pil treng ingen parentes
+        treng = k == "objekt"
+    } ellers {
+        treng = _treng_parentes(e)
+    }
+    hvis treng {
+        legg_til(ut, "(")
+        emit(e, ut)
+        legg_til(ut, ")")
+    } ellers {
+        emit(e, ut)
+    }
+    returner 0
 }
 
 funksjon _mottakar(e: liste, ut: liste) -> heltall {
@@ -151,9 +203,10 @@ funksjon emit(e: liste, ut: liste) -> heltall {
         legg_til(ut, "=")
         emit(e[2], ut)
     } ellers hvis k == "binær" {
-        _mottakar(e[2], ut)
+        la p = _prio(tekst(e[1]))
+        _operand(e[2], p, usann, tekst(e[1]), ut)
         legg_til(ut, tekst(e[1]))
-        _mottakar(e[3], ut)
+        _operand(e[3], p, sann, tekst(e[1]), ut)
     } ellers hvis k == "vent" {
         legg_til(ut, "await")
         _mottakar(e[1], ut)
@@ -193,6 +246,20 @@ funksjon emit(e: liste, ut: liste) -> heltall {
         legg_til(ut, "]")
     } ellers hvis k == "regex_klasse" {
         legg_til(ut, _regex_klasse(e[1], tekst(e[2])))
+    } ellers hvis k == "vilkår" {
+        _operand(e[1], 2, usann, "?", ut)
+        legg_til(ut, "?")
+        _operand(e[2], 1, usann, "?", ut)
+        legg_til(ut, ":")
+        _operand(e[3], 1, usann, "?", ut)
+    } ellers hvis k == "ikkje" {
+        legg_til(ut, "!")
+        _mottakar(e[1], ut)
+    } ellers hvis k == "sekvens" {
+        # (a,b,…) — alltid i parentes, så han kan stå som argument og som pilkropp
+        legg_til(ut, "(")
+        _liste(e[1], ut)
+        legg_til(ut, ")")
     } ellers {
         kast "wasm_js: ukjend JS-node " + k
     }
@@ -252,8 +319,10 @@ funksjon param_namn() -> liste {
     returner ["a", "b", "c", "d", "e", "f", "g", "h", "j", "k", "l", "n"]
 }
 
-# Parameternamn for ein vertsfunksjon: tekst/funksjon tek to WASM-verdiar (peikar, lengd).
-# Gjev {"param": [[namn, ...] per Norscode-parameter], "flat": [namn, ...]}.
+# Parameternamn for ein vertsfunksjon: tekstparametrar tek to WASM-verdiar (peikar, lengd).
+# W4: resultattypen «tekst» gjev ein ekstra, siste parameter: adressa til postkassa, der
+# lastaren skriv svaret (hjelparen U). Gjev {"param": [[namn, ...] per Norscode-parameter],
+# "flat": [namn, ...], "postkasse": namn eller ""}.
 funksjon import_param(vf: ordbok) -> ordbok {
     la pn = param_namn()
     la param = []
@@ -262,7 +331,7 @@ funksjon import_param(vf: ordbok) -> ordbok {
     la i = 0
     mens i < lengde(vf["param"]) {
         la t = tekst(vf["param"][i])
-        hvis t == "tekst" eller t == "funksjon" eller t == "verdi" {
+        hvis vert.tekst_parameter(t) {
             legg_til(param, [pn[n], pn[n + 1]])
             legg_til(flat, pn[n])
             legg_til(flat, pn[n + 1])
@@ -274,11 +343,16 @@ funksjon import_param(vf: ordbok) -> ordbok {
         }
         i = i + 1
     }
-    returner {"param": param, "flat": flat}
+    la pk = ""
+    hvis vf["resultat"] == "tekst" {
+        pk = pn[n]
+        legg_til(flat, pk)
+    }
+    returner {"param": param, "flat": flat, "postkasse": pk}
 }
 
 # Løys vertsnodane i eit operasjonstre til reine JS-nodar. `brukt` får nøklane til
-# hjelparane (E, S, H) som treet treng.
+# hjelparane (E, S, H, W, U, L, V, T) som treet treng.
 funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
     hvis builtin.type(e) != "liste" { returner e }
     hvis lengde(e) == 0 { returner e }
@@ -287,11 +361,18 @@ funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
         hvis k == "arg" {
             la i = e[1]
             la t = tekst(typar[i])
-            hvis t == "tekst" eller t == "funksjon" eller t == "verdi" {
+            hvis vert.tekst_parameter(t) {
                 brukt["S"] = sann
                 returner ["kall", ["namn", "S"], [["namn", param[i][0]], ["namn", param[i][1]]]]
             }
             returner ["namn", param[i][0]]
+        }
+        hvis k == "lokal" {
+            returner ["namn", param[e[1]][0]]
+        }
+        hvis k == "hjelpar" {
+            brukt[tekst(e[1])] = sann
+            returner ["namn", tekst(e[1])]
         }
         hvis k == "element" {
             brukt["E"] = sann
@@ -299,6 +380,11 @@ funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
         }
         hvis k == "nytt_handtak" {
             brukt["E"] = sann
+            # W4: med slepp i modulen blir plassar frå frilista gjenbrukte (P)
+            hvis finnes_nøkkel(brukt, "_gjenbruk") {
+                brukt["P"] = sann
+                returner ["kall", ["namn", "P"], [løys_vert(e[1], param, typar, brukt)]]
+            }
             returner ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [løys_vert(e[1], param, typar, brukt)]], ["tal", 1]]
         }
         hvis k == "escape" {
@@ -306,8 +392,8 @@ funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
             returner ["kall", ["namn", "H"], [løys_vert(e[1], param, typar, brukt)]]
         }
         hvis k == "skriv_tekst" {
-            brukt["W"] = sann
-            returner ["kall", ["namn", "W"], [løys_vert(e[1], param, typar, brukt), løys_vert(e[2], param, typar, brukt)]]
+            brukt["U"] = sann
+            returner ["kall", ["namn", "U"], [løys_vert(e[1], param, typar, brukt), løys_vert(e[2], param, typar, brukt)]]
         }
         hvis k == "eksport" {
             returner ["indeks", ["namn", "x"], løys_vert(e[1], param, typar, brukt)]
@@ -331,9 +417,17 @@ funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
 #   E: handtakstabell (indeks → DOM-element)
 #   S: UTF-8-tekst frå WASM-minnet «m» (peikar, lengd)
 #   H: HTML-escape, bygd frå std.wasm_vert.escape_tabell()
-#   W: skriv ein JS-streng som UTF-8 i WASM-minnet «m» ved ein adresse (postkassa), gjev
-#      talet på bytar (TextEncoder.encodeInto)
+#   U: skriv ein JS-streng som UTF-8 i WASM-minnet «m» ved ein adresse (postkassa), veks
+#      minnet ved behov og gjev talet på bytar (W4: erstattar W frå W1, som ikkje voks)
+#   F, P: frilista og plassering av handtak (W4, berre når modulen importerer slepp)
+#   N, L, V, T: hendingsnamn, lyttar, gjeldande hending og elementet ho gjeld (W4)
 funksjon hjelparar() -> liste {
+    returner hjelparar_med(usann)
+}
+
+# gjenbruk (W4): modulen importerer slepp, så nye handtak (også lyttarhandtaka frå L) blir
+# plasserte med P.
+funksjon hjelparar_med(gjenbruk: bool) -> liste {
     la tab = vert.escape_tabell()
     la teikn = []
     la par = []
@@ -350,10 +444,76 @@ funksjon hjelparar() -> liste {
     la h_def = ["pil", ["a"],
         ["kall", ["felt", ["binær", "+", ["streng", ""], ["namn", "a"]], "replace"],
             [["regex_klasse", teikn, "g"], ["pil", ["b"], ["indeks", ["objekt", par], ["namn", "b"]]]]]]
-    la w_def = ["pil", ["a", "b"],
-        ["felt", ["kall", ["felt", ["ny", ["global", "TextEncoder"], []], "encodeInto"],
-            [["namn", "a"], ["ny", ["global", "Uint8Array"], [["felt", ["felt", ["namn", "x"], "m"], "buffer"], ["namn", "b"]]]]], "written"]]
-    returner [["E", e_def], ["S", s_def], ["H", h_def], ["W", w_def]]
+    la xm = ["felt", ["namn", "x"], "m"]
+    la ende = ["binær", "+", ["namn", "b"], ["felt", ["namn", "a"], "length"]]
+    # U (W4): tekst av vilkårleg lengd til WASM (DOM → WASM, og sifra til tekst(desimaltal)):
+    # kodar strengen, veks minnet når han ikkje får plass, kopierer bytane til b og gjev talet
+    # på bytar.
+    la u_def = ["pil", ["a", "b"], ["sekvens", [
+        ["tildel", ["namn", "a"], ["kall", ["felt", ["ny", ["global", "TextEncoder"], []], "encode"], [["namn", "a"]]]],
+        ["binær", "&&", ["binær", ">", ende, ["felt", ["felt", xm, "buffer"], "byteLength"]],
+            # b ligg alltid inne i minnet, så (lengd >> 16) + 1 sider er nok
+            ["kall", ["felt", xm, "grow"],
+                [["binær", "+", ["binær", ">>", ["felt", ["namn", "a"], "length"], ["tal", 16]], ["tal", 1]]]]],
+        ["kall", ["felt", ["ny", ["global", "Uint8Array"], [["felt", xm, "buffer"]]], "set"], [["namn", "a"], ["namn", "b"]]],
+        ["felt", ["namn", "a"], "length"]]]]
+    # N (W4): norsk hendingsnamn → DOM-hending, frå std.wasm_vert.hendingar()
+    la hend = vert.hendingar()
+    la n_par = []
+    la hindre = []
+    la hi = 0
+    mens hi < lengde(hend) {
+        legg_til(n_par, [hend[hi][0], ["streng", hend[hi][1]]])
+        hvis hend[hi][2] {
+            legg_til(hindre, ["binær", "&&", ["binær", "==", ["namn", "b"], ["streng", hend[hi][0]]],
+                ["kall", ["felt", ["namn", "e"], "preventDefault"], []]])
+        }
+        hi = hi + 1
+    }
+    la n_def = ["objekt", n_par]
+    # L (W4): lyttar. L(mål, hending, eksport, namn): utan namn (lytt) er T elementet med
+    # lyttaren; med namn (deleger) er T det næraste elementet med data-nc-<hending>, og
+    # eksporten blir berre kalla når attributtet er namnet. V er hendinga. send (submit)
+    # får preventDefault. Handtaket er ein AbortController (slepp fjernar lyttaren).
+    la attr = ["binær", "+", ["streng", vert.delegering_prefiks()], ["namn", "b"]]
+    la sel = ["binær", "+", ["binær", "+", ["streng", "[" + vert.delegering_prefiks()], ["namn", "b"]], ["streng", "]"]]
+    la etter_treff = [["tildel", ["namn", "V"], ["namn", "e"]]]
+    la hj = 0
+    mens hj < lengde(hindre) {
+        legg_til(etter_treff, hindre[hj])
+        hj = hj + 1
+    }
+    legg_til(etter_treff, ["kall", ["namn", "c"], []])
+    la l_kropp = ["binær", "&&",
+        ["binær", "&&",
+            ["tildel", ["namn", "T"], ["vilkår", ["namn", "d"],
+                ["kall", ["felt", ["felt", ["namn", "e"], "target"], "closest"], [sel]],
+                ["namn", "a"]]],
+            ["binær", "||", ["ikkje", ["namn", "d"]],
+                ["binær", "==", ["kall", ["felt", ["namn", "T"], "getAttribute"], [attr]], ["namn", "d"]]]],
+        ["sekvens", etter_treff]]
+    la l_handtak = ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [["namn", "f"]]], ["tal", 1]]
+    la l_dep = ["E", "N", "V", "T"]
+    hvis gjenbruk {
+        l_handtak = ["kall", ["namn", "P"], [["namn", "f"]]]
+        l_dep = ["E", "P", "N", "V", "T"]
+    }
+    la l_def = ["pil", ["a", "b", "c", "d", "f"], ["sekvens", [
+        ["tildel", ["namn", "f"], ["ny", ["global", "AbortController"], []]],
+        ["kall", ["felt", ["namn", "a"], "addEventListener"],
+            [["indeks", ["namn", "N"], ["namn", "b"]], ["pil", ["e"], l_kropp],
+             ["objekt", [["signal", ["felt", ["namn", "f"], "signal"]]]]]],
+        l_handtak]]]
+    # F og P (W4): frilista for handtak og plassering av eit nytt handtak (gjenbruk frå F)
+    la f_def = ["tabell", []]
+    la p_def = ["pil", ["a", "b"], ["sekvens", [
+        ["vilkår", ["felt", ["namn", "F"], "length"],
+            ["tildel", ["indeks", ["namn", "E"], ["tildel", ["namn", "b"], ["kall", ["felt", ["namn", "F"], "pop"], []]]], ["namn", "a"]],
+            ["tildel", ["namn", "b"], ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [["namn", "a"]]], ["tal", 1]]]],
+        ["namn", "b"]]]]
+    # [namn, definisjon (null: berre deklarert), hjelparar han treng]
+    returner [["E", e_def, []], ["F", f_def, []], ["P", p_def, ["E", "F"]], ["S", s_def, []], ["H", h_def, []],
+              ["U", u_def, []], ["N", n_def, []], ["V", null, []], ["T", null, []], ["L", l_def, l_dep]]
 }
 
 # Lastarprogrammet: instansier modulen med importobjektet, lagre eksportane i x og kall
@@ -395,16 +555,38 @@ funksjon bygg_lastar_frå_tabell(tabell: liste, importar: liste, wasm_url: tekst
     la imp = []
     la i = 0
     mens i < lengde(importar) {
+        hvis tekst(importar[i]) == "slepp" { brukt["_gjenbruk"] = sann }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(importar) {
         la namn = tekst(importar[i])
         la vf = _finn_vf(tabell, namn)
         la ip = import_param(vf)
         la kropp = løys_vert(vf["op"], ip["param"], vf["param"], brukt)
+        hvis ip["postkasse"] != "" {
+            brukt["U"] = sann
+            kropp = ["kall", ["namn", "U"], [kropp, ["namn", ip["postkasse"]]]]
+        }
         legg_til(imp, [namn, ["pil", ip["flat"], kropp]])
         i = i + 1
     }
     la deklar = []
     la hjelp_namn = []
-    la alle_h = hjelparar()
+    la alle_h = hjelparar_med(finnes_nøkkel(brukt, "_gjenbruk"))
+    # Hjelparane ein brukt hjelpar treng (L → E, N, V, T)
+    la hi0 = lengde(alle_h) - 1
+    mens hi0 >= 0 {
+        hvis finnes_nøkkel(brukt, tekst(alle_h[hi0][0])) {
+            la dep = alle_h[hi0][2]
+            la di = 0
+            mens di < lengde(dep) {
+                brukt[tekst(dep[di])] = sann
+                di = di + 1
+            }
+        }
+        hi0 = hi0 - 1
+    }
     la hi = 0
     mens hi < lengde(alle_h) {
         la hn = tekst(alle_h[hi][0])

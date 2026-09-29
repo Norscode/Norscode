@@ -1,0 +1,103 @@
+# std/wasm_serve.no — serve-integrasjon for Norscode-klientmodular i WebAssembly (W4).
+#
+# Ein app som brukar ein WASM-klient treng tre ting frå tenaren:
+#
+#   1. Modulen og lastaren. `modul_svar` og `lastar_svar` leverer dei med rett MIME-type
+#      (application/wasm, text/javascript), nosniff og versjonert cache: `?v=<versjon>`
+#      der versjonen er sha256 over bytane gjev `immutable` i eitt år; feil eller manglande
+#      v gjev `no-cache`. Begge har ETag = versjonen, så `nc serve` svarar 304 på
+#      If-None-Match.
+#   2. Script-taggen på sida: `script_tag()` (type="module", lastaren utan versjon: éin
+#      304-revalidering per sidevising), eller `script_tag_versjonert(lastar_versjon)` når
+#      appen kjenner versjonen.
+#   3. CSP: `csp_wasm()` har 'wasm-unsafe-eval' i script-src. Han skal BERRE brukast på sider
+#      som lastar WASM; alle andre sider (og ressursane sjølve) får `csp_standard()`.
+#      'wasm-unsafe-eval' opnar ikkje for eval eller new Function i JS.
+#
+# Rutene for modulen og lastaren blir laga av tools/nc_wasm.no (NC_WASM_APP): han skriv
+# build/wasm/<app>/serve.no, som importerer appen og den genererte klient_data-modulen og
+# kallar funksjonane her. Appen sjølv importerer ingenting under build/ og kan køyrast (og
+# sjekkast) utan at klienten er bygd; då er det berre sida utan klientlogikk.
+#
+# Kvifor bytane er ein tekstliteral: `nc serve` har ingen disk-kapabilitet og ingen
+# modulglobalar (ein modulglobal gjev «Ukjent global variabel» under serve), så modulen kan
+# verken lesast frå disk eller dekodast éin gong og haldast. klient_data.no har difor
+# bytane som ein rå tekstliteral, som ikkje kostar noko per førespurnad (hex-dekoding kosta
+# 18 ms/KB i fastmodus og 68 ms/KB i standard-VM-en per førespurnad, målt W4).
+#
+# CSP-funksjonane er med her fordi std/http_cache.no (PR #206) ikkje finst på denne greina.
+# Når #206 er fletta, bør `csp_wasm` flyttast dit (planen: hc.csp_wasm()).
+
+bruk std.web som web
+
+funksjon csp_standard() -> tekst {
+    returner "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+}
+
+# Som csp_standard, men med 'wasm-unsafe-eval' i script-src: berre for sider som lastar WASM.
+funksjon csp_wasm() -> tekst {
+    returner "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+}
+
+funksjon cache_immutable() -> tekst {
+    returner "public, max-age=31536000, immutable"
+}
+
+# `immutable` berre når ?v= er den rette versjonen; elles no-cache (revalider med ETag).
+funksjon cache_versjonert(ctx: ordbok_tekst, versjon: tekst) -> tekst {
+    hvis versjon != "" og web.request_query_param(ctx, "v") == versjon {
+        returner cache_immutable()
+    }
+    returner "no-cache"
+}
+
+funksjon etag(versjon: tekst) -> tekst {
+    returner "\"" + versjon + "\""
+}
+
+# Svar med tryggleiksheaderane som alle svar frå ein WASM-app skal ha.
+funksjon svar(innhaldstype: tekst, kropp: tekst, csp: tekst, cache: tekst) -> ordbok_tekst {
+    la h = {}
+    h["content-security-policy"] = csp
+    h["x-content-type-options"] = "nosniff"
+    h["cache-control"] = cache
+    h["referrer-policy"] = "no-referrer"
+    returner {"status": 200, "content_type": innhaldstype, "body": kropp, "headers": h}
+}
+
+# Ei HTML-side som lastar WASM-klienten: CSP med 'wasm-unsafe-eval'.
+funksjon side(html: tekst) -> ordbok_tekst {
+    returner svar("text/html; charset=utf-8", html, csp_wasm(), "no-cache")
+}
+
+# Ei vanleg HTML-side utan WASM: standard-CSP.
+funksjon vanleg_side(html: tekst) -> ordbok_tekst {
+    returner svar("text/html; charset=utf-8", html, csp_standard(), "no-cache")
+}
+
+# /_nc/app.wasm: bytane (rå tekst frå klient_data.wasm()), versjonert.
+funksjon modul_svar(ctx: ordbok_tekst, bytar: tekst, versjon: tekst) -> ordbok_tekst {
+    la s = svar("application/wasm", bytar, csp_standard(), cache_versjonert(ctx, versjon))
+    s["etag"] = etag(versjon)
+    returner s
+}
+
+# /_nc/nc.js: lastaren (generert frå Norscode-data), versjonert.
+funksjon lastar_svar(ctx: ordbok_tekst, lastar: tekst, versjon: tekst) -> ordbok_tekst {
+    la s = svar("text/javascript; charset=utf-8", lastar, csp_standard(), cache_versjonert(ctx, versjon))
+    s["etag"] = etag(versjon)
+    returner s
+}
+
+funksjon standard_prefiks() -> tekst {
+    returner "/_nc/"
+}
+
+# Script-taggen for lastaren. Utan versjon: nettlesaren revaliderer (304) kvar gong.
+funksjon script_tag() -> tekst {
+    returner "<script type=\"module\" src=\"" + standard_prefiks() + "nc.js\"></script>"
+}
+
+funksjon script_tag_versjonert(lastar_versjon: tekst) -> tekst {
+    returner "<script type=\"module\" src=\"" + standard_prefiks() + "nc.js?v=" + lastar_versjon + "\"></script>"
+}
