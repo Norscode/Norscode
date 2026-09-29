@@ -22,6 +22,12 @@
 #     og valet (localStorage) blir sletta (lager.logg_ut).
 #     Personvern: ingenting blir lagra på eininga før brukaren har valt det, og valet er
 #     det einaste som ligg i localStorage. #lokal viser tilstanden til kopien.
+#   - W8, installerbar app (std/wasm_pwa_klient.no): klienten registrerer service workeren
+#     (/sw.js). Etter første besøk startar sida frå cachen, også utan nett, og viser då den
+#     lokale kopien. Når ein ny versjon ventar, blir «Ein ny versjon er klar.» og knappen
+#     «Oppdater» viste; klikket tek den nye versjonen i bruk (skipWaiting), og når han har
+#     teke over, blir sida lasta på nytt (full navigasjon, så ny klientkode køyrer mot den nye
+#     workeren). Blir han teken i bruk utan klikk (berre éi fane), seier sida det og held fram.
 #
 # Svara kjem gjennom tilbakekall (closures) i den rekkjefølgja førespurnadene vart sende.
 # last_inn og lagre tek ein valfri closure `etter` som blir kalla når sida er oppdatert
@@ -30,6 +36,7 @@
 bruk std.wasm_vert som vert
 bruk std.wasm_nett som nett
 bruk std.wasm_lager som lager
+bruk std.wasm_pwa_klient som pwa
 bruk std.wasm_rt som rt
 bruk examples.wasm_deltakarar.reglar som reglar
 
@@ -52,11 +59,20 @@ la hugs: bool = usann
 la behald_ulagra: bool = usann
 # Svaret frå tenaren ventar på den lokale kopien (så han alltid blir lesen først)
 la lokal_lest: bool = sann
+# W8: lista som er vist, er den lokale kopien (ikkje tenarlista)
+la viser_lokal: bool = usann
 la ventande_svar: liste = []
 la api_url: tekst = "/api/deltakarar"
 la etter_lokal = null
 la lokal_h: heltall = 0
 la hugs_h: heltall = 0
+# W8: service workeren
+la oppdatering_h: heltall = 0
+la ny_versjon_h: heltall = 0
+la oppdater_klikka: bool = usann
+la sw_etter = null
+la oppdater_h: heltall = 0
+la etter_aktivering: tekst = ""
 
 # ─── Reine funksjonar (same resultat i VM-en og i WASM) ──────────────────────
 
@@ -214,8 +230,18 @@ funksjon last_inn(etter) -> heltall {
     opptatt(sann)
     vis_feil("")
     vis_status("Hentar deltakarlista …")
-    nett.hent_json(api_url, fun(s) -> lasta(s, etter), fun(f) -> feila("Kunne ikkje hente lista", f, etter))
+    nett.hent_json(api_url, fun(s) -> lasta(s, etter), fun(f) -> last_feila(f, etter))
     returner 0
+}
+
+# Tenaren svara ikkje (eller med ein feil). Er den lokale kopien ikkje lesen enno, ventar feilen
+# på han (W8: utan nett kjem feilen straks, og kopien skal visast først).
+funksjon last_feila(f: ordbok, etter) -> heltall {
+    hvis ikkje lokal_lest {
+        ventande_svar = [null, etter, f]
+        returner 0
+    }
+    returner feila("Kunne ikkje hente lista", f, etter)
 }
 
 funksjon lasta(s: ordbok, etter) -> heltall {
@@ -233,6 +259,7 @@ funksjon lasta(s: ordbok, etter) -> heltall {
         opptatt(usann)
         returner ferdig(etter)
     }
+    viser_lokal = usann
     liste = []
     la i = 0
     mens i < lengde(frå) {
@@ -263,6 +290,7 @@ funksjon lagre(etter) -> heltall {
 }
 
 funksjon lagra(s: ordbok, etter) -> heltall {
+    viser_lokal = usann
     sett_ulagra(usann)
     lagre_lokal(null)
     vis_status("Lagra " + tekst(s["json"]["lagra"]) + " deltakarar.")
@@ -310,7 +338,7 @@ funksjon lokal_ferdig() -> heltall {
     hvis lengde(ventande_svar) > 0 {
         la v = ventande_svar
         ventande_svar = []
-        lasta(v[0], v[1])
+        hvis v[0] == null { last_feila(v[2], v[1]) } ellers { lasta(v[0], v[1]) }
     }
     returner 0
 }
@@ -338,6 +366,7 @@ funksjon lokal_lasta(r: liste) -> heltall {
     gjengje()
     sett_ulagra(meta["ulagra"] == sann)
     behald_ulagra = meta["ulagra"] == sann
+    viser_lokal = sann
     vis_status("Viser lagra kopi frå eininga (" + tekst(lengde(liste)) + " deltakarar) – hentar frå tenaren …")
     vis_lokal("Lista er lagra på eininga.")
     returner lokal_ferdig()
@@ -401,10 +430,50 @@ funksjon hugs_klikk() -> heltall {
 }
 
 funksjon feila(kva: tekst, f: ordbok, etter) -> heltall {
-    vis_status("")
+    hvis viser_lokal {
+        vis_status("Viser lagra kopi frå eininga (" + tekst(lengde(liste)) + " deltakarar). Tenaren svarar ikkje, så lista kan vere eldre enn på tenaren.")
+    } ellers {
+        vis_status("")
+    }
     vis_feil(feilmelding(kva, f))
     opptatt(usann)
     returner ferdig(etter)
+}
+
+# ─── Service worker (W8) ─────────────────────────────────────────────────────
+
+# Meldinga brukaren ser om ein ny versjon (rein; "" = ingen melding).
+funksjon sw_melding(hending: tekst, klikka: bool) -> tekst {
+    hvis hending == "ventar" { returner "Ein ny versjon er klar." }
+    hvis hending == "aktivert" og ikkje klikka { returner "Ein ny versjon er teken i bruk. Han blir lasta neste gong du opnar sida." }
+    returner ""
+}
+
+# Hendingar frå service workeren (std/wasm_pwa_klient.no). Etter at brukaren har bede om
+# oppdateringa og den nye workeren har teke over, blir sida lasta på nytt (full navigasjon).
+funksjon sw_endra(s: ordbok) -> heltall {
+    la h = s["hending"]
+    hvis sw_etter != null { builtin.ncb_call_fn(sw_etter, s) }
+    hvis h == "aktivert" og oppdater_klikka {
+        la mål = etter_aktivering
+        hvis mål == "" { mål = vert.hent_sti() }
+        vert.gå_til(mål)
+        returner 0
+    }
+    la m = sw_melding(h, oppdater_klikka)
+    hvis m != "" {
+        vert.sett_tekst(ny_versjon_h, m)
+        vert.vis(oppdatering_h, sann)
+        vert.vis(oppdater_h, h == "ventar")
+    }
+    returner 0
+}
+
+funksjon oppdater_klikk() -> heltall {
+    oppdater_klikka = sann
+    vert.sett_attr(oppdater_h, "disabled", "disabled")
+    pwa.aktiver_ny()
+    returner 0
 }
 
 # ─── Hendingar (tilbakekall utan parametrar) ─────────────────────────────────
@@ -462,12 +531,16 @@ funksjon start_med(etter) -> heltall {
 }
 
 # Start med val (testklientane): "etter" (lista er henta frå tenaren), "etter_lokal" (den
-# lokale kopien er lesen) og "url" (API-ruta; standard /api/deltakarar).
+# lokale kopien er lesen) og "url" (API-ruta; standard /api/deltakarar). W8: "sw_etter" (closure som
+# får kvar hending frå service workeren) og "etter_aktivering" (URL-en sida går til når ein ny
+# versjon som brukaren bad om, har teke over; standard stien til sida).
 funksjon start_med_val(val: ordbok) -> heltall {
     la etter = null
     hvis finnes_nøkkel(val, "etter") { etter = val["etter"] }
     hvis finnes_nøkkel(val, "etter_lokal") { etter_lokal = val["etter_lokal"] }
     hvis finnes_nøkkel(val, "url") { api_url = val["url"] }
+    hvis finnes_nøkkel(val, "sw_etter") { sw_etter = val["sw_etter"] }
+    hvis finnes_nøkkel(val, "etter_aktivering") { etter_aktivering = val["etter_aktivering"] }
     liste_h = vert.finn("#liste")
     status_h = vert.finn("#status")
     ulagra_h = vert.finn("#ulagra")
@@ -487,6 +560,12 @@ funksjon start_med_val(val: ordbok) -> heltall {
     lokal_h = vert.finn("#lokal")
     hugs_h = vert.finn("#hugs")
     vert.lytt(hugs_h, "klikk", "hugs_klikk")
+    # W8: service workeren og oppdateringsflyten
+    oppdatering_h = vert.finn("#oppdatering")
+    ny_versjon_h = vert.finn("#ny-versjon")
+    oppdater_h = vert.finn("#oppdater")
+    vert.lytt(oppdater_h, "klikk", "oppdater_klikk")
+    pwa.registrer(fun(s) -> sw_endra(s))
     # W7: den lokale kopien (berre når brukaren har valt det) blir lesen medan tenaren blir spurd
     hugs = vert.hent_lokalt(hugs_nøkkel()) == "1"
     vis_hugs()
