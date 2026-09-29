@@ -87,11 +87,24 @@ funksjon request_query_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
     returner heltall_fra_tekst(request_query_param(ctx, nøkkel))
 }
 
+// HTTP-headernamn skil ikkje mellom store og små bokstavar (RFC 9110 §5.1).
+// nc serve legg headerane i ctx slik klienten sende dei («Cookie», «If-None-Match»),
+// web.request_context og HTTP/2-proxyar gjev små bokstavar: slå opp direkte først,
+// og skann nøklane kasus-uavhengig berre når det ikkje treffer.
 funksjon request_header(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
+    hvis ctx == null eller ikkje finnes_nøkkel(ctx, "__headers__") { returner "" }
     la h = ctx["__headers__"]
+    hvis h == null { returner "" }
     la low = tekst_til_liten(nøkkel)
     hvis (finnes_nøkkel(h, low)) { returner h[low] }
     hvis (finnes_nøkkel(h, nøkkel)) { returner h[nøkkel] }
+    la ks = nøkler(h)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis tekst_til_liten(k) == low { returner h[k] }
+        i = i + 1
+    }
     returner ""
 }
 
@@ -419,12 +432,9 @@ funksjon response_finalize(ctx: ordbok_tekst, response: ordbok_tekst) -> ordbok_
     }
     headers = _header_sett_mangler(headers, "server", "Norscode")
     headers = _header_sett_mangler(headers, "x-request-id", request_id(ctx))
-    la origin = request_header(ctx, "origin")
-    hvis origin != "" {
-        headers = _header_sett_mangler(headers, "access-control-allow-origin", origin)
-        headers = _header_sett_mangler(headers, "access-control-allow-credentials", "true")
-        headers = _header_sett_mangler(headers, "vary", "Origin")
-    }
+    // Ingen CORS her. Før vart kvar Origin spegla med credentials, so ein framand
+    // side med brukaren sin cookie kunne lese svaret. Cross-origin går berre via
+    // response_finalize_strict_cors med eksplisitt allowlist (docs/APP_KJENSLE.md).
     response["__status__"] = status
     response["__body__"] = body
     response["__headers__"] = headers
@@ -459,14 +469,43 @@ funksjon _origin_er_tillaten(origin: tekst, tillatne: tekst) -> boolsk {
     returner usann
 }
 
+// Legg `verdi` til Vary utan å skrive over det som alt står der (t.d.
+// «x-norscode-fragment»): ein cache som mistar Vary-leddet kan gje fragment
+// til ei full navigasjon. Nøkkelen blir funnen kasus-uavhengig.
+funksjon _vary_legg_til(headers: ordbok_tekst, verdi: tekst) -> ordbok_tekst {
+    la nøkkel = "vary"
+    la ks = nøkler(headers)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        hvis tekst_til_liten(tekst(ks[i])) == "vary" { nøkkel = tekst(ks[i]) }
+        i = i + 1
+    }
+    la eksisterande = ""
+    hvis finnes_nøkkel(headers, nøkkel) { eksisterande = builtin.trim(tekst(headers[nøkkel])) }
+    hvis eksisterande == "" {
+        headers[nøkkel] = verdi
+        returner headers
+    }
+    la ledd = builtin.split(eksisterande, ",")
+    la j: heiltall = 0
+    mens j < lengde(ledd) {
+        la l = tekst_til_liten(builtin.trim(ledd[j]))
+        hvis l == tekst_til_liten(verdi) eller l == "*" { returner headers }
+        j = j + 1
+    }
+    headers[nøkkel] = eksisterande + ", " + verdi
+    returner headers
+}
+
 funksjon response_finalize_strict_cors(ctx: ordbok_tekst, response: ordbok_tekst, tillatne_origins: tekst) -> ordbok_tekst {
     la ferdig = response_finalize_strict(ctx, response)
     la origin = request_header(ctx, "origin")
     la headers = ferdig["__headers__"]
+    // Svaret er avhengig av Origin same om origin er tillaten eller ikkje.
+    headers = _vary_legg_til(headers, "Origin")
     hvis _origin_er_tillaten(origin, tillatne_origins) {
         headers["access-control-allow-origin"] = origin
         headers["access-control-allow-credentials"] = "true"
-        headers["vary"] = "Origin"
     } ellers {
         hvis har_nokkel(headers, "access-control-allow-origin") { headers["access-control-allow-origin"] = "" }
         hvis har_nokkel(headers, "access-control-allow-credentials") { headers["access-control-allow-credentials"] = "" }
@@ -1052,11 +1091,22 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
             allowed = allowed + ", HEAD"
         }
         allowed = allowed + ", OPTIONS"
-        returner response_finalize(ctx, response_builder(204, {
+        la preflight = response_builder(204, {
             "allow": allowed,
             "access-control-allow-methods": allowed,
             "access-control-allow-headers": "authorization, content-type, x-api-key, x-request-id"
-        }, ""))
+        }, "")
+        // Preflight speglar ikkje Origin. Ein app som vil tillate cross-origin, set
+        // ctx["__cors_origins__"] (kommaseparert allowlist) i ein request-middleware;
+        // då går preflight gjennom response_finalize_strict_cors som andre CORS-svar.
+        la tillatne_origins: tekst = ""
+        hvis finnes_nøkkel(ctx, "__cors_origins__") og ctx["__cors_origins__"] != null {
+            tillatne_origins = tekst(ctx["__cors_origins__"])
+        }
+        hvis tillatne_origins != "" {
+            returner response_finalize_strict_cors(ctx, preflight, tillatne_origins)
+        }
+        returner response_finalize(ctx, preflight)
     }
 
     la sti_match: boolsk = usann
