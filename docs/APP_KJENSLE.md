@@ -195,6 +195,16 @@ Resultat mot krava:
 - Standardmodus blir tregare for kvart kall. Veksten er jamn frå kall 1, der lasta var låg (0,84 → 1,36 → 1,77 → 2,16 s), så han skuldast ikkje berre at lasta auka mot slutten.
 - Baseline frå kritikken var 7× på første kall og 13× i snitt over 5 kall. Her er det 8,6× på første kall.
 
+Gjentaking på same kode under tung last (ein full testsuite i ein annan worktree; lastsnitt 47 ved start, 5 ved slutt av FAST=0-køyringa), 2026-09-29 07:24:
+
+| | VM_FAST=0 | VM_FAST=1 |
+|---|---|---|
+| TTFB kall 1 / 2 / 20 | 2,96 / 5,93 / 71,08 s | 0,177 / 0,241 / 0,238 s |
+| median TTFB kall 11–20 | 65,9 s | 0,269 s |
+| kall20 / kall2 | 12,0 | 0,99 |
+
+Lasta bles opp absolutttala, men alle tre krava held òg her: 245×, 0,99 og 12,0. Veksten i standardmodus flatar ut etter kall 10, fordi lasta fall undervegs.
+
 ## 7. Testar
 
 | Test | Kva |
