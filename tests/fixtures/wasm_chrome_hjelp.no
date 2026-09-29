@@ -1,0 +1,180 @@
+# Felles hjelparar for Chrome-testane i WASM-sporet (W0, W1): finn Chrome/Chromium,
+# start barne-`nc serve` med miljøkontrakten, dump DOM-en med headless Chrome og stopp
+# alle prosessar. Flagga er dei frå planen (§4.4): utan dei heng headless Chrome ofte mot
+# nc serve, som tek éi tilkopling om gongen. Stdout blir lesen til </html>, så blir
+# Chrome stoppa.
+bruk std.prosess som prosess
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon policy() -> ordbok_tekst {
+    la p = prosess.ny_policy("wasm-chrome")
+    prosess.tillat_alle(p)
+    prosess.aktiver_køyring(p)
+    returner p
+}
+
+funksjon nettlesarmiljø() -> ordbok_tekst {
+    returner {"PATH": "/usr/bin:/bin", "HOME": miljo_hent("HOME"), "TMPDIR": "/tmp"}
+}
+
+# Stien til Chrome/Chromium (NC_CHROME, elles standardstiane på macOS og Linux), eller "".
+funksjon finn_chrome() -> tekst {
+    la kandidatar = []
+    la eigen = miljo_hent("NC_CHROME")
+    hvis eigen != "" {
+        legg_til(kandidatar, eigen)
+    } ellers {
+        legg_til(kandidatar, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        legg_til(kandidatar, "/Applications/Chromium.app/Contents/MacOS/Chromium")
+        legg_til(kandidatar, "/usr/bin/google-chrome")
+        legg_til(kandidatar, "/usr/bin/chromium")
+        legg_til(kandidatar, "/usr/bin/chromium-browser")
+    }
+    la i = 0
+    mens i < lengde(kandidatar) {
+        la plan = prosess.start_argv_plan(kandidatar[i], ["--version"])
+        prosess.med_miljø(plan, nettlesarmiljø())
+        prosess.med_timeout(plan, 30)
+        prosess.med_sandbox(plan, "none", 8589934592, 4096, usann)
+        la h = prosess.start_argv_async_trygt(policy(), plan)
+        hvis h["status"] == "kjorer" {
+            la ferdig = prosess.native_async_vent(h, 30000)
+            la ut = tekst(prosess.native_async_les(h)["stdout"])
+            prosess.native_async_lukk(h)
+            hvis ferdig["status"] == "ferdig" og heltall_fra_tekst(tekst(ferdig["exit_code"])) == 0 og builtin.index_of(ut, "Chrom") >= 0 {
+                returner kandidatar[i]
+            }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon les_meir(h: ordbok_tekst) -> tekst {
+    la r = prosess.native_async_les(h)
+    hvis finnes_nøkkel(r, "stdout") { returner tekst(r["stdout"]) }
+    returner ""
+}
+
+funksjon stopp(h: ordbok_tekst) -> heltall {
+    la st = prosess.native_async_poll(h)
+    hvis st["status"] == "kjorer" {
+        prosess.native_async_signal(h, 15)
+        la v = prosess.native_async_vent(h, 5000)
+        hvis v["status"] == "kjorer" {
+            prosess.native_async_signal(h, 9)
+            prosess.native_async_vent(h, 5000)
+        }
+    }
+    prosess.native_async_lukk(h)
+    returner 0
+}
+
+# Start `nc serve` for appen på porten og vent til han lyttar. Gjev handtaket, eller eit
+# handtak med status «feil» og utdata i «ut».
+funksjon start_serve(app: tekst, port: tekst) -> ordbok_tekst {
+    la rot = hjelp.root()
+    la m = hjelp.grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "serve"
+    m["NORSCODE_FILE"] = rot + "/" + app
+    m["NC_SERVE_PORT"] = port
+    m["NC_SERVE_HOST"] = "127.0.0.1"
+    m["NORSCODE_VM_FAST"] = "1"
+    la plan = prosess.start_argv_plan(hjelp.runtime(), [])
+    prosess.med_cwd(plan, rot)
+    prosess.med_miljø(plan, m)
+    prosess.med_timeout(plan, 600)
+    prosess.med_sandbox(plan, "none", 4294967296, 1024, usann)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner {"status": "feil", "ut": "spawn: " + tekst(h["status"])} }
+    la ut = ""
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < 180000 {
+        ut = ut + les_meir(h)
+        hvis builtin.index_of(ut, "Socket-lytting aktiv") >= 0 {
+            h["ut"] = ut
+            returner h
+        }
+        la v = prosess.native_async_vent(h, 250)
+        hvis v["status"] != "kjorer" {
+            ut = ut + les_meir(h)
+            prosess.native_async_lukk(h)
+            returner {"status": "feil", "ut": ut}
+        }
+    }
+    stopp(h)
+    returner {"status": "feil", "ut": ut + " (tidsavbrot)"}
+}
+
+# Headless Chrome med --dump-dom; les stdout til </html> og stopp.
+funksjon dump(chrome: tekst, url: tekst, profil: tekst) -> tekst {
+    la flagg = ["--headless=new", "--disable-gpu", "--no-first-run", "--disable-background-networking",
+                "--dns-prefetch-disable", "--disable-features=NetworkPrediction,Prerender2",
+                "--virtual-time-budget=5000", "--dump-dom", "--user-data-dir=" + profil, url]
+    la plan = prosess.start_argv_plan(chrome, flagg)
+    prosess.med_miljø(plan, nettlesarmiljø())
+    prosess.med_timeout(plan, 90)
+    prosess.med_maks_output(plan, 4194304)
+    prosess.med_sandbox(plan, "none", 8589934592, 4096, usann)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner "" }
+    la ut = ""
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < 60000 og builtin.index_of(ut, "</html>") < 0 {
+        ut = ut + les_meir(h)
+        hvis builtin.index_of(ut, "</html>") < 0 {
+            la v = prosess.native_async_vent(h, 250)
+            hvis v["status"] != "kjorer" {
+                ut = ut + les_meir(h)
+                bryt
+            }
+        }
+    }
+    stopp(h)
+    returner ut
+}
+
+# Fersk Chrome-profil per side: den gamle blir sletta før og etter (berre under
+# build/wasm/, med /bin/rm utan skal).
+funksjon rydd_profil(sti: tekst) -> heltall {
+    hvis builtin.index_of(sti, "/build/wasm/test_") < 0 { kast "rydd_profil: ulovleg sti " + sti }
+    la plan = prosess.start_argv_plan("/bin/rm", ["-rf", sti])
+    prosess.med_miljø(plan, nettlesarmiljø())
+    prosess.med_timeout(plan, 30)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] == "kjorer" {
+        prosess.native_async_vent(h, 30000)
+        prosess.native_async_lukk(h)
+    }
+    returner 0
+}
+
+# Dump éi side med ein fersk profil under `mappe` (relativ til rota).
+funksjon dump_side(chrome: tekst, url: tekst, mappe: tekst, namn: tekst) -> tekst {
+    la profil = hjelp.root() + "/" + mappe + "/profil-" + namn
+    rydd_profil(profil)
+    la d = dump(chrome, url, profil)
+    rydd_profil(profil)
+    returner d
+}
+
+funksjon krev(dump_tekst: tekst, nål: tekst, kva: tekst) -> heltall {
+    hvis builtin.index_of(dump_tekst, nål) < 0 {
+        skriv(kva + ": fann ikkje «" + nål + "» i DOM-en:\n" + dump_tekst + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+# Teksten i <pre id="nc-logg"> (der logg_test skriv i testbygg), HTML-avescapa.
+# Gjev "\u0000" (NUL) når elementet manglar, så «tom logg» og «ingen side» ikkje er like.
+funksjon logg_frå_dom(d: tekst) -> tekst {
+    la opn = "<pre id=\"nc-logg\">"
+    la p = builtin.index_of(d, opn)
+    hvis p < 0 { returner builtin.chr(0) }
+    la rest = builtin.slice(d, p + lengde(opn), lengde(d))
+    la s = builtin.index_of(rest, "</pre>")
+    hvis s < 0 { returner builtin.chr(0) }
+    la t = builtin.slice(rest, 0, s)
+    returner builtin.replace(builtin.replace(builtin.replace(t, "&lt;", "<"), "&gt;", ">"), "&amp;", "&")
+}
