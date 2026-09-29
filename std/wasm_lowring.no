@@ -1,0 +1,1145 @@
+# std/wasm_lowring.no — NCB → WebAssembly med WasmGC-verdimodell (W0).
+#
+# Inndata er NCB-JSON frå `nc compile` (parsa med json_parse_raw). Utdata er ein
+# WASM-modul (byteliste) som nettlesaren kan instansiere med lastaren frå std/wasm_js.no.
+#
+# Verdimodell (WasmGC): alle Norscode-verdiar er `eqref` (ref null eq).
+#   heltall   i31ref når verdien ligg i −2^30 … 2^30−1, elles struct $boks {i64}
+#             (kanonisk: små tal er alltid i31, så likskap kan samanlikne i64-verdiane)
+#   bool      to singleton-structar $bool {i32} i globalane 0 (usann) og 1 (sann)
+#   null      ref.null eq
+#   tekst     berre som konstant argument til vertsfunksjonar (W0): (i32 peikar, i32 lengd)
+#             inn i datasegmentet i minnet «m»
+# Aritmetikk og samanlikning går via små atomfunksjonar (til_i64, frå_i64, add, lik, …)
+# som blir emitterte som WASM-instruksjonar frå Norscode. Heltalsdivisjon og rest har same
+# semantikk som VM-en (trunkerande, i64.div_s/i64.rem_s). Deling på null gjev trap.
+#
+# Subset i W0: PUSH_CONST (heltall/bool/null, tekst som vertsargument), LOAD/STORE_NAME,
+# LOAD/STORE_GLOBAL, POP, DUP, BINARY_{ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,LSHIFT,RSHIFT},
+# COMPARE_{EQ,NE,LT,LE,GT,GE}, UNARY_{NEG,NOT}, JUMP, JUMP_IF_FALSE, LABEL, CALL
+# (brukarfunksjonar og vertsfunksjonar i std.wasm_vert), RETURN.
+# Alt anna — ukjende opkodar, `builtin.*`, flyttal, tekst som verdi — gjev
+# KOMPILERINGSFEIL med ei liste over alle funna. Det finst ingen stille fallback.
+#
+# Kontrollflyt: basisblokker med stakkslot-lokale og ei dispatch-lykkje
+# (loop + br_table). Verdiar som flyt over etikettar (`og`/`eller`) blir lagra i slotane.
+#
+# Modulen: typar (boks, bool, funksjonstypar), importar «nc».<vertsfunksjon>, funksjonar
+# (innpakkarar for importane, atom, brukarfunksjonar, init), minne «m» (berre når det finst
+# tekstkonstantar), globalar, eksportar («m», «i» = init, «k0», «k1», … = funksjonar som
+# lytt_klikk peikar på), kode og data. Init («i») køyrer modulinitialiseringane og så
+# `start()`. Det finst ingen startseksjon: importane les minnet via eksportane, som først
+# finst etter instansieringa.
+
+bruk std.wasm_binary som w
+bruk std.wasm_vert som vert
+
+funksjon EQREF() -> heltall { returner 109 }
+funksjon I32() -> heltall { returner 127 }
+funksjon I64() -> heltall { returner 126 }
+funksjon T_BOKS() -> heltall { returner 0 }
+funksjon T_BOOL() -> heltall { returner 1 }
+funksjon I31_MIN() -> heltall { returner 0 - 1073741824 }
+funksjon I31_MAX() -> heltall { returner 1073741823 }
+
+funksjon _la_til(mål: liste, kjelde: liste) -> heltall {
+    la i = 0
+    mens i < lengde(kjelde) {
+        legg_til(mål, kjelde[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _leb(n: heltall) -> liste { returner w.leb_u(n) }
+
+funksjon _type_namn(v) -> tekst {
+    la t = builtin.type(v)
+    hvis t == "boolsk" eller t == "bool" { returner "bool" }
+    hvis t == "ingenting" eller t == "null" { returner "null" }
+    returner t
+}
+
+# ─── Atom ────────────────────────────────────────────────────────────────────
+
+funksjon atom_rekkje() -> liste {
+    returner ["til_i64", "frå_i64", "sannhet", "bool", "er_tal", "lik",
+              "add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr",
+              "lt", "le", "gt", "ge", "neg"]
+}
+
+funksjon _atom_avheng(namn: tekst) -> liste {
+    hvis namn == "sannhet" { returner ["til_i64"] }
+    hvis namn == "lik" { returner ["er_tal", "til_i64"] }
+    hvis namn == "neg" { returner ["til_i64", "frå_i64"] }
+    hvis namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" { returner ["til_i64"] }
+    la bin = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr"]
+    la i = 0
+    mens i < lengde(bin) {
+        hvis bin[i] == namn { returner ["til_i64", "frå_i64"] }
+        i = i + 1
+    }
+    returner []
+}
+
+funksjon _i64_op(namn: tekst) -> heltall {
+    la namn_l = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr", "lt", "le", "gt", "ge"]
+    la kode = [124, 125, 126, 127, 129, 131, 132, 133, 134, 135, 83, 87, 85, 89]
+    la i = 0
+    mens i < lengde(namn_l) {
+        hvis namn_l[i] == namn { returner kode[i] }
+        i = i + 1
+    }
+    kast "wasm_lowring: ukjend i64-operasjon " + namn
+}
+
+# Signatur: [[param-typar], [resultat-typar]]
+funksjon _atom_sig(namn: tekst) -> liste {
+    hvis namn == "til_i64" { returner [[EQREF()], [I64()]] }
+    hvis namn == "frå_i64" { returner [[I64()], [EQREF()]] }
+    hvis namn == "sannhet" eller namn == "er_tal" { returner [[EQREF()], [I32()]] }
+    hvis namn == "bool" { returner [[I32()], [EQREF()]] }
+    hvis namn == "neg" { returner [[EQREF()], [EQREF()]] }
+    hvis namn == "lik" eller namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" {
+        returner [[EQREF(), EQREF()], [I32()]]
+    }
+    returner [[EQREF(), EQREF()], [EQREF()]]
+}
+
+funksjon _kall(k: ordbok, atom: tekst) -> liste {
+    la ut = [16]
+    _la_til(ut, _leb(k["atom_idx"][atom]))
+    returner ut
+}
+
+funksjon _atom_kropp(k: ordbok, namn: tekst) -> liste {
+    la b = []
+    la tb = T_BOKS()
+    la tbo = T_BOOL()
+    hvis namn == "til_i64" {
+        # i31 → i31.get_s + utvid; elles ref.cast $boks + struct.get (trap for bool/null)
+        _la_til(b, [32, 0, 251, 20, 108, 4, 126, 32, 0, 251, 22, 108, 251, 29, 172, 5, 32, 0, 251, 22, tb, 251, 2, tb, 0, 11])
+    } ellers hvis namn == "frå_i64" {
+        _la_til(b, [32, 0, 66])
+        _la_til(b, w.leb_s(I31_MIN()))
+        _la_til(b, [89, 32, 0, 66])
+        _la_til(b, w.leb_s(I31_MAX()))
+        _la_til(b, [87, 113, 4, EQREF(), 32, 0, 167, 251, 28, 5, 32, 0, 251, 0, tb, 11])
+    } ellers hvis namn == "sannhet" {
+        # null → 0; $bool → feltet; tal → != 0
+        _la_til(b, [32, 0, 209, 4, 127, 65, 0, 5, 32, 0, 251, 20, tbo, 4, 127, 32, 0, 251, 22, tbo, 251, 2, tbo, 0, 5, 32, 0])
+        _la_til(b, _kall(k, "til_i64"))
+        _la_til(b, [66, 0, 82, 11, 11])
+    } ellers hvis namn == "bool" {
+        _la_til(b, [32, 0, 4, EQREF(), 35, 1, 5, 35, 0, 11])
+    } ellers hvis namn == "er_tal" {
+        _la_til(b, [32, 0, 251, 20, 108, 32, 0, 251, 20, tb, 114])
+    } ellers hvis namn == "lik" {
+        # to tal: samanlikn i64-verdiane; elles referanselikskap (bool-singletonar, null)
+        _la_til(b, [32, 0])
+        _la_til(b, _kall(k, "er_tal"))
+        _la_til(b, [32, 1])
+        _la_til(b, _kall(k, "er_tal"))
+        _la_til(b, [113, 4, 127, 32, 0])
+        _la_til(b, _kall(k, "til_i64"))
+        _la_til(b, [32, 1])
+        _la_til(b, _kall(k, "til_i64"))
+        _la_til(b, [81, 5, 32, 0, 32, 1, 211, 11])
+    } ellers hvis namn == "neg" {
+        _la_til(b, [66, 0, 32, 0])
+        _la_til(b, _kall(k, "til_i64"))
+        legg_til(b, 125)
+        _la_til(b, _kall(k, "frå_i64"))
+    } ellers hvis namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" {
+        _la_til(b, [32, 0])
+        _la_til(b, _kall(k, "til_i64"))
+        _la_til(b, [32, 1])
+        _la_til(b, _kall(k, "til_i64"))
+        legg_til(b, _i64_op(namn))
+    } ellers {
+        _la_til(b, [32, 0])
+        _la_til(b, _kall(k, "til_i64"))
+        _la_til(b, [32, 1])
+        _la_til(b, _kall(k, "til_i64"))
+        legg_til(b, _i64_op(namn))
+        _la_til(b, _kall(k, "frå_i64"))
+    }
+    returner b
+}
+
+funksjon _binær_atom(op: tekst) -> tekst {
+    la ops = ["BINARY_ADD", "BINARY_SUB", "BINARY_MUL", "BINARY_DIV", "BINARY_MOD", "BINARY_AND",
+              "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT", "BINARY_RSHIFT"]
+    la atom = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr"]
+    la i = 0
+    mens i < lengde(ops) {
+        hvis ops[i] == op { returner atom[i] }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _samanlikn_atom(op: tekst) -> tekst {
+    hvis op == "COMPARE_LT" { returner "lt" }
+    hvis op == "COMPARE_LE" { returner "le" }
+    hvis op == "COMPARE_GT" { returner "gt" }
+    hvis op == "COMPARE_GE" { returner "ge" }
+    returner ""
+}
+
+# ─── Kontekst ────────────────────────────────────────────────────────────────
+
+funksjon _ny_kontekst(ncb: ordbok, testbygg: bool) -> ordbok {
+    la globale = {}
+    hvis finnes_nøkkel(ncb, "global_names") { globale = ncb["global_names"] }
+    returner {
+        "ncb": ncb, "fns": ncb["functions"], "globale": globale, "testbygg": testbygg,
+        "vert_modul": "std.wasm_vert", "feil": [],
+        "nåbare": [], "nåbar_sett": {}, "analyse": {},
+        "vert_brukt": {}, "atom_brukt": {}, "tilbakekall": {}, "tilbakekall_liste": []
+    }
+}
+
+funksjon _feil(k: ordbok, q: tekst, melding: tekst) -> heltall {
+    legg_til(k["feil"], "funksjon " + q + ": " + melding)
+    returner 0
+}
+
+funksjon _legg_nåbar(k: ordbok, q: tekst) -> heltall {
+    hvis ikkje finnes_nøkkel(k["nåbar_sett"], q) {
+        k["nåbar_sett"][q] = sann
+        legg_til(k["nåbare"], q)
+    }
+    returner 0
+}
+
+funksjon _bruk_atom(k: ordbok, namn: tekst) -> heltall {
+    k["atom_brukt"][namn] = sann
+    la dep = _atom_avheng(namn)
+    la i = 0
+    mens i < lengde(dep) {
+        k["atom_brukt"][dep[i]] = sann
+        i = i + 1
+    }
+    returner 0
+}
+
+# ─── Analyse (pass 1): blokker, stakkhøgder, roller for tekstkonstantar ───────
+
+funksjon _push(st: ordbok, kind: tekst) -> heltall {
+    la h = st["h"]
+    hvis h < lengde(st["k"]) { st["k"][h] = kind } ellers { legg_til(st["k"], kind) }
+    st["h"] = h + 1
+    hvis st["h"] > st["maks"] { st["maks"] = st["h"] }
+    returner 0
+}
+
+# Pop éin verdi. Gjev kinden («v» eller «t:<instruksjonsindeks>»), eller "" ved underflyt.
+funksjon _pop(st: ordbok) -> tekst {
+    hvis st["h"] <= 0 { returner "" }
+    st["h"] = st["h"] - 1
+    returner tekst(st["k"][st["h"]])
+}
+
+funksjon _pop_verdi(k: ordbok, q: tekst, st: ordbok, kva: tekst) -> heltall {
+    la kind = _pop(st)
+    hvis kind == "" {
+        _feil(k, q, "stakkunderflyt ved " + kva)
+    } ellers hvis kind != "v" {
+        _feil(k, q, "tekst er berre støtta som konstant argument til vertsfunksjonar i W0 (brukt av " + kva + ")")
+    }
+    returner 0
+}
+
+funksjon _er_terminator(op: tekst) -> bool {
+    returner op == "JUMP" eller op == "JUMP_IF_FALSE" eller op == "RETURN"
+}
+
+funksjon _flett(k: ordbok, q: tekst, a: ordbok, b2: heltall, st: ordbok, arbeid: liste) -> heltall {
+    la h = st["h"]
+    la i = 0
+    mens i < h {
+        hvis st["k"][i] != "v" { _feil(k, q, "tekstkonstant kan ikkje flyte over ein etikett") }
+        i = i + 1
+    }
+    la hoyde = a["hoyde"]
+    hvis hoyde[b2] < 0 {
+        hoyde[b2] = h
+        legg_til(arbeid, b2)
+    } ellers hvis hoyde[b2] != h {
+        _feil(k, q, "ulik stakkhøgd ved blokk " + tekst(b2) + " (" + tekst(hoyde[b2]) + " mot " + tekst(h) + ")")
+    }
+    returner 0
+}
+
+funksjon _analyser(k: ordbok, q: tekst) -> heltall {
+    la fd = k["fns"][q]
+    la modul = tekst(fd["module"])
+    la params = fd["params"]
+    la kode = fd["code"]
+    la n = lengde(kode)
+    la a = {"q": q, "modul": modul, "np": lengde(params), "lok": {}, "n_lok": 0,
+            "blokker": [], "labels": {}, "hoyde": [], "rolle": {}, "maks_slot": 0, "dup": usann}
+    k["analyse"][q] = a
+    hvis finnes_nøkkel(fd, "is_async") og fd["is_async"] == sann {
+        _feil(k, q, "asynkrone funksjonar er ikkje støtta i W0")
+    }
+    la i = 0
+    mens i < lengde(params) {
+        a["lok"][tekst(params[i])] = i
+        i = i + 1
+    }
+    # Lokale: alle STORE_NAME-mål som ikkje er parametrar
+    i = 0
+    mens i < n {
+        la ins = kode[i]
+        hvis tekst(ins[0]) == "STORE_NAME" og ikkje finnes_nøkkel(a["lok"], tekst(ins[1])) {
+            a["lok"][tekst(ins[1])] = lengde(params) + a["n_lok"]
+            a["n_lok"] = a["n_lok"] + 1
+        }
+        hvis tekst(ins[0]) == "DUP" { a["dup"] = sann }
+        i = i + 1
+    }
+    # Basisblokker: leiarar ved 0, ved kvar LABEL og etter kvar terminator
+    la leiar = []
+    i = 0
+    mens i < n { legg_til(leiar, usann)  i = i + 1 }
+    hvis n > 0 { leiar[0] = sann }
+    i = 0
+    mens i < n {
+        la op = tekst(kode[i][0])
+        hvis op == "LABEL" { leiar[i] = sann }
+        hvis _er_terminator(op) og i + 1 < n { leiar[i + 1] = sann }
+        i = i + 1
+    }
+    i = 0
+    mens i < n {
+        hvis leiar[i] {
+            la j = i + 1
+            mens j < n og ikkje leiar[j] { j = j + 1 }
+            legg_til(a["blokker"], {"start": i, "slutt": j})
+            legg_til(a["hoyde"], -1)
+            hvis tekst(kode[i][0]) == "LABEL" { a["labels"][tekst(kode[i][1])] = lengde(a["blokker"]) - 1 }
+        }
+        i = i + 1
+    }
+    hvis n == 0 {
+        _feil(k, q, "tom funksjonskropp")
+        returner 0
+    }
+    # Stakkhøgder (arbeidsliste frå blokk 0)
+    a["hoyde"][0] = 0
+    la arbeid = [0]
+    la ai = 0
+    mens ai < lengde(arbeid) {
+        la bi = arbeid[ai]
+        ai = ai + 1
+        la blk = a["blokker"][bi]
+        la st = {"k": [], "h": 0, "maks": 0}
+        la hi = 0
+        mens hi < a["hoyde"][bi] { _push(st, "v")  hi = hi + 1 }
+        la avslutta = usann
+        la ii = blk["start"]
+        mens ii < blk["slutt"] {
+            la ins = kode[ii]
+            la op = tekst(ins[0])
+            hvis op == "LABEL" {
+            } ellers hvis op == "PUSH_CONST" {
+                la tn = _type_namn(ins[1])
+                hvis tn == "heltall" eller tn == "bool" eller tn == "null" { _push(st, "v") }
+                ellers hvis tn == "tekst" { _push(st, "t:" + tekst(ii)) }
+                ellers {
+                    _feil(k, q, "konstant av typen " + tn + " er ikkje støtta i W0")
+                    _push(st, "v")
+                }
+            } ellers hvis op == "LOAD_NAME" {
+                hvis ikkje finnes_nøkkel(a["lok"], tekst(ins[1])) { _feil(k, q, "ukjend namn " + tekst(ins[1])) }
+                _push(st, "v")
+            } ellers hvis op == "STORE_NAME" {
+                _pop_verdi(k, q, st, "STORE_NAME " + tekst(ins[1]))
+            } ellers hvis op == "LOAD_GLOBAL" eller op == "STORE_GLOBAL" {
+                la gn = tekst(ins[1])
+                la finst = usann
+                hvis finnes_nøkkel(k["globale"], modul) {
+                    la gl = k["globale"][modul]
+                    la gi = 0
+                    mens gi < lengde(gl) {
+                        hvis tekst(gl[gi]) == gn { finst = sann }
+                        gi = gi + 1
+                    }
+                }
+                hvis ikkje finst { _feil(k, q, "ukjend global " + modul + "." + gn) }
+                hvis op == "LOAD_GLOBAL" { _push(st, "v") } ellers { _pop_verdi(k, q, st, "STORE_GLOBAL " + gn) }
+            } ellers hvis _binær_atom(op) != "" {
+                _pop_verdi(k, q, st, op)
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _bruk_atom(k, _binær_atom(op))
+            } ellers hvis op == "COMPARE_EQ" eller op == "COMPARE_NE" {
+                _pop_verdi(k, q, st, op)
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _bruk_atom(k, "lik")
+                _bruk_atom(k, "bool")
+            } ellers hvis _samanlikn_atom(op) != "" {
+                _pop_verdi(k, q, st, op)
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _bruk_atom(k, _samanlikn_atom(op))
+                _bruk_atom(k, "bool")
+            } ellers hvis op == "UNARY_NEG" {
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _bruk_atom(k, "neg")
+            } ellers hvis op == "UNARY_NOT" {
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _bruk_atom(k, "sannhet")
+                _bruk_atom(k, "bool")
+            } ellers hvis op == "POP" {
+                _pop_verdi(k, q, st, op)
+            } ellers hvis op == "DUP" {
+                _pop_verdi(k, q, st, op)
+                _push(st, "v")
+                _push(st, "v")
+            } ellers hvis op == "CALL" {
+                _analyser_kall(k, a, q, modul, ins, st)
+            } ellers hvis op == "RETURN" {
+                _pop_verdi(k, q, st, op)
+                avslutta = sann
+            } ellers hvis op == "JUMP" {
+                hvis ikkje finnes_nøkkel(a["labels"], tekst(ins[1])) {
+                    _feil(k, q, "ukjend etikett " + tekst(ins[1]))
+                } ellers {
+                    _flett(k, q, a, a["labels"][tekst(ins[1])], st, arbeid)
+                }
+                avslutta = sann
+            } ellers hvis op == "JUMP_IF_FALSE" {
+                _pop_verdi(k, q, st, op)
+                _bruk_atom(k, "sannhet")
+                hvis ikkje finnes_nøkkel(a["labels"], tekst(ins[1])) {
+                    _feil(k, q, "ukjend etikett " + tekst(ins[1]))
+                } ellers {
+                    _flett(k, q, a, a["labels"][tekst(ins[1])], st, arbeid)
+                }
+                hvis bi + 1 < lengde(a["blokker"]) { _flett(k, q, a, bi + 1, st, arbeid) }
+                avslutta = sann
+            } ellers {
+                _feil(k, q, "ustøtta opcode " + op)
+            }
+            ii = ii + 1
+        }
+        hvis ikkje avslutta {
+            hvis bi + 1 < lengde(a["blokker"]) {
+                _flett(k, q, a, bi + 1, st, arbeid)
+            } ellers {
+                _feil(k, q, "funksjonen endar utan RETURN")
+            }
+        }
+        hvis st["maks"] > a["maks_slot"] { a["maks_slot"] = st["maks"] }
+    }
+    returner 0
+}
+
+funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste, st: ordbok) -> heltall {
+    la namn = tekst(ins[1])
+    la n = ins[2]
+    la vm = k["vert_modul"] + "."
+    hvis builtin.starts_with(namn, "builtin.") {
+        _feil(k, q, "ustøtta builtin: " + builtin.slice(namn, 8, lengde(namn)))
+        la i = 0
+        mens i < n { _pop(st)  i = i + 1 }
+        _push(st, "v")
+        returner 0
+    }
+    hvis builtin.starts_with(namn, vm) og vert.er_vertsfunksjon(builtin.slice(namn, lengde(vm), lengde(namn))) {
+        la kort = builtin.slice(namn, lengde(vm), lengde(namn))
+        la vf = vert.vertsfunksjon(kort)
+        hvis vf["berre_test"] og ikkje k["testbygg"] {
+            _feil(k, q, "vertsfunksjonen " + kort + " finst berre i testbygg (NC_WASM_TESTBYGG=1)")
+        }
+        la pt = vf["param"]
+        hvis n != lengde(pt) {
+            _feil(k, q, "vertsfunksjonen " + kort + " tek " + tekst(lengde(pt)) + " argument, fekk " + tekst(n))
+            la i = 0
+            mens i < n { _pop(st)  i = i + 1 }
+            _push(st, "v")
+            returner 0
+        }
+        # Argumenta ligg på st["k"][h-n .. h-1]
+        la base = st["h"] - n
+        hvis base < 0 {
+            _feil(k, q, "stakkunderflyt ved kall til " + kort)
+            returner 0
+        }
+        la j = 0
+        mens j < n {
+            la t = tekst(pt[j])
+            la kind = tekst(st["k"][base + j])
+            hvis t == "tekst" eller t == "funksjon" {
+                hvis ikkje builtin.starts_with(kind, "t:") {
+                    _feil(k, q, "argument " + tekst(j + 1) + " til " + kort + " må vere ein tekstkonstant i kjelda")
+                } ellers {
+                    la ci = builtin.heltall_fra_tekst(builtin.slice(kind, 2, lengde(kind)))
+                    hvis t == "tekst" {
+                        a["rolle"][tekst(ci)] = {"art": "tekst"}
+                    } ellers {
+                        la fnamn = tekst(k["fns"][q]["code"][ci][1])
+                        la mål = modul + "." + fnamn
+                        hvis ikkje finnes_nøkkel(k["fns"], mål) {
+                            _feil(k, q, kort + ": finn ikkje funksjonen " + fnamn + " i modulen " + modul)
+                        } ellers hvis lengde(k["fns"][mål]["params"]) != 0 {
+                            _feil(k, q, kort + ": funksjonen " + fnamn + " kan ikkje ha parametrar")
+                        } ellers {
+                            hvis ikkje finnes_nøkkel(k["tilbakekall"], mål) {
+                                k["tilbakekall"][mål] = "k" + tekst(lengde(k["tilbakekall_liste"]))
+                                legg_til(k["tilbakekall_liste"], mål)
+                            }
+                            _legg_nåbar(k, mål)
+                            a["rolle"][tekst(ci)] = {"art": "funksjon", "mål": mål}
+                        }
+                    }
+                }
+            } ellers hvis kind != "v" {
+                _feil(k, q, "argument " + tekst(j + 1) + " til " + kort + " må vere eit heltal, ikkje tekst")
+            }
+            j = j + 1
+        }
+        st["h"] = base
+        _push(st, "v")
+        k["vert_brukt"][kort] = sann
+        la pi = 0
+        mens pi < lengde(pt) {
+            hvis pt[pi] == "handtak" eller pt[pi] == "heltall" { _bruk_atom(k, "til_i64") }
+            pi = pi + 1
+        }
+        returner 0
+    }
+    hvis finnes_nøkkel(k["fns"], namn) {
+        la np = lengde(k["fns"][namn]["params"])
+        hvis n != np { _feil(k, q, namn + " tek " + tekst(np) + " argument, fekk " + tekst(n)) }
+        la i = 0
+        mens i < n {
+            _pop_verdi(k, q, st, "kall til " + namn)
+            i = i + 1
+        }
+        _push(st, "v")
+        _legg_nåbar(k, namn)
+        returner 0
+    }
+    _feil(k, q, "ukjend funksjon " + namn)
+    la i = 0
+    mens i < n { _pop(st)  i = i + 1 }
+    _push(st, "v")
+    returner 0
+}
+
+# ─── Typeregister ────────────────────────────────────────────────────────────
+
+funksjon _type_idx(k: ordbok, param: liste, res: liste) -> heltall {
+    la nøkkel = "p"
+    la i = 0
+    mens i < lengde(param) { nøkkel = nøkkel + "," + tekst(param[i])  i = i + 1 }
+    nøkkel = nøkkel + "r"
+    i = 0
+    mens i < lengde(res) { nøkkel = nøkkel + "," + tekst(res[i])  i = i + 1 }
+    hvis finnes_nøkkel(k["type_nøkkel"], nøkkel) { returner k["type_nøkkel"][nøkkel] }
+    la enc = [96]
+    _la_til(enc, _leb(lengde(param)))
+    _la_til(enc, param)
+    _la_til(enc, _leb(lengde(res)))
+    _la_til(enc, res)
+    legg_til(k["typar"], enc)
+    la idx = lengde(k["typar"]) - 1
+    k["type_nøkkel"][nøkkel] = idx
+    returner idx
+}
+
+funksjon _eqref_liste(n: heltall) -> liste {
+    la ut = []
+    la i = 0
+    mens i < n { legg_til(ut, EQREF())  i = i + 1 }
+    returner ut
+}
+
+funksjon _import_sig(vf: ordbok) -> liste {
+    la p = []
+    la i = 0
+    mens i < lengde(vf["param"]) {
+        la t = tekst(vf["param"][i])
+        hvis t == "tekst" eller t == "funksjon" { legg_til(p, I32())  legg_til(p, I32()) }
+        ellers hvis t == "handtak" { legg_til(p, I32()) }
+        ellers { legg_til(p, I64()) }
+        i = i + 1
+    }
+    la r = []
+    hvis vf["resultat"] == "handtak" { legg_til(r, I32()) }
+    returner [p, r]
+}
+
+funksjon _innpakkar_sig(vf: ordbok) -> liste {
+    la p = []
+    la i = 0
+    mens i < lengde(vf["param"]) {
+        la t = tekst(vf["param"][i])
+        hvis t == "tekst" eller t == "funksjon" { legg_til(p, I32())  legg_til(p, I32()) }
+        ellers { legg_til(p, EQREF()) }
+        i = i + 1
+    }
+    returner [p, [EQREF()]]
+}
+
+# ─── Emittering (pass 2) ─────────────────────────────────────────────────────
+
+funksjon _streng_ref(k: ordbok, s: tekst) -> liste {
+    hvis ikkje finnes_nøkkel(k["strengar"], s) {
+        k["strengar"][s] = lengde(k["data"])
+        la i = 0
+        mens i < lengde(s) {
+            legg_til(k["data"], builtin.char_code(builtin.slice(s, i, i + 1)))
+            i = i + 1
+        }
+    }
+    la ut = [65]
+    _la_til(ut, w.leb_s(k["strengar"][s]))
+    legg_til(ut, 65)
+    _la_til(ut, w.leb_s(lengde(s)))
+    returner ut
+}
+
+funksjon _heiltal(n: heltall) -> liste {
+    la ut = []
+    hvis n >= I31_MIN() og n <= I31_MAX() {
+        legg_til(ut, 65)
+        _la_til(ut, w.leb_s(n))
+        _la_til(ut, [251, 28])
+    } ellers {
+        legg_til(ut, 66)
+        _la_til(ut, w.leb_s(n))
+        _la_til(ut, [251, 0, T_BOKS()])
+    }
+    returner ut
+}
+
+funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: heltall) -> liste {
+    la op = tekst(ins[0])
+    la b = []
+    hvis op == "LABEL" {
+    } ellers hvis op == "PUSH_CONST" {
+        la v = ins[1]
+        la tn = _type_namn(v)
+        hvis tn == "heltall" { _la_til(b, _heiltal(v)) }
+        ellers hvis tn == "bool" {
+            hvis v { _la_til(b, [35, 1]) } ellers { _la_til(b, [35, 0]) }
+        }
+        ellers hvis tn == "null" { _la_til(b, [208, EQREF()]) }
+        ellers hvis tn == "tekst" {
+            la r = a["rolle"][tekst(ii)]
+            hvis r["art"] == "funksjon" { _la_til(b, _streng_ref(k, k["tilbakekall"][r["mål"]])) }
+            ellers { _la_til(b, _streng_ref(k, tekst(v))) }
+        }
+    } ellers hvis op == "LOAD_NAME" {
+        legg_til(b, 32)
+        _la_til(b, _leb(a["lok"][tekst(ins[1])]))
+    } ellers hvis op == "STORE_NAME" {
+        legg_til(b, 33)
+        _la_til(b, _leb(a["lok"][tekst(ins[1])]))
+    } ellers hvis op == "LOAD_GLOBAL" {
+        legg_til(b, 35)
+        _la_til(b, _leb(k["glob_idx"][a["modul"] + "." + tekst(ins[1])]))
+    } ellers hvis op == "STORE_GLOBAL" {
+        legg_til(b, 36)
+        _la_til(b, _leb(k["glob_idx"][a["modul"] + "." + tekst(ins[1])]))
+    } ellers hvis _binær_atom(op) != "" {
+        _la_til(b, _kall(k, _binær_atom(op)))
+    } ellers hvis op == "COMPARE_EQ" {
+        _la_til(b, _kall(k, "lik"))
+        _la_til(b, _kall(k, "bool"))
+    } ellers hvis op == "COMPARE_NE" {
+        _la_til(b, _kall(k, "lik"))
+        legg_til(b, 69)
+        _la_til(b, _kall(k, "bool"))
+    } ellers hvis _samanlikn_atom(op) != "" {
+        _la_til(b, _kall(k, _samanlikn_atom(op)))
+        _la_til(b, _kall(k, "bool"))
+    } ellers hvis op == "UNARY_NEG" {
+        _la_til(b, _kall(k, "neg"))
+    } ellers hvis op == "UNARY_NOT" {
+        _la_til(b, _kall(k, "sannhet"))
+        legg_til(b, 69)
+        _la_til(b, _kall(k, "bool"))
+    } ellers hvis op == "POP" {
+        legg_til(b, 26)
+    } ellers hvis op == "DUP" {
+        legg_til(b, 34)
+        _la_til(b, _leb(lok_tmp))
+        legg_til(b, 32)
+        _la_til(b, _leb(lok_tmp))
+    } ellers hvis op == "CALL" {
+        la namn = tekst(ins[1])
+        legg_til(b, 16)
+        hvis finnes_nøkkel(k["innpakkar_idx"], namn) { _la_til(b, _leb(k["innpakkar_idx"][namn])) }
+        ellers { _la_til(b, _leb(k["funk_idx"][namn])) }
+    } ellers hvis op == "RETURN" {
+        legg_til(b, 15)
+    } ellers {
+        kast "wasm_lowring: intern feil, uanalysert opcode " + op
+    }
+    returner b
+}
+
+funksjon _lokal_grupper(n_eq: heltall, n_i32: heltall) -> liste {
+    la g = []
+    la ng = 0
+    hvis n_eq > 0 { ng = ng + 1 }
+    hvis n_i32 > 0 { ng = ng + 1 }
+    _la_til(g, _leb(ng))
+    hvis n_eq > 0 { _la_til(g, _leb(n_eq))  legg_til(g, EQREF()) }
+    hvis n_i32 > 0 { _la_til(g, _leb(n_i32))  legg_til(g, I32()) }
+    returner g
+}
+
+funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
+    la a = k["analyse"][q]
+    la kode = k["fns"][q]["code"]
+    la np = a["np"]
+    la slot0 = np + a["n_lok"]
+    la n_slot = a["maks_slot"]
+    la lok_tmp = slot0 + n_slot
+    la n_eq = a["n_lok"] + n_slot
+    hvis a["dup"] { n_eq = n_eq + 1 }
+    la pc = np + n_eq
+    la c = pc + 1
+    # Nåbare blokker i kjelderekkjefølgje → dispatch-id
+    la nåbare = []
+    la id = {}
+    la bi = 0
+    mens bi < lengde(a["blokker"]) {
+        hvis a["hoyde"][bi] >= 0 {
+            id[tekst(bi)] = lengde(nåbare)
+            legg_til(nåbare, bi)
+        }
+        bi = bi + 1
+    }
+    la nb = lengde(nåbare)
+    la b0 = a["blokker"][nåbare[0]]
+    la siste = tekst(kode[b0["slutt"] - 1][0])
+    la direkte = nb == 1 og siste == "RETURN"
+    la kropp = []
+    hvis direkte {
+        _la_til(kropp, _lokal_grupper(n_eq, 0))
+        la ii = b0["start"]
+        mens ii < b0["slutt"] {
+            _la_til(kropp, _instruksjon(k, a, ii, kode[ii], lok_tmp))
+            ii = ii + 1
+        }
+        _la_til(kropp, [0, 11])
+        returner kropp
+    }
+    _la_til(kropp, _lokal_grupper(n_eq, 2))
+    # loop { block×nb { local.get pc; br_table 0..nb-1 } kode_0 … }
+    _la_til(kropp, [3, 64])
+    la i = 0
+    mens i < nb { _la_til(kropp, [2, 64])  i = i + 1 }
+    legg_til(kropp, 32)
+    _la_til(kropp, _leb(pc))
+    legg_til(kropp, 14)
+    _la_til(kropp, _leb(nb))
+    i = 0
+    mens i < nb { _la_til(kropp, _leb(i))  i = i + 1 }
+    _la_til(kropp, _leb(nb - 1))
+    legg_til(kropp, 11)
+    la d = 0
+    mens d < nb {
+        la bix = nåbare[d]
+        la blk = a["blokker"][bix]
+        la djup = nb - 1 - d
+        la h = a["hoyde"][bix]
+        # Last stakkslotane inn på WASM-stakken
+        la s = 0
+        mens s < h {
+            legg_til(kropp, 32)
+            _la_til(kropp, _leb(slot0 + s))
+            s = s + 1
+        }
+        la termin = ""
+        la mål = -1
+        la ii = blk["start"]
+        mens ii < blk["slutt"] {
+            la ins = kode[ii]
+            la op = tekst(ins[0])
+            hvis op == "JUMP" eller op == "JUMP_IF_FALSE" {
+                termin = op
+                mål = a["labels"][tekst(ins[1])]
+            } ellers hvis op == "RETURN" {
+                termin = op
+                legg_til(kropp, 15)
+            } ellers {
+                _la_til(kropp, _instruksjon(k, a, ii, ins, lok_tmp))
+            }
+            ii = ii + 1
+        }
+        hvis termin == "JUMP_IF_FALSE" {
+            _la_til(kropp, _kall(k, "sannhet"))
+            legg_til(kropp, 33)
+            _la_til(kropp, _leb(c))
+        }
+        hvis termin != "RETURN" {
+            # Høgda ved utgangen = høgda til etterfølgjaren
+            la etter = bix + 1
+            hvis termin == "JUMP" { etter = mål }
+            la he = a["hoyde"][etter]
+            la s2 = he - 1
+            mens s2 >= 0 {
+                legg_til(kropp, 33)
+                _la_til(kropp, _leb(slot0 + s2))
+                s2 = s2 - 1
+            }
+            hvis termin == "JUMP_IF_FALSE" {
+                # sann → fall gjennom (bix+1), usann → mål
+                legg_til(kropp, 65)
+                _la_til(kropp, w.leb_s(id[tekst(bix + 1)]))
+                legg_til(kropp, 65)
+                _la_til(kropp, w.leb_s(id[tekst(mål)]))
+                legg_til(kropp, 32)
+                _la_til(kropp, _leb(c))
+                legg_til(kropp, 27)
+            } ellers {
+                legg_til(kropp, 65)
+                _la_til(kropp, w.leb_s(id[tekst(etter)]))
+            }
+            legg_til(kropp, 33)
+            _la_til(kropp, _leb(pc))
+            legg_til(kropp, 12)
+            _la_til(kropp, _leb(djup))
+        }
+        hvis d < nb - 1 { legg_til(kropp, 11) }
+        d = d + 1
+    }
+    # slutt på loop, unreachable, slutt på funksjonen
+    _la_til(kropp, [11, 0, 11])
+    returner kropp
+}
+
+funksjon _innpakkar(k: ordbok, vf: ordbok, import_idx: heltall) -> liste {
+    la b = [0]
+    la a = 0
+    la i = 0
+    mens i < lengde(vf["param"]) {
+        la t = tekst(vf["param"][i])
+        hvis t == "tekst" eller t == "funksjon" {
+            _la_til(b, [32])
+            _la_til(b, _leb(a))
+            _la_til(b, [32])
+            _la_til(b, _leb(a + 1))
+            a = a + 2
+        } ellers hvis t == "handtak" {
+            legg_til(b, 32)
+            _la_til(b, _leb(a))
+            _la_til(b, _kall(k, "til_i64"))
+            legg_til(b, 167)
+            a = a + 1
+        } ellers {
+            legg_til(b, 32)
+            _la_til(b, _leb(a))
+            _la_til(b, _kall(k, "til_i64"))
+            a = a + 1
+        }
+        i = i + 1
+    }
+    legg_til(b, 16)
+    _la_til(b, _leb(import_idx))
+    hvis vf["resultat"] == "handtak" { _la_til(b, [251, 28]) } ellers { _la_til(b, [208, EQREF()]) }
+    legg_til(b, 11)
+    returner b
+}
+
+# ─── Hovudinngang ────────────────────────────────────────────────────────────
+
+# opsjonar: {"testbygg": bool}
+# Gjev {"ok": bool, "feil": [tekst], "bytar": liste, "importar": [namn], "eksportar": [namn],
+#       "tilbakekall": {kvalifisert namn: eksportnamn}, "funksjonar": [kvalifiserte namn],
+#       "har_init": bool}
+funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
+    la testbygg = usann
+    hvis finnes_nøkkel(opsjonar, "testbygg") { testbygg = opsjonar["testbygg"] == sann }
+    la k = _ny_kontekst(ncb, testbygg)
+    la fns = k["fns"]
+    la entry = ""
+    hvis finnes_nøkkel(ncb, "entry") { entry = tekst(ncb["entry"]) }
+    hvis entry == "" eller ikkje finnes_nøkkel(fns, entry) {
+        returner {"ok": usann, "feil": ["klientmodulen manglar funksjonen start()"]}
+    }
+    hvis lengde(fns[entry]["params"]) != 0 {
+        returner {"ok": usann, "feil": ["start() kan ikkje ha parametrar i ein klientmodul"]}
+    }
+    _legg_nåbar(k, entry)
+    la inits = []
+    hvis finnes_nøkkel(ncb, "module_initializers") { inits = ncb["module_initializers"] }
+    la inits_med = {}
+    la init_liste = []
+    la ai = 0
+    mens sann {
+        mens ai < lengde(k["nåbare"]) {
+            _analyser(k, k["nåbare"][ai])
+            ai = ai + 1
+        }
+        # Modulinit for kvar modul som har ein nåbar funksjon
+        la modular = {}
+        la mi = 0
+        mens mi < lengde(k["nåbare"]) {
+            modular[tekst(fns[k["nåbare"][mi]]["module"])] = sann
+            mi = mi + 1
+        }
+        la endra = usann
+        la ii = 0
+        mens ii < lengde(inits) {
+            la iq = tekst(inits[ii])
+            hvis finnes_nøkkel(fns, iq) og ikkje finnes_nøkkel(inits_med, iq) og finnes_nøkkel(modular, tekst(fns[iq]["module"])) {
+                inits_med[iq] = sann
+                _legg_nåbar(k, iq)
+                endra = sann
+            }
+            ii = ii + 1
+        }
+        hvis ikkje endra og ai >= lengde(k["nåbare"]) { bryt }
+    }
+    # Init-rekkjefølgja er rekkjefølgja i module_initializers
+    la ii2 = 0
+    mens ii2 < lengde(inits) {
+        hvis finnes_nøkkel(inits_med, tekst(inits[ii2])) { legg_til(init_liste, tekst(inits[ii2])) }
+        ii2 = ii2 + 1
+    }
+    hvis lengde(k["feil"]) > 0 {
+        returner {"ok": usann, "feil": k["feil"]}
+    }
+
+    # ── Indeksar ──
+    k["typar"] = []
+    k["type_nøkkel"] = {}
+    # GC-typane først: 0 = $boks {i64}, 1 = $bool {i32}
+    legg_til(k["typar"], [95, 1, I64(), 0])
+    legg_til(k["typar"], [95, 1, I32(), 0])
+    k["type_nøkkel"]["$boks"] = 0
+    k["type_nøkkel"]["$bool"] = 1
+
+    la tabell = vert.vertsfunksjonar()
+    la vert_liste = []
+    la ti = 0
+    mens ti < lengde(tabell) {
+        hvis finnes_nøkkel(k["vert_brukt"], tekst(tabell[ti]["namn"])) { legg_til(vert_liste, tabell[ti]) }
+        ti = ti + 1
+    }
+    la n_imp = lengde(vert_liste)
+    la neste = n_imp
+    k["innpakkar_idx"] = {}
+    la vi = 0
+    mens vi < n_imp {
+        k["innpakkar_idx"][k["vert_modul"] + "." + tekst(vert_liste[vi]["namn"])] = neste
+        neste = neste + 1
+        vi = vi + 1
+    }
+    k["atom_idx"] = {}
+    la atomar = []
+    la ar = atom_rekkje()
+    la ati = 0
+    mens ati < lengde(ar) {
+        hvis finnes_nøkkel(k["atom_brukt"], ar[ati]) {
+            k["atom_idx"][ar[ati]] = neste
+            legg_til(atomar, ar[ati])
+            neste = neste + 1
+        }
+        ati = ati + 1
+    }
+    k["funk_idx"] = {}
+    la fi = 0
+    mens fi < lengde(k["nåbare"]) {
+        k["funk_idx"][k["nåbare"][fi]] = neste
+        neste = neste + 1
+        fi = fi + 1
+    }
+    la init_idx = neste
+    # Globalar: 0 usann, 1 sann, så modulglobalane til modular med nåbare funksjonar
+    k["glob_idx"] = {}
+    la glob_modular = []
+    la gm_sett = {}
+    fi = 0
+    mens fi < lengde(k["nåbare"]) {
+        la mm = tekst(fns[k["nåbare"][fi]]["module"])
+        hvis ikkje finnes_nøkkel(gm_sett, mm) {
+            gm_sett[mm] = sann
+            legg_til(glob_modular, mm)
+        }
+        fi = fi + 1
+    }
+    la n_glob = 2
+    la gmi = 0
+    mens gmi < lengde(glob_modular) {
+        la mm2 = glob_modular[gmi]
+        hvis finnes_nøkkel(k["globale"], mm2) {
+            la gl = k["globale"][mm2]
+            la gj = 0
+            mens gj < lengde(gl) {
+                k["glob_idx"][mm2 + "." + tekst(gl[gj])] = n_glob
+                n_glob = n_glob + 1
+                gj = gj + 1
+            }
+        }
+        gmi = gmi + 1
+    }
+
+    # ── Funksjonstypar og kroppar ──
+    k["strengar"] = {}
+    k["data"] = []
+    la import_typar = []
+    vi = 0
+    mens vi < n_imp {
+        la sig = _import_sig(vert_liste[vi])
+        legg_til(import_typar, _type_idx(k, sig[0], sig[1]))
+        vi = vi + 1
+    }
+    la funk_typar = []
+    la kroppar = []
+    vi = 0
+    mens vi < n_imp {
+        la sig2 = _innpakkar_sig(vert_liste[vi])
+        legg_til(funk_typar, _type_idx(k, sig2[0], sig2[1]))
+        legg_til(kroppar, _innpakkar(k, vert_liste[vi], vi))
+        vi = vi + 1
+    }
+    ati = 0
+    mens ati < lengde(atomar) {
+        la sig3 = _atom_sig(atomar[ati])
+        legg_til(funk_typar, _type_idx(k, sig3[0], sig3[1]))
+        la ak = [0]
+        _la_til(ak, _atom_kropp(k, atomar[ati]))
+        legg_til(ak, 11)
+        legg_til(kroppar, ak)
+        ati = ati + 1
+    }
+    fi = 0
+    mens fi < lengde(k["nåbare"]) {
+        la q = k["nåbare"][fi]
+        legg_til(funk_typar, _type_idx(k, _eqref_liste(k["analyse"][q]["np"]), [EQREF()]))
+        legg_til(kroppar, _brukarfunksjon(k, q))
+        fi = fi + 1
+    }
+    # Init: modulinitialiseringar, så start()
+    legg_til(funk_typar, _type_idx(k, [], []))
+    la ik = [0]
+    la ij = 0
+    mens ij < lengde(init_liste) {
+        legg_til(ik, 16)
+        _la_til(ik, _leb(k["funk_idx"][init_liste[ij]]))
+        legg_til(ik, 26)
+        ij = ij + 1
+    }
+    legg_til(ik, 16)
+    _la_til(ik, _leb(k["funk_idx"][entry]))
+    _la_til(ik, [26, 11])
+    legg_til(kroppar, ik)
+
+    # ── Seksjonar ──
+    la m = [0, 97, 115, 109, 1, 0, 0, 0]
+    la tp = _leb(lengde(k["typar"]))
+    la tyi = 0
+    mens tyi < lengde(k["typar"]) { _la_til(tp, k["typar"][tyi])  tyi = tyi + 1 }
+    _la_til(m, w.seksjon(1, tp))
+
+    hvis n_imp > 0 {
+        la ip = _leb(n_imp)
+        vi = 0
+        mens vi < n_imp {
+            _la_til(ip, w.namn_bytar("nc"))
+            _la_til(ip, w.namn_bytar(tekst(vert_liste[vi]["namn"])))
+            legg_til(ip, 0)
+            _la_til(ip, _leb(import_typar[vi]))
+            vi = vi + 1
+        }
+        _la_til(m, w.seksjon(2, ip))
+    }
+
+    la fp = _leb(lengde(funk_typar))
+    la fti = 0
+    mens fti < lengde(funk_typar) { _la_til(fp, _leb(funk_typar[fti]))  fti = fti + 1 }
+    _la_til(m, w.seksjon(3, fp))
+
+    la har_minne = lengde(k["data"]) > 0
+    hvis har_minne { _la_til(m, w.seksjon(5, [1, 0, 1])) }
+
+    la gp = _leb(n_glob)
+    # usann / sann: (ref $bool) immutable = struct.new $bool (i32.const 0/1)
+    _la_til(gp, [100, T_BOOL(), 0, 65, 0, 251, 0, T_BOOL(), 11])
+    _la_til(gp, [100, T_BOOL(), 0, 65, 1, 251, 0, T_BOOL(), 11])
+    la gk = 2
+    mens gk < n_glob {
+        _la_til(gp, [EQREF(), 1, 208, EQREF(), 11])
+        gk = gk + 1
+    }
+    _la_til(m, w.seksjon(6, gp))
+
+    la eksportar = []
+    la ep = []
+    la n_eksp = 1 + lengde(k["tilbakekall_liste"])
+    hvis har_minne { n_eksp = n_eksp + 1 }
+    _la_til(ep, _leb(n_eksp))
+    hvis har_minne {
+        _la_til(ep, w.namn_bytar("m"))
+        _la_til(ep, [2, 0])
+        legg_til(eksportar, "m")
+    }
+    _la_til(ep, w.namn_bytar("i"))
+    legg_til(ep, 0)
+    _la_til(ep, _leb(init_idx))
+    legg_til(eksportar, "i")
+    la tki = 0
+    mens tki < lengde(k["tilbakekall_liste"]) {
+        la tq = k["tilbakekall_liste"][tki]
+        la en = k["tilbakekall"][tq]
+        _la_til(ep, w.namn_bytar(en))
+        legg_til(ep, 0)
+        _la_til(ep, _leb(k["funk_idx"][tq]))
+        legg_til(eksportar, en)
+        tki = tki + 1
+    }
+    _la_til(m, w.seksjon(7, ep))
+
+    la cp = _leb(lengde(kroppar))
+    la ki = 0
+    mens ki < lengde(kroppar) {
+        _la_til(cp, _leb(lengde(kroppar[ki])))
+        _la_til(cp, kroppar[ki])
+        ki = ki + 1
+    }
+    _la_til(m, w.seksjon(10, cp))
+
+    hvis har_minne {
+        la dp = [1, 0, 65, 0, 11]
+        _la_til(dp, _leb(lengde(k["data"])))
+        _la_til(dp, k["data"])
+        _la_til(m, w.seksjon(11, dp))
+    }
+
+    la imp_namn = []
+    vi = 0
+    mens vi < n_imp { legg_til(imp_namn, tekst(vert_liste[vi]["namn"]))  vi = vi + 1 }
+    returner {"ok": sann, "feil": [], "bytar": m, "importar": imp_namn, "eksportar": eksportar,
+              "tilbakekall": k["tilbakekall"], "funksjonar": k["nåbare"], "har_init": sann,
+              "atom": atomar}
+}
+
+# Versjon over sjølve bytane (sha256_bytes, 12 hex). sha256(tekst(liste)) er IKKJE
+# innhaldet og gav same versjon for ulike modular (funn i W0-proben).
+funksjon versjon(bytar: liste) -> tekst {
+    returner builtin.slice(builtin.sha256_bytes(bytar), 0, 12)
+}
+
+funksjon feilrapport(res: ordbok) -> tekst {
+    la ut = "WASM-kompilering feila (" + tekst(lengde(res["feil"])) + " feil):\n"
+    la i = 0
+    mens i < lengde(res["feil"]) {
+        ut = ut + "  - " + tekst(res["feil"][i]) + "\n"
+        i = i + 1
+    }
+    returner ut
+}

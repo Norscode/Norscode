@@ -1,0 +1,142 @@
+# std/wasm_vert.no — vertsbindingar for Norscode-klientmodular kompilerte til WebAssembly (W0).
+#
+# Fila har tre roller:
+#
+#  1. Norscode-API for klientkode: `finn`, `sett_tekst`, `sett_html`, `lytt_klikk`
+#     (og `test_klikk`, berre i testbygg). Funksjonane er stubbar: i VM-en kastar dei,
+#     og WASM-backenden (std/wasm_lowring.no) byter kalla ut med importar frå modulen
+#     «nc». Klientkoden skriv `bruk std.wasm_vert som vert` og `vert.finn("#ut")`.
+#
+#  2. Vertstabellen (`vertsfunksjonar`): ein Norscode-datastruktur som skildrar kvar
+#     vertsfunksjon med namn, parametertypar, resultattype og DOM-operasjonen som eit
+#     lite JS-uttrykkstre. Lastaren blir emittert token for token frå denne tabellen av
+#     std/wasm_js.no. Det finst ingen handskriven lastarmal.
+#
+#  3. HTML-escaping (`escape_tabell`, `html_escape`). `sett_html(h, mal, verdi)` er den
+#     einaste vegen til innerHTML. `mal` må vere ein tekstkonstant i kjelda (utviklar-HTML,
+#     kontrollert av kompilatoren), og `verdi` blir ALLTID escapa i nettlesaren med ein
+#     JS-hjelpar som blir emittert frå `escape_tabell`. Tabellen er den same som
+#     std.html.escape brukar, så `html_escape` her gjev identisk tekst i VM-en.
+#
+# Parametertypar (Norscode → WASM → JS):
+#   "tekst"    tekstkonstant i kjelda → (i32 peikar, i32 lengd) i minnet «m» → JS-streng (UTF-8)
+#   "funksjon" tekstkonstant som namngjev ein funksjon i same modul, utan parametrar →
+#              eksportnamn (i32, i32) → JS kallar eksporten
+#   "handtak"  heltall (elementhandtak) → i32 → JS-tal (indeks i handtakstabellen)
+#   "heltall"  heltall → i64 → JS BigInt (eksakt, også over 2^53)
+# Resultattypar: "handtak" (i32 → i31ref) eller "ingen" (→ null).
+#
+# JS-uttrykkstreet (noder som lister, første element er nodetypen):
+#   ["arg", i]              i-te Norscode-parameter (tekst/funksjon blir dekoda frå minnet)
+#   ["element", i]          elementet som handtaket i parameter i peikar på
+#   ["nytt_handtak", e]     legg elementet e i handtakstabellen og gjev indeksen
+#   ["global", namn]        global JS-verdi (t.d. document)
+#   ["felt", e, namn]       e.namn
+#   ["kall", f, [args]]     f(args)
+#   ["tildel", mål, e]      mål=e
+#   ["streng", s]           strengliteral
+#   ["pil", [param], e]     pilfunksjon
+#   ["eksport", e]          eksporten med namnet e frå WASM-modulen
+#   ["escape", e]           HTML-escape av e (emittert frå escape_tabell)
+
+funksjon _berre_nettlesar(namn: tekst) -> heltall {
+    kast "wasm_vert." + namn + " finst berre i nettlesaren: kompiler klientmodulen med tools/nc_wasm.no"
+}
+
+# ─── Norscode-API (stubbar i VM-en) ──────────────────────────────────────────
+
+funksjon finn(selektor: tekst) -> heltall {
+    returner _berre_nettlesar("finn")
+}
+
+funksjon sett_tekst(handtak: heltall, verdi: heltall) -> heltall {
+    returner _berre_nettlesar("sett_tekst")
+}
+
+funksjon sett_html(handtak: heltall, mal: tekst, verdi: heltall) -> heltall {
+    returner _berre_nettlesar("sett_html")
+}
+
+funksjon lytt_klikk(handtak: heltall, funksjonsnamn: tekst) -> heltall {
+    returner _berre_nettlesar("lytt_klikk")
+}
+
+funksjon test_klikk(handtak: heltall) -> heltall {
+    returner _berre_nettlesar("test_klikk")
+}
+
+# ─── Vertstabellen ───────────────────────────────────────────────────────────
+
+funksjon _vf(namn: tekst, param: liste, resultat: tekst, berre_test: bool, op: liste) -> ordbok {
+    returner {"namn": namn, "param": param, "resultat": resultat, "berre_test": berre_test, "op": op}
+}
+
+funksjon _element(i: heltall) -> liste {
+    returner ["element", i]
+}
+
+funksjon vertsfunksjonar() -> liste {
+    la ut = []
+    # finn(selektor) → handtak: document.querySelector(selektor)
+    legg_til(ut, _vf("finn", ["tekst"], "handtak", usann,
+        ["nytt_handtak", ["kall", ["felt", ["global", "document"], "querySelector"], [["arg", 0]]]]))
+    # sett_tekst(h, verdi): element.textContent = verdi
+    legg_til(ut, _vf("sett_tekst", ["handtak", "heltall"], "ingen", usann,
+        ["tildel", ["felt", _element(0), "textContent"], ["arg", 1]]))
+    # sett_html(h, mal, verdi): element.innerHTML = mal med «{}» bytt ut med escape(verdi)
+    legg_til(ut, _vf("sett_html", ["handtak", "tekst", "heltall"], "ingen", usann,
+        ["tildel", ["felt", _element(0), "innerHTML"],
+            ["kall", ["felt", ["kall", ["felt", ["arg", 1], "split"], [["streng", mal_plasshaldar()]]], "join"],
+                [["escape", ["arg", 2]]]]]))
+    # lytt_klikk(h, funksjon): element.addEventListener("click", () => eksport())
+    legg_til(ut, _vf("lytt_klikk", ["handtak", "funksjon"], "ingen", usann,
+        ["kall", ["felt", _element(0), "addEventListener"],
+            [["streng", "click"], ["pil", [], ["kall", ["eksport", ["arg", 1]], []]]]]))
+    # test_klikk(h): element.click() — berre i testbygg (NC_WASM_TESTBYGG=1)
+    legg_til(ut, _vf("test_klikk", ["handtak"], "ingen", sann,
+        ["kall", ["felt", _element(0), "click"], []]))
+    returner ut
+}
+
+funksjon vertsfunksjon(namn: tekst) -> ordbok {
+    la alle = vertsfunksjonar()
+    la i = 0
+    mens i < lengde(alle) {
+        hvis alle[i]["namn"] == namn { returner alle[i] }
+        i = i + 1
+    }
+    returner {}
+}
+
+funksjon er_vertsfunksjon(namn: tekst) -> bool {
+    returner lengde(vertsfunksjon(namn)) > 0
+}
+
+# Plasshaldaren i HTML-malar for sett_html.
+funksjon mal_plasshaldar() -> tekst {
+    returner "{}"
+}
+
+# ─── HTML-escaping ───────────────────────────────────────────────────────────
+
+# Rekkjefølgja er viktig: «&» først, så entitetane ikkje blir dobbel-escapa.
+funksjon escape_tabell() -> liste {
+    returner [["&", "&amp;"], ["<", "&lt;"], [">", "&gt;"], ["\"", "&quot;"], ["'", "&#x27;"]]
+}
+
+# Same resultat som std.html.escape, og som JS-hjelparen lastaren får frå tabellen.
+funksjon html_escape(verdi: tekst) -> tekst {
+    la tab = escape_tabell()
+    la r = verdi
+    la i = 0
+    mens i < lengde(tab) {
+        r = tekst_erstatt(r, tab[i][0], tab[i][1])
+        i = i + 1
+    }
+    returner r
+}
+
+# Mal + verdi slik nettlesaren set dei saman (for testar og tenarsida).
+funksjon html_frå_mal(mal: tekst, verdi: tekst) -> tekst {
+    returner builtin.join(builtin.split(mal, mal_plasshaldar()), html_escape(verdi))
+}

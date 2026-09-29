@@ -1,0 +1,414 @@
+# std/wasm_js.no — Norscode→JS-emitter for WASM-lastaren (W0).
+#
+# Nettlesaren kan ikkje starte WebAssembly utan eit lite JS-lim. Dette limet blir IKKJE
+# skrive for hand: emitteren byggjer JS token for token frå Norscode-data, same prinsipp
+# som x86-backenden emitterer maskinkode frå instruksjonsdata.
+#
+#   - Kva vertsfunksjonane gjer (DOM-operasjonane), kjem frå std.wasm_vert.vertsfunksjonar().
+#   - Kva hjelparar lastaren har (handtakstabell, UTF-8-dekodar, HTML-escape), kjem frå
+#     `hjelparar()` her, som JS-uttrykkstre. Escape-hjelparen blir bygd frå
+#     std.wasm_vert.escape_tabell().
+#   - Lastarprogrammet (instansiering, importobjekt, init-kall) kjem frå `lastar_program()`.
+#
+# Berre vertsfunksjonar modulen faktisk importerer, kjem med (tree-shaking), og berre
+# hjelparane dei brukar. Strengliteralane i denne fila er enkelttoken (identifikatorar og
+# teiknsetjing); tests/test_wasm_lastar.no sjekkar det.
+#
+# JS-nodar: ["namn", id]  ["global", id]  ["tal", n]  ["streng", s]  ["felt", e, id]
+#   ["indeks", e, i]  ["kall", f, [args]]  ["ny", f, [args]]  ["tildel", mål, e]
+#   ["binær", op, a, b]  ["vent", e]  ["pil", [param], e]  ["objekt", [[nøkkel, e], ...]]
+#   ["tabell", [e, ...]]  ["regex_klasse", [teikn, ...], flagg]
+# Setningar: ["la", [[namn, e eller null], ...]]  ["uttrykk", e]
+# Program:   ["asynk_iife", [setningar]]
+# Vertsnodane («arg», «element», «nytt_handtak», «eksport», «escape») i std/wasm_vert.no
+# blir løyste til JS-nodar av `løys_vert` før emittering.
+
+bruk std.wasm_vert som vert
+
+# ─── Token-nivå ──────────────────────────────────────────────────────────────
+
+funksjon _er_id_teikn(c: tekst) -> bool {
+    hvis c == "" { returner usann }
+    la k = builtin.char_code(c)
+    returner (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 36
+}
+
+# Set saman token. Mellomrom berre der to identifikatorteikn møtest (let x, new T, await f).
+funksjon token_til_tekst(tokens: liste) -> tekst {
+    la ut = ""
+    la førre = ""
+    la i = 0
+    mens i < lengde(tokens) {
+        la t = tekst(tokens[i])
+        hvis lengde(t) > 0 {
+            hvis _er_id_teikn(førre) og _er_id_teikn(builtin.slice(t, 0, 1)) { ut = ut + " " }
+            ut = ut + t
+            førre = builtin.slice(t, lengde(t) - 1, lengde(t))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _hex2(n: heltall) -> tekst {
+    la hs = "0123456789abcdef"
+    returner builtin.slice(hs, (n >> 4) & 15, ((n >> 4) & 15) + 1) + builtin.slice(hs, n & 15, (n & 15) + 1)
+}
+
+# JS-strengliteral som eitt token. Bytar over 127 går uendra (UTF-8, charset=utf-8).
+funksjon js_streng(s: tekst) -> tekst {
+    la q = "\""
+    la bs = "\\"
+    la ut = q
+    la i = 0
+    mens i < lengde(s) {
+        la c = builtin.slice(s, i, i + 1)
+        la k = builtin.char_code(c)
+        hvis c == q eller c == bs { ut = ut + bs + c }
+        ellers hvis k < 32 { ut = ut + bs + "u00" + _hex2(k) }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut + q
+}
+
+funksjon _regex_klasse(teikn: liste, flagg: tekst) -> tekst {
+    la bs = "\\"
+    la ut = "/" + "["
+    la i = 0
+    mens i < lengde(teikn) {
+        la c = tekst(teikn[i])
+        hvis c == bs eller c == "]" eller c == "^" eller c == "-" eller c == "/" eller c == "[" { ut = ut + bs }
+        ut = ut + c
+        i = i + 1
+    }
+    returner ut + "]" + "/" + flagg
+}
+
+funksjon er_identifikator(s: tekst) -> bool {
+    hvis lengde(s) == 0 { returner usann }
+    la k0 = builtin.char_code(builtin.slice(s, 0, 1))
+    hvis k0 >= 48 og k0 <= 57 { returner usann }
+    la i = 0
+    mens i < lengde(s) {
+        hvis ikkje _er_id_teikn(builtin.slice(s, i, i + 1)) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# ─── JS-tre → token ──────────────────────────────────────────────────────────
+
+funksjon _treng_parentes(e: liste) -> bool {
+    la k = tekst(e[0])
+    returner k == "vent" eller k == "binær" eller k == "tildel" eller k == "pil" eller k == "objekt"
+}
+
+funksjon _mottakar(e: liste, ut: liste) -> heltall {
+    hvis _treng_parentes(e) {
+        legg_til(ut, "(")
+        emit(e, ut)
+        legg_til(ut, ")")
+    } ellers {
+        emit(e, ut)
+    }
+    returner 0
+}
+
+funksjon _liste(elem: liste, ut: liste) -> heltall {
+    la i = 0
+    mens i < lengde(elem) {
+        hvis i > 0 { legg_til(ut, ",") }
+        emit(elem[i], ut)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon emit(e: liste, ut: liste) -> heltall {
+    la k = tekst(e[0])
+    hvis k == "namn" eller k == "global" eller k == "tal" {
+        legg_til(ut, tekst(e[1]))
+    } ellers hvis k == "streng" {
+        legg_til(ut, js_streng(tekst(e[1])))
+    } ellers hvis k == "felt" {
+        _mottakar(e[1], ut)
+        legg_til(ut, ".")
+        legg_til(ut, tekst(e[2]))
+    } ellers hvis k == "indeks" {
+        _mottakar(e[1], ut)
+        legg_til(ut, "[")
+        emit(e[2], ut)
+        legg_til(ut, "]")
+    } ellers hvis k == "kall" eller k == "ny" {
+        hvis k == "ny" { legg_til(ut, "new") }
+        _mottakar(e[1], ut)
+        legg_til(ut, "(")
+        _liste(e[2], ut)
+        legg_til(ut, ")")
+    } ellers hvis k == "tildel" {
+        emit(e[1], ut)
+        legg_til(ut, "=")
+        emit(e[2], ut)
+    } ellers hvis k == "binær" {
+        _mottakar(e[2], ut)
+        legg_til(ut, tekst(e[1]))
+        _mottakar(e[3], ut)
+    } ellers hvis k == "vent" {
+        legg_til(ut, "await")
+        _mottakar(e[1], ut)
+    } ellers hvis k == "pil" {
+        la ps = e[1]
+        hvis lengde(ps) == 1 {
+            legg_til(ut, tekst(ps[0]))
+        } ellers {
+            legg_til(ut, "(")
+            la i = 0
+            mens i < lengde(ps) {
+                hvis i > 0 { legg_til(ut, ",") }
+                legg_til(ut, tekst(ps[i]))
+                i = i + 1
+            }
+            legg_til(ut, ")")
+        }
+        legg_til(ut, "=>")
+        # Ein objektliteral som kropp må ha parentes (elles blir han lesen som blokk).
+        hvis tekst(e[2][0]) == "objekt" { _mottakar(e[2], ut) } ellers { emit(e[2], ut) }
+    } ellers hvis k == "objekt" {
+        legg_til(ut, "{")
+        la par = e[1]
+        la i = 0
+        mens i < lengde(par) {
+            hvis i > 0 { legg_til(ut, ",") }
+            la nøkkel = tekst(par[i][0])
+            hvis er_identifikator(nøkkel) { legg_til(ut, nøkkel) } ellers { legg_til(ut, js_streng(nøkkel)) }
+            legg_til(ut, ":")
+            emit(par[i][1], ut)
+            i = i + 1
+        }
+        legg_til(ut, "}")
+    } ellers hvis k == "tabell" {
+        legg_til(ut, "[")
+        _liste(e[1], ut)
+        legg_til(ut, "]")
+    } ellers hvis k == "regex_klasse" {
+        legg_til(ut, _regex_klasse(e[1], tekst(e[2])))
+    } ellers {
+        kast "wasm_js: ukjend JS-node " + k
+    }
+    returner 0
+}
+
+funksjon emit_setning(s: liste, ut: liste) -> heltall {
+    la k = tekst(s[0])
+    hvis k == "la" {
+        legg_til(ut, "let")
+        la i = 0
+        mens i < lengde(s[1]) {
+            hvis i > 0 { legg_til(ut, ",") }
+            la par = s[1][i]
+            legg_til(ut, tekst(par[0]))
+            hvis par[1] != null {
+                legg_til(ut, "=")
+                emit(par[1], ut)
+            }
+            i = i + 1
+        }
+    } ellers hvis k == "uttrykk" {
+        emit(s[1], ut)
+    } ellers {
+        kast "wasm_js: ukjend JS-setning " + k
+    }
+    returner 0
+}
+
+funksjon emit_program(p: liste) -> liste {
+    hvis tekst(p[0]) != "asynk_iife" { kast "wasm_js: ukjend programform " + tekst(p[0]) }
+    la ut = []
+    # (async()=>{ … })()
+    legg_til(ut, "(")
+    legg_til(ut, "async")
+    legg_til(ut, "(")
+    legg_til(ut, ")")
+    legg_til(ut, "=>")
+    legg_til(ut, "{")
+    la i = 0
+    mens i < lengde(p[1]) {
+        hvis i > 0 { legg_til(ut, ";") }
+        emit_setning(p[1][i], ut)
+        i = i + 1
+    }
+    legg_til(ut, "}")
+    legg_til(ut, ")")
+    legg_til(ut, "(")
+    legg_til(ut, ")")
+    returner ut
+}
+
+# ─── Vertsnodar → JS-nodar ───────────────────────────────────────────────────
+
+# JS-parameternamn for importfunksjonane i lastaren.
+funksjon param_namn() -> liste {
+    returner ["a", "b", "c", "d", "e", "f", "g", "h", "j", "k", "l", "n"]
+}
+
+# Parameternamn for ein vertsfunksjon: tekst/funksjon tek to WASM-verdiar (peikar, lengd).
+# Gjev {"param": [[namn, ...] per Norscode-parameter], "flat": [namn, ...]}.
+funksjon import_param(vf: ordbok) -> ordbok {
+    la pn = param_namn()
+    la param = []
+    la flat = []
+    la n = 0
+    la i = 0
+    mens i < lengde(vf["param"]) {
+        la t = tekst(vf["param"][i])
+        hvis t == "tekst" eller t == "funksjon" {
+            legg_til(param, [pn[n], pn[n + 1]])
+            legg_til(flat, pn[n])
+            legg_til(flat, pn[n + 1])
+            n = n + 2
+        } ellers {
+            legg_til(param, [pn[n]])
+            legg_til(flat, pn[n])
+            n = n + 1
+        }
+        i = i + 1
+    }
+    returner {"param": param, "flat": flat}
+}
+
+# Løys vertsnodane i eit operasjonstre til reine JS-nodar. `brukt` får nøklane til
+# hjelparane (E, S, H) som treet treng.
+funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
+    hvis builtin.type(e) != "liste" { returner e }
+    hvis lengde(e) == 0 { returner e }
+    hvis builtin.type(e[0]) == "tekst" {
+        la k = tekst(e[0])
+        hvis k == "arg" {
+            la i = e[1]
+            la t = tekst(typar[i])
+            hvis t == "tekst" eller t == "funksjon" {
+                brukt["S"] = sann
+                returner ["kall", ["namn", "S"], [["namn", param[i][0]], ["namn", param[i][1]]]]
+            }
+            returner ["namn", param[i][0]]
+        }
+        hvis k == "element" {
+            brukt["E"] = sann
+            returner ["indeks", ["namn", "E"], løys_vert(["arg", e[1]], param, typar, brukt)]
+        }
+        hvis k == "nytt_handtak" {
+            brukt["E"] = sann
+            returner ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [løys_vert(e[1], param, typar, brukt)]], ["tal", 1]]
+        }
+        hvis k == "escape" {
+            brukt["H"] = sann
+            returner ["kall", ["namn", "H"], [løys_vert(e[1], param, typar, brukt)]]
+        }
+        hvis k == "eksport" {
+            returner ["indeks", ["namn", "x"], løys_vert(e[1], param, typar, brukt)]
+        }
+        hvis k == "streng" eller k == "namn" eller k == "global" eller k == "tal" {
+            returner e
+        }
+    }
+    la ut = []
+    la i = 0
+    mens i < lengde(e) {
+        legg_til(ut, løys_vert(e[i], param, typar, brukt))
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Hjelparar og lastarprogram (Norscode-data) ─────────────────────────────
+
+# Lastarhjelparar i den rekkjefølgja dei blir deklarerte.
+#   E: handtakstabell (indeks → DOM-element)
+#   S: UTF-8-tekst frå WASM-minnet «m» (peikar, lengd)
+#   H: HTML-escape, bygd frå std.wasm_vert.escape_tabell()
+funksjon hjelparar() -> liste {
+    la tab = vert.escape_tabell()
+    la teikn = []
+    la par = []
+    la i = 0
+    mens i < lengde(tab) {
+        legg_til(teikn, tab[i][0])
+        legg_til(par, [tab[i][0], ["streng", tab[i][1]]])
+        i = i + 1
+    }
+    la e_def = ["tabell", []]
+    la s_def = ["pil", ["a", "b"],
+        ["kall", ["felt", ["ny", ["global", "TextDecoder"], []], "decode"],
+            [["ny", ["global", "Uint8Array"], [["felt", ["felt", ["namn", "x"], "m"], "buffer"], ["namn", "a"], ["namn", "b"]]]]]]
+    la h_def = ["pil", ["a"],
+        ["kall", ["felt", ["binær", "+", ["streng", ""], ["namn", "a"]], "replace"],
+            [["regex_klasse", teikn, "g"], ["pil", ["b"], ["indeks", ["objekt", par], ["namn", "b"]]]]]]
+    returner [["E", e_def], ["S", s_def], ["H", h_def]]
+}
+
+# Lastarprogrammet: instansier modulen med importobjektet, lagre eksportane i x og kall
+# init-eksporten «i» viss modulen har ein.
+funksjon lastar_program(deklarasjonar: liste, importobjekt: liste, wasm_url: tekst, har_init: bool) -> liste {
+    la la_par = []
+    la i = 0
+    mens i < lengde(deklarasjonar) {
+        legg_til(la_par, deklarasjonar[i])
+        i = i + 1
+    }
+    legg_til(la_par, ["x", null])
+    la instansier = ["kall", ["felt", ["global", "WebAssembly"], "instantiateStreaming"],
+        [["kall", ["global", "fetch"], [["streng", wasm_url]]], ["objekt", [["nc", ["objekt", importobjekt]]]]]]
+    la setningar = [
+        ["la", la_par],
+        ["uttrykk", ["tildel", ["namn", "x"], ["felt", ["felt", ["vent", instansier], "instance"], "exports"]]]
+    ]
+    hvis har_init {
+        legg_til(setningar, ["uttrykk", ["kall", ["felt", ["namn", "x"], "i"], []]])
+    }
+    returner ["asynk_iife", setningar]
+}
+
+funksjon _finn_vf(tabell: liste, namn: tekst) -> ordbok {
+    la j = 0
+    mens j < lengde(tabell) {
+        hvis tabell[j]["namn"] == namn { returner tabell[j] }
+        j = j + 1
+    }
+    kast "wasm_js: ukjend vertsfunksjon " + namn
+}
+
+# Bygg lastaren for dei importerte vertsfunksjonane (i importrekkjefølgja til modulen).
+# tabell: vertstabellen (vanlegvis vert.vertsfunksjonar(); testar kan sende ein annan).
+# Gjev {"js": tekst, "program": JS-tre, "hjelparar": [namn]}.
+funksjon bygg_lastar_frå_tabell(tabell: liste, importar: liste, wasm_url: tekst, har_init: bool) -> ordbok {
+    la brukt = {}
+    la imp = []
+    la i = 0
+    mens i < lengde(importar) {
+        la namn = tekst(importar[i])
+        la vf = _finn_vf(tabell, namn)
+        la ip = import_param(vf)
+        la kropp = løys_vert(vf["op"], ip["param"], vf["param"], brukt)
+        legg_til(imp, [namn, ["pil", ip["flat"], kropp]])
+        i = i + 1
+    }
+    la deklar = []
+    la hjelp_namn = []
+    la alle_h = hjelparar()
+    la hi = 0
+    mens hi < lengde(alle_h) {
+        la hn = tekst(alle_h[hi][0])
+        hvis finnes_nøkkel(brukt, hn) {
+            legg_til(deklar, [hn, alle_h[hi][1]])
+            legg_til(hjelp_namn, hn)
+        }
+        hi = hi + 1
+    }
+    la prog = lastar_program(deklar, imp, wasm_url, har_init)
+    returner {"js": token_til_tekst(emit_program(prog)), "program": prog, "hjelparar": hjelp_namn}
+}
+
+funksjon bygg_lastar(importar: liste, wasm_url: tekst, har_init: bool) -> ordbok {
+    returner bygg_lastar_frå_tabell(vert.vertsfunksjonar(), importar, wasm_url, har_init)
+}
