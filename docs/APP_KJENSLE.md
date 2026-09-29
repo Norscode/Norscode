@@ -1,7 +1,8 @@
-# App-kjensle: tenarlaget (A0)
+# App-kjensle: tenarlaget (A0) og kvikke sider (del 1)
 
 Sporet «app-kjensle» skal få Norscode-webappar til å kjennast som lokale appar.
-A0 er grunnmuren utan klientkode:
+[Del 1](#del-1-kvikke-sider-utan-javascript-stdkvikkno) (`std/kvikk.no`) gjer
+sidebyte raske utan ein einaste linje JavaScript. A0 er grunnmuren utan klientkode:
 
 - ein felles responskontrakt som alle seinare steg byggjer på
 - rask VM (fast-modus) i deploy-malane
@@ -84,7 +85,7 @@ Testar:
 ## 3. Vakt-regelen
 
 1. **Ei vakt er total.** All logikk ligg i `prøv`/`fang`, og kvart unntak gjev `usann` (403). Eit unntak som slepp ut av ei vakt, tek ned heile `nc serve`, fordi `nc_main.no` kallar vakta utan `prøv`. Seinare førespurnader i same prosess får då aldri svar. `web.handle_request` blir òg avbroten.
-2. **Vakter i std-modular har fullt kvalifiserte namn** (`modul.vakt`). Namn utan punktum blir slått opp som `__main__.<namn>`, og då vinn appen sin funksjon med same namn.
+2. **Vakter i std-modular har fullt kvalifiserte namn med heile modulstien** (`std.kvikk.vakt_ingen_spekulasjon`, ikkje aliaset `kvikk.…`). Under `nc serve` heiter funksjonane i importerte modular `std.<modul>.<namn>`. Eit alias blir ikkje funne, og vakta gjev då 403 på *alle* førespurnader (målt i del 1). `web.handle_request` godtek begge formene, so berre ein `nc serve`-test fangar feilen. Namn utan punktum blir slått opp som `__main__.<namn>`, og då vinn appen sin funksjon med same namn.
 3. API-autentisering høyrer heime i handlaren (401/403 med `feil`-felt), ikkje i vakta.
 
 ```norscode
@@ -226,9 +227,162 @@ Regresjon (macOS, begge modusar): alle 52 eksisterande testar som importerer `st
 
 Header-kasus-fiksen slår på `std.auth` og `web.request_cookie` under `nc serve` for første gong for nettlesarar som sender `Cookie` med stor forbokstav. Svakheitene i auth, som sesjonar som aldri går ut, blir retta i T1.
 
+Testane for del 1 står i [eigen tabell](#testar-del-1).
+
+## Del 1: kvikke sider utan JavaScript (`std/kvikk.no`)
+
+Brukarkravet er absolutt: **ingen JavaScript i nokon form.** Ingen `.js`-filer,
+ingen JS som tekst i `.no`-strengar, ingen `<script>` (heller ikkje
+`type="speculationrules"`) og ingen `on*=`-attributt. Alt i del 1 er
+HTTP-headerar, JSON og CSS som tenaren lagar. Nettlesarar utan støtte for ein
+del lastar sidene heilt vanleg.
+
+| Del | Korleis | Verknad |
+|---|---|---|
+| Speculation Rules | Headeren `Speculation-Rules: "/_nc/spekulasjon.json?v=<12 hex>"` på kvar HTML-side. Reglane er JSON (`application/speculationrules+json`) | Chromium hentar (prefetch) eller viser ferdig (prerender) lenkja brukaren held peikaren over, so klikket opnar ei ferdig side |
+| View Transitions | `@view-transition { navigation: auto; }` i `/_nc/stil.css?v=<12 hex>` (immutable) | Sidebyte glir over i kvarandre (160 ms) i staden for å blinke. Av ved `prefers-reduced-motion: reduce` |
+| Cache og bfcache | Sterk ETag og `no-cache` (offentleg) eller `private, no-cache` (innlogga), aldri `no-store` | Tilbake/fram kan bruke bfcache; ei uendra side kostar eit 304 utan kropp |
+| 304 | `If-None-Match` med svak samanlikning: lister, `*` og `W/`-prefiks | Verkar òg bak nginx med gzip (svekte ETag-ar), der 304-vegen i `nc serve` gjev 200 |
+| Sec-Purpose | `kvikk.er_spekulativ`, `kvikk.er_prerender` og to totale vakter | Spekulative hentingar kan skiljast frå ekte sidevisingar |
+
+### Oppsett i ein app
+
+```norscode
+bruk std.web som web
+bruk std.frontend som frontend
+bruk std.kvikk som kvikk
+
+// Ingen globalar under nc serve: oppsettet blir laga i ein funksjon.
+funksjon fart() -> ordbok_tekst {
+    la o = kvikk.med_unntak(kvikk.oppsett(), "/admin/*")
+    returner kvikk.med_stil(o, app_css())     // appen sitt stilark i /_nc/stil.css
+}
+
+// Éi rute leverer reglane (offentleg og privat) og stilarket.
+funksjon nc_ressurs(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_nc/{fil:tekst}")
+    returner kvikk.ressurs(ctx, fart())
+}
+
+funksjon heim(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /")
+    la o = fart()
+    la html = frontend.layout_app_med_head("Tavle", nav(), innhald(), "fot",
+        kvikk.stil_href(o), kvikk.head(o))
+    returner kvikk.side(ctx, o, html)          // eller kvikk.privat_side for innlogga sider
+}
+```
+
+Heile demoen er `examples/app_kjensle.no` (Oppgåvetavle):
+`./bin/nc serve examples/app_kjensle.no --port 8080 --host 127.0.0.1`.
+
+| Funksjon | Gjer |
+|---|---|
+| `oppsett()` | Standard: prefetch og prerender med iver `moderate`, berre prefetch på private sider, overgangar på |
+| `med_iver(o, iver)` | `conservative` (ved klikk), `moderate` (hover), `eager` eller `immediate`. Kastar på andre verdiar |
+| `utan_prefetch(o)`, `utan_prerender(o)`, `med_prerender_privat(o)`, `utan_overgang(o)` | Brytarar. Utan prefetch og prerender blir det ingen `Speculation-Rules`-header |
+| `med_unntak(o, mønster)` | Eit ekstra URL Pattern-mønster for stien (`/admin/*`, `/*/slett`). Må byrje med `/` |
+| `med_stil(o, css)` | Legg appen sitt stilark etter kvikk-stilen i `/_nc/stil.css` (ny `?v=` når innhaldet endrar seg) |
+| `side(ctx, o, html)` | 200, ETag, `no-cache`, tryggleiksheaderar, offentlege reglar, 304 ved treff |
+| `privat_side(ctx, o, html)` | Som `side`, men `private, no-cache` og `/_nc/spekulasjon-privat.json` |
+| `side_med_status(ctx, o, status, html)` | T.d. 404 og 422: utan ETag, `private, no-cache` |
+| `sjå_anna(sti)` | 303 See Other (Post/Redirect/Get), berre lokale stiar, `no-store` (tom kropp) |
+| `ressurs(ctx, o)` | Handlar for `/_nc/{fil:tekst}`: `spekulasjon.json`, `spekulasjon-privat.json`, `stil.css`, elles 404 |
+| `stil_href(o)`, `head(o)` | Til `frontend.layout_app_med_head` / `page_med_head`. `head` gjev viewport-meta og `<link rel="expect" href="#app-main" blocking="render">` |
+| `er_spekulativ(ctx)`, `er_prerender(ctx)` | `Sec-Purpose` (eller eldre `Purpose`) inneheld `prefetch`/`prerender` |
+| `vakt_ingen_spekulasjon`, `vakt_ingen_prerender` | Totale vakter: spekulativ henting får 403, og nettlesaren hentar sida vanleg ved klikk |
+| `med_vary_spekulasjon(svar)` | `Vary: Sec-Purpose` for svar som faktisk skil mellom spekulativ og vanleg henting |
+
+`std/frontend.no` har to nye opt-in-funksjonar: `page_med_head(tittel, innhold, stylesheet_href, ekstra_head)` og `layout_app_med_head(…, stylesheet_href, ekstra_head)`. Den siste set òg `id="app-main"` på `<main>`, so skip-lenka og `rel=expect` har eit mål. `page`, `layout_app` og `layout_app_med_stylesheet` gjev byte-identisk utdata som før (golden i `test_kvikk`).
+
+### Reglane
+
+```json
+{"prefetch":[{"source":"document","eagerness":"moderate","where":{"and":[
+   {"href_matches":{"pathname":"/*"}},
+   {"not":{"href_matches":[{"pathname":"/_*"},{"pathname":"/*logout*"}, … ]}},
+   {"not":{"selector_matches":["[data-nc-prefetch='false']","[rel~='nofollow']"]}}]}}],
+ "prerender":[ … same, pluss "[data-nc-prerender='false']" … ]}
+```
+
+- **Same origin:** mønstra er ordbøker med berre `pathname`. Protokoll, vert og port kjem då frå dokumentet, medan søk og fragment er jokerteikn, so `/logout` dekkjer òg `/logout?neste=/` (stadfesta i Chrome).
+- **Standardunntak:** `/_*` (interne endepunkt), og `logout`, `log-out`, `signout`, `sign-out`, `logg-ut`, `loggut`, `logg_ut` og `utlogg` kvar som helst i stien.
+- **I markupen:** `data-nc-prefetch="false"` stoppar begge, `data-nc-prerender="false"` berre prerender, og `rel="nofollow"` stoppar begge.
+- **Berre GET:** Speculation Rules gjeld berre lenkjer (GET-navigasjon), aldri skjema. Ruta `/_nc/{fil}` er GET.
+- **Private sider** peikar på `spekulasjon-privat.json`, som berre har prefetch. Prerender køyrer sida i bakgrunnen før klikket, og det må appen slå på sjølv (`med_prerender_privat`).
+- **Versjonering:** `?v=` er dei 12 første hex-teikna av SHA-256 over JSON-en / CSS-en. Rett `v` gjev `public, max-age=31536000, immutable`, feil eller manglande `v` gjev `no-cache` (`http_cache.svar_immutable`).
+
+### Spekulative førespurnader (Sec-Purpose)
+
+Chromium sender `Sec-Purpose: prefetch` ved prefetch og `Sec-Purpose: prefetch;prerender` ved prerender. Tokena er kasussensitive, og `kvikk` lowercasar ikkje verdien (sjå Linux-avviket under).
+
+- **Ikkje tel sidevisingar** for spekulative førespurnader: `hvis ikkje kvikk.er_spekulativ(ctx) { … }` (demoen skriv `sidevising <sti>` berre då). Ei førehandslasta side som blir opna, gjev ingen ny førespurnad, so tenarteljing blir anten for låg (spekulative ikkje talde) eller for høg (alle talde). Nøyaktig teljing ved aktivering krev klientkode og høyrer ikkje heime her.
+- **GET med sideeffekt** skal vere unnateke i reglane *og* verna av `web.use_guard("std.kvikk.vakt_ingen_spekulasjon")` (heile modulstien, sjå vakt-regelen). Demoen gjer det for `/logg-ut`.
+- `vakt_ingen_prerender` slepp prefetch gjennom. Når både prefetch- og prerender-reglar treffer same lenkje, såg tenaren i headless Chrome berre `Sec-Purpose: prefetch` (sjå under), so ei rute som ikkje tåler prerender bør bruke `vakt_ingen_spekulasjon`, `data-nc-prerender="false"` eller eit unntak.
+- Svar som endrar innhald etter `Sec-Purpose`, skal ha `Vary: Sec-Purpose` (`med_vary_spekulasjon`). Svara frå `kvikk` gjer ikkje det, so dei treng det ikkje.
+
+### Cache-standardar og bfcache (funn)
+
+| Veg | Standard `Cache-Control` på HTML | Endra i del 1? |
+|---|---|---|
+| `std/web.no` `response_finalize` (`web.handle_request`) | `no-store` når handlaren ikkje set noko | **Nei.** `no-store` er trygt for private sider, og ein ny standard kunne lagre innlogga innhald i cachar. Han blokkerer bfcache, men `response_finalize` respekterer `cache-control` som handlaren set, so `kvikk.side` får `no-cache` |
+| `nc serve` (`selfhost/nc_main.no`, `http_response.no`) | Ingen header | Nei (lukkinga). Bfcache-venleg, men utan ETag blir det ikkje 304 |
+| `selfhost/serve_runner.no`, `selfhost/vm.no` (VM-spegelen) | `no-store` | Nei (lukkinga / ikkje `nc serve`-vegen) |
+| `std/frontend.no`-layoutar | Lagar berre tekst. `fragment_page` → `islands.fragment_or_full_response` utan `cache-control`, og får dermed `no-store` via `web.handle_request` og ingenting via `nc serve` | Nei |
+| `std/mw.no` `ingen_cache`, `/helse` | `no-store` med vilje | Nei |
+
+Éin trygg og bakoverkompatibel fiks i `response_finalize`: han la til `content-type: text/plain` i `headers` sjølv når svaret hadde toppnøkkelen `content_type` (responskontrakten), so HTML frå kontrakten vart sjølvmotseiande og `hc.kontrakt_feil` sa nei. No blir toppnøkkelen respektert. Svar utan toppnøkkelen blir handterte som før.
+
+### CSP
+
+`http_cache.csp_standard()` (`script-src 'self'`) blokkerer ikkje header-varianten av Speculation Rules. I Chrome 154 vart reglane brukte òg med `script-src 'none'` (målt). Stilarket er same origin og blir dekt av `default-src 'self'`. Demoen har ingen `style=`-attributt, som `default-src 'self'` ville blokkert.
+
+### Nettlesarstøtte
+
+| | Chromium (Chrome, Edge, Opera, Samsung) | Safari | Firefox |
+|---|---|---|---|
+| `Speculation-Rules`-header, document rules, eagerness | Ja (sidan 121); **stadfesta i Chrome 154** | Nei | Nei |
+| Prefetch / prerender | Ja / ja; `Sec-Purpose` stadfesta | Nei | Nei |
+| Kryss-dokument View Transitions (`@view-transition`) | Ja (sidan 126) | Ja (sidan 18.2) | Nei (berre same-dokument) |
+| bfcache | Ja | Ja | Ja |
+| ETag / 304 | Ja | Ja | Ja |
+
+Versjonane er etter beste kunnskap per 2026-09 og bør stadfestast mot caniuse før dei blir lova nokon; berre Chrome 154 er målt her. Utan støtte blir headeren og `@view-transition` ignorerte, og sidene lastar som vanleg. Safari og Firefox får dermed cache/bfcache og (Safari) overgangar, men ingen førehandslasting.
+
+### Stadfesta i headless Chrome 154 (utan JS i repoet)
+
+Metode: `nc serve` på ein prøveapp i `build/` (ikkje committa) med `kvikk` og iver `immediate` (headless kan ikkje halde peikaren over ei lenkje), og `Google Chrome --headless=new --dump-dom --virtual-time-budget=… --enable-logging=stderr --log-net-log=…`. Appen skriv `Sec-Purpose` for kvar førespurnad til stdout, og netloggen viser kva Chrome henta.
+
+- **Reglane blir aksepterte:** Chrome henta `/_nc/spekulasjon.json?v=…` og `/_nc/stil.css?v=…` og prefetcha `/ok1` og `/ok2?x=1` med `Sec-Purpose: prefetch`.
+- **Unntaka verkar:** ingen henting av `/logout`, `/logout?neste=/`, `/konto/logg-ut`, `/_intern`, `/admin/x` (eige unntak), `data-nc-prefetch="false"`, `rel="nofollow"` eller ei ekstern lenkje.
+- **Prerender:** med berre prerender-reglar kom `/ok1` og `/ok2` med `Sec-Purpose: prefetch;prerender`, og lenkja med `data-nc-prerender="false"` vart ikkje henta. Med begge regelsetta såg tenaren berre prefetch. Om prerenderen då gjenbrukte prefetch-svaret eller vart hoppa over i headless, kan ikkje avgjerast utan DevTools-protokollen.
+- **CSP:** reglane vart brukte både med `csp_standard()` og med `script-src 'none'`.
+- **Negativ kontroll:** ugyldig regel-JSON gav konsollmeldinga «While parsing speculation rules … Syntax error» i stderr. Demoen (`/oppgaver`) gav inga slik melding og ingen CSP-brot.
+- **Ikkje stadfesta:** iver `moderate` (hover), sjølve overgangsanimasjonen og at sidene faktisk kjem frå bfcache. Det krev ein ekte nettlesar med peikar eller DevTools-protokollen, og ingen JS-baserte måleverktøy skal inn i repoet.
+
+### Testar (del 1)
+
+| Test | Kva |
+|---|---|
+| `tests/test_kvikk.no` | Gyldig JSON og innhald i reglane (offentleg/privat, iver, unntak, veljarar, JSON-escaping som rundtur), headerar på HTML/reglar/stilark, 304 for sterk, `W/`, liste og `*`, Sec-Purpose og vakter, ingen `<script`/`on*=`, golden for `frontend.page`, og kontrakten gjennom `web.handle_request` |
+| `tests/test_kvikk_serve.no` | Oppgåvetavla under barne-`nc serve` (16 førespurnader): headerar på wire, 304, 50 rader, 404, 303/422, Sec-Purpose utan sidevising, 403 frå vakta, ingen klientkode, byte-identitet mellom VM_FAST=0 og 1 |
+| `tests/test_web_request_header.no` | Nytt tilfelle: headernamn på 300 byte (Linux-avviket under) |
+
+Kvar test er vist å kunne feile: `test_kvikk` mot ti mutantar av `std/kvikk.no` (m.a. `no-store`, utan `nofollow`, feil iver, prerender alltid på private sider, utan `W/`, utan `/_*`, JSON-escaping, `<script>` i `head`) og mot `std/web.no` utan content_type-fiksen; `test_kvikk_serve` mot åtte mutantar (m.a. sidevising for prefetch, vakt med alias, 200 i staden for 303, `onsubmit`, 49 rader, feil Content-Type på reglane); `test_web_request_header` gjev signal 139 på Linux mot førre `std/web.no`.
+
+Alle tre er grøne i `./bin/nc test` og `NC_TEST_VM_FAST=1 ./bin/nc test` på macOS og i Docker linux/amd64 (`bootstrap/stage0/norscode-linux-x86_64`).
+
+Regresjon (macOS, begge modusar): dei 49 eksisterande testane som importerer eller les `std.web`, `std.frontend` eller `std.http_cache`, er køyrde før (349abd5, eigen worktree) og etter del 1. Resultata er dei same (98 av 98 OK), og i tillegg er dei nye testane grøne. I Docker linux/amd64 er `test_web_request_header`, `test_frontend`, `test_frontend_panel_helpers`, `test_http_cache`, `test_web_cors` og `test_app_kjensle_serve` grøne i begge modusar.
+
+Flate og lukking: alt i del 1 ligg utanfor `nc_main`-lukkinga (framleis 51 modular; `std/web.no`, `std/frontend.no` og `std/kvikk.no` er ikkje med), so det trengst ingen reseed. `./bin/nc feature-check` er grøn for alle nye og endra `.no`-filer. Active-surface i ratchet-modus (git-indeks-kopi som i A0) passerer: 6619 filer (+4 `.no`), og framandspråk, shebang, binær, c_æra, bytekode og json står uendra på taka sine.
+
+### Del 2: offline og lokal lagring (ventar)
+
+Offline-bruk, lokal lagring (IndexedDB) og synk krev kode som køyrer i nettlesaren. Utan JavaScript er einaste vegen kompilert Norscode → WASM (eller generert JS som kompilatorutdata, ikkje handskriven), og den backenden finst ikkje enno: `std/wasm_binary.no` lowrar berre heiltalsaritmetikk utan kontrollflyt, kall, strengar eller DOM-importar. Del 2 ventar på at brukaren vel veg.
+
 ## Kjende avvik (krev reseed, R1)
 
-Desse ligg i `nc_main`-lukkinga og kan ikkje rettast utan reseed:
+Desse ligg i `nc_main`-lukkinga eller i `bootstrap/` og kan ikkje rettast utan reseed:
 
 1. **VM-spegelen av web-laget** (`selfhost/vm.no`):
    - `vm_web_finalize_response` speglar framleis `Origin` med credentials.
@@ -239,6 +393,10 @@ Desse ligg i `nc_main`-lukkinga og kan ikkje rettast utan reseed:
 2. **Unntak i vakt tek ned `nc serve`** (`nc_main.no` kallar vakta utan `prøv`). Fram til R1 gjeld vakt-regelen over.
 3. **304 i `nc serve` krev eksakt `If-None-Match` eller `if-none-match`** (`nc_main.no:471`). Andre kasusvariantar gjev 200. Nettlesarar og HTTP/2 sender ein av desse to.
 4. **`response_to_http` filtrerer ikkje CR/LF i headerverdiar** (`selfhost/http_response.no`). Vernet ligg i `http_cache.header_trygg`, så svar som ikkje går via `http_cache`, er ikkje verna.
+5. **`tekst_til_liten` heng på tekstar over 256 byte på Linux-x86-stage0** (`bootstrap/stage0/norscode-linux-x86_64`, funne i del 1). 256 byte går, 257 heng under `nc run` og gjev signal 139 under `nc test`. macOS-arm64-stage0 er ikkje ramma. Med eittrådig `nc serve` er klientstyrt tekst gjennom `tekst_til_liten` ein DoS-veg: `web.request_header` (A0-skanninga) lowercasa kvart headernamn, og er retta (lowercasar berre namn med rett lengd, test i `test_web_request_header`). `kvikk` lowercasar ikkje `Sec-Purpose`. Anna std-kode som lowercasar klientdata, er ikkje gjennomgått.
+6. **Statusteksten** for 303 og 422 er «OK» (`status_tekst` i `http_response.no`). Nettlesarar bryr seg ikkje om han.
+7. **`nc serve` tek éin førespurnad om gongen, éin per tilkopling.** Prefetch kjem i same kø som vanlege klikk, og ein open preconnect-sokkel frå nettlesaren kan halde køa (head-of-line). Iver `moderate` gjev éin eller to spekulative førespurnader om gongen. `eager`/`immediate` på lange lister er ikkje tilrådd før serverlykkja er retta.
+8. **304 frå `nc serve` sin eigen sjekk har berre ETag**, utan Cache-Control og Speculation-Rules. `kvikk` sitt eige 304 (for `W/`, lister og `*`) har dei med.
 
 ## Funn i andre repo (berre lese)
 
