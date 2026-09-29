@@ -1,0 +1,289 @@
+# std/wasm_sw.no — service worker-logikken i Norscode (W8). Modulen blir kompilert til
+# sw.wasm av tools/nc_wasm.no (NC_WASM_SW=1), og sw.js er ein generert lastar (std/wasm_js.no,
+# bygg_sw_lastar) som berre utfører planane herifrå.
+#
+# Hendingane (namna i std.wasm_vert.sw_hendingar()):
+#   install  plan {c: cachenamn, u: [URL-ar å precache], s: skipWaiting?}. Lastaren hentar kvar
+#            URL utan HTTP-cache og lagrar svaret berre når «lagre» seier ja; elles feilar
+#            installasjonen (ein privat eller feil konfigurert app-skal-URL stoppar han).
+#   rydd     (activate) liste over cachar som skal slettast: alle «nc-»-cachar unnateke den
+#            gjeldande.
+#   melding  (message) {s: skipWaiting?}: berre for meldinga std.wasm_vert.sw_skip_melding().
+#   hent     (fetch) plan {k, n, l, c, o}: k er strategien, n cachenøkkelen, l om svaret kan
+#            lagrast, c cachenamnet og o offline-sida (for navigasjonar):
+#              cache   cache først: versjonerte (?v=), immutable ressursar
+#              nett    nett først, cache som fallback, så offline-sida: app-skalet og dei
+#                      eksplisitte offline-rutene (nøkkelen er stien utan spørjing)
+#              berre   berre nett, aldri lagra; offline-sida som fallback. Private ruter og
+#                      ukjende navigasjonar.
+#              forbi   fetch utan noko meir: andre metodar enn GET, andre opphav, private
+#                      førespurnader som ikkje er navigasjonar (t.d. /api/…), og alt anna
+#   lagre    {l: bool}: berre 2xx (ikkje 206), type «basic», ikkje omdirigert og utan
+#            Cache-Control private eller no-store. Eit feilsvar skriv difor aldri over ei
+#            oppføring.
+#
+# Konfigurasjonen (JSON som tenaren skriv i sw.js, std/wasm_pwa.no):
+#   {"v": versjon, "c": "nc-<16 hex>", "p": [precache-URL-ar], "i": [immutable URL-ar med ?v=],
+#    "r": [nett-først-stiar], "x": [private stiar/prefiks], "o": offline-sida, "a": aktiver
+#    når det berre finst éi fane, "av": kill switch}
+# Med "av" blir ingenting precacha eller handtert, og alle «nc-»-cachar blir sletta.
+#
+# Dei reine funksjonane (tolk_konfig, valider_konfig, rute, kan_lagre, …) køyrer likt i VM-en og
+# i WASM (paritetskorpuset w8_sw).
+bruk std.wasm_vert som vert
+bruk std.wasm_rt som rt
+
+la _konfig: ordbok = {}
+
+funksjon cache_prefiks() -> tekst {
+    returner "nc-"
+}
+
+funksjon strategiar() -> liste {
+    returner ["forbi", "cache", "nett", "berre"]
+}
+
+# ─── Konfigurasjon (rein) ────────────────────────────────────────────────────
+
+funksjon _tekst_liste(k: ordbok, felt: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(k, felt) eller builtin.type(k[felt]) != "liste" { returner felt + " manglar eller er ikkje ei liste" }
+    la l = k[felt]
+    la i = 0
+    mens i < lengde(l) {
+        hvis builtin.type(l[i]) != "tekst" eller ikkje builtin.starts_with(l[i], "/") eller builtin.starts_with(l[i], "//") {
+            returner felt + "[" + tekst(i) + "] er ikkje ein absolutt sti"
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# "" når konfigurasjonen er gyldig, elles den første feilen.
+funksjon valider_konfig(k) -> tekst {
+    hvis builtin.type(k) != "ordbok" { returner "konfigurasjonen er ikkje eit objekt" }
+    hvis ikkje finnes_nøkkel(k, "v") eller builtin.type(k["v"]) != "tekst" eller k["v"] == "" { returner "v (versjonen) manglar" }
+    hvis ikkje finnes_nøkkel(k, "c") eller builtin.type(k["c"]) != "tekst" eller ikkje builtin.starts_with(k["c"], cache_prefiks()) {
+        returner "c (cachenamnet) må byrje med " + cache_prefiks()
+    }
+    la felt = ["p", "i", "r", "x"]
+    la fi = 0
+    mens fi < lengde(felt) {
+        la f = _tekst_liste(k, felt[fi])
+        hvis f != "" { returner f }
+        fi = fi + 1
+    }
+    hvis ikkje finnes_nøkkel(k, "o") eller builtin.type(k["o"]) != "tekst" { returner "o (offline-sida) manglar" }
+    hvis k["o"] != "" og ikkje vert.er_i(k["p"], k["o"]) { returner "offline-sida " + k["o"] + " er ikkje precacha" }
+    hvis ikkje finnes_nøkkel(k, "a") eller builtin.type(k["a"]) != "boolsk" { returner "a manglar eller er ikkje sann/usann" }
+    la i = 0
+    mens i < lengde(k["i"]) {
+        hvis ikkje vert.er_i(k["p"], k["i"][i]) { returner "immutable " + k["i"][i] + " er ikkje precacha" }
+        hvis builtin.index_of(k["i"][i], "?v=") < 0 { returner "immutable " + k["i"][i] + " har ingen ?v=" }
+        i = i + 1
+    }
+    la r = 0
+    mens r < lengde(k["r"]) {
+        hvis ikkje vert.er_i(k["p"], k["r"][r]) { returner "offline-ruta " + k["r"][r] + " er ikkje precacha" }
+        r = r + 1
+    }
+    la p = 0
+    mens p < lengde(k["p"]) {
+        hvis er_privat(k, utan_spørjing(k["p"][p])) { returner "den private ruta " + k["p"][p] + " kan ikkje precachast" }
+        p = p + 1
+    }
+    returner ""
+}
+
+# Konfigurasjonen frå sw.js. Kastar «SwFeil: …» når han er ugyldig.
+funksjon tolk_konfig(t: tekst) -> ordbok {
+    la k = null
+    prøv {
+        k = rt.json_parse(t)
+    } fang (e) {
+        kast "SwFeil: konfigurasjonen er ikkje gyldig JSON: " + tekst(e)
+    }
+    la f = valider_konfig(k)
+    hvis f != "" { kast "SwFeil: " + f }
+    returner k
+}
+
+funksjon slått_av(k: ordbok) -> bool {
+    returner finnes_nøkkel(k, "av") og k["av"] == sann
+}
+
+# ─── Stiar (reine) ───────────────────────────────────────────────────────────
+
+# Stien (med spørjing, utan fragment) når URL-en er på opphavet, elles "".
+funksjon sti_i(url: tekst, opphav: tekst) -> tekst {
+    hvis opphav == "" eller ikkje builtin.starts_with(url, opphav + "/") { returner "" }
+    la s = builtin.slice(url, lengde(opphav), lengde(url))
+    la h = builtin.index_of(s, "#")
+    hvis h >= 0 { s = builtin.slice(s, 0, h) }
+    returner s
+}
+
+funksjon utan_spørjing(sti: tekst) -> tekst {
+    la q = builtin.index_of(sti, "?")
+    hvis q >= 0 { returner builtin.slice(sti, 0, q) }
+    returner sti
+}
+
+# Ein privat sti: lik eit privat prefiks, eller under det («/mi-side» dekkjer «/mi-side/x»,
+# ikkje «/mi-sidex»; eit prefiks som sluttar på «/» dekkjer alt under).
+funksjon er_privat(k: ordbok, sti: tekst) -> bool {
+    la x = k["x"]
+    la i = 0
+    mens i < lengde(x) {
+        la p = x[i]
+        hvis builtin.ends_with(p, "/") {
+            hvis builtin.starts_with(sti, p) { returner sann }
+        } ellers hvis sti == p eller builtin.starts_with(sti, p + "/") {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+# ─── Planar (reine) ──────────────────────────────────────────────────────────
+
+funksjon _plan(k: ordbok, strategi: tekst, nøkkel: tekst, lagre: bool, offline: tekst) -> ordbok {
+    returner {"k": strategi, "n": nøkkel, "l": lagre, "c": k["c"], "o": offline}
+}
+
+# Planen for ein førespurnad q = {m: metode, u: URL, n: modus (navigate, cors, …), o: opphavet
+# til workeren}.
+funksjon rute(k: ordbok, q: ordbok) -> ordbok {
+    hvis slått_av(k) eller q["m"] != "GET" { returner _plan(k, "forbi", "", usann, "") }
+    la sti = sti_i(tekst(q["u"]), tekst(q["o"]))
+    hvis sti == "" { returner _plan(k, "forbi", "", usann, "") }
+    la rein = utan_spørjing(sti)
+    la nav = q["n"] == "navigate"
+    la off = ""
+    hvis nav { off = k["o"] }
+    hvis er_privat(k, rein) {
+        hvis nav { returner _plan(k, "berre", "", usann, off) }
+        returner _plan(k, "forbi", "", usann, "")
+    }
+    hvis vert.er_i(k["i"], sti) { returner _plan(k, "cache", sti, sann, "") }
+    hvis vert.er_i(k["r"], rein) { returner _plan(k, "nett", rein, sann, off) }
+    hvis nav { returner _plan(k, "berre", "", usann, off) }
+    returner _plan(k, "forbi", "", usann, "")
+}
+
+# Forbyr Cache-Control-verdien lagring (private eller no-store, uavhengig av store og små
+# bokstavar og av argument som private="set-cookie")?
+funksjon cache_control_forbyr(cc) -> bool {
+    hvis cc == null { returner usann }
+    la delar = builtin.split(tekst(cc), ",")
+    la i = 0
+    mens i < lengde(delar) {
+        la d = tekst_til_liten(builtin.trim(delar[i]))
+        la e = builtin.index_of(d, "=")
+        hvis e >= 0 { d = builtin.trim(builtin.slice(d, 0, e)) }
+        hvis d == "private" eller d == "no-store" { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Kan svaret lagrast? m = {s: status, t: type, r: redirected, c: Cache-Control eller null}.
+funksjon kan_lagre(m) -> bool {
+    hvis builtin.type(m) != "ordbok" { returner usann }
+    la s = m["s"]
+    hvis builtin.type(s) != "heltall" eller s < 200 eller s > 299 eller s == 206 { returner usann }
+    hvis m["t"] != "basic" { returner usann }
+    hvis m["r"] != usann { returner usann }
+    returner ikkje cache_control_forbyr(m["c"])
+}
+
+funksjon installer_plan(k: ordbok, klientar: heltall) -> ordbok {
+    hvis slått_av(k) { returner {"c": k["c"], "u": [], "s": sann} }
+    returner {"c": k["c"], "u": k["p"], "s": k["a"] og klientar <= 1}
+}
+
+# Cachane som skal slettast når workeren blir aktivert.
+funksjon rydd_plan(k: ordbok, namn: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(namn) {
+        la n = tekst(namn[i])
+        hvis builtin.starts_with(n, cache_prefiks()) og (n != k["c"] eller slått_av(k)) { legg_til(ut, n) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon melding_plan(k: ordbok, m) -> ordbok {
+    returner {"s": m == vert.sw_skip_melding()}
+}
+
+# ─── Handterarane (tilbakekall frå SW-lastaren) ──────────────────────────────
+
+funksjon _inn() {
+    returner rt.json_parse(vert.sw_inn())
+}
+
+funksjon _svar(plan) -> heltall {
+    vert.sw_ut(builtin.json_stringify(plan))
+    returner 0
+}
+
+# Ein feil i ein handterar gjev ein trygg plan: ingen lagring, ingen skipWaiting, og fetch går
+# rett til nettet. Ein feil ved install gjev null, så installasjonen feilar.
+funksjon sw_install() -> heltall {
+    prøv {
+        returner _svar(installer_plan(_konfig, _inn()))
+    } fang (e) {
+        skriv("ERROR: sw install: " + tekst(e) + "\n")
+    }
+    returner _svar(null)
+}
+
+funksjon sw_rydd() -> heltall {
+    prøv {
+        returner _svar(rydd_plan(_konfig, _inn()))
+    } fang (e) {
+        skriv("ERROR: sw rydd: " + tekst(e) + "\n")
+    }
+    returner _svar([])
+}
+
+funksjon sw_melding() -> heltall {
+    prøv {
+        returner _svar(melding_plan(_konfig, _inn()))
+    } fang (e) {
+        skriv("ERROR: sw melding: " + tekst(e) + "\n")
+    }
+    returner _svar({"s": usann})
+}
+
+funksjon sw_hent() -> heltall {
+    prøv {
+        returner _svar(rute(_konfig, _inn()))
+    } fang (e) {
+        skriv("ERROR: sw hent: " + tekst(e) + "\n")
+    }
+    returner _svar({"k": "forbi"})
+}
+
+funksjon sw_lagre() -> heltall {
+    prøv {
+        returner _svar({"l": kan_lagre(_inn())})
+    } fang (e) {
+        skriv("ERROR: sw lagre: " + tekst(e) + "\n")
+    }
+    returner _svar({"l": usann})
+}
+
+# Init: les konfigurasjonen og registrer handterarane. Er konfigurasjonen ugyldig, blir ingen
+# handterar registrert, og installasjonen feilar (fail-closed).
+funksjon start() -> heltall {
+    _konfig = tolk_konfig(vert.sw_inn())
+    vert.sw_lytt("install", "sw_install")
+    vert.sw_lytt("rydd", "sw_rydd")
+    vert.sw_lytt("melding", "sw_melding")
+    vert.sw_lytt("hent", "sw_hent")
+    vert.sw_lytt("lagre", "sw_lagre")
+    returner 0
+}

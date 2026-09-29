@@ -1,0 +1,472 @@
+# std/wasm_pwa.no — installerbar app som startar frå cache og verkar offline (W8), tenarsida.
+#
+# Appen skildrar seg sjølv som Norscode-data:
+#
+#   bruk std.wasm_pwa som pwa
+#
+#   funksjon pwa_konfig() -> ordbok {
+#       la k = pwa.konfig("Deltakarar", "Deltakarar")
+#       pwa.med_farger(k, "#1f5f99", "#ffffff")
+#       pwa.med_skal(k, "/", side_html(""))        # app-skalet: HTML utan persondata
+#       pwa.med_skal(k, "/stil.css", stil_css())
+#       pwa.med_privat(k, "/api/")                  # aldri cacha, aldri frå cachen
+#       returner k
+#   }
+#
+# og tools/nc_wasm.no (NC_WASM_SW=1) byggjer service workeren (std/wasm_sw.no → sw.wasm og ein
+# generert lastar) og legg rutene til i serve-inngangen:
+#
+#   GET /sw.js                 sw_svar: `let C="<konfig>"` + SW-lastaren; no-cache,
+#                              Service-Worker-Allowed: /, CSP med 'wasm-unsafe-eval' (policyen
+#                              på svaret for sw.js er den som gjeld i workeren, og utan han kan
+#                              workeren ikkje kompilere sw.wasm: målt i Chrome, sjå docs)
+#   GET /_nc/sw.wasm?v=…       modulen (immutable ved rett v)
+#   GET /manifest.webmanifest  manifest_svar (application/manifest+json)
+#   GET /_nc/ikon-192.png?v=…, /_nc/ikon-512.png?v=…, /_nc/ikon-maskable.png?v=…
+#                              ikon_svar: levert av appen (med_ikon) eller laga av std/png_enkel.no
+#   GET /_nc/offline           offline_svar: sida service workeren viser for navigasjonar utan
+#                              nett (data-nc-offline="1"); ingen persondata, ingen skript
+#
+# Sida har head_tags(k) i <head> (manifest, theme-color, apple-touch-icon), og klienten
+# registrerer workeren med std/wasm_pwa_klient.no.
+#
+# Reglar frå app-planen (A4), handheva her og i std/wasm_sw.no:
+#   - Innlogga HTML blir aldri cacha: berre app-skal utan persondata (med_skal), versjonerte
+#     ressursar (?v=) og eksplisitte offline-ruter blir precacha. Ein privat sti (med_privat)
+#     kan ikkje vere app-skal (valider), og workeren lagrar aldri svar med Cache-Control
+#     private eller no-store, feilsvar, omdirigeringar eller svar frå andre opphav.
+#   - Versjonen er sha256 over konfigurasjonen workeren får (med URL-ane og versjonane til
+#     klientmodulen, lastaren, sw.wasm og ikona), kroppane til app-skalet, offline-sida,
+#     manifestet og lastaren (nc.js). Endrar éin av dei seg, endrar sw.js og cachenamnet
+#     («nc-<16 hex>») seg, og nettlesaren installerer ein ny worker.
+#   - Ny versjon ventar til brukaren tek han i bruk (std/wasm_pwa_klient.no: aktiver_ny), eller
+#     til det berre finst éi fane (med_aktivering). Gamle cachar blir sletta ved aktivering.
+#   - Utlogging: utlogging_headerar() gjev Clear-Site-Data («cache» og «storage»: Cache
+#     Storage, IndexedDB, localStorage og service worker-registreringa).
+#   - Kill switch: slå_av(k) gjev ein worker som ikkje handterer noko og slettar cachane sine.
+#
+# Ingen modulglobalar: alt verkar under `nc serve`.
+bruk std.wasm_serve som ws
+bruk std.wasm_js som js
+bruk std.png_enkel som png
+bruk std.html som html
+
+funksjon pwa_prefiks() -> tekst {
+    returner "/_nc/"
+}
+
+funksjon sw_sti() -> tekst {
+    returner "/sw.js"
+}
+
+funksjon manifest_sti() -> tekst {
+    returner "/manifest.webmanifest"
+}
+
+funksjon offline_sti() -> tekst {
+    returner pwa_prefiks() + "offline"
+}
+
+# Versjonen av ikongeneratoren (std/png_enkel.no): med i versjonen til dei genererte ikona.
+funksjon ikon_generator() -> tekst {
+    returner "png_enkel-ring-1"
+}
+
+funksjon ikon_namn() -> liste {
+    returner ["192", "512", "maskable"]
+}
+
+funksjon visingar() -> liste {
+    returner ["standalone", "fullscreen", "minimal-ui", "browser"]
+}
+
+# ─── Konfigurasjon ───────────────────────────────────────────────────────────
+
+funksjon konfig(namn: tekst, kortnamn: tekst) -> ordbok {
+    returner {
+        "namn": namn, "kortnamn": kortnamn, "skildring": "", "lang": "nn",
+        "start_url": "/", "scope": "/", "display": "standalone",
+        "tema": "#1f5f99", "bakgrunn": "#ffffff",
+        "skal": [], "offline_ruter": [], "privat": [],
+        "offline": {"tittel": "Du er fråkopla", "tekst": "Sida du bad om, finst ikkje på eininga. Prøv igjen når du har nett."},
+        "ikon": {}, "aktiver_éi_fane": sann, "slått_av": usann
+    }
+}
+
+funksjon med_farger(k: ordbok, tema: tekst, bakgrunn: tekst) -> ordbok {
+    k["tema"] = tema
+    k["bakgrunn"] = bakgrunn
+    returner k
+}
+
+funksjon med_skildring(k: ordbok, skildring: tekst) -> ordbok {
+    k["skildring"] = skildring
+    returner k
+}
+
+funksjon med_start(k: ordbok, start_url: tekst, scope: tekst) -> ordbok {
+    k["start_url"] = start_url
+    k["scope"] = scope
+    returner k
+}
+
+# App-skal: ein ressurs utan persondata (HTML-skalet, stilark) som blir precacha og henta
+# «nett først». `kropp` er det tenaren leverer på `url` (med i versjonen).
+funksjon med_skal(k: ordbok, url: tekst, kropp: tekst) -> ordbok {
+    legg_til(k["skal"], {"url": url, "kropp": kropp})
+    returner k
+}
+
+# Ei eksplisitt offline-rute: som app-skal, men for sider som skal kunne opnast utan nett.
+funksjon med_offline_rute(k: ordbok, url: tekst, kropp: tekst) -> ordbok {
+    legg_til(k["offline_ruter"], {"url": url, "kropp": kropp})
+    returner k
+}
+
+# Privat sti eller prefiks («/mi-side» dekkjer «/mi-side/…»; eit prefiks som sluttar på «/»
+# dekkjer alt under): aldri cacha, aldri frå cachen. Navigasjonar dit utan nett får offline-sida.
+funksjon med_privat(k: ordbok, sti: tekst) -> ordbok {
+    legg_til(k["privat"], sti)
+    returner k
+}
+
+funksjon med_offline_side(k: ordbok, tittel: tekst, tekst_: tekst) -> ordbok {
+    k["offline"] = {"tittel": tittel, "tekst": tekst_}
+    returner k
+}
+
+# Eit ikon levert av appen: `namn` er "192", "512" eller "maskable", `bytar` ein PNG (rå
+# bytar som tekst). Elles blir ikonet laga av std/png_enkel.no.
+funksjon med_ikon(k: ordbok, namn: tekst, bytar: tekst) -> ordbok {
+    k["ikon"][namn] = bytar
+    returner k
+}
+
+# Automatisk aktivering av ein ny versjon når det berre finst éi fane (standard sann). Med
+# usann ventar ein ny versjon alltid til brukaren tek han i bruk.
+funksjon med_aktivering(k: ordbok, éi_fane: bool) -> ordbok {
+    k["aktiver_éi_fane"] = éi_fane
+    returner k
+}
+
+# Kill switch: workeren handterer ingenting og slettar cachane sine ved neste oppdatering.
+funksjon slå_av(k: ordbok) -> ordbok {
+    k["slått_av"] = sann
+    returner k
+}
+
+# ─── Validering ──────────────────────────────────────────────────────────────
+
+funksjon _er_sti(s) -> bool {
+    returner builtin.type(s) == "tekst" og builtin.starts_with(s, "/") og ikkje builtin.starts_with(s, "//")
+}
+
+funksjon _utan_spørjing(sti: tekst) -> tekst {
+    la q = builtin.index_of(sti, "?")
+    hvis q >= 0 { returner builtin.slice(sti, 0, q) }
+    returner sti
+}
+
+funksjon er_privat(k: ordbok, sti: tekst) -> bool {
+    la x = k["privat"]
+    la i = 0
+    mens i < lengde(x) {
+        la p = x[i]
+        hvis builtin.ends_with(p, "/") {
+            hvis builtin.starts_with(sti, p) { returner sann }
+        } ellers hvis sti == p eller builtin.starts_with(sti, p + "/") {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _er_farge(s) -> bool {
+    hvis builtin.type(s) != "tekst" { returner usann }
+    prøv {
+        png.farge(s)
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+# Feila i konfigurasjonen (tom liste når han er gyldig).
+funksjon valider(k: ordbok) -> liste {
+    la feil = []
+    hvis builtin.trim(tekst(k["namn"])) == "" { legg_til(feil, "namn manglar") }
+    hvis builtin.trim(tekst(k["kortnamn"])) == "" { legg_til(feil, "kortnamn manglar") }
+    hvis ikkje _er_sti(k["scope"]) eller ikkje builtin.ends_with(k["scope"], "/") { legg_til(feil, "scope må vere ein sti som sluttar på /") }
+    hvis ikkje _er_sti(k["start_url"]) { legg_til(feil, "start_url må vere ein absolutt sti") } ellers hvis _er_sti(k["scope"]) og ikkje builtin.starts_with(k["start_url"], k["scope"]) { legg_til(feil, "start_url " + k["start_url"] + " er utanfor scope " + k["scope"]) }
+    hvis ikkje vert_i(visingar(), tekst(k["display"])) { legg_til(feil, "display må vere ein av " + builtin.join(visingar(), ", ")) }
+    hvis ikkje _er_farge(k["tema"]) { legg_til(feil, "tema må vere #rrggbb") }
+    hvis ikkje _er_farge(k["bakgrunn"]) { legg_til(feil, "bakgrunn må vere #rrggbb") }
+    la i = 0
+    mens i < lengde(k["privat"]) {
+        hvis ikkje _er_sti(k["privat"][i]) { legg_til(feil, "privat[" + tekst(i) + "] er ikkje ein absolutt sti") }
+        i = i + 1
+    }
+    la skal = skal_og_ruter(k)
+    la har_start = usann
+    la j = 0
+    mens j < lengde(skal) {
+        la u = skal[j]["url"]
+        hvis ikkje _er_sti(u) {
+            legg_til(feil, "app-skal " + tekst(u) + " er ikkje ein absolutt sti")
+        } ellers {
+            hvis er_privat(k, _utan_spørjing(u)) { legg_til(feil, "den private ruta " + u + " kan ikkje vere app-skal eller offline-rute") }
+            hvis builtin.index_of(u, "?") >= 0 { legg_til(feil, "app-skal " + u + " kan ikkje ha spørjing") }
+            hvis builtin.starts_with(u, pwa_prefiks()) eller u == sw_sti() { legg_til(feil, "app-skal " + u + " er ein av rutene til PWA-modulen") }
+            hvis u == _utan_spørjing(tekst(k["start_url"])) { har_start = sann }
+        }
+        j = j + 1
+    }
+    hvis ikkje har_start og ikkje k["slått_av"] { legg_til(feil, "start_url " + tekst(k["start_url"]) + " er ikkje app-skal (legg ho til med med_skal), så appen kan ikkje starte utan nett") }
+    la n = ikon_namn()
+    la ni = 0
+    mens ni < lengde(n) {
+        hvis finnes_nøkkel(k["ikon"], n[ni]) {
+            la s = png.sjekk(k["ikon"][n[ni]])
+            hvis ikkje s["ok"] { legg_til(feil, "ikonet " + n[ni] + " er ikkje ein gyldig PNG: " + builtin.join(s["feil"], "; ")) } ellers hvis n[ni] != "maskable" og (tekst(s["bredde"]) != n[ni] eller tekst(s["høgd"]) != n[ni]) {
+                legg_til(feil, "ikonet " + n[ni] + " er " + tekst(s["bredde"]) + "x" + tekst(s["høgd"]))
+            }
+        }
+        ni = ni + 1
+    }
+    returner feil
+}
+
+funksjon vert_i(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Kastar «PwaFeil: …» med alle feila.
+funksjon krev_gyldig(k: ordbok) -> heltall {
+    la f = valider(k)
+    hvis lengde(f) > 0 { kast "PwaFeil: " + builtin.join(f, "; ") }
+    returner 0
+}
+
+funksjon skal_og_ruter(k: ordbok) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(k["skal"]) {
+        legg_til(ut, k["skal"][i])
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(k["offline_ruter"]) {
+        legg_til(ut, k["offline_ruter"][i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Ikon ────────────────────────────────────────────────────────────────────
+
+funksjon _ikon_storleik(namn: tekst) -> heltall {
+    hvis namn == "192" { returner 192 }
+    returner 512
+}
+
+# PNG-bytane til ikonet (levert eller generert).
+funksjon ikon_bytar(k: ordbok, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(k["ikon"], namn) { returner k["ikon"][namn] }
+    hvis namn == "maskable" og finnes_nøkkel(k["ikon"], "512") { returner k["ikon"]["512"] }
+    returner png.ikon(_ikon_storleik(namn), k["tema"], k["bakgrunn"])
+}
+
+# Versjonen til ikonet (12 hex) utan å lage det: sha256 av bytane når appen leverer dei, elles
+# av generatoren, storleiken og fargane (generatoren er deterministisk).
+funksjon ikon_versjon(k: ordbok, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(k["ikon"], namn) { returner builtin.slice(builtin.sha256(k["ikon"][namn]), 0, 12) }
+    hvis namn == "maskable" og finnes_nøkkel(k["ikon"], "512") { returner builtin.slice(builtin.sha256(k["ikon"]["512"]), 0, 12) }
+    returner builtin.slice(builtin.sha256(ikon_generator() + "|" + tekst(_ikon_storleik(namn)) + "|" + k["tema"] + "|" + k["bakgrunn"]), 0, 12)
+}
+
+funksjon ikon_url(k: ordbok, namn: tekst) -> tekst {
+    returner pwa_prefiks() + "ikon-" + namn + ".png?v=" + ikon_versjon(k, namn)
+}
+
+# ─── Manifest, offline-side og head ──────────────────────────────────────────
+
+funksjon manifest(k: ordbok) -> ordbok {
+    la m = {"id": k["start_url"], "name": k["namn"], "short_name": k["kortnamn"]}
+    hvis k["skildring"] != "" { m["description"] = k["skildring"] }
+    m["lang"] = k["lang"]
+    m["start_url"] = k["start_url"]
+    m["scope"] = k["scope"]
+    m["display"] = k["display"]
+    m["theme_color"] = k["tema"]
+    m["background_color"] = k["bakgrunn"]
+    m["icons"] = [
+        {"src": ikon_url(k, "192"), "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": ikon_url(k, "512"), "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": ikon_url(k, "maskable"), "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+    ]
+    returner m
+}
+
+funksjon manifest_json(k: ordbok) -> tekst {
+    returner builtin.json_stringify(manifest(k))
+}
+
+# Sida workeren viser for navigasjonar utan nett (og for private ruter og ukjende sider når
+# nettet er borte). Statisk HTML utan skript og utan persondata.
+funksjon offline_html(k: ordbok) -> tekst {
+    la tittel = html.escape(k["offline"]["tittel"])
+    returner "<!doctype html><html lang=\"" + html.escape(k["lang"]) + "\"><head><meta charset=\"utf-8\">" +
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+        "<meta name=\"theme-color\" content=\"" + html.escape(k["tema"]) + "\">" +
+        "<title>" + tittel + "</title></head>" +
+        "<body data-nc-offline=\"1\"><main><h1>" + tittel + "</h1><p>" + html.escape(k["offline"]["tekst"]) + "</p>" +
+        "<p><a href=\"" + html.escape(k["start_url"]) + "\">Til " + html.escape(k["kortnamn"]) + "</a></p></main></body></html>"
+}
+
+# Taggane sida skal ha i <head>.
+funksjon head_tags(k: ordbok) -> tekst {
+    returner "<link rel=\"manifest\" href=\"" + manifest_sti() + "\">" +
+        "<meta name=\"theme-color\" content=\"" + html.escape(k["tema"]) + "\">" +
+        "<link rel=\"icon\" type=\"image/png\" sizes=\"192x192\" href=\"" + html.escape(ikon_url(k, "192")) + "\">" +
+        "<link rel=\"apple-touch-icon\" href=\"" + html.escape(ikon_url(k, "192")) + "\">"
+}
+
+# ─── Workeren: konfigurasjon og versjon ──────────────────────────────────────
+
+# `info` kjem frå den genererte serve-inngangen (klient_data): {"klient_v", "lastar",
+# "sw_v", "sw_lastar", "prefiks"}.
+funksjon precache(k: ordbok, info: ordbok) -> liste {
+    la ut = []
+    la s = skal_og_ruter(k)
+    la i = 0
+    mens i < lengde(s) {
+        hvis ikkje vert_i(ut, s[i]["url"]) { legg_til(ut, s[i]["url"]) }
+        i = i + 1
+    }
+    la faste = [offline_sti(), manifest_sti(), ikon_url(k, "192"), ikon_url(k, "512"), ikon_url(k, "maskable"),
+                info["prefiks"] + "nc.js", info["prefiks"] + "app.wasm?v=" + info["klient_v"],
+                info["prefiks"] + "sw.wasm?v=" + info["sw_v"]]
+    la j = 0
+    mens j < lengde(faste) {
+        hvis ikkje vert_i(ut, faste[j]) { legg_til(ut, faste[j]) }
+        j = j + 1
+    }
+    returner ut
+}
+
+# Konfigurasjonen workeren får (utan versjonen): sjå std/wasm_sw.no.
+funksjon sw_konfig_utan_versjon(k: ordbok, info: ordbok) -> ordbok {
+    la p = precache(k, info)
+    la imm = []
+    la nett = []
+    la i = 0
+    mens i < lengde(p) {
+        hvis builtin.index_of(p[i], "?v=") >= 0 { legg_til(imm, p[i]) } ellers { legg_til(nett, p[i]) }
+        i = i + 1
+    }
+    la priv = []
+    la j = 0
+    mens j < lengde(k["privat"]) {
+        legg_til(priv, k["privat"][j])
+        j = j + 1
+    }
+    returner {"p": p, "i": imm, "r": nett, "x": priv, "o": offline_sti(), "a": k["aktiver_éi_fane"], "av": k["slått_av"]}
+}
+
+# Versjonen (64 hex): sha256 over konfigurasjonen workeren får og kroppane til alt som blir
+# precacha utan ?v= (app-skalet, offline-rutene, offline-sida, manifestet og lastaren).
+funksjon versjon(k: ordbok, info: ordbok) -> tekst {
+    la alt = builtin.json_stringify(sw_konfig_utan_versjon(k, info)) + "\n"
+    la s = skal_og_ruter(k)
+    la i = 0
+    mens i < lengde(s) {
+        alt = alt + s[i]["url"] + "\n" + tekst(lengde(s[i]["kropp"])) + "\n" + s[i]["kropp"] + "\n"
+        i = i + 1
+    }
+    alt = alt + offline_html(k) + "\n" + manifest_json(k) + "\n" + tekst(info["lastar"])
+    returner builtin.sha256(alt)
+}
+
+funksjon cachenamn(v: tekst) -> tekst {
+    returner "nc-" + builtin.slice(v, 0, 16)
+}
+
+funksjon sw_konfig(k: ordbok, info: ordbok) -> ordbok {
+    la v = versjon(k, info)
+    la c = sw_konfig_utan_versjon(k, info)
+    la ut = {"v": v, "c": cachenamn(v)}
+    la n = nøkler(c)
+    la i = 0
+    mens i < lengde(n) {
+        ut[n[i]] = c[n[i]]
+        i = i + 1
+    }
+    returner ut
+}
+
+# sw.js: konfigurasjonen (emittert av std/wasm_js.no) og den genererte SW-lastaren.
+funksjon sw_js(k: ordbok, info: ordbok) -> tekst {
+    returner js.sw_konfig_setning(builtin.json_stringify(sw_konfig(k, info))) + ";" + info["sw_lastar"]
+}
+
+# ─── Svar ────────────────────────────────────────────────────────────────────
+
+funksjon sw_svar(k: ordbok, info: ordbok) -> ordbok_tekst {
+    returner sw_svar_med_csp(k, info, ws.csp_wasm())
+}
+
+# Som sw_svar med ein annan CSP (berre for testar: utan 'wasm-unsafe-eval' kan workeren ikkje
+# kompilere sw.wasm, og installasjonen feilar).
+funksjon sw_svar_med_csp(k: ordbok, info: ordbok, csp: tekst) -> ordbok_tekst {
+    krev_gyldig(k)
+    la s = ws.svar("text/javascript; charset=utf-8", sw_js(k, info), csp, "no-cache")
+    s["headers"]["service-worker-allowed"] = k["scope"]
+    returner s
+}
+
+funksjon manifest_svar(k: ordbok) -> ordbok_tekst {
+    krev_gyldig(k)
+    returner ws.svar("application/manifest+json", manifest_json(k), ws.csp_standard(), "no-cache")
+}
+
+funksjon ikon_svar(ctx: ordbok_tekst, k: ordbok, namn: tekst) -> ordbok_tekst {
+    hvis ikkje vert_i(ikon_namn(), namn) {
+        la s404 = ws.svar("text/plain; charset=utf-8", "ukjent ikon", ws.csp_standard(), "no-store")
+        s404["status"] = 404
+        returner s404
+    }
+    la v = ikon_versjon(k, namn)
+    la s = ws.svar("image/png", ikon_bytar(k, namn), ws.csp_standard(), ws.cache_versjonert(ctx, v))
+    s["etag"] = ws.etag(v)
+    returner s
+}
+
+funksjon offline_svar(k: ordbok) -> ordbok_tekst {
+    returner ws.vanleg_side(offline_html(k))
+}
+
+# Headerane eit utloggingssvar skal ha: Clear-Site-Data slettar Cache Storage, IndexedDB,
+# localStorage og service worker-registreringa for opphavet («cache», «storage»), så ingen
+# data frå økta ligg att på eininga.
+funksjon utlogging_headerar() -> ordbok_tekst {
+    returner {"clear-site-data": "\"cache\", \"storage\""}
+}
+
+# Legg utloggingsheaderane til eit svar.
+funksjon med_utlogging(svar: ordbok_tekst) -> ordbok_tekst {
+    la h = utlogging_headerar()
+    la n = nøkler(h)
+    la i = 0
+    mens i < lengde(n) {
+        svar["headers"][n[i]] = h[n[i]]
+        i = i + 1
+    }
+    returner svar
+}
