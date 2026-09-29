@@ -1,8 +1,9 @@
 # W0 (WASM-sporet): lastaren blir emittert frå Norscode-data, ikkje frå ein handskriven mal.
 #
 #   1. Byte-tak: lastaren for teljar-settet (4 importar) ≤ 600 byte, eitt import ≤ 400,
-#      heile vertstabellen ≤ 900 (W1: dei interne logg/logg_test/flyt_tekst og W-hjelparen
-#      kom til; planbudsjettet for fullt sett er 2,5 KB).
+#      W4: heile produksjonstabellen (alle vertsfunksjonar utanom testkrokane) ≤ 2560 byte
+#      (planbudsjettet), heile tabellen med testkrokane ≤ 3072, og ein typisk
+#      interaktiv klient (examples/wasm_skjema/klient.no, 21 importar) ≤ 2048.
 #   2. Tree-shaking: berre importerte vertsfunksjonar og hjelparane dei treng kjem med.
 #      Importnamna i lastaren er nøyaktig importseksjonen i modulen (sjekken diskriminerer:
 #      ein lastar med ein ekstra import blir avvist).
@@ -13,7 +14,11 @@
 #      handskriven lastarbit), og kvart kodetoken i lastaren finst som literal i éi av
 #      dei to filene (proveniens).
 #   5. Tryggleik: ingen eval/Function/document.write/on…-attributt; innerHTML blir berre
-#      sett via escape-hjelparen, og html_escape er lik std.html.escape.
+#      sett via escape-hjelparen, og html_escape er lik std.html.escape. W4: setAttribute
+#      og createElement berre med namn som er kontrollerte ved kompilering (attributt/tag),
+#      og navigasjon berre til same opphav.
+#   6. W4: tekst frå DOM-en (resultattypen tekst) går gjennom U, hendingar gjennom L, og
+#      hjelparane blir tree-shaka etter bruk.
 bruk std.wasm_js som js
 bruk std.wasm_vert som vert
 bruk std.html som html
@@ -21,7 +26,9 @@ bruk tests.fixtures.wasm_test_hjelp som hjelp
 
 funksjon tak_teljar() -> heltall { returner 600 }
 funksjon tak_eitt_import() -> heltall { returner 400 }
-funksjon tak_fullt() -> heltall { returner 900 }
+funksjon tak_fullt() -> heltall { returner 2560 }
+funksjon tak_fullt_test() -> heltall { returner 3072 }
+funksjon tak_øy() -> heltall { returner 2048 }
 
 funksjon url() -> tekst { returner "/_nc/app.wasm?v=0123456789ab" }
 
@@ -43,10 +50,16 @@ funksjon tal_av(t: tekst, nål: tekst) -> heltall {
 
 # ─── Enkel JS-tokenisering (for proveniens- og fragmentsjekken) ──────────────
 
+# W4: bytar over 127 (æ ø å i namn som tøm og gå_til) høyrer til identifikatoren.
 funksjon er_id(c: tekst) -> bool {
     hvis c == "" { returner usann }
     la k = builtin.char_code(c)
-    returner (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 36
+    returner k >= 128 eller (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 36
+}
+
+# Operatorar på to teikn som emitteren skriv som eitt token.
+funksjon er_op2(s: tekst) -> bool {
+    returner s == "=>" eller s == "&&" eller s == "||" eller s == "==" eller s == "??" eller s == ">>" eller s == "!=" eller s == "<=" eller s == ">="
 }
 
 # Token i ein JS-tekst. Strengliteralar og regex-literalar blir eitt token kvar
@@ -84,8 +97,8 @@ funksjon js_token(t: tekst) -> liste {
             mens j < n og er_id(builtin.slice(t, j, j + 1)) { j = j + 1 }
             legg_til(ut, builtin.slice(t, i, j))
             i = j
-        } ellers hvis c == "=" og builtin.slice(t, i + 1, i + 2) == ">" {
-            legg_til(ut, "=>")
+        } ellers hvis er_op2(builtin.slice(t, i, i + 2)) {
+            legg_til(ut, builtin.slice(t, i, i + 2))
             i = i + 2
         } ellers {
             legg_til(ut, c)
@@ -180,6 +193,8 @@ funksjon lastar_importar(js_tekst: tekst) -> liste {
                 }
                 hvis djup == 0 og t == "," { forventar_nøkkel = sann }
                 ellers hvis djup == 0 og forventar_nøkkel og j + 1 < lengde(tok) og tok[j + 1] == ":" {
+                    # W4: namn som ikkje er JS-identifikatorar (tøm, gå_til) står i hermeteikn
+                    hvis builtin.starts_with(t, "\"") { t = builtin.slice(t, 1, lengde(t) - 1) }
                     legg_til(ut, t)
                     forventar_nøkkel = usann
                 }
@@ -225,6 +240,24 @@ funksjon balansert(t: tekst) -> bool {
     returner lengde(stakk) == 0
 }
 
+# Ingen tildeling til eit on…-felt (t.d. «.onclick=»): lyttarar går berre via addEventListener.
+funksjon ingen_on_tildeling(t: tekst) -> bool {
+    la tok = js_token(t)
+    la i = 0
+    mens i + 1 < lengde(tok) {
+        la x = tekst(tok[i])
+        hvis builtin.starts_with(x, "on") og lengde(x) > 2 og tok[i + 1] == "=" { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon js_av(e: liste) -> tekst {
+    la ut = []
+    js.emit(e, ut)
+    returner js.token_til_tekst(ut)
+}
+
 funksjon kopi_tabell() -> liste {
     returner vert.vertsfunksjonar()
 }
@@ -236,20 +269,27 @@ funksjon start() -> heltall {
     la l_teljar = js.bygg_lastar(teljar_importar(), url(), sann)["js"]
     la l_eitt = js.bygg_lastar(["sett_tekst"], url(), sann)["js"]
     la alle_namn = []
+    la prod_namn = []
     la tab = vert.vertsfunksjonar()
     la ti = 0
     mens ti < lengde(tab) {
         legg_til(alle_namn, tab[ti]["namn"])
+        hvis ikkje tab[ti]["berre_test"] { legg_til(prod_namn, tab[ti]["namn"]) }
         ti = ti + 1
     }
-    la l_fullt = js.bygg_lastar(alle_namn, url(), sann)["js"]
+    la l_fullt = js.bygg_lastar(prod_namn, url(), sann)["js"]
+    la l_fullt_test = js.bygg_lastar(alle_namn, url(), sann)["js"]
     skriv("lastar: teljar " + tekst(lengde(l_teljar)) + " B (tak " + tekst(tak_teljar()) + "), eitt import " +
-        tekst(lengde(l_eitt)) + " B (tak " + tekst(tak_eitt_import()) + "), fullt " + tekst(lengde(l_fullt)) + " B (tak " + tekst(tak_fullt()) + ")\n")
+        tekst(lengde(l_eitt)) + " B (tak " + tekst(tak_eitt_import()) + "), fullt " + tekst(lengde(l_fullt)) + " B (tak " + tekst(tak_fullt()) +
+        "), fullt med testkrokar " + tekst(lengde(l_fullt_test)) + " B (tak " + tekst(tak_fullt_test()) + ")\n")
     assert(lengde(l_teljar) <= tak_teljar())
     assert(lengde(l_eitt) <= tak_eitt_import())
     assert(lengde(l_fullt) <= tak_fullt())
+    assert(lengde(l_fullt_test) <= tak_fullt_test())
+    assert(ikkje inneheld(l_fullt, "test_"))
     assert(balansert(l_teljar))
     assert(balansert(l_fullt))
+    assert(balansert(l_fullt_test))
     assert(ikkje balansert(l_teljar + ")"))
 
     # ── 2. Tree-shaking og importnamn = importseksjonen ──
@@ -266,7 +306,7 @@ funksjon start() -> heltall {
     assert(like_lister(l_klikk["hjelparar"], ["E"]))
     assert(ikkje inneheld(l_klikk["js"], "TextDecoder"))
     assert(ikkje inneheld(l_teljar, "test_klikk"))
-    assert(inneheld(l_fullt, "test_klikk"))
+    assert(inneheld(l_fullt_test, "test_klikk"))
     # Ekte modul: teljar-klienten, bygd med CLI-en (barneprosess i VM-fastmodus; lowring og
     # validering av ein W1-modul tek fleire sekund per KB i standard-VM-en). Importane i
     # utdatalinja er dei validatoren las ut av bytane, og nc.js er lastaren CLI-en skreiv.
@@ -291,9 +331,9 @@ funksjon start() -> heltall {
     assert(inneheld(l_logg["js"], "logg:(a,b)=>console.log(S(a,b))"))
     assert(like_lister(l_logg["hjelparar"], ["S"]))
     la l_flyt = js.bygg_lastar(["flyt_tekst"], url(), sann)
-    assert(inneheld(l_flyt["js"], "flyt_tekst:(a,b)=>W(a.toExponential(),b)"))
-    assert(inneheld(l_flyt["js"], "W=(a,b)=>new TextEncoder().encodeInto(a,new Uint8Array(x.m.buffer,b)).written"))
-    assert(like_lister(l_flyt["hjelparar"], ["W"]))
+    # W4: sifra går gjennom U (same hjelpar som tekst frå DOM-en; W er borte)
+    assert(inneheld(l_flyt["js"], "flyt_tekst:(a,b)=>U(a.toExponential(),b)"))
+    assert(like_lister(l_flyt["hjelparar"], ["U"]))
     assert(ikkje inneheld(l_flyt["js"], "TextDecoder"))
     la l_lt = js.bygg_lastar(["logg_test"], url(), sann)["js"]
     assert(inneheld(l_lt, "logg_test:(a,b)=>document.getElementById(\"nc-logg\").append(S(a,b))"))
@@ -370,7 +410,7 @@ funksjon start() -> heltall {
     assert(ikkje er_js_fragment("wasm_js: ukjend JS-node "))
     # Proveniens: kvart kodetoken i lastaren (unnateke streng- og regexliteralar, som er
     # data) er ein literal i emitteren eller vertsmodulen.
-    la tok = js_token(l_fullt)
+    la tok = js_token(l_fullt_test)
     la tki = 0
     mens tki < lengde(tok) {
         la t = tekst(tok[tki])
@@ -385,13 +425,35 @@ funksjon start() -> heltall {
     }
 
     # ── 5. Tryggleik ──
-    assert(ikkje inneheld(l_fullt, "eval"))
-    assert(ikkje inneheld(l_fullt, "Function("))
-    assert(ikkje inneheld(l_fullt, "document.write"))
-    assert(ikkje inneheld(l_fullt, "setAttribute"))
-    assert(ikkje inneheld(l_fullt, "onclick"))
-    assert_eq(tal_av(l_fullt, "innerHTML="), 1)
-    assert(inneheld(l_fullt, "innerHTML=S(b,c).split(\"{}\").join(H(S(d,e)))"))
+    assert(ikkje inneheld(l_fullt_test, "eval"))
+    assert(ikkje inneheld(l_fullt_test, "Function("))
+    assert(ikkje inneheld(l_fullt_test, "document.write"))
+    assert(ikkje inneheld(l_fullt_test, "onclick"))
+    assert(ingen_on_tildeling(l_fullt_test))
+    assert(ikkje ingen_on_tildeling("E[a].onclick=b"))
+    assert_eq(tal_av(l_fullt_test, "innerHTML="), 1)
+    assert(inneheld(l_fullt_test, "innerHTML=S(b,c).split(\"{}\").join(H(S(d,e)))"))
+    # W4: setAttribute og createElement berre i sett_attr og lag, med namn som er kontrollerte
+    # ved kompilering (parametertypane attributt og tag), og navigasjon berre til same opphav
+    assert_eq(tal_av(l_fullt_test, "setAttribute("), 2)
+    assert(inneheld(l_fullt_test, "sett_handlar:(a,b,c,d,e)=>E[a].setAttribute(\"data-nc-\"+S(b,c),S(d,e).slice(1))"))
+    assert(like_lister(vert.vertsfunksjon("sett_handlar")["param"], ["handtak", "hending", "funksjon"]))
+    assert_eq(tal_av(l_fullt_test, "createElement("), 1)
+    assert(like_lister(vert.vertsfunksjon("sett_attr")["param"], ["handtak", "attributt", "verdi"]))
+    assert(like_lister(vert.vertsfunksjon("lag")["param"], ["tag"]))
+    assert(inneheld(l_fullt_test, "gå_til:(a,b)=>(a=new URL(S(a,b),location.href)).origin==location.origin&&location.assign(a)"))
+    assert_eq(tal_av(l_fullt_test, "location.assign("), 1)
+    assert(vert.trygt_attributt("title") og vert.trygt_attributt("data-id") og vert.trygt_attributt("aria-invalid"))
+    la farlege = ["onclick", "onmouseover", "href", "src", "style", "srcdoc", "action", "formaction", "data-nc-klikk", "data-", "data-A", "xlink:href"]
+    la fi = 0
+    mens fi < lengde(farlege) {
+        hvis vert.trygt_attributt(farlege[fi]) {
+            skriv("attributtet " + farlege[fi] + " skulle ikkje vere trygt\n")
+            assert(usann)
+        }
+        fi = fi + 1
+    }
+    assert(vert.trygg_tag("li") og ikkje vert.trygg_tag("script") og ikkje vert.trygg_tag("iframe") og ikkje vert.trygg_tag("style"))
     la prøver = ["", "vanleg tekst", "<script>alert(\"x\")</script>", "a & b 'c' \"d\" <e>", "&amp; allereie", "blåbær <b>"]
     la pi = 0
     mens pi < lengde(prøver) {
@@ -399,6 +461,62 @@ funksjon start() -> heltall {
         pi = pi + 1
     }
     assert_eq(vert.html_frå_mal("<b>{}</b> og {}", "<i>&"), "<b>&lt;i&gt;&amp;</b> og &lt;i&gt;&amp;")
+
+    # ── 6. W4: tekst frå DOM-en, hendingar og tree-shaking av dei nye hjelparane ──
+    la l_hv = js.bygg_lastar(["hent_verdi"], url(), sann)
+    assert(like_lister(l_hv["hjelparar"], ["E", "U"]))
+    assert(inneheld(l_hv["js"], "hent_verdi:(a,b)=>U(E[a].value,b)"))
+    assert(inneheld(l_hv["js"], "U=(a,b)=>(a=new TextEncoder().encode(a),b+a.length>x.m.buffer.byteLength&&x.m.grow((a.length>>16)+1),new Uint8Array(x.m.buffer).set(a,b),a.length)"))
+    la l_ly = js.bygg_lastar(["lytt"], url(), sann)
+    assert(like_lister(l_ly["hjelparar"], ["E", "S", "N", "V", "T", "L"]))
+    assert(inneheld(l_ly["js"], "lytt:(a,b,c,d,e)=>L(E[a],S(b,c),x[S(d,e)])"))
+    assert(inneheld(l_ly["js"], "b==\"send\"&&e.preventDefault()"))
+    # N kjem frå hendingar(): kvar hending i tabellen står der
+    la hd = vert.hendingar()
+    la hdi = 0
+    mens hdi < lengde(hd) {
+        assert(inneheld(l_ly["js"], hd[hdi][0] + ":\"" + hd[hdi][1] + "\""))
+        hdi = hdi + 1
+    }
+    la l_dl = js.bygg_lastar(["deleger"], url(), sann)
+    assert(inneheld(l_dl["js"], "closest(\"[data-nc-\"+b+\"]\")"))
+    assert(inneheld(l_dl["js"], "deleger:(a,b,c,d)=>L(document,S(a,b),x[S(c,d)],S(c,d).slice(1))"))
+    la l_et = js.bygg_lastar(["etter"], url(), sann)
+    assert(like_lister(l_et["hjelparar"], ["E", "S"]))
+    assert(ikkje inneheld(l_et["js"], "addEventListener"))
+    la l_sl = js.bygg_lastar(["slepp"], url(), sann)
+    assert(like_lister(l_sl["hjelparar"], ["E", "F"]))
+    assert(inneheld(l_sl["js"], "slepp:a=>(E[a]&&E[a].abort?E[a].abort():clearTimeout(E[a]),E[a]=null,F.push(a))"))
+    # Handtak blir gjenbrukte (P) berre når modulen importerer slepp, også lyttarhandtaka
+    la l_gj = js.bygg_lastar(["finn", "lytt", "slepp"], url(), sann)
+    assert(like_lister(l_gj["hjelparar"], ["E", "F", "P", "S", "N", "V", "T", "L"]))
+    assert(inneheld(l_gj["js"], "P=(a,b)=>(F.length?E[b=F.pop()]=a:b=E.push(a)-1,b)"))
+    assert(inneheld(l_gj["js"], "finn:(a,b)=>P(document.querySelector(S(a,b)))"))
+    assert(inneheld(l_gj["js"], "{signal:f.signal}),P(f))"))
+    assert(ikkje inneheld(l_ly["js"], "P("))
+    assert(inneheld(js.bygg_lastar(["finn"], url(), sann)["js"], "finn:(a,b)=>E.push(document.querySelector(S(a,b)))-1"))
+    la l_hd = js.bygg_lastar(["hending_data"], url(), sann)
+    assert(like_lister(l_hd["hjelparar"], ["S", "U", "T"]))
+    # Teljaren (W0-settet) har ingen av dei nye hjelparane
+    assert(ikkje inneheld(l_teljar, ",U=(") og ikkje inneheld(l_teljar, ",L=(") og ikkje inneheld(l_teljar, ",N={") og ikkje inneheld(l_teljar, ",P=("))
+    assert(inneheld(l_gj["js"], ",L=(") og inneheld(l_hv["js"], ",U=("))
+    # Presedens: parentes berre der JS krev det
+    assert_eq(js_av(["binær", "-", ["namn", "a"], ["binær", "-", ["namn", "b"], ["namn", "c"]]]), "a-(b-c)")
+    assert_eq(js_av(["binær", "-", ["binær", "-", ["namn", "a"], ["namn", "b"]], ["namn", "c"]]), "a-b-c")
+    assert_eq(js_av(["binær", "||", ["binær", "??", ["namn", "a"], ["namn", "b"]], ["namn", "c"]]), "(a??b)||c")
+    assert_eq(js_av(["binær", "&&", ["binær", "||", ["namn", "a"], ["namn", "b"]], ["namn", "c"]]), "(a||b)&&c")
+    assert_eq(js_av(["binær", ">>", ["binær", "+", ["namn", "a"], ["namn", "b"]], ["tal", 16]]), "a+b>>16")
+    assert_eq(js_av(["vilkår", ["binær", "&&", ["namn", "a"], ["namn", "b"]], ["namn", "c"], ["namn", "d"]]), "a&&b?c:d")
+    # Ein typisk interaktiv klient (skjema-demoen), bygd med CLI-en: importnamna i lastaren
+    # er importseksjonen (også namn i hermeteikn), og lastaren er under taket for øy-program
+    la l_s = hjelp.bygg_klient("examples/wasm_skjema/klient.no", "build/wasm/test_lastar/skjema", usann)
+    la imp_s = hjelp.liste_felt(l_s, "importar")
+    la js_s = fil_les(rot + "/build/wasm/test_lastar/skjema/nc.js")
+    assert(like_lister(lastar_importar(js_s), imp_s))
+    assert(lengde(imp_s) >= 10)
+    skriv("lastar: skjema-klienten " + tekst(lengde(js_s)) + " B (tak " + tekst(tak_øy()) + "), " + tekst(lengde(imp_s)) + " importar\n")
+    assert(lengde(js_s) <= tak_øy())
+    assert(balansert(js_s))
 
     skriv("test_wasm_lastar OK\n")
     returner 0
