@@ -1,4 +1,4 @@
-# std/wasm_les.no — strukturell WASM-validator i Norscode (W0).
+# std/wasm_les.no — strukturell WASM-validator i Norscode (W0, W1).
 #
 # Les ein .wasm-modul (liste med bytar 0–255) og sjekkar strukturen utan å køyre han:
 #   - magic og versjon;
@@ -10,7 +10,10 @@
 #   - indeksar innanfor grensene: typar, funksjonar (importar + definerte), globalar,
 #     minne, lokale, strukturfelt, tag-ar, dataseksjonar og greinedjupner;
 #   - funksjonskroppar: kjende opkodar med rette immediates, balanserte
-#     block/loop/if/try_table/else/end, og siste `end` nøyaktig på slutten av kroppen.
+#     block/loop/if/try_table/else/end, og siste `end` nøyaktig på slutten av kroppen;
+#   - W1: array-instruksjonane (array.new_fixed/new_data/copy) peikar på array-typar,
+#     dataindeksar i kode (array.new_data, memory.init, data.drop) krev datacount-
+#     seksjonen og ligg under han, og datacount er lik talet på segment i dataseksjonen.
 # Stakk- og typesjekk av instruksjonane kjem i W2.
 #
 # Bruk: `valider(bytar)` gjev {"ok": bool, "feil": tekst, "info": ordbok}.
@@ -442,6 +445,20 @@ funksjon _kropp(b: liste, s: ordbok, info: ordbok, funk_type: ordbok) -> heltall
     returner 0
 }
 
+# W1: dataindeksar i kode krev datacount-seksjonen (12), og indeksen må vere under han.
+funksjon _dataidx(b: liste, s: ordbok, info: ordbok, kva: tekst) -> heltall {
+    la d = _leb_u(b, s, 5)
+    hvis info["n_data_meldt"] < 0 { _feil(kva + " utan datacount-seksjon") }
+    hvis d >= info["n_data_meldt"] { _feil(kva + ": dataindeks " + tekst(d) + " utanfor (datacount " + tekst(info["n_data_meldt"]) + ")") }
+    returner d
+}
+
+funksjon _arraytype(b: liste, s: ordbok, info: ordbok, kva: tekst) -> heltall {
+    la t = _typeidx(b, s, info)
+    hvis info["typar"][t]["art"] != "array" { _feil(kva + " på ikkje-array " + tekst(t)) }
+    returner t
+}
+
 funksjon _gc_op(b: liste, s: ordbok, info: ordbok, dj: heltall) -> heltall {
     la n_typar = lengde(info["typar"])
     la sub = _leb_u(b, s, 5)
@@ -454,15 +471,20 @@ funksjon _gc_op(b: liste, s: ordbok, info: ordbok, dj: heltall) -> heltall {
         la t = _typeidx(b, s, info)
         hvis info["typar"][t]["art"] != "array" { _feil("array-instruksjon på ikkje-array " + tekst(t)) }
     }
-    ellers hvis sub == 8 { _typeidx(b, s, info)  _leb_u(b, s, 5) }
+    ellers hvis sub == 8 {
+        _arraytype(b, s, info, "array.new_fixed")
+        _leb_u(b, s, 5)
+    }
     ellers hvis sub == 9 eller sub == 18 {
-        _typeidx(b, s, info)
-        la d = _leb_u(b, s, 5)
-        hvis d >= info["n_data_meldt"] { _feil("dataindeks " + tekst(d) + " utanfor") }
+        _arraytype(b, s, info, "array.new_data")
+        _dataidx(b, s, info, "array.new_data")
     }
     ellers hvis sub == 10 eller sub == 19 { _typeidx(b, s, info)  _leb_u(b, s, 5) }
     ellers hvis sub == 15 eller (sub >= 26 og sub <= 30) { }
-    ellers hvis sub == 17 { _typeidx(b, s, info)  _typeidx(b, s, info) }
+    ellers hvis sub == 17 {
+        _arraytype(b, s, info, "array.copy")
+        _arraytype(b, s, info, "array.copy")
+    }
     ellers hvis sub >= 20 og sub <= 23 { _heaptype(b, s, n_typar) }
     ellers hvis sub == 24 eller sub == 25 {
         _byte(b, s)
@@ -478,11 +500,10 @@ funksjon _fc_op(b: liste, s: ordbok, info: ordbok) -> heltall {
     la sub = _leb_u(b, s, 5)
     hvis sub <= 7 { }
     ellers hvis sub == 8 {
-        la d = _leb_u(b, s, 5)
-        hvis d >= info["n_data_meldt"] { _feil("memory.init: data " + tekst(d) + " utanfor") }
+        _dataidx(b, s, info, "memory.init")
         _byte(b, s)
     }
-    ellers hvis sub == 9 { _leb_u(b, s, 5) }
+    ellers hvis sub == 9 { _dataidx(b, s, info, "data.drop") }
     ellers hvis sub == 10 { _byte(b, s)  _byte(b, s) }
     ellers hvis sub == 11 { _byte(b, s) }
     ellers { _feil("ukjend 0xfc-opkode " + tekst(sub)) }
@@ -640,6 +661,10 @@ funksjon _les_modul(b: liste, info: ordbok) -> heltall {
             }
         } ellers hvis id == 11 {
             la n = _leb_u(b, ss, 5)
+            info["n_data"] = n
+            hvis info["n_data_meldt"] >= 0 og n != info["n_data_meldt"] {
+                _feil("dataseksjonen har " + tekst(n) + " segment, datacount seier " + tekst(info["n_data_meldt"]))
+            }
             la i = 0
             mens i < n {
                 la flagg = _leb_u(b, ss, 5)
@@ -661,12 +686,13 @@ funksjon _les_modul(b: liste, info: ordbok) -> heltall {
     }
     hvis n_funk_def > 0 og n_kode < 0 { _feil("funksjonsseksjon utan kodeseksjon") }
     hvis n_kode > 0 og n_funk_def < 0 { _feil("kodeseksjon utan funksjonsseksjon") }
+    hvis info["n_data_meldt"] > 0 og info["n_data"] < 0 { _feil("datacount seier " + tekst(info["n_data_meldt"]) + " segment, men dataseksjonen manglar") }
     returner 0
 }
 
 funksjon ny_info() -> ordbok {
     returner {"typar": [], "funk_typar": [], "n_funk": 0, "n_funk_import": 0, "n_glob": 0,
-              "n_minne": 0, "n_tag": 0, "n_data_meldt": 1000000, "importar": [], "eksportar": [],
+              "n_minne": 0, "n_tag": 0, "n_data_meldt": -1, "n_data": -1, "importar": [], "eksportar": [],
               "seksjonar": []}
 }
 
@@ -695,11 +721,16 @@ funksjon frå_hex(h: tekst) -> liste {
     returner ut
 }
 
+# Utan hjelpekall per byte (eit funksjonskall kostar millisekund i standard-VM-en).
 funksjon til_hex(b: liste) -> tekst {
+    la hs = "0123456789abcdef"
     la ut = ""
     la i = 0
     mens i < lengde(b) {
-        ut = ut + _hex(b[i])
+        la x = b[i]
+        la h = (x >> 4) & 15
+        la l = x & 15
+        ut = ut + builtin.slice(hs, h, h + 1) + builtin.slice(hs, l, l + 1)
         i = i + 1
     }
     returner ut
