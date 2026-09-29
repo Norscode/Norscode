@@ -1,0 +1,174 @@
+# W0 (WASM-sporet): examples/wasm_teljar/app.no under ekte `nc serve` i ein barneprosess
+# (NORSCODE_FAKE_HTTP_REQUESTS: heile HTTP-vegen i nc_main utan sokkel).
+#
+# Teljar-klienten blir bygd med CLI-en (nc compile + tools/nc_wasm.no) til
+# build/wasm/test_serve/, og ein kopi av app.no som importerer den byggjinga blir servert.
+#
+# Krav:
+#   - /_nc/app.wasm?v=<v>: application/wasm, nosniff, immutable, Content-Length = storleiken,
+#     og kroppen er BYTE-IDENTISK med app.wasm; v = sha256 over bytane
+#   - /_nc/app.wasm utan v og /_nc/nc.js med feil v: no-cache
+#   - /_nc/nc.js?v=<lv>: text/javascript, kroppen = nc.js, immutable, peikar på app.wasm?v=<v>
+#   - «/» har CSP med 'wasm-unsafe-eval' og script-tag med lastarversjonen
+#   - «/om» og «/kontroll/streng-csp» har CSP UTAN 'wasm-unsafe-eval' (berre WASM-sida får det)
+bruk std.runtime.process_abi som process_abi
+bruk std.wasm_lowring som lowring
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon crlf() -> tekst { returner "\r\n" }
+
+funksjon førespurnad(sti: tekst) -> tekst {
+    returner "GET " + sti + " HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf() + crlf()
+}
+
+funksjon saman(reqs: liste) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(reqs) {
+        hvis i > 0 { ut = ut + "\\n" }
+        ut = ut + reqs[i]
+        i = i + 1
+    }
+    returner ut
+}
+
+# Svaret: {"status", "body", "h:<namn>"} med små bokstavar i headernamna. Kroppen blir
+# skoren ut etter Content-Length, så binære bytar (også 0x0a) blir verande urørte.
+funksjon tolk_svar(ut: tekst) -> liste {
+    la svar = []
+    la rest = ut
+    la p = builtin.index_of(rest, "HTTP/1.1 ")
+    mens p >= 0 {
+        rest = builtin.slice(rest, p, lengde(rest))
+        la slutt = builtin.index_of(rest, "\r\n\r\n")
+        hvis slutt < 0 {
+            skriv("uferdig svar i utdata:\n" + rest + "\n")
+            assert(usann)
+        }
+        la hovud = builtin.slice(rest, 0, slutt)
+        la linjer = builtin.split(hovud, "\r\n")
+        la s = {}
+        s["status"] = builtin.slice(builtin.trim(linjer[0]), 9, 12)
+        la i = 1
+        mens i < lengde(linjer) {
+            la l = linjer[i]
+            la k = builtin.index_of(l, ":")
+            hvis k > 0 {
+                s["h:" + tekst_til_liten(builtin.trim(builtin.slice(l, 0, k)))] = builtin.trim(builtin.slice(l, k + 1, lengde(l)))
+            }
+            i = i + 1
+        }
+        la start_k = slutt + 4
+        la cl = 0
+        hvis finnes_nøkkel(s, "h:content-length") { cl = heltall_fra_tekst(s["h:content-length"]) }
+        s["body"] = builtin.slice(rest, start_k, start_k + cl)
+        legg_til(svar, s)
+        rest = builtin.slice(rest, start_k + cl, lengde(rest))
+        p = builtin.index_of(rest, "HTTP/1.1 ")
+    }
+    returner svar
+}
+
+funksjon hdr(s: ordbok, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(s, "h:" + namn) { returner s["h:" + namn] }
+    returner ""
+}
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool { returner builtin.index_of(t, nål) >= 0 }
+
+funksjon første_ulike(a: tekst, b: tekst) -> heltall {
+    la i = 0
+    mens i < lengde(a) og i < lengde(b) og builtin.slice(a, i, i + 1) == builtin.slice(b, i, i + 1) { i = i + 1 }
+    returner i
+}
+
+funksjon start() -> heltall {
+    la rot = hjelp.root()
+    la ut = "build/wasm/test_serve"
+    la linje = hjelp.bygg_klient("examples/wasm_teljar/klient.no", ut, usann)
+    la app = hjelp.app_kopi(ut)
+    la bytar = hjelp.les_bytar(ut + "/app.wasm")
+    la wasm_tekst = fil_les(rot + "/" + ut + "/app.wasm")
+    la lastar = fil_les(rot + "/" + ut + "/nc.js")
+    la v = hjelp.felt(linje, "v")
+    assert_eq(v, lowring.versjon(bytar))
+    assert_eq(lengde(wasm_tekst), lengde(bytar))
+    la lv = builtin.slice(builtin.sha256(lastar), 0, 12)
+
+    la reqs = [
+        førespurnad("/"),
+        førespurnad("/om"),
+        førespurnad("/kontroll/streng-csp"),
+        førespurnad("/_nc/nc.js?v=" + lv),
+        førespurnad("/_nc/nc.js?v=feil"),
+        førespurnad("/_nc/app.wasm?v=" + v),
+        førespurnad("/_nc/app.wasm")
+    ]
+    la m = hjelp.grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "serve"
+    m["NORSCODE_FILE"] = rot + "/" + app
+    m["NC_SERVE_PORT"] = "48311"
+    m["NC_SERVE_HOST"] = "127.0.0.1"
+    m["NORSCODE_FAKE_HTTP_REQUESTS"] = saman(reqs)
+    m["NORSCODE_VM_FAST"] = miljo_hent("NORSCODE_VM_FAST")
+    la r = hjelp.køyr_nc(m, 600000)
+    hjelp.krev_ok("nc serve", r)
+    la svar = tolk_svar(r["stdout"])
+    hvis lengde(svar) != 7 {
+        skriv("venta 7 svar, fekk " + tekst(lengde(svar)) + ":\n" + r["stdout"] + "\n")
+    }
+    assert_eq(lengde(svar), 7)
+
+    # «/»: WASM-sida
+    la side = svar[0]
+    assert_eq(side["status"], "200")
+    assert(builtin.starts_with(hdr(side, "content-type"), "text/html"))
+    assert(inneheld(hdr(side, "content-security-policy"), "script-src 'self' 'wasm-unsafe-eval'"))
+    assert(ikkje inneheld(hdr(side, "content-security-policy"), "'unsafe-eval'" + ";"))
+    assert(inneheld(side["body"], "src=\"/_nc/nc.js?v=" + lv + "\""))
+    assert(inneheld(side["body"], "<output id=\"ut\">0</output>"))
+    assert_eq(hdr(side, "cache-control"), "no-cache")
+    assert_eq(hdr(side, "x-content-type-options"), "nosniff")
+
+    # «/om» og kontrollsida: ikkje 'wasm-unsafe-eval'
+    assert_eq(svar[1]["status"], "200")
+    assert(ikkje inneheld(hdr(svar[1], "content-security-policy"), "wasm-unsafe-eval"))
+    assert(inneheld(hdr(svar[1], "content-security-policy"), "script-src 'self';"))
+    assert_eq(svar[2]["status"], "200")
+    assert(ikkje inneheld(hdr(svar[2], "content-security-policy"), "wasm-unsafe-eval"))
+    assert_eq(svar[2]["body"], side["body"])
+
+    # Lastaren
+    la ls = svar[3]
+    assert_eq(ls["status"], "200")
+    assert_eq(hdr(ls, "content-type"), "text/javascript; charset=utf-8")
+    assert_eq(hdr(ls, "cache-control"), "public, max-age=31536000, immutable")
+    assert_eq(ls["body"], lastar)
+    assert(inneheld(ls["body"], "/_nc/app.wasm?v=" + v))
+    assert_eq(hdr(svar[4], "cache-control"), "no-cache")
+
+    # Modulen: byte-identisk
+    la ws = svar[5]
+    assert_eq(ws["status"], "200")
+    assert_eq(hdr(ws, "content-type"), "application/wasm")
+    assert_eq(hdr(ws, "x-content-type-options"), "nosniff")
+    assert_eq(hdr(ws, "cache-control"), "public, max-age=31536000, immutable")
+    assert_eq(heltall_fra_tekst(hdr(ws, "content-length")), lengde(bytar))
+    hvis ws["body"] != wasm_tekst {
+        skriv("app.wasm frå serve er ikkje byte-identisk: lengd " + tekst(lengde(ws["body"])) + " mot " + tekst(lengde(wasm_tekst)) + ", første ulike byte " + tekst(første_ulike(ws["body"], wasm_tekst)) + "\n")
+        assert(usann)
+    }
+    la i = 0
+    mens i < lengde(bytar) {
+        hvis builtin.char_code(builtin.slice(ws["body"], i, i + 1)) != bytar[i] {
+            skriv("byte " + tekst(i) + " skil seg\n")
+            assert(usann)
+        }
+        i = i + 1
+    }
+    assert_eq(hdr(svar[6], "cache-control"), "no-cache")
+    assert_eq(svar[6]["body"], wasm_tekst)
+
+    skriv("test_wasm_serve OK\n")
+    returner 0
+}

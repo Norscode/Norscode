@@ -51,7 +51,20 @@ funksjon _la_til(mål: liste, kjelde: liste) -> heltall {
     returner 0
 }
 
-funksjon _leb(n: heltall) -> liste { returner w.leb_u(n) }
+# Usignert LEB128 (same som w.leb_u, men utan ekstra kall: kall er dyre i VM-en).
+funksjon _leb(verdi: heltall) -> liste {
+    hvis verdi >= 0 og verdi < 128 { returner [verdi] }
+    la ut = []
+    la n = verdi
+    mens sann {
+        la b = n & 127
+        n = n >> 7
+        hvis n != 0 { b = b | 128 }
+        legg_til(ut, b)
+        hvis n == 0 { returner ut }
+    }
+    returner ut
+}
 
 funksjon _type_namn(v) -> tekst {
     la t = builtin.type(v)
@@ -167,24 +180,15 @@ funksjon _atom_kropp(k: ordbok, namn: tekst) -> liste {
     returner b
 }
 
-funksjon _binær_atom(op: tekst) -> tekst {
-    la ops = ["BINARY_ADD", "BINARY_SUB", "BINARY_MUL", "BINARY_DIV", "BINARY_MOD", "BINARY_AND",
-              "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT", "BINARY_RSHIFT"]
-    la atom = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr"]
-    la i = 0
-    mens i < lengde(ops) {
-        hvis ops[i] == op { returner atom[i] }
-        i = i + 1
-    }
-    returner ""
+# NCB-opkode → atom (binære heiltalsoperasjonar og ordna samanlikningar).
+funksjon binær_atom_kart() -> ordbok {
+    returner {"BINARY_ADD": "add", "BINARY_SUB": "sub", "BINARY_MUL": "mul", "BINARY_DIV": "div",
+              "BINARY_MOD": "mod", "BINARY_AND": "and", "BINARY_OR": "or", "BINARY_XOR": "xor",
+              "BINARY_LSHIFT": "shl", "BINARY_RSHIFT": "shr"}
 }
 
-funksjon _samanlikn_atom(op: tekst) -> tekst {
-    hvis op == "COMPARE_LT" { returner "lt" }
-    hvis op == "COMPARE_LE" { returner "le" }
-    hvis op == "COMPARE_GT" { returner "gt" }
-    hvis op == "COMPARE_GE" { returner "ge" }
-    returner ""
+funksjon samanlikn_atom_kart() -> ordbok {
+    returner {"COMPARE_LT": "lt", "COMPARE_LE": "le", "COMPARE_GT": "gt", "COMPARE_GE": "ge"}
 }
 
 # ─── Kontekst ────────────────────────────────────────────────────────────────
@@ -192,9 +196,17 @@ funksjon _samanlikn_atom(op: tekst) -> tekst {
 funksjon _ny_kontekst(ncb: ordbok, testbygg: bool) -> ordbok {
     la globale = {}
     hvis finnes_nøkkel(ncb, "global_names") { globale = ncb["global_names"] }
+    la tabell = vert.vertsfunksjonar()
+    la vert_idx = {}
+    la i = 0
+    mens i < lengde(tabell) {
+        vert_idx[tekst(tabell[i]["namn"])] = tabell[i]
+        i = i + 1
+    }
     returner {
         "ncb": ncb, "fns": ncb["functions"], "globale": globale, "testbygg": testbygg,
-        "vert_modul": "std.wasm_vert", "feil": [],
+        "vert_modul": "std.wasm_vert", "feil": [], "tabell": tabell, "vert_idx": vert_idx,
+        "binop": binær_atom_kart(), "cmpop": samanlikn_atom_kart(),
         "nåbare": [], "nåbar_sett": {}, "analyse": {},
         "vert_brukt": {}, "atom_brukt": {}, "tilbakekall": {}, "tilbakekall_liste": []
     }
@@ -370,22 +382,22 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 }
                 hvis ikkje finst { _feil(k, q, "ukjend global " + modul + "." + gn) }
                 hvis op == "LOAD_GLOBAL" { _push(st, "v") } ellers { _pop_verdi(k, q, st, "STORE_GLOBAL " + gn) }
-            } ellers hvis _binær_atom(op) != "" {
+            } ellers hvis finnes_nøkkel(k["binop"], op) {
                 _pop_verdi(k, q, st, op)
                 _pop_verdi(k, q, st, op)
                 _push(st, "v")
-                _bruk_atom(k, _binær_atom(op))
+                _bruk_atom(k, k["binop"][op])
             } ellers hvis op == "COMPARE_EQ" eller op == "COMPARE_NE" {
                 _pop_verdi(k, q, st, op)
                 _pop_verdi(k, q, st, op)
                 _push(st, "v")
                 _bruk_atom(k, "lik")
                 _bruk_atom(k, "bool")
-            } ellers hvis _samanlikn_atom(op) != "" {
+            } ellers hvis finnes_nøkkel(k["cmpop"], op) {
                 _pop_verdi(k, q, st, op)
                 _pop_verdi(k, q, st, op)
                 _push(st, "v")
-                _bruk_atom(k, _samanlikn_atom(op))
+                _bruk_atom(k, k["cmpop"][op])
                 _bruk_atom(k, "bool")
             } ellers hvis op == "UNARY_NEG" {
                 _pop_verdi(k, q, st, op)
@@ -452,9 +464,9 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
         _push(st, "v")
         returner 0
     }
-    hvis builtin.starts_with(namn, vm) og vert.er_vertsfunksjon(builtin.slice(namn, lengde(vm), lengde(namn))) {
+    hvis builtin.starts_with(namn, vm) og finnes_nøkkel(k["vert_idx"], builtin.slice(namn, lengde(vm), lengde(namn))) {
         la kort = builtin.slice(namn, lengde(vm), lengde(namn))
-        la vf = vert.vertsfunksjon(kort)
+        la vf = k["vert_idx"][kort]
         hvis vf["berre_test"] og ikkje k["testbygg"] {
             _feil(k, q, "vertsfunksjonen " + kort + " finst berre i testbygg (NC_WASM_TESTBYGG=1)")
         }
@@ -650,8 +662,8 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
     } ellers hvis op == "STORE_GLOBAL" {
         legg_til(b, 36)
         _la_til(b, _leb(k["glob_idx"][a["modul"] + "." + tekst(ins[1])]))
-    } ellers hvis _binær_atom(op) != "" {
-        _la_til(b, _kall(k, _binær_atom(op)))
+    } ellers hvis finnes_nøkkel(k["binop"], op) {
+        _la_til(b, _kall(k, k["binop"][op]))
     } ellers hvis op == "COMPARE_EQ" {
         _la_til(b, _kall(k, "lik"))
         _la_til(b, _kall(k, "bool"))
@@ -659,8 +671,8 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
         _la_til(b, _kall(k, "lik"))
         legg_til(b, 69)
         _la_til(b, _kall(k, "bool"))
-    } ellers hvis _samanlikn_atom(op) != "" {
-        _la_til(b, _kall(k, _samanlikn_atom(op)))
+    } ellers hvis finnes_nøkkel(k["cmpop"], op) {
+        _la_til(b, _kall(k, k["cmpop"][op]))
         _la_til(b, _kall(k, "bool"))
     } ellers hvis op == "UNARY_NEG" {
         _la_til(b, _kall(k, "neg"))
@@ -923,7 +935,7 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     k["type_nøkkel"]["$boks"] = 0
     k["type_nøkkel"]["$bool"] = 1
 
-    la tabell = vert.vertsfunksjonar()
+    la tabell = k["tabell"]
     la vert_liste = []
     la ti = 0
     mens ti < lengde(tabell) {

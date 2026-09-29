@@ -1,0 +1,141 @@
+# Felles hjelparar for WASM-testane (W0): barneprosessar med eksplisitt, ikkje-arva miljø
+# (NORSCODE_CMD/FILE frå ein CI-adapter kan då ikkje vinne), kompilering av klientmodular
+# og bygg med tools/nc_wasm.no. Alt som blir skrive, hamnar under build/wasm/.
+bruk std.runtime.process_abi som process_abi
+bruk std.wasm_les som les
+
+funksjon root() -> tekst {
+    returner tekst(builtin.system_info()["cwd"])
+}
+
+funksjon runtime() -> tekst {
+    returner tekst(builtin.system_info()["executable"])
+}
+
+funksjon grunnmiljø(rot: tekst) -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_ROOT": rot,
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_FAKE_HTTP_REQUESTS": ""
+    }
+}
+
+# Køyr runtimen synkront med miljøkontrakten. Gjev {"exit", "stdout", "stderr", "status"}.
+funksjon køyr_nc(miljø: ordbok_tekst, timeout_ms: heltall) -> ordbok {
+    la rot = root()
+    la req = process_abi.request(runtime(), [], rot, "", timeout_ms, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, miljø)
+    la res = builtin.process_spawn_argv(req)
+    la ec = -1
+    hvis finnes_nøkkel(res, "exit_code") { ec = heltall_fra_tekst(tekst(res["exit_code"])) }
+    returner {"exit": ec, "stdout": tekst(res["stdout"]), "stderr": tekst(res["stderr"]), "status": tekst(res["status"])}
+}
+
+funksjon krev_ok(namn: tekst, r: ordbok) -> heltall {
+    hvis r["status"] != "ferdig" eller r["exit"] != 0 {
+        skriv(namn + " feila: status=" + r["status"] + " exit=" + tekst(r["exit"]) + "\nstdout:\n" + r["stdout"] + "\nstderr:\n" + r["stderr"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+# `nc compile kjelde -o ut` (kjelde og ut relative til rota).
+funksjon kompiler_ncb(kjelde: tekst, ut: tekst) -> heltall {
+    la rot = root()
+    la m = grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "compile"
+    m["NORSCODE_FILE"] = rot + "/" + kjelde
+    m["NORSCODE_OUTPUT"] = rot + "/" + ut
+    m["NORSCODE_VM_FAST"] = "1"
+    krev_ok("nc compile " + kjelde, køyr_nc(m, 300000))
+    returner 0
+}
+
+funksjon les_ncb(sti: tekst) -> ordbok {
+    returner builtin.json_parse_raw(fil_les(root() + "/" + sti))
+}
+
+funksjon mkdir(sti: tekst) -> heltall {
+    builtin.mkdir_p(root() + "/" + sti)
+    returner 0
+}
+
+# Kompiler kjelde til NCB og byggjer ho med tools/nc_wasm.no (verktøyet køyrer i
+# VM-fastmodus, som kompilatoren). Gjev utdatalinja frå verktøyet.
+funksjon bygg_klient(kjelde: tekst, utmappe: tekst, testbygg: bool) -> tekst {
+    mkdir(utmappe)
+    kompiler_ncb(kjelde, utmappe + "/klient.ncb.json")
+    la rot = root()
+    la m = grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = rot + "/tools/nc_wasm.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_NCB"] = utmappe + "/klient.ncb.json"
+    m["NC_WASM_UT"] = utmappe
+    hvis testbygg { m["NC_WASM_TESTBYGG"] = "1" } ellers { m["NC_WASM_TESTBYGG"] = "" }
+    la r = køyr_nc(m, 300000)
+    krev_ok("nc_wasm " + kjelde, r)
+    la ut = r["stdout"]
+    la p = builtin.index_of(ut, "WASM: ")
+    hvis p < 0 {
+        skriv("fann ikkje WASM-linja i utdata frå nc_wasm:\n" + ut + "\n")
+        assert(usann)
+    }
+    la linje = builtin.slice(ut, p, lengde(ut))
+    la nl = builtin.index_of(linje, "\n")
+    la bs = builtin.index_of(linje, "\\")
+    hvis bs >= 0 og (nl < 0 eller bs < nl) { nl = bs }
+    hvis nl >= 0 { linje = builtin.slice(linje, 0, nl) }
+    returner linje
+}
+
+# Kopi av examples/wasm_teljar/app.no som importerer klient_data frå `utmappe` (under
+# build/wasm/) i staden for build/wasm/wasm_teljar. Resten av appen er uendra.
+funksjon app_kopi(utmappe: tekst) -> tekst {
+    la rot = root()
+    la src = fil_les(rot + "/examples/wasm_teljar/app.no")
+    la gammal = "bruk build.wasm.wasm_teljar.klient_data som klient"
+    hvis builtin.index_of(src, gammal) < 0 {
+        skriv("examples/wasm_teljar/app.no importerer ikkje " + gammal + "\n")
+        assert(usann)
+    }
+    la ny = "bruk " + builtin.replace(utmappe, "/", ".") + ".klient_data som klient"
+    fil_skriv(rot + "/" + utmappe + "/app.no", builtin.replace(src, gammal, ny))
+    returner utmappe + "/app.no"
+}
+
+# Filinnhald som byteliste (fil_les er byte-eksakt; char_code per byte).
+funksjon les_bytar(sti: tekst) -> liste {
+    la t = fil_les(root() + "/" + sti)
+    la ut = []
+    la i = 0
+    mens i < lengde(t) {
+        legg_til(ut, builtin.char_code(builtin.slice(t, i, i + 1)))
+        i = i + 1
+    }
+    returner ut
+}
+
+# Verdien etter «nøkkel=» i ei linje (t.d. v=abc123 i WASM-linja).
+funksjon felt(linje: tekst, nøkkel: tekst) -> tekst {
+    la p = builtin.index_of(linje, nøkkel + "=")
+    hvis p < 0 { returner "" }
+    la rest = builtin.slice(linje, p + lengde(nøkkel) + 1, lengde(linje))
+    la s = builtin.index_of(rest, " ")
+    la k = builtin.index_of(rest, ",")
+    hvis k >= 0 og (s < 0 eller k < s) { s = k }
+    hvis s >= 0 { rest = builtin.slice(rest, 0, s) }
+    returner builtin.trim(rest)
+}

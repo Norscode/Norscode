@@ -1,0 +1,228 @@
+# W0 (WASM-sporet): NCB → WasmGC-lowring og strukturell validator.
+#
+#   1. Validatoren godtek fasitmodulane frå W0-proben (WasmGC-typar og exnref-unnatak,
+#      validerte i Chromium) og ein handbygd modul med import, kall, lokal og blokk.
+#   2. Validatoren AVVISER den same modulen med éin feil om gongen (importtype utanfor,
+#      kall utanfor, lokal utanfor, greinedjupn utanfor, manglande end, feil
+#      seksjonsrekkjefølgje, feil magic, avkorta fil, eksport utanfor). Kvar negativ
+#      har ein positiv kontroll, så porten diskriminerer.
+#   3. Korpuset (tests/wasm_korpus/*.no og examples/wasm_teljar/klient.no) blir kompilert
+#      med `nc compile` og bygd med tools/nc_wasm.no i barneprosessar (minimal.no blir
+#      òg lowra her, i testmodusen sin VM) og godteke av validatoren, med dei
+#      venta importane og eksportane. minimal.no er byte-eksakt mot ein fasit.
+#   4. feil_ustotta.no gjev kompileringsfeil med ALLE funna (fail-closed), også frå CLI-en
+#      (exit 1, ingen app.wasm); test_klikk
+#      blir berre godteken i testbygg.
+#   5. Versjonen er sha256 over bytane: éin endra byte gjev ny versjon.
+bruk std.wasm_binary som w
+bruk std.wasm_lowring som lowring
+bruk std.wasm_les som les
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon la_til(m: liste, k: liste) -> heltall {
+    la i = 0
+    mens i < lengde(k) {
+        legg_til(m, k[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+# Handbygd modul: type 0 = (i32) -> i32, import nc.f (type imp_type), funksjon g (type 0)
+# eksportert som «g» (indeks eksp): block { local.get 0; call kall; local.set lokal; br djup }
+# local.get 1. Med standardverdiane (0, 0, 1, 0, 1, sann) er modulen gyldig.
+funksjon testmodul(imp_type: heltall, kall: heltall, lokal: heltall, djup: heltall,
+                   eksp: heltall, med_end: bool) -> liste {
+    la m = [0, 97, 115, 109, 1, 0, 0, 0]
+    la_til(m, w.seksjon(1, [1, 96, 1, 127, 1, 127]))
+    la_til(m, w.seksjon(2, [1, 2, 110, 99, 1, 102, 0, imp_type]))
+    la_til(m, w.seksjon(3, [1, 0]))
+    la_til(m, w.seksjon(7, [1, 1, 103, 0, eksp]))
+    la kropp = [1, 1, 127, 2, 64, 32, 0, 16, kall, 33, lokal, 12, djup, 11, 32, 1]
+    hvis med_end { legg_til(kropp, 11) }
+    la kode = [1]
+    la_til(kode, w.leb_u(lengde(kropp)))
+    la_til(kode, kropp)
+    la_til(m, w.seksjon(10, kode))
+    returner m
+}
+
+funksjon krev_avvist(namn: tekst, bytar: liste, forventa: tekst) -> heltall {
+    la r = les.valider(bytar)
+    hvis r["ok"] {
+        skriv("validatoren godtok " + namn + " (skulle avvise)\n")
+        assert(usann)
+    }
+    hvis builtin.index_of(r["feil"], forventa) < 0 {
+        skriv(namn + ": venta feil med «" + forventa + "», fekk: " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon krev_godteken(namn: tekst, bytar: liste) -> ordbok {
+    la r = les.valider(bytar)
+    hvis ikkje r["ok"] {
+        skriv("validatoren avviste " + namn + ": " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner r["info"]
+}
+
+funksjon like_lister(a: liste, b: liste) -> bool {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) {
+        hvis tekst(a[i]) != tekst(b[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon lowr(kjelde: tekst, namn: tekst, testbygg: bool) -> ordbok {
+    la ncb_sti = "build/wasm/test_w0/" + namn + ".ncb.json"
+    hjelp.kompiler_ncb(kjelde, ncb_sti)
+    returner lowring.kompiler(hjelp.les_ncb(ncb_sti), {"testbygg": testbygg})
+}
+
+# Bygg med CLI-en (tools/nc_wasm.no i ein barneprosess), les app.wasm og valider her.
+funksjon krev_bygd(kjelde: tekst, namn: tekst, importar: liste, eksportar: liste) -> liste {
+    la ut = "build/wasm/test_w0/" + namn
+    la linje = hjelp.bygg_klient(kjelde, ut, usann)
+    la bytar = hjelp.les_bytar(ut + "/app.wasm")
+    assert_eq(hjelp.felt(linje, "v"), lowring.versjon(bytar))
+    la info = krev_godteken(namn, bytar)
+    hvis ikkje like_lister(info["importar"], importar) {
+        skriv(namn + ": importar " + builtin.join(info["importar"], ",") + ", venta " + builtin.join(importar, ",") + "\n")
+        assert(usann)
+    }
+    hvis ikkje like_lister(info["eksportar"], eksportar) {
+        skriv(namn + ": eksportar " + builtin.join(info["eksportar"], ",") + ", venta " + builtin.join(eksportar, ",") + "\n")
+        assert(usann)
+    }
+    returner bytar
+}
+
+funksjon inneheld_feil(res: ordbok, nål: tekst) -> bool {
+    la i = 0
+    mens i < lengde(res["feil"]) {
+        hvis builtin.index_of(tekst(res["feil"][i]), nål) >= 0 { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir("build/wasm/test_w0")
+
+    # ── 1. Fasitmodular frå proben (WasmGC og exnref) ──
+    la gc = les.frå_hex("0061736d010000000110045f017e015e78016000017e6000017f030403020303071d030767635f626f6b7300000369333100010974656b73745f6c656e00020a23030e004229fb0000fb02000042017c0b08004179fb1cfb1d0b09004105fb0701fb0f0b")
+    la gi = krev_godteken("GC-fasit", gc)
+    assert_eq(lengde(gi["typar"]), 4)
+    assert_eq(gi["typar"][0]["art"], "struct")
+    assert_eq(gi["typar"][1]["art"], "array")
+    assert_eq(gi["typar"][2]["art"], "func")
+    assert(like_lister(gi["eksportar"], ["gc_boks", "i31", "tekst_len"]))
+    la eh = les.frå_hex("0061736d01000000010a0260017f0060017f017f030201010d030100000708010470726f7600000a19011700027f1f4001000000200008000b417f0f0b41e4006a0b")
+    la ei = krev_godteken("EH-fasit", eh)
+    assert_eq(ei["n_tag"], 1)
+
+    # ── 2. Handbygd modul: positiv kontroll og éin feil om gongen ──
+    krev_godteken("testmodul", testmodul(0, 0, 1, 0, 1, sann))
+    krev_avvist("importtype utanfor", testmodul(5, 0, 1, 0, 1, sann), "typeindeks 5 utanfor")
+    krev_avvist("kall utanfor", testmodul(0, 2, 1, 0, 1, sann), "call 2 utanfor")
+    krev_avvist("lokal utanfor", testmodul(0, 0, 2, 0, 1, sann), "lokal 2 utanfor")
+    krev_avvist("greinedjupn utanfor", testmodul(0, 0, 1, 2, 1, sann), "greinedjupn 2 utanfor")
+    krev_avvist("eksport utanfor", testmodul(0, 0, 1, 0, 2, sann), "funksjon 2 utanfor")
+    krev_avvist("manglande end", testmodul(0, 0, 1, 0, 1, usann), "manglar avsluttande end")
+    la feil_magic = testmodul(0, 0, 1, 0, 1, sann)
+    feil_magic[1] = 98
+    krev_avvist("feil magic", feil_magic, "feil magic")
+    la avkorta = testmodul(0, 0, 1, 0, 1, sann)
+    la kort = []
+    la ki = 0
+    mens ki < lengde(avkorta) - 3 {
+        legg_til(kort, avkorta[ki])
+        ki = ki + 1
+    }
+    krev_avvist("avkorta", kort, "forbi slutten")
+    # Funksjonsseksjonen (3) før importseksjonen (2)
+    la byta = [0, 97, 115, 109, 1, 0, 0, 0]
+    la_til(byta, w.seksjon(1, [1, 96, 1, 127, 1, 127]))
+    la_til(byta, w.seksjon(3, [1, 0]))
+    la_til(byta, w.seksjon(2, [1, 2, 110, 99, 1, 102, 0, 0]))
+    krev_avvist("seksjonsrekkjefølgje", byta, "feil rekkjefølgje")
+
+    # ── 3. Korpus ──
+    # minimal.no blir lowra her (i testmodusen sin VM), dei andre med CLI-en. Alle blir
+    # validerte her.
+    la min_res = lowr("tests/wasm_korpus/minimal.no", "minimal", usann)
+    hvis ikkje min_res["ok"] {
+        skriv(lowring.feilrapport(min_res))
+        assert(usann)
+    }
+    la minimal = min_res["bytar"]
+    la min_info = krev_godteken("minimal", minimal)
+    assert_eq(lengde(min_info["importar"]), 0)
+    assert(like_lister(min_info["eksportar"], ["i"]))
+    la fasit ="0061736d010000000120075f017e005f017f0060016d017e60017e016d60026d6d016d6000016d6000000307060203040505060618036401004100fb00010b6401004101fb00010b6d01d06d0b070501016900050a7d061c002000fb146c047e2000fb166cfb1dac052000fb1600fb0200000b0b2300200042808080807c59200042ffffffff035771046d2000a7fb1c052000fb00000b0b0d0020001000200110007c10010b1401026d4128fb1c4102fb1c1002240223020f000b0e01016d4100fb1c2402d06d0f000b080010041a10031a0b"
+    hvis les.til_hex(minimal) != fasit {
+        skriv("minimal.no er ikkje byte-eksakt mot fasiten:\n" + les.til_hex(minimal) + "\n")
+        assert(usann)
+    }
+    krev_bygd("tests/wasm_korpus/aritm.no", "aritm", ["finn", "sett_tekst"], ["m", "i"])
+    krev_bygd("tests/wasm_korpus/kontroll.no", "kontroll", ["finn", "sett_tekst"], ["m", "i"])
+    krev_bygd("examples/wasm_teljar/klient.no", "teljar", ["finn", "sett_tekst", "sett_html", "lytt_klikk"], ["m", "i", "k0"])
+    # CLI-en med same NCB som minimal gjev byte-identisk modul
+    la min_cli = krev_bygd("tests/wasm_korpus/minimal.no", "minimal_cli", [], ["i"])
+    assert_eq(les.til_hex(min_cli), fasit)
+
+    # ── 4. Fail-closed: alle funna i éin rapport ──
+    la feil = lowr("tests/wasm_korpus/feil_ustotta.no", "feil_ustotta", usann)
+    assert(ikkje feil["ok"])
+    assert(ikkje finnes_nøkkel(feil, "bytar"))
+    assert(inneheld_feil(feil, "konstant av typen desimaltall"))
+    assert(inneheld_feil(feil, "ustøtta opcode BUILD_LIST"))
+    assert(inneheld_feil(feil, "tekst er berre støtta som konstant argument"))
+    assert(inneheld_feil(feil, "ustøtta builtin: lengde_ukjend"))
+    assert(inneheld_feil(feil, "test_klikk finst berre i testbygg"))
+    assert(inneheld_feil(feil, "finn ikkje funksjonen finst_ikkje"))
+    assert_eq(lengde(feil["feil"]), 6)
+    # Testbygg: test_klikk er lov, resten feilar framleis.
+    la feil_t = lowring.kompiler(hjelp.les_ncb("build/wasm/test_w0/feil_ustotta.ncb.json"), {"testbygg": sann})
+    assert(ikkje feil_t["ok"])
+    assert(ikkje inneheld_feil(feil_t, "test_klikk"))
+    assert_eq(lengde(feil_t["feil"]), 5)
+    # CLI-en: exit 1, rapporten listar alle seks, og ingen app.wasm blir skriven.
+    hjelp.mkdir("build/wasm/test_w0/feil_cli")
+    hvis builtin.fil_finnes(hjelp.root() + "/build/wasm/test_w0/feil_cli/app.wasm") { builtin.fil_slett(hjelp.root() + "/build/wasm/test_w0/feil_cli/app.wasm") }
+    hjelp.kompiler_ncb("tests/wasm_korpus/feil_ustotta.no", "build/wasm/test_w0/feil_cli/klient.ncb.json")
+    la m = hjelp.grunnmiljø(hjelp.root())
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = hjelp.root() + "/tools/nc_wasm.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_NCB"] = "build/wasm/test_w0/feil_cli/klient.ncb.json"
+    m["NC_WASM_UT"] = "build/wasm/test_w0/feil_cli"
+    la r = hjelp.køyr_nc(m, 300000)
+    assert(r["exit"] != 0)
+    assert(builtin.index_of(r["stdout"], "WASM-kompilering feila (6 feil)") >= 0)
+    assert(builtin.index_of(r["stdout"], "ustøtta builtin: lengde_ukjend") >= 0)
+    assert(ikkje builtin.fil_finnes(hjelp.root() + "/build/wasm/test_w0/feil_cli/app.wasm"))
+
+    # ── 5. Versjon over bytane ──
+    la v = lowring.versjon(minimal)
+    assert_eq(lengde(v), 12)
+    assert_eq(v, builtin.slice(builtin.sha256_bytes(minimal), 0, 12))
+    la kopi = []
+    la i = 0
+    mens i < lengde(minimal) {
+        legg_til(kopi, minimal[i])
+        i = i + 1
+    }
+    assert_eq(lowring.versjon(kopi), v)
+    kopi[lengde(kopi) - 2] = (kopi[lengde(kopi) - 2] + 1) & 255
+    assert(lowring.versjon(kopi) != v)
+
+    skriv("test_wasm_w0 OK\n")
+    returner 0
+}

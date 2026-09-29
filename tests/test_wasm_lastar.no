@@ -1,0 +1,377 @@
+# W0 (WASM-sporet): lastaren blir emittert frå Norscode-data, ikkje frå ein handskriven mal.
+#
+#   1. Byte-tak: lastaren for teljar-settet (4 importar) ≤ 600 byte, eitt import ≤ 400,
+#      heile vertstabellen ≤ 700.
+#   2. Tree-shaking: berre importerte vertsfunksjonar og hjelparane dei treng kjem med.
+#      Importnamna i lastaren er nøyaktig importseksjonen i modulen (sjekken diskriminerer:
+#      ein lastar med ein ekstra import blir avvist).
+#   3. Strukturen kjem frå data: endrar ein vertstabellen (ny DOM-operasjon, ny funksjon),
+#      endrar lastaren seg tilsvarande.
+#   4. Ingen handskrivne malar: ingen strengliteral i std/wasm_js.no eller
+#      std/wasm_vert.no er eit JS-fragment (skannaren diskriminerer: han flaggar ein
+#      handskriven lastarbit), og kvart kodetoken i lastaren finst som literal i éi av
+#      dei to filene (proveniens).
+#   5. Tryggleik: ingen eval/Function/document.write/on…-attributt; innerHTML blir berre
+#      sett via escape-hjelparen, og html_escape er lik std.html.escape.
+bruk std.wasm_js som js
+bruk std.wasm_vert som vert
+bruk std.wasm_lowring som lowring
+bruk std.wasm_les som les
+bruk std.html som html
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon tak_teljar() -> heltall { returner 600 }
+funksjon tak_eitt_import() -> heltall { returner 400 }
+funksjon tak_fullt() -> heltall { returner 700 }
+
+funksjon url() -> tekst { returner "/_nc/app.wasm?v=0123456789ab" }
+
+funksjon teljar_importar() -> liste { returner ["finn", "sett_tekst", "sett_html", "lytt_klikk"] }
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool { returner builtin.index_of(t, nål) >= 0 }
+
+funksjon tal_av(t: tekst, nål: tekst) -> heltall {
+    la n = 0
+    la rest = t
+    la p = builtin.index_of(rest, nål)
+    mens p >= 0 {
+        n = n + 1
+        rest = builtin.slice(rest, p + lengde(nål), lengde(rest))
+        p = builtin.index_of(rest, nål)
+    }
+    returner n
+}
+
+# ─── Enkel JS-tokenisering (for proveniens- og fragmentsjekken) ──────────────
+
+funksjon er_id(c: tekst) -> bool {
+    hvis c == "" { returner usann }
+    la k = builtin.char_code(c)
+    returner (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 36
+}
+
+# Token i ein JS-tekst. Strengliteralar og regex-literalar blir eitt token kvar
+# (prefiks «"» eller «/»), identifikatorar og tal eitt token, «=>» eitt token, anna
+# teiknsetjing eitt teikn per token.
+funksjon js_token(t: tekst) -> liste {
+    la ut = []
+    la i = 0
+    la n = lengde(t)
+    mens i < n {
+        la c = builtin.slice(t, i, i + 1)
+        hvis c == " " {
+            i = i + 1
+        } ellers hvis c == "\"" {
+            la j = i + 1
+            mens j < n og builtin.slice(t, j, j + 1) != "\"" {
+                hvis builtin.slice(t, j, j + 1) == "\\" { j = j + 1 }
+                j = j + 1
+            }
+            legg_til(ut, builtin.slice(t, i, j + 1))
+            i = j + 1
+        } ellers hvis c == "/" og builtin.slice(t, i + 1, i + 2) == "[" {
+            la j = i + 2
+            mens j < n og builtin.slice(t, j, j + 1) != "]" {
+                hvis builtin.slice(t, j, j + 1) == "\\" { j = j + 1 }
+                j = j + 1
+            }
+            # «]/» og flagg
+            j = j + 2
+            mens j < n og er_id(builtin.slice(t, j, j + 1)) { j = j + 1 }
+            legg_til(ut, builtin.slice(t, i, j))
+            i = j
+        } ellers hvis er_id(c) {
+            la j = i
+            mens j < n og er_id(builtin.slice(t, j, j + 1)) { j = j + 1 }
+            legg_til(ut, builtin.slice(t, i, j))
+            i = j
+        } ellers hvis c == "=" og builtin.slice(t, i + 1, i + 2) == ">" {
+            legg_til(ut, "=>")
+            i = i + 2
+        } ellers {
+            legg_til(ut, c)
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+# Strengliteralane i ei Norscode-kjeldefil (utan kommentarar), avkoda.
+funksjon literalar(src: tekst) -> liste {
+    la ut = []
+    la i = 0
+    la n = lengde(src)
+    mens i < n {
+        la c = builtin.slice(src, i, i + 1)
+        hvis c == "#" eller (c == "/" og builtin.slice(src, i + 1, i + 2) == "/") {
+            mens i < n og builtin.slice(src, i, i + 1) != "\n" { i = i + 1 }
+        } ellers hvis c == "\"" {
+            la s = ""
+            i = i + 1
+            mens i < n og builtin.slice(src, i, i + 1) != "\"" {
+                la d = builtin.slice(src, i, i + 1)
+                hvis d == "\\" {
+                    la e = builtin.slice(src, i + 1, i + 2)
+                    hvis e == "n" { s = s + "\n" } ellers { s = s + e }
+                    i = i + 2
+                } ellers {
+                    s = s + d
+                    i = i + 1
+                }
+            }
+            legg_til(ut, s)
+            i = i + 1
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon er_html_entitet(s: tekst) -> bool {
+    hvis lengde(s) < 3 { returner usann }
+    hvis builtin.slice(s, 0, 1) != "&" eller builtin.slice(s, lengde(s) - 1, lengde(s)) != ";" { returner usann }
+    la i = 1
+    mens i < lengde(s) - 1 {
+        la c = builtin.slice(s, i, i + 1)
+        hvis ikkje er_id(c) og c != "#" { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# Eit JS-fragment er ein literal med minst to token der minst eitt er ein identifikator
+# og minst eitt er strukturell JS-teiknsetjing — t.d. «E[a].textContent=b» eller
+# «(async()=>{let d=document». Enkelttoken («=>», «textContent», «{}») er ikkje fragment.
+funksjon er_js_fragment(s: tekst) -> bool {
+    hvis er_html_entitet(s) { returner usann }
+    la tok = js_token(s)
+    hvis lengde(tok) < 2 { returner usann }
+    la har_id = usann
+    la har_struktur = usann
+    la i = 0
+    mens i < lengde(tok) {
+        la t = tekst(tok[i])
+        hvis er_id(builtin.slice(t, 0, 1)) { har_id = sann }
+        hvis t == "(" eller t == ")" eller t == "{" eller t == "}" eller t == "[" eller t == "]" eller t == ";" eller t == "=" eller t == "=>" {
+            har_struktur = sann
+        }
+        i = i + 1
+    }
+    returner har_id og har_struktur
+}
+
+# Importnamna (nøklane i nc-objektet) i ein lastar, i rekkjefølgje.
+funksjon lastar_importar(js_tekst: tekst) -> liste {
+    la tok = js_token(js_tekst)
+    la ut = []
+    la i = 0
+    mens i + 3 < lengde(tok) {
+        hvis tok[i] == "nc" og tok[i + 1] == ":" og tok[i + 2] == "{" {
+            la djup = 0
+            la j = i + 3
+            la forventar_nøkkel = sann
+            mens j < lengde(tok) {
+                la t = tekst(tok[j])
+                hvis t == "(" eller t == "[" eller t == "{" { djup = djup + 1 }
+                hvis t == ")" eller t == "]" { djup = djup - 1 }
+                hvis t == "}" {
+                    hvis djup == 0 { returner ut }
+                    djup = djup - 1
+                }
+                hvis djup == 0 og t == "," { forventar_nøkkel = sann }
+                ellers hvis djup == 0 og forventar_nøkkel og j + 1 < lengde(tok) og tok[j + 1] == ":" {
+                    legg_til(ut, t)
+                    forventar_nøkkel = usann
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon like_lister(a: liste, b: liste) -> bool {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) {
+        hvis tekst(a[i]) != tekst(b[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon balansert(t: tekst) -> bool {
+    la tok = js_token(t)
+    la stakk = []
+    la i = 0
+    mens i < lengde(tok) {
+        la x = tekst(tok[i])
+        hvis x == "(" eller x == "[" eller x == "{" { legg_til(stakk, x) }
+        hvis x == ")" eller x == "]" eller x == "}" {
+            hvis lengde(stakk) == 0 { returner usann }
+            la topp = tekst(stakk[lengde(stakk) - 1])
+            hvis (x == ")" og topp != "(") eller (x == "]" og topp != "[") eller (x == "}" og topp != "{") { returner usann }
+            la ny = []
+            la k = 0
+            mens k < lengde(stakk) - 1 {
+                legg_til(ny, stakk[k])
+                k = k + 1
+            }
+            stakk = ny
+        }
+        i = i + 1
+    }
+    returner lengde(stakk) == 0
+}
+
+funksjon kopi_tabell() -> liste {
+    returner vert.vertsfunksjonar()
+}
+
+funksjon start() -> heltall {
+    la rot = hjelp.root()
+
+    # ── 1. Byte-tak ──
+    la l_teljar = js.bygg_lastar(teljar_importar(), url(), sann)["js"]
+    la l_eitt = js.bygg_lastar(["sett_tekst"], url(), sann)["js"]
+    la alle_namn = []
+    la tab = vert.vertsfunksjonar()
+    la ti = 0
+    mens ti < lengde(tab) {
+        legg_til(alle_namn, tab[ti]["namn"])
+        ti = ti + 1
+    }
+    la l_fullt = js.bygg_lastar(alle_namn, url(), sann)["js"]
+    skriv("lastar: teljar " + tekst(lengde(l_teljar)) + " B (tak " + tekst(tak_teljar()) + "), eitt import " +
+        tekst(lengde(l_eitt)) + " B (tak " + tekst(tak_eitt_import()) + "), fullt " + tekst(lengde(l_fullt)) + " B (tak " + tekst(tak_fullt()) + ")\n")
+    assert(lengde(l_teljar) <= tak_teljar())
+    assert(lengde(l_eitt) <= tak_eitt_import())
+    assert(lengde(l_fullt) <= tak_fullt())
+    assert(balansert(l_teljar))
+    assert(balansert(l_fullt))
+    assert(ikkje balansert(l_teljar + ")"))
+
+    # ── 2. Tree-shaking og importnamn = importseksjonen ──
+    assert(ikkje inneheld(l_eitt, "TextDecoder"))
+    assert(ikkje inneheld(l_eitt, "H="))
+    assert(ikkje inneheld(l_eitt, "innerHTML"))
+    assert(ikkje inneheld(l_eitt, "addEventListener"))
+    la l_finn = js.bygg_lastar(["finn"], url(), sann)
+    assert(like_lister(l_finn["hjelparar"], ["E", "S"]))
+    la l_html = js.bygg_lastar(["sett_html"], url(), sann)
+    assert(like_lister(l_html["hjelparar"], ["E", "S", "H"]))
+    assert(ikkje inneheld(l_teljar, "test_klikk"))
+    assert(inneheld(l_fullt, "test_klikk"))
+    # Ekte modul: teljar-klienten, kompilert og lowra
+    hjelp.mkdir("build/wasm/test_lastar")
+    hjelp.kompiler_ncb("examples/wasm_teljar/klient.no", "build/wasm/test_lastar/klient.ncb.json")
+    la res = lowring.kompiler(hjelp.les_ncb("build/wasm/test_lastar/klient.ncb.json"), {})
+    assert(res["ok"])
+    la info = les.valider(res["bytar"])["info"]
+    la l_modul = js.bygg_lastar(res["importar"], url(), res["har_init"])["js"]
+    assert(like_lister(lastar_importar(l_modul), info["importar"]))
+    assert(like_lister(info["importar"], teljar_importar()))
+    # Diskriminerer: ein lastar med ein import meir enn modulen blir avvist.
+    la ekstra = []
+    la ei = 0
+    mens ei < lengde(res["importar"]) {
+        legg_til(ekstra, res["importar"][ei])
+        ei = ei + 1
+    }
+    legg_til(ekstra, "test_klikk")
+    assert(ikkje like_lister(lastar_importar(js.bygg_lastar(ekstra, url(), sann)["js"]), info["importar"]))
+    # Init-kallet kjem berre med når modulen har init
+    assert(inneheld(l_modul, "x.i()"))
+    assert(ikkje inneheld(js.bygg_lastar(["sett_tekst"], url(), usann)["js"], "x.i()"))
+    # URL-en med versjon er bakt inn
+    assert(inneheld(l_teljar, "fetch(\"/_nc/app.wasm?v=0123456789ab\")"))
+
+    # ── 3. Strukturen kjem frå vertstabellen ──
+    la t2 = kopi_tabell()
+    la i2 = 0
+    mens i2 < lengde(t2) {
+        hvis t2[i2]["namn"] == "sett_tekst" {
+            t2[i2]["op"] = ["tildel", ["felt", ["element", 0], "innerText"], ["arg", 1]]
+        }
+        i2 = i2 + 1
+    }
+    legg_til(t2, {"namn": "fokus", "param": ["handtak"], "resultat": "ingen", "berre_test": usann,
+                  "op": ["kall", ["felt", ["element", 0], "focus"], []]})
+    la l2 = js.bygg_lastar_frå_tabell(t2, ["sett_tekst", "fokus"], url(), sann)["js"]
+    assert(inneheld(l2, "sett_tekst:(a,b)=>E[a].innerText=b"))
+    assert(ikkje inneheld(l2, "textContent"))
+    assert(inneheld(l2, "fokus:a=>E[a].focus()"))
+    assert(inneheld(l_teljar, "sett_tekst:(a,b)=>E[a].textContent=b"))
+    # Escape-hjelparen er bygd frå escape_tabell: kvar entitet i tabellen står i lastaren.
+    la et = vert.escape_tabell()
+    la eti = 0
+    mens eti < lengde(et) {
+        assert(inneheld(l_teljar, et[eti][1]))
+        eti = eti + 1
+    }
+
+    # ── 4. Ingen handskrivne malar ──
+    la kjelder = ["std/wasm_js.no", "std/wasm_vert.no"]
+    la lit_sett = {}
+    la ki = 0
+    mens ki < lengde(kjelder) {
+        la lit = literalar(fil_les(rot + "/" + kjelder[ki]))
+        assert(lengde(lit) > 20)
+        la li = 0
+        mens li < lengde(lit) {
+            la s = tekst(lit[li])
+            hvis er_js_fragment(s) {
+                skriv(kjelder[ki] + ": strengliteralen «" + s + "» er eit JS-fragment (handskriven mal?)\n")
+                assert(usann)
+            }
+            lit_sett[s] = sann
+            li = li + 1
+        }
+        ki = ki + 1
+    }
+    # Skannaren diskriminerer
+    assert(er_js_fragment("(async()=>{let d=document"))
+    assert(er_js_fragment("E[a].textContent=b"))
+    assert(er_js_fragment("x.i()"))
+    assert(ikkje er_js_fragment("=>"))
+    assert(ikkje er_js_fragment("textContent"))
+    assert(ikkje er_js_fragment("{}"))
+    assert(ikkje er_js_fragment("&#x27;"))
+    assert(ikkje er_js_fragment("wasm_js: ukjend JS-node "))
+    # Proveniens: kvart kodetoken i lastaren (unnateke streng- og regexliteralar, som er
+    # data) er ein literal i emitteren eller vertsmodulen.
+    la tok = js_token(l_fullt)
+    la tki = 0
+    mens tki < lengde(tok) {
+        la t = tekst(tok[tki])
+        la f = builtin.slice(t, 0, 1)
+        la er_data = f == "\"" eller (f == "/" og lengde(t) > 1)
+        la er_tal = builtin.char_code(f) >= 48 og builtin.char_code(f) <= 57
+        hvis ikkje er_data og ikkje er_tal og ikkje finnes_nøkkel(lit_sett, t) {
+            skriv("lastartokenet «" + t + "» finst ikkje som literal i emitteren eller vertstabellen\n")
+            assert(usann)
+        }
+        tki = tki + 1
+    }
+
+    # ── 5. Tryggleik ──
+    assert(ikkje inneheld(l_fullt, "eval"))
+    assert(ikkje inneheld(l_fullt, "Function("))
+    assert(ikkje inneheld(l_fullt, "document.write"))
+    assert(ikkje inneheld(l_fullt, "setAttribute"))
+    assert(ikkje inneheld(l_fullt, "onclick"))
+    assert_eq(tal_av(l_fullt, "innerHTML="), 1)
+    assert(inneheld(l_fullt, "innerHTML=S(b,c).split(\"{}\").join(H(d))"))
+    la prøver = ["", "vanleg tekst", "<script>alert(\"x\")</script>", "a & b 'c' \"d\" <e>", "&amp; allereie", "blåbær <b>"]
+    la pi = 0
+    mens pi < lengde(prøver) {
+        assert_eq(vert.html_escape(prøver[pi]), html.escape(prøver[pi]))
+        pi = pi + 1
+    }
+    assert_eq(vert.html_frå_mal("<b>{}</b> og {}", "<i>&"), "<b>&lt;i&gt;&amp;</b> og &lt;i&gt;&amp;")
+
+    skriv("test_wasm_lastar OK\n")
+    returner 0
+}
