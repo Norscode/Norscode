@@ -1,46 +1,45 @@
-# std/wasm_lowring.no — NCB → WebAssembly med WasmGC-verdimodell (W0).
+# std/wasm_lowring.no — NCB → WebAssembly med WasmGC-verdimodell (W0 + W1).
 #
 # Inndata er NCB-JSON frå `nc compile` (parsa med json_parse_raw). Utdata er ein
 # WASM-modul (byteliste) som nettlesaren kan instansiere med lastaren frå std/wasm_js.no.
 #
-# Verdimodell (WasmGC): alle Norscode-verdiar er `eqref` (ref null eq).
-#   heltall   i31ref når verdien ligg i −2^30 … 2^30−1, elles struct $boks {i64}
-#             (kanonisk: små tal er alltid i31, så likskap kan samanlikne i64-verdiane)
-#   bool      to singleton-structar $bool {i32} i globalane 0 (usann) og 1 (sann)
-#   null      ref.null eq
-#   tekst     berre som konstant argument til vertsfunksjonar (W0): (i32 peikar, i32 lengd)
-#             inn i datasegmentet i minnet «m»
-# Aritmetikk og samanlikning går via små atomfunksjonar (til_i64, frå_i64, add, lik, …)
-# som blir emitterte som WASM-instruksjonar frå Norscode. Heltalsdivisjon og rest har same
-# semantikk som VM-en (trunkerande, i64.div_s/i64.rem_s). Deling på null gjev trap.
+# Verdimodell (WasmGC, sjå std/wasm_atom.no): alle Norscode-verdiar er `eqref`.
+#   heltall      i31ref i −2^30 … 2^30−1, elles struct $boks {i64} (kanonisk)
+#   bool         to singleton-structar $bool {i32} i globalane 0 (usann) og 1 (sann)
+#   null         ref.null eq
+#   desimaltall  struct $flyt {f64}
+#   tekst        array $tekst (mut i8): UTF-8-bytar som i VM-en (`lengde` tel bytar)
+#   liste        struct $liste {n, $arr} med amortisert vekst
+#   ordbok       struct $ordbok {n, nøklar, verdiar}, innsetjingsordna
+# Semantikken (polymorf +, blanda samanlikningar, sanning, tekst(x), feilmeldingar) ligg i
+# atoma i std/wasm_atom.no, som berre blir tekne med når modulen brukar dei.
 #
-# Subset i W0: PUSH_CONST (heltall/bool/null, tekst som vertsargument), LOAD/STORE_NAME,
+# Subset (W1): PUSH_CONST (heltall, desimaltall, tekst, bool, null), LOAD/STORE_NAME,
 # LOAD/STORE_GLOBAL, POP, DUP, BINARY_{ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,LSHIFT,RSHIFT},
-# COMPARE_{EQ,NE,LT,LE,GT,GE}, UNARY_{NEG,NOT}, JUMP, JUMP_IF_FALSE, LABEL, CALL
-# (brukarfunksjonar og vertsfunksjonar i std.wasm_vert), RETURN.
-# Alt anna — ukjende opkodar, `builtin.*`, flyttal, tekst som verdi — gjev
-# KOMPILERINGSFEIL med ei liste over alle funna. Det finst ingen stille fallback.
+# COMPARE_{EQ,NE,LT,LE,GT,GE}, UNARY_{NEG,NOT}, JUMP, JUMP_IF_FALSE, LABEL, BUILD_LIST,
+# BUILD_MAP, INDEX_GET, INDEX_SET, CALL (brukarfunksjonar, vertsfunksjonar i std.wasm_vert
+# og builtins i `builtin_tabell`), RETURN.
+# Alt anna — ukjende opkodar og builtins — gjev KOMPILERINGSFEIL med ei liste over alle
+# funna. Det finst ingen stille fallback.
 #
 # Kontrollflyt: basisblokker med stakkslot-lokale og ei dispatch-lykkje
 # (loop + br_table). Verdiar som flyt over etikettar (`og`/`eller`) blir lagra i slotane.
 #
-# Modulen: typar (boks, bool, funksjonstypar), importar «nc».<vertsfunksjon>, funksjonar
-# (innpakkarar for importane, atom, brukarfunksjonar, init), minne «m» (berre når det finst
-# tekstkonstantar), globalar, eksportar («m», «i» = init, «k0», «k1», … = funksjonar som
-# lytt_klikk peikar på), kode og data. Init («i») køyrer modulinitialiseringane og så
-# `start()`. Det finst ingen startseksjon: importane les minnet via eksportane, som først
-# finst etter instansieringa.
+# Modulen: typar (dei sju GC-typane, så funksjonstypar), importar «nc».<vertsfunksjon>,
+# funksjonar (innpakkarar for vertsfunksjonane klientkoden kallar, atom, brukarfunksjonar,
+# init), minne «m» (tekstkonstantar til vertsfunksjonane og postkassa for tekst over
+# JS-grensa), globalar, eksportar («m», «i» = init, «k0», «k1», … = funksjonar som
+# lytt_klikk peikar på), datacount, kode og data (passivt segment 0 med tekstliteralar for
+# array.new_data, aktivt segment med vertskonstantane). Init («i») køyrer
+# modulinitialiseringane og så `start()`.
 
 bruk std.wasm_binary som w
 bruk std.wasm_vert som vert
+bruk std.wasm_atom som a
 
 funksjon EQREF() -> heltall { returner 109 }
 funksjon I32() -> heltall { returner 127 }
 funksjon I64() -> heltall { returner 126 }
-funksjon T_BOKS() -> heltall { returner 0 }
-funksjon T_BOOL() -> heltall { returner 1 }
-funksjon I31_MIN() -> heltall { returner 0 - 1073741824 }
-funksjon I31_MAX() -> heltall { returner 1073741823 }
 
 funksjon _la_til(mål: liste, kjelde: liste) -> heltall {
     la i = 0
@@ -51,19 +50,10 @@ funksjon _la_til(mål: liste, kjelde: liste) -> heltall {
     returner 0
 }
 
-# Usignert LEB128 (same som w.leb_u, men utan ekstra kall: kall er dyre i VM-en).
+# Usignert LEB128 (utan ekstra kall for små tal: kall er dyre i VM-en).
 funksjon _leb(verdi: heltall) -> liste {
     hvis verdi >= 0 og verdi < 128 { returner [verdi] }
-    la ut = []
-    la n = verdi
-    mens sann {
-        la b = n & 127
-        n = n >> 7
-        hvis n != 0 { b = b | 128 }
-        legg_til(ut, b)
-        hvis n == 0 { returner ut }
-    }
-    returner ut
+    returner a.leb_u(verdi)
 }
 
 funksjon _type_namn(v) -> tekst {
@@ -73,122 +63,30 @@ funksjon _type_namn(v) -> tekst {
     returner t
 }
 
-# ─── Atom ────────────────────────────────────────────────────────────────────
+# ─── Tabellar ────────────────────────────────────────────────────────────────
 
-funksjon atom_rekkje() -> liste {
-    returner ["til_i64", "frå_i64", "sannhet", "bool", "er_tal", "lik",
-              "add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr",
-              "lt", "le", "gt", "ge", "neg"]
+# builtin.<namn> → [aritet, atom]. Alle andre builtins gjev «ustøtta builtin».
+funksjon builtin_tabell() -> ordbok {
+    returner {"skriv": [1, "skriv"], "lengde": [1, "lengde"], "tekst": [1, "tekst_av"],
+              "tekst_fra_heltall": [1, "tekst_av"], "heltall": [1, "heltall_av"],
+              "heltall_fra_tekst": [1, "heltall_av"], "legg_til": [2, "legg_til"],
+              "har_nokkel": [2, "har_nokkel"], "nøkler": [1, "nøkler"], "slice": [3, "slice"],
+              "char_code": [1, "char_code"], "chr": [1, "chr"], "type": [1, "type_namn"],
+              "for_iterabel": [1, "for_iterabel"]}
 }
 
-funksjon _atom_avheng(namn: tekst) -> liste {
-    hvis namn == "sannhet" { returner ["til_i64"] }
-    hvis namn == "lik" { returner ["er_tal", "til_i64"] }
-    hvis namn == "neg" { returner ["til_i64", "frå_i64"] }
-    hvis namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" { returner ["til_i64"] }
-    la bin = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr"]
-    la i = 0
-    mens i < lengde(bin) {
-        hvis bin[i] == namn { returner ["til_i64", "frå_i64"] }
-        i = i + 1
-    }
-    returner []
-}
-
-funksjon _i64_op(namn: tekst) -> heltall {
-    la namn_l = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr", "lt", "le", "gt", "ge"]
-    la kode = [124, 125, 126, 127, 129, 131, 132, 133, 134, 135, 83, 87, 85, 89]
-    la i = 0
-    mens i < lengde(namn_l) {
-        hvis namn_l[i] == namn { returner kode[i] }
-        i = i + 1
-    }
-    kast "wasm_lowring: ukjend i64-operasjon " + namn
-}
-
-# Signatur: [[param-typar], [resultat-typar]]
-funksjon _atom_sig(namn: tekst) -> liste {
-    hvis namn == "til_i64" { returner [[EQREF()], [I64()]] }
-    hvis namn == "frå_i64" { returner [[I64()], [EQREF()]] }
-    hvis namn == "sannhet" eller namn == "er_tal" { returner [[EQREF()], [I32()]] }
-    hvis namn == "bool" { returner [[I32()], [EQREF()]] }
-    hvis namn == "neg" { returner [[EQREF()], [EQREF()]] }
-    hvis namn == "lik" eller namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" {
-        returner [[EQREF(), EQREF()], [I32()]]
-    }
-    returner [[EQREF(), EQREF()], [EQREF()]]
-}
-
-funksjon _kall(k: ordbok, atom: tekst) -> liste {
-    la ut = [16]
-    _la_til(ut, _leb(k["atom_idx"][atom]))
-    returner ut
-}
-
-funksjon _atom_kropp(k: ordbok, namn: tekst) -> liste {
-    la b = []
-    la tb = T_BOKS()
-    la tbo = T_BOOL()
-    hvis namn == "til_i64" {
-        # i31 → i31.get_s + utvid; elles ref.cast $boks + struct.get (trap for bool/null)
-        _la_til(b, [32, 0, 251, 20, 108, 4, 126, 32, 0, 251, 22, 108, 251, 29, 172, 5, 32, 0, 251, 22, tb, 251, 2, tb, 0, 11])
-    } ellers hvis namn == "frå_i64" {
-        _la_til(b, [32, 0, 66])
-        _la_til(b, w.leb_s(I31_MIN()))
-        _la_til(b, [89, 32, 0, 66])
-        _la_til(b, w.leb_s(I31_MAX()))
-        _la_til(b, [87, 113, 4, EQREF(), 32, 0, 167, 251, 28, 5, 32, 0, 251, 0, tb, 11])
-    } ellers hvis namn == "sannhet" {
-        # null → 0; $bool → feltet; tal → != 0
-        _la_til(b, [32, 0, 209, 4, 127, 65, 0, 5, 32, 0, 251, 20, tbo, 4, 127, 32, 0, 251, 22, tbo, 251, 2, tbo, 0, 5, 32, 0])
-        _la_til(b, _kall(k, "til_i64"))
-        _la_til(b, [66, 0, 82, 11, 11])
-    } ellers hvis namn == "bool" {
-        _la_til(b, [32, 0, 4, EQREF(), 35, 1, 5, 35, 0, 11])
-    } ellers hvis namn == "er_tal" {
-        _la_til(b, [32, 0, 251, 20, 108, 32, 0, 251, 20, tb, 114])
-    } ellers hvis namn == "lik" {
-        # to tal: samanlikn i64-verdiane; elles referanselikskap (bool-singletonar, null)
-        _la_til(b, [32, 0])
-        _la_til(b, _kall(k, "er_tal"))
-        _la_til(b, [32, 1])
-        _la_til(b, _kall(k, "er_tal"))
-        _la_til(b, [113, 4, 127, 32, 0])
-        _la_til(b, _kall(k, "til_i64"))
-        _la_til(b, [32, 1])
-        _la_til(b, _kall(k, "til_i64"))
-        _la_til(b, [81, 5, 32, 0, 32, 1, 211, 11])
-    } ellers hvis namn == "neg" {
-        _la_til(b, [66, 0, 32, 0])
-        _la_til(b, _kall(k, "til_i64"))
-        legg_til(b, 125)
-        _la_til(b, _kall(k, "frå_i64"))
-    } ellers hvis namn == "lt" eller namn == "le" eller namn == "gt" eller namn == "ge" {
-        _la_til(b, [32, 0])
-        _la_til(b, _kall(k, "til_i64"))
-        _la_til(b, [32, 1])
-        _la_til(b, _kall(k, "til_i64"))
-        legg_til(b, _i64_op(namn))
-    } ellers {
-        _la_til(b, [32, 0])
-        _la_til(b, _kall(k, "til_i64"))
-        _la_til(b, [32, 1])
-        _la_til(b, _kall(k, "til_i64"))
-        legg_til(b, _i64_op(namn))
-        _la_til(b, _kall(k, "frå_i64"))
-    }
-    returner b
-}
-
-# NCB-opkode → atom (binære heiltalsoperasjonar og ordna samanlikningar).
+# NCB-opkode → atom.
 funksjon binær_atom_kart() -> ordbok {
-    returner {"BINARY_ADD": "add", "BINARY_SUB": "sub", "BINARY_MUL": "mul", "BINARY_DIV": "div",
-              "BINARY_MOD": "mod", "BINARY_AND": "and", "BINARY_OR": "or", "BINARY_XOR": "xor",
+    returner {"BINARY_ADD": "add", "BINARY_SUB": "sub", "BINARY_MUL": "mul",
+              "BINARY_AND": "and", "BINARY_OR": "or", "BINARY_XOR": "xor",
               "BINARY_LSHIFT": "shl", "BINARY_RSHIFT": "shr"}
 }
 
-funksjon samanlikn_atom_kart() -> ordbok {
-    returner {"COMPARE_LT": "lt", "COMPARE_LE": "le", "COMPARE_GT": "gt", "COMPARE_GE": "ge"}
+# Ordna samanlikningar: cmp gjev −1/0/1/2; tabellen er instruksjonane som gjer det om til
+# i32 (0/1) før bool-atomet.
+funksjon samanlikn_kart() -> ordbok {
+    returner {"COMPARE_LT": [65, 127, 70], "COMPARE_GT": [65, 1, 70],
+              "COMPARE_GE": [65, 2, 73], "COMPARE_LE": [65, 1, 106, 65, 2, 73]}
 }
 
 # ─── Kontekst ────────────────────────────────────────────────────────────────
@@ -206,9 +104,10 @@ funksjon _ny_kontekst(ncb: ordbok, testbygg: bool) -> ordbok {
     returner {
         "ncb": ncb, "fns": ncb["functions"], "globale": globale, "testbygg": testbygg,
         "vert_modul": "std.wasm_vert", "feil": [], "tabell": tabell, "vert_idx": vert_idx,
-        "binop": binær_atom_kart(), "cmpop": samanlikn_atom_kart(),
-        "nåbare": [], "nåbar_sett": {}, "analyse": {},
-        "vert_brukt": {}, "atom_brukt": {}, "tilbakekall": {}, "tilbakekall_liste": []
+        "binop": binær_atom_kart(), "cmpop": samanlikn_kart(), "builtins": builtin_tabell(),
+        "nåbare": [], "nåbar_sett": {}, "analyse": {}, "flyt": usann,
+        "vert_brukt": {}, "atom_direkte": {}, "tilbakekall": {}, "tilbakekall_liste": [],
+        "lit": [], "lit_idx": {}, "data": [], "strengar": {}
     }
 }
 
@@ -226,14 +125,35 @@ funksjon _legg_nåbar(k: ordbok, q: tekst) -> heltall {
 }
 
 funksjon _bruk_atom(k: ordbok, namn: tekst) -> heltall {
-    k["atom_brukt"][namn] = sann
-    la dep = _atom_avheng(namn)
+    k["atom_direkte"][namn] = sann
+    returner 0
+}
+
+# Transitiv lukking over atom_avheng (etter analysen, når k["flyt"] er kjend).
+funksjon _atom_lukking(k: ordbok) -> ordbok {
+    la sett = {}
+    la arbeid = []
+    la r = a.atom_rekkje()
     la i = 0
-    mens i < lengde(dep) {
-        k["atom_brukt"][dep[i]] = sann
+    mens i < lengde(r) {
+        hvis finnes_nøkkel(k["atom_direkte"], r[i]) { legg_til(arbeid, r[i]) }
         i = i + 1
     }
-    returner 0
+    la j = 0
+    mens j < lengde(arbeid) {
+        la n = tekst(arbeid[j])
+        hvis ikkje finnes_nøkkel(sett, n) {
+            sett[n] = sann
+            la dep = a.atom_avheng(n, k["flyt"])
+            la d = 0
+            mens d < lengde(dep) {
+                legg_til(arbeid, dep[d])
+                d = d + 1
+            }
+        }
+        j = j + 1
+    }
+    returner sett
 }
 
 # ─── Analyse (pass 1): blokker, stakkhøgder, roller for tekstkonstantar ───────
@@ -246,7 +166,8 @@ funksjon _push(st: ordbok, kind: tekst) -> heltall {
     returner 0
 }
 
-# Pop éin verdi. Gjev kinden («v» eller «t:<instruksjonsindeks>»), eller "" ved underflyt.
+# Pop éin verdi. Gjev kinden («v» eller «t:<instruksjonsindeks>» for ein tekstkonstant),
+# eller "" ved underflyt.
 funksjon _pop(st: ordbok) -> tekst {
     hvis st["h"] <= 0 { returner "" }
     st["h"] = st["h"] - 1
@@ -254,11 +175,15 @@ funksjon _pop(st: ordbok) -> tekst {
 }
 
 funksjon _pop_verdi(k: ordbok, q: tekst, st: ordbok, kva: tekst) -> heltall {
-    la kind = _pop(st)
-    hvis kind == "" {
-        _feil(k, q, "stakkunderflyt ved " + kva)
-    } ellers hvis kind != "v" {
-        _feil(k, q, "tekst er berre støtta som konstant argument til vertsfunksjonar i W0 (brukt av " + kva + ")")
+    hvis _pop(st) == "" { _feil(k, q, "stakkunderflyt ved " + kva) }
+    returner 0
+}
+
+funksjon _pop_n(k: ordbok, q: tekst, st: ordbok, n: heltall, kva: tekst) -> heltall {
+    la i = 0
+    mens i < n {
+        _pop_verdi(k, q, st, kva)
+        i = i + 1
     }
     returner 0
 }
@@ -267,14 +192,9 @@ funksjon _er_terminator(op: tekst) -> bool {
     returner op == "JUMP" eller op == "JUMP_IF_FALSE" eller op == "RETURN"
 }
 
-funksjon _flett(k: ordbok, q: tekst, a: ordbok, b2: heltall, st: ordbok, arbeid: liste) -> heltall {
+funksjon _flett(k: ordbok, q: tekst, an: ordbok, b2: heltall, st: ordbok, arbeid: liste) -> heltall {
     la h = st["h"]
-    la i = 0
-    mens i < h {
-        hvis st["k"][i] != "v" { _feil(k, q, "tekstkonstant kan ikkje flyte over ein etikett") }
-        i = i + 1
-    }
-    la hoyde = a["hoyde"]
+    la hoyde = an["hoyde"]
     hvis hoyde[b2] < 0 {
         hoyde[b2] = h
         legg_til(arbeid, b2)
@@ -290,26 +210,28 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
     la params = fd["params"]
     la kode = fd["code"]
     la n = lengde(kode)
-    la a = {"q": q, "modul": modul, "np": lengde(params), "lok": {}, "n_lok": 0,
-            "blokker": [], "labels": {}, "hoyde": [], "rolle": {}, "maks_slot": 0, "dup": usann}
-    k["analyse"][q] = a
+    la an = {"q": q, "modul": modul, "np": lengde(params), "lok": {}, "n_lok": 0,
+             "blokker": [], "labels": {}, "hoyde": [], "rolle": {}, "maks_slot": 0, "dup": usann,
+             "konst_div": {}}
+    k["analyse"][q] = an
     hvis finnes_nøkkel(fd, "is_async") og fd["is_async"] == sann {
-        _feil(k, q, "asynkrone funksjonar er ikkje støtta i W0")
+        _feil(k, q, "asynkrone funksjonar er ikkje støtta enno")
     }
     la i = 0
     mens i < lengde(params) {
-        a["lok"][tekst(params[i])] = i
+        an["lok"][tekst(params[i])] = i
         i = i + 1
     }
     # Lokale: alle STORE_NAME-mål som ikkje er parametrar
     i = 0
     mens i < n {
         la ins = kode[i]
-        hvis tekst(ins[0]) == "STORE_NAME" og ikkje finnes_nøkkel(a["lok"], tekst(ins[1])) {
-            a["lok"][tekst(ins[1])] = lengde(params) + a["n_lok"]
-            a["n_lok"] = a["n_lok"] + 1
+        la op0 = tekst(ins[0])
+        hvis op0 == "STORE_NAME" og ikkje finnes_nøkkel(an["lok"], tekst(ins[1])) {
+            an["lok"][tekst(ins[1])] = lengde(params) + an["n_lok"]
+            an["n_lok"] = an["n_lok"] + 1
         }
-        hvis tekst(ins[0]) == "DUP" { a["dup"] = sann }
+        hvis op0 == "DUP" { an["dup"] = sann }
         i = i + 1
     }
     # Basisblokker: leiarar ved 0, ved kvar LABEL og etter kvar terminator
@@ -329,9 +251,9 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
         hvis leiar[i] {
             la j = i + 1
             mens j < n og ikkje leiar[j] { j = j + 1 }
-            legg_til(a["blokker"], {"start": i, "slutt": j})
-            legg_til(a["hoyde"], -1)
-            hvis tekst(kode[i][0]) == "LABEL" { a["labels"][tekst(kode[i][1])] = lengde(a["blokker"]) - 1 }
+            legg_til(an["blokker"], {"start": i, "slutt": j})
+            legg_til(an["hoyde"], -1)
+            hvis tekst(kode[i][0]) == "LABEL" { an["labels"][tekst(kode[i][1])] = lengde(an["blokker"]) - 1 }
         }
         i = i + 1
     }
@@ -340,16 +262,16 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
         returner 0
     }
     # Stakkhøgder (arbeidsliste frå blokk 0)
-    a["hoyde"][0] = 0
+    an["hoyde"][0] = 0
     la arbeid = [0]
     la ai = 0
     mens ai < lengde(arbeid) {
         la bi = arbeid[ai]
         ai = ai + 1
-        la blk = a["blokker"][bi]
+        la blk = an["blokker"][bi]
         la st = {"k": [], "h": 0, "maks": 0}
         la hi = 0
-        mens hi < a["hoyde"][bi] { _push(st, "v")  hi = hi + 1 }
+        mens hi < an["hoyde"][bi] { _push(st, "v")  hi = hi + 1 }
         la avslutta = usann
         la ii = blk["start"]
         mens ii < blk["slutt"] {
@@ -360,12 +282,15 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 la tn = _type_namn(ins[1])
                 hvis tn == "heltall" eller tn == "bool" eller tn == "null" { _push(st, "v") }
                 ellers hvis tn == "tekst" { _push(st, "t:" + tekst(ii)) }
-                ellers {
-                    _feil(k, q, "konstant av typen " + tn + " er ikkje støtta i W0")
+                ellers hvis tn == "desimaltall" {
+                    k["flyt"] = sann
+                    _push(st, "v")
+                } ellers {
+                    _feil(k, q, "konstant av typen " + tn + " er ikkje støtta")
                     _push(st, "v")
                 }
             } ellers hvis op == "LOAD_NAME" {
-                hvis ikkje finnes_nøkkel(a["lok"], tekst(ins[1])) { _feil(k, q, "ukjend namn " + tekst(ins[1])) }
+                hvis ikkje finnes_nøkkel(an["lok"], tekst(ins[1])) { _feil(k, q, "ukjend namn " + tekst(ins[1])) }
                 _push(st, "v")
             } ellers hvis op == "STORE_NAME" {
                 _pop_verdi(k, q, st, "STORE_NAME " + tekst(ins[1]))
@@ -383,21 +308,34 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 hvis ikkje finst { _feil(k, q, "ukjend global " + modul + "." + gn) }
                 hvis op == "LOAD_GLOBAL" { _push(st, "v") } ellers { _pop_verdi(k, q, st, "STORE_GLOBAL " + gn) }
             } ellers hvis finnes_nøkkel(k["binop"], op) {
-                _pop_verdi(k, q, st, op)
-                _pop_verdi(k, q, st, op)
+                _pop_n(k, q, st, 2, op)
                 _push(st, "v")
                 _bruk_atom(k, k["binop"][op])
+            } ellers hvis op == "BINARY_DIV" eller op == "BINARY_MOD" {
+                # Konstant divisor ≠ 0 rett før: ingen nullsjekk (og ingen feilveg i modulen)
+                la atom = "div"
+                hvis op == "BINARY_MOD" { atom = "mod" }
+                hvis ii > blk["start"] {
+                    la førre = kode[ii - 1]
+                    hvis tekst(førre[0]) == "PUSH_CONST" og builtin.type(førre[1]) == "heltall" {
+                        hvis førre[1] != 0 {
+                            atom = atom + "_k"
+                            an["konst_div"][tekst(ii)] = sann
+                        }
+                    }
+                }
+                _pop_n(k, q, st, 2, op)
+                _push(st, "v")
+                _bruk_atom(k, atom)
             } ellers hvis op == "COMPARE_EQ" eller op == "COMPARE_NE" {
-                _pop_verdi(k, q, st, op)
-                _pop_verdi(k, q, st, op)
+                _pop_n(k, q, st, 2, op)
                 _push(st, "v")
                 _bruk_atom(k, "lik")
                 _bruk_atom(k, "bool")
             } ellers hvis finnes_nøkkel(k["cmpop"], op) {
-                _pop_verdi(k, q, st, op)
-                _pop_verdi(k, q, st, op)
+                _pop_n(k, q, st, 2, op)
                 _push(st, "v")
-                _bruk_atom(k, k["cmpop"][op])
+                _bruk_atom(k, "cmp")
                 _bruk_atom(k, "bool")
             } ellers hvis op == "UNARY_NEG" {
                 _pop_verdi(k, q, st, op)
@@ -408,6 +346,22 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 _push(st, "v")
                 _bruk_atom(k, "sannhet")
                 _bruk_atom(k, "bool")
+            } ellers hvis op == "BUILD_LIST" {
+                _pop_n(k, q, st, ins[1], op)
+                _push(st, "v")
+                _bruk_atom(k, "liste_frå_arr")
+            } ellers hvis op == "BUILD_MAP" {
+                _pop_n(k, q, st, 2 * ins[1], op)
+                _push(st, "v")
+                _bruk_atom(k, "ordbok_frå_par")
+            } ellers hvis op == "INDEX_GET" {
+                _pop_n(k, q, st, 2, op)
+                _push(st, "v")
+                _bruk_atom(k, "indeks_hent")
+            } ellers hvis op == "INDEX_SET" {
+                _pop_n(k, q, st, 3, op)
+                _push(st, "v")
+                _bruk_atom(k, "indeks_set")
             } ellers hvis op == "POP" {
                 _pop_verdi(k, q, st, op)
             } ellers hvis op == "DUP" {
@@ -415,26 +369,26 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 _push(st, "v")
                 _push(st, "v")
             } ellers hvis op == "CALL" {
-                _analyser_kall(k, a, q, modul, ins, st)
+                _analyser_kall(k, an, q, modul, ins, st)
             } ellers hvis op == "RETURN" {
                 _pop_verdi(k, q, st, op)
                 avslutta = sann
             } ellers hvis op == "JUMP" {
-                hvis ikkje finnes_nøkkel(a["labels"], tekst(ins[1])) {
+                hvis ikkje finnes_nøkkel(an["labels"], tekst(ins[1])) {
                     _feil(k, q, "ukjend etikett " + tekst(ins[1]))
                 } ellers {
-                    _flett(k, q, a, a["labels"][tekst(ins[1])], st, arbeid)
+                    _flett(k, q, an, an["labels"][tekst(ins[1])], st, arbeid)
                 }
                 avslutta = sann
             } ellers hvis op == "JUMP_IF_FALSE" {
                 _pop_verdi(k, q, st, op)
                 _bruk_atom(k, "sannhet")
-                hvis ikkje finnes_nøkkel(a["labels"], tekst(ins[1])) {
+                hvis ikkje finnes_nøkkel(an["labels"], tekst(ins[1])) {
                     _feil(k, q, "ukjend etikett " + tekst(ins[1]))
                 } ellers {
-                    _flett(k, q, a, a["labels"][tekst(ins[1])], st, arbeid)
+                    _flett(k, q, an, an["labels"][tekst(ins[1])], st, arbeid)
                 }
-                hvis bi + 1 < lengde(a["blokker"]) { _flett(k, q, a, bi + 1, st, arbeid) }
+                hvis bi + 1 < lengde(an["blokker"]) { _flett(k, q, an, bi + 1, st, arbeid) }
                 avslutta = sann
             } ellers {
                 _feil(k, q, "ustøtta opcode " + op)
@@ -442,29 +396,38 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
             ii = ii + 1
         }
         hvis ikkje avslutta {
-            hvis bi + 1 < lengde(a["blokker"]) {
-                _flett(k, q, a, bi + 1, st, arbeid)
+            hvis bi + 1 < lengde(an["blokker"]) {
+                _flett(k, q, an, bi + 1, st, arbeid)
             } ellers {
                 _feil(k, q, "funksjonen endar utan RETURN")
             }
         }
-        hvis st["maks"] > a["maks_slot"] { a["maks_slot"] = st["maks"] }
+        hvis st["maks"] > an["maks_slot"] { an["maks_slot"] = st["maks"] }
     }
     returner 0
 }
 
-funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste, st: ordbok) -> heltall {
+funksjon _analyser_kall(k: ordbok, an: ordbok, q: tekst, modul: tekst, ins: liste, st: ordbok) -> heltall {
     la namn = tekst(ins[1])
     la n = ins[2]
     la vm = k["vert_modul"] + "."
     hvis builtin.starts_with(namn, "builtin.") {
-        _feil(k, q, "ustøtta builtin: " + builtin.slice(namn, 8, lengde(namn)))
-        la i = 0
-        mens i < n { _pop(st)  i = i + 1 }
+        la kort_b = builtin.slice(namn, 8, lengde(namn))
+        hvis finnes_nøkkel(k["builtins"], kort_b) {
+            la bt = k["builtins"][kort_b]
+            hvis n != bt[0] {
+                _feil(k, q, "builtin." + kort_b + " tek " + tekst(bt[0]) + " argument, fekk " + tekst(n))
+            }
+            _bruk_atom(k, bt[1])
+        } ellers {
+            _feil(k, q, "ustøtta builtin: " + kort_b)
+        }
+        _pop_n(k, q, st, n, namn)
         _push(st, "v")
         returner 0
     }
-    hvis builtin.starts_with(namn, vm) og finnes_nøkkel(k["vert_idx"], builtin.slice(namn, lengde(vm), lengde(namn))) {
+    hvis builtin.starts_with(namn, vm) og finnes_nøkkel(k["vert_idx"], builtin.slice(namn, lengde(vm), lengde(namn))) og
+         ikkje k["vert_idx"][builtin.slice(namn, lengde(vm), lengde(namn))]["intern"] {
         la kort = builtin.slice(namn, lengde(vm), lengde(namn))
         la vf = k["vert_idx"][kort]
         hvis vf["berre_test"] og ikkje k["testbygg"] {
@@ -494,7 +457,7 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
                 } ellers {
                     la ci = builtin.heltall_fra_tekst(builtin.slice(kind, 2, lengde(kind)))
                     hvis t == "tekst" {
-                        a["rolle"][tekst(ci)] = {"art": "tekst"}
+                        an["rolle"][tekst(ci)] = {"art": "tekst"}
                     } ellers {
                         la fnamn = tekst(k["fns"][q]["code"][ci][1])
                         la mål = modul + "." + fnamn
@@ -508,11 +471,11 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
                                 legg_til(k["tilbakekall_liste"], mål)
                             }
                             _legg_nåbar(k, mål)
-                            a["rolle"][tekst(ci)] = {"art": "funksjon", "mål": mål}
+                            an["rolle"][tekst(ci)] = {"art": "funksjon", "mål": mål}
                         }
                     }
                 }
-            } ellers hvis kind != "v" {
+            } ellers hvis (t == "heltall" eller t == "handtak") og builtin.starts_with(kind, "t:") {
                 _feil(k, q, "argument " + tekst(j + 1) + " til " + kort + " må vere eit heltal, ikkje tekst")
             }
             j = j + 1
@@ -523,6 +486,10 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
         la pi = 0
         mens pi < lengde(pt) {
             hvis pt[pi] == "handtak" eller pt[pi] == "heltall" { _bruk_atom(k, "til_i64") }
+            hvis pt[pi] == "verdi" {
+                _bruk_atom(k, "tekst_av")
+                _bruk_atom(k, "til_minne")
+            }
             pi = pi + 1
         }
         returner 0
@@ -530,11 +497,7 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
     hvis finnes_nøkkel(k["fns"], namn) {
         la np = lengde(k["fns"][namn]["params"])
         hvis n != np { _feil(k, q, namn + " tek " + tekst(np) + " argument, fekk " + tekst(n)) }
-        la i = 0
-        mens i < n {
-            _pop_verdi(k, q, st, "kall til " + namn)
-            i = i + 1
-        }
+        _pop_n(k, q, st, n, "kall til " + namn)
         _push(st, "v")
         _legg_nåbar(k, namn)
         returner 0
@@ -548,19 +511,22 @@ funksjon _analyser_kall(k: ordbok, a: ordbok, q: tekst, modul: tekst, ins: liste
 
 # ─── Typeregister ────────────────────────────────────────────────────────────
 
+# param/res: lister av verdityper (heiltal eller bytelister som [99, 3]).
 funksjon _type_idx(k: ordbok, param: liste, res: liste) -> heltall {
+    la pf = a.flat(param)
+    la rf = a.flat(res)
     la nøkkel = "p"
     la i = 0
-    mens i < lengde(param) { nøkkel = nøkkel + "," + tekst(param[i])  i = i + 1 }
+    mens i < lengde(pf) { nøkkel = nøkkel + "," + tekst(pf[i])  i = i + 1 }
     nøkkel = nøkkel + "r"
     i = 0
-    mens i < lengde(res) { nøkkel = nøkkel + "," + tekst(res[i])  i = i + 1 }
+    mens i < lengde(rf) { nøkkel = nøkkel + "," + tekst(rf[i])  i = i + 1 }
     hvis finnes_nøkkel(k["type_nøkkel"], nøkkel) { returner k["type_nøkkel"][nøkkel] }
     la enc = [96]
     _la_til(enc, _leb(lengde(param)))
-    _la_til(enc, param)
+    _la_til(enc, pf)
     _la_til(enc, _leb(lengde(res)))
-    _la_til(enc, res)
+    _la_til(enc, rf)
     legg_til(k["typar"], enc)
     la idx = lengde(k["typar"]) - 1
     k["type_nøkkel"][nøkkel] = idx
@@ -574,21 +540,24 @@ funksjon _eqref_liste(n: heltall) -> liste {
     returner ut
 }
 
+# WASM-signaturen til importen (JS-sida).
 funksjon _import_sig(vf: ordbok) -> liste {
     la p = []
     la i = 0
     mens i < lengde(vf["param"]) {
         la t = tekst(vf["param"][i])
-        hvis t == "tekst" eller t == "funksjon" { legg_til(p, I32())  legg_til(p, I32()) }
-        ellers hvis t == "handtak" { legg_til(p, I32()) }
+        hvis t == "tekst" eller t == "funksjon" eller t == "verdi" { legg_til(p, I32())  legg_til(p, I32()) }
+        ellers hvis t == "handtak" eller t == "postkasse" { legg_til(p, I32()) }
+        ellers hvis t == "desimal" { legg_til(p, 124) }
         ellers { legg_til(p, I64()) }
         i = i + 1
     }
     la r = []
-    hvis vf["resultat"] == "handtak" { legg_til(r, I32()) }
+    hvis vf["resultat"] == "handtak" eller vf["resultat"] == "lengd" { legg_til(r, I32()) }
     returner [p, r]
 }
 
+# Signaturen til innpakkaren som klientkoden kallar (eqref-verdiar).
 funksjon _innpakkar_sig(vf: ordbok) -> liste {
     la p = []
     la i = 0
@@ -603,6 +572,7 @@ funksjon _innpakkar_sig(vf: ordbok) -> liste {
 
 # ─── Emittering (pass 2) ─────────────────────────────────────────────────────
 
+# Tekstkonstant til ein vertsfunksjon: (i32 peikar, i32 lengd) i det aktive segmentet.
 funksjon _streng_ref(k: ordbok, s: tekst) -> liste {
     hvis ikkje finnes_nøkkel(k["strengar"], s) {
         k["strengar"][s] = lengde(k["data"])
@@ -621,19 +591,35 @@ funksjon _streng_ref(k: ordbok, s: tekst) -> liste {
 
 funksjon _heiltal(n: heltall) -> liste {
     la ut = []
-    hvis n >= I31_MIN() og n <= I31_MAX() {
+    hvis n >= a.I31_MIN() og n <= a.I31_MAX() {
         legg_til(ut, 65)
         _la_til(ut, w.leb_s(n))
         _la_til(ut, [251, 28])
     } ellers {
         legg_til(ut, 66)
         _la_til(ut, w.leb_s(n))
-        _la_til(ut, [251, 0, T_BOKS()])
+        _la_til(ut, [251, 0, a.T_BOKS()])
     }
     returner ut
 }
 
-funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: heltall) -> liste {
+funksjon _kall(k: ordbok, atom: tekst) -> liste {
+    la ut = [16]
+    _la_til(ut, _leb(k["atom_idx"][atom]))
+    returner ut
+}
+
+# (i32.const off, i32.const len) for namnet på funksjonen (feilmeldingar som i VM-en).
+funksjon _fnamn(k: ordbok, q: tekst) -> liste {
+    la r = a.lit_ref(k, q)
+    la ut = [65]
+    _la_til(ut, w.leb_s(r[0]))
+    legg_til(ut, 65)
+    _la_til(ut, w.leb_s(r[1]))
+    returner ut
+}
+
+funksjon _instruksjon(k: ordbok, an: ordbok, ii: heltall, ins: liste, lok_tmp: heltall) -> liste {
     la op = tekst(ins[0])
     la b = []
     hvis op == "LABEL" {
@@ -645,25 +631,42 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
             hvis v { _la_til(b, [35, 1]) } ellers { _la_til(b, [35, 0]) }
         }
         ellers hvis tn == "null" { _la_til(b, [208, EQREF()]) }
+        ellers hvis tn == "desimaltall" {
+            _la_til(b, a.flat([a.f64c(builtin.desimal_til_bits(v)), a.sny(a.T_FLYT())]))
+        }
         ellers hvis tn == "tekst" {
-            la r = a["rolle"][tekst(ii)]
-            hvis r["art"] == "funksjon" { _la_til(b, _streng_ref(k, k["tilbakekall"][r["mål"]])) }
-            ellers { _la_til(b, _streng_ref(k, tekst(v))) }
+            la nøkkel = tekst(ii)
+            hvis finnes_nøkkel(an["rolle"], nøkkel) {
+                la r = an["rolle"][nøkkel]
+                hvis r["art"] == "funksjon" { _la_til(b, _streng_ref(k, k["tilbakekall"][r["mål"]])) }
+                ellers { _la_til(b, _streng_ref(k, tekst(v))) }
+            } ellers {
+                _la_til(b, a.flat(a.LIT(k, tekst(v))))
+            }
         }
     } ellers hvis op == "LOAD_NAME" {
         legg_til(b, 32)
-        _la_til(b, _leb(a["lok"][tekst(ins[1])]))
+        _la_til(b, _leb(an["lok"][tekst(ins[1])]))
     } ellers hvis op == "STORE_NAME" {
         legg_til(b, 33)
-        _la_til(b, _leb(a["lok"][tekst(ins[1])]))
+        _la_til(b, _leb(an["lok"][tekst(ins[1])]))
     } ellers hvis op == "LOAD_GLOBAL" {
         legg_til(b, 35)
-        _la_til(b, _leb(k["glob_idx"][a["modul"] + "." + tekst(ins[1])]))
+        _la_til(b, _leb(k["glob_idx"][an["modul"] + "." + tekst(ins[1])]))
     } ellers hvis op == "STORE_GLOBAL" {
         legg_til(b, 36)
-        _la_til(b, _leb(k["glob_idx"][a["modul"] + "." + tekst(ins[1])]))
+        _la_til(b, _leb(k["glob_idx"][an["modul"] + "." + tekst(ins[1])]))
     } ellers hvis finnes_nøkkel(k["binop"], op) {
         _la_til(b, _kall(k, k["binop"][op]))
+    } ellers hvis op == "BINARY_DIV" eller op == "BINARY_MOD" {
+        la atom = "div"
+        hvis op == "BINARY_MOD" { atom = "mod" }
+        hvis finnes_nøkkel(an["konst_div"], tekst(ii)) {
+            _la_til(b, _kall(k, atom + "_k"))
+        } ellers {
+            _la_til(b, _fnamn(k, an["q"]))
+            _la_til(b, _kall(k, atom))
+        }
     } ellers hvis op == "COMPARE_EQ" {
         _la_til(b, _kall(k, "lik"))
         _la_til(b, _kall(k, "bool"))
@@ -672,7 +675,8 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
         legg_til(b, 69)
         _la_til(b, _kall(k, "bool"))
     } ellers hvis finnes_nøkkel(k["cmpop"], op) {
-        _la_til(b, _kall(k, k["cmpop"][op]))
+        _la_til(b, _kall(k, "cmp"))
+        _la_til(b, k["cmpop"][op])
         _la_til(b, _kall(k, "bool"))
     } ellers hvis op == "UNARY_NEG" {
         _la_til(b, _kall(k, "neg"))
@@ -680,6 +684,20 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
         _la_til(b, _kall(k, "sannhet"))
         legg_til(b, 69)
         _la_til(b, _kall(k, "bool"))
+    } ellers hvis op == "BUILD_LIST" {
+        _la_til(b, [251, 8, a.T_ARR()])
+        _la_til(b, _leb(ins[1]))
+        _la_til(b, _kall(k, "liste_frå_arr"))
+    } ellers hvis op == "BUILD_MAP" {
+        _la_til(b, [251, 8, a.T_ARR()])
+        _la_til(b, _leb(2 * ins[1]))
+        _la_til(b, _kall(k, "ordbok_frå_par"))
+    } ellers hvis op == "INDEX_GET" {
+        _la_til(b, _fnamn(k, an["q"]))
+        _la_til(b, _kall(k, "indeks_hent"))
+    } ellers hvis op == "INDEX_SET" {
+        _la_til(b, _fnamn(k, an["q"]))
+        _la_til(b, _kall(k, "indeks_set"))
     } ellers hvis op == "POP" {
         legg_til(b, 26)
     } ellers hvis op == "DUP" {
@@ -689,9 +707,13 @@ funksjon _instruksjon(k: ordbok, a: ordbok, ii: heltall, ins: liste, lok_tmp: he
         _la_til(b, _leb(lok_tmp))
     } ellers hvis op == "CALL" {
         la namn = tekst(ins[1])
-        legg_til(b, 16)
-        hvis finnes_nøkkel(k["innpakkar_idx"], namn) { _la_til(b, _leb(k["innpakkar_idx"][namn])) }
-        ellers { _la_til(b, _leb(k["funk_idx"][namn])) }
+        hvis builtin.starts_with(namn, "builtin.") {
+            _la_til(b, _kall(k, k["builtins"][builtin.slice(namn, 8, lengde(namn))][1]))
+        } ellers {
+            legg_til(b, 16)
+            hvis finnes_nøkkel(k["innpakkar_idx"], namn) { _la_til(b, _leb(k["innpakkar_idx"][namn])) }
+            ellers { _la_til(b, _leb(k["funk_idx"][namn])) }
+        }
     } ellers hvis op == "RETURN" {
         legg_til(b, 15)
     } ellers {
@@ -712,29 +734,29 @@ funksjon _lokal_grupper(n_eq: heltall, n_i32: heltall) -> liste {
 }
 
 funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
-    la a = k["analyse"][q]
+    la an = k["analyse"][q]
     la kode = k["fns"][q]["code"]
-    la np = a["np"]
-    la slot0 = np + a["n_lok"]
-    la n_slot = a["maks_slot"]
+    la np = an["np"]
+    la slot0 = np + an["n_lok"]
+    la n_slot = an["maks_slot"]
     la lok_tmp = slot0 + n_slot
-    la n_eq = a["n_lok"] + n_slot
-    hvis a["dup"] { n_eq = n_eq + 1 }
+    la n_eq = an["n_lok"] + n_slot
+    hvis an["dup"] { n_eq = n_eq + 1 }
     la pc = np + n_eq
     la c = pc + 1
     # Nåbare blokker i kjelderekkjefølgje → dispatch-id
     la nåbare = []
     la id = {}
     la bi = 0
-    mens bi < lengde(a["blokker"]) {
-        hvis a["hoyde"][bi] >= 0 {
+    mens bi < lengde(an["blokker"]) {
+        hvis an["hoyde"][bi] >= 0 {
             id[tekst(bi)] = lengde(nåbare)
             legg_til(nåbare, bi)
         }
         bi = bi + 1
     }
     la nb = lengde(nåbare)
-    la b0 = a["blokker"][nåbare[0]]
+    la b0 = an["blokker"][nåbare[0]]
     la siste = tekst(kode[b0["slutt"] - 1][0])
     la direkte = nb == 1 og siste == "RETURN"
     la kropp = []
@@ -742,7 +764,7 @@ funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
         _la_til(kropp, _lokal_grupper(n_eq, 0))
         la ii = b0["start"]
         mens ii < b0["slutt"] {
-            _la_til(kropp, _instruksjon(k, a, ii, kode[ii], lok_tmp))
+            _la_til(kropp, _instruksjon(k, an, ii, kode[ii], lok_tmp))
             ii = ii + 1
         }
         _la_til(kropp, [0, 11])
@@ -764,9 +786,9 @@ funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
     la d = 0
     mens d < nb {
         la bix = nåbare[d]
-        la blk = a["blokker"][bix]
+        la blk = an["blokker"][bix]
         la djup = nb - 1 - d
-        la h = a["hoyde"][bix]
+        la h = an["hoyde"][bix]
         # Last stakkslotane inn på WASM-stakken
         la s = 0
         mens s < h {
@@ -782,12 +804,12 @@ funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
             la op = tekst(ins[0])
             hvis op == "JUMP" eller op == "JUMP_IF_FALSE" {
                 termin = op
-                mål = a["labels"][tekst(ins[1])]
+                mål = an["labels"][tekst(ins[1])]
             } ellers hvis op == "RETURN" {
                 termin = op
                 legg_til(kropp, 15)
             } ellers {
-                _la_til(kropp, _instruksjon(k, a, ii, ins, lok_tmp))
+                _la_til(kropp, _instruksjon(k, an, ii, ins, lok_tmp))
             }
             ii = ii + 1
         }
@@ -800,7 +822,7 @@ funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
             # Høgda ved utgangen = høgda til etterfølgjaren
             la etter = bix + 1
             hvis termin == "JUMP" { etter = mål }
-            la he = a["hoyde"][etter]
+            la he = an["hoyde"][etter]
             la s2 = he - 1
             mens s2 >= 0 {
                 legg_til(kropp, 33)
@@ -835,27 +857,30 @@ funksjon _brukarfunksjon(k: ordbok, q: tekst) -> liste {
 
 funksjon _innpakkar(k: ordbok, vf: ordbok, import_idx: heltall) -> liste {
     la b = [0]
-    la a = 0
+    la ai = 0
     la i = 0
     mens i < lengde(vf["param"]) {
         la t = tekst(vf["param"][i])
         hvis t == "tekst" eller t == "funksjon" {
             _la_til(b, [32])
-            _la_til(b, _leb(a))
+            _la_til(b, _leb(ai))
             _la_til(b, [32])
-            _la_til(b, _leb(a + 1))
-            a = a + 2
+            _la_til(b, _leb(ai + 1))
+            ai = ai + 2
         } ellers hvis t == "handtak" {
             legg_til(b, 32)
-            _la_til(b, _leb(a))
+            _la_til(b, _leb(ai))
             _la_til(b, _kall(k, "til_i64"))
             legg_til(b, 167)
-            a = a + 1
+            ai = ai + 1
+        } ellers hvis t == "verdi" {
+            _la_til(b, a.flat([a.i32c(k["postkasse"]), a.lg(ai), a.K(k, "tekst_av"), a.K(k, "til_minne")]))
+            ai = ai + 1
         } ellers {
             legg_til(b, 32)
-            _la_til(b, _leb(a))
+            _la_til(b, _leb(ai))
             _la_til(b, _kall(k, "til_i64"))
-            a = a + 1
+            ai = ai + 1
         }
         i = i + 1
     }
@@ -871,7 +896,7 @@ funksjon _innpakkar(k: ordbok, vf: ordbok, import_idx: heltall) -> liste {
 # opsjonar: {"testbygg": bool}
 # Gjev {"ok": bool, "feil": [tekst], "bytar": liste, "importar": [namn], "eksportar": [namn],
 #       "tilbakekall": {kvalifisert namn: eksportnamn}, "funksjonar": [kvalifiserte namn],
-#       "har_init": bool}
+#       "har_init": bool, "atom": [namn]}
 funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     la testbygg = usann
     hvis finnes_nøkkel(opsjonar, "testbygg") { testbygg = opsjonar["testbygg"] == sann }
@@ -926,14 +951,33 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         returner {"ok": usann, "feil": k["feil"]}
     }
 
+    # ── Atom og importar ──
+    la atom_sett = _atom_lukking(k)
+    la atomar = []
+    la ar = a.atom_rekkje()
+    la ati = 0
+    mens ati < lengde(ar) {
+        hvis finnes_nøkkel(atom_sett, ar[ati]) {
+            legg_til(atomar, ar[ati])
+            la imp = a.atom_importar(ar[ati], testbygg)
+            la ip0 = 0
+            mens ip0 < lengde(imp) {
+                k["vert_brukt"][imp[ip0]] = sann
+                ip0 = ip0 + 1
+            }
+        }
+        ati = ati + 1
+    }
+
     # ── Indeksar ──
     k["typar"] = []
     k["type_nøkkel"] = {}
-    # GC-typane først: 0 = $boks {i64}, 1 = $bool {i32}
-    legg_til(k["typar"], [95, 1, I64(), 0])
-    legg_til(k["typar"], [95, 1, I32(), 0])
-    k["type_nøkkel"]["$boks"] = 0
-    k["type_nøkkel"]["$bool"] = 1
+    la gct = a.gc_typar()
+    la gi = 0
+    mens gi < lengde(gct) {
+        legg_til(k["typar"], gct[gi])
+        gi = gi + 1
+    }
 
     la tabell = k["tabell"]
     la vert_liste = []
@@ -943,24 +987,31 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         ti = ti + 1
     }
     la n_imp = lengde(vert_liste)
-    la neste = n_imp
-    k["innpakkar_idx"] = {}
+    k["import_idx"] = {}
+    la neste = 0
     la vi = 0
     mens vi < n_imp {
-        k["innpakkar_idx"][k["vert_modul"] + "." + tekst(vert_liste[vi]["namn"])] = neste
-        neste = neste + 1
+        k["import_idx"][tekst(vert_liste[vi]["namn"])] = vi
+        vi = vi + 1
+    }
+    neste = n_imp
+    # Innpakkarar berre for vertsfunksjonane klientkoden kallar (ikkje dei interne)
+    k["innpakkar_idx"] = {}
+    la innpakka = []
+    vi = 0
+    mens vi < n_imp {
+        hvis ikkje vert_liste[vi]["intern"] {
+            k["innpakkar_idx"][k["vert_modul"] + "." + tekst(vert_liste[vi]["namn"])] = neste
+            legg_til(innpakka, vi)
+            neste = neste + 1
+        }
         vi = vi + 1
     }
     k["atom_idx"] = {}
-    la atomar = []
-    la ar = atom_rekkje()
-    la ati = 0
-    mens ati < lengde(ar) {
-        hvis finnes_nøkkel(k["atom_brukt"], ar[ati]) {
-            k["atom_idx"][ar[ati]] = neste
-            legg_til(atomar, ar[ati])
-            neste = neste + 1
-        }
+    ati = 0
+    mens ati < lengde(atomar) {
+        k["atom_idx"][atomar[ati]] = neste
+        neste = neste + 1
         ati = ati + 1
     }
     k["funk_idx"] = {}
@@ -1000,9 +1051,17 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         gmi = gmi + 1
     }
 
-    # ── Funksjonstypar og kroppar ──
-    k["strengar"] = {}
-    k["data"] = []
+    # ── Kroppar: brukarfunksjonane først (dei samlar data), så atom og innpakkarar ──
+    la brukar_kroppar = []
+    fi = 0
+    mens fi < lengde(k["nåbare"]) {
+        legg_til(brukar_kroppar, _brukarfunksjon(k, k["nåbare"][fi]))
+        fi = fi + 1
+    }
+    # Postkassa ligg etter vertskonstantane (8-justert)
+    k["postkasse"] = ((lengde(k["data"]) + 7) / 8) * 8
+    la har_minne = lengde(k["data"]) > 0 eller finnes_nøkkel(atom_sett, "til_minne") eller finnes_nøkkel(atom_sett, "fmt_f64")
+
     la import_typar = []
     vi = 0
     mens vi < n_imp {
@@ -1012,19 +1071,19 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     }
     la funk_typar = []
     la kroppar = []
-    vi = 0
-    mens vi < n_imp {
-        la sig2 = _innpakkar_sig(vert_liste[vi])
+    la ii3 = 0
+    mens ii3 < lengde(innpakka) {
+        la vf = vert_liste[innpakka[ii3]]
+        la sig2 = _innpakkar_sig(vf)
         legg_til(funk_typar, _type_idx(k, sig2[0], sig2[1]))
-        legg_til(kroppar, _innpakkar(k, vert_liste[vi], vi))
-        vi = vi + 1
+        legg_til(kroppar, _innpakkar(k, vf, innpakka[ii3]))
+        ii3 = ii3 + 1
     }
     ati = 0
     mens ati < lengde(atomar) {
-        la sig3 = _atom_sig(atomar[ati])
+        la sig3 = a.atom_sig(atomar[ati])
         legg_til(funk_typar, _type_idx(k, sig3[0], sig3[1]))
-        la ak = [0]
-        _la_til(ak, _atom_kropp(k, atomar[ati]))
+        la ak = a.flat(a.atom_kropp(k, atomar[ati]))
         legg_til(ak, 11)
         legg_til(kroppar, ak)
         ati = ati + 1
@@ -1033,7 +1092,7 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     mens fi < lengde(k["nåbare"]) {
         la q = k["nåbare"][fi]
         legg_til(funk_typar, _type_idx(k, _eqref_liste(k["analyse"][q]["np"]), [EQREF()]))
-        legg_til(kroppar, _brukarfunksjon(k, q))
+        legg_til(kroppar, brukar_kroppar[fi])
         fi = fi + 1
     }
     # Init: modulinitialiseringar, så start()
@@ -1076,13 +1135,19 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     mens fti < lengde(funk_typar) { _la_til(fp, _leb(funk_typar[fti]))  fti = fti + 1 }
     _la_til(m, w.seksjon(3, fp))
 
-    la har_minne = lengde(k["data"]) > 0
-    hvis har_minne { _la_til(m, w.seksjon(5, [1, 0, 1])) }
+    hvis har_minne {
+        # Minst éi side; nok til vertskonstantane og ei lita postkasse
+        la sider = (k["postkasse"] + 64 + 65535) / 65536
+        la mp = [1, 0]
+        _la_til(mp, _leb(sider))
+        _la_til(m, w.seksjon(5, mp))
+    }
 
     la gp = _leb(n_glob)
     # usann / sann: (ref $bool) immutable = struct.new $bool (i32.const 0/1)
-    _la_til(gp, [100, T_BOOL(), 0, 65, 0, 251, 0, T_BOOL(), 11])
-    _la_til(gp, [100, T_BOOL(), 0, 65, 1, 251, 0, T_BOOL(), 11])
+    la tbo = a.T_BOOL()
+    _la_til(gp, [100, tbo, 0, 65, 0, 251, 0, tbo, 11])
+    _la_til(gp, [100, tbo, 0, 65, 1, 251, 0, tbo, 11])
     la gk = 2
     mens gk < n_glob {
         _la_til(gp, [EQREF(), 1, 208, EQREF(), 11])
@@ -1116,6 +1181,15 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     }
     _la_til(m, w.seksjon(7, ep))
 
+    # Datasegment: 0 = passivt (tekstliteralar for array.new_data), så det aktive med
+    # vertskonstantane i minnet.
+    la n_seg = 0
+    hvis lengde(k["lit"]) > 0 { n_seg = n_seg + 1 }
+    hvis lengde(k["data"]) > 0 { n_seg = n_seg + 1 }
+    hvis lengde(k["lit"]) > 0 {
+        _la_til(m, w.seksjon(12, _leb(n_seg)))
+    }
+
     la cp = _leb(lengde(kroppar))
     la ki = 0
     mens ki < lengde(kroppar) {
@@ -1125,10 +1199,18 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     }
     _la_til(m, w.seksjon(10, cp))
 
-    hvis har_minne {
-        la dp = [1, 0, 65, 0, 11]
-        _la_til(dp, _leb(lengde(k["data"])))
-        _la_til(dp, k["data"])
+    hvis n_seg > 0 {
+        la dp = _leb(n_seg)
+        hvis lengde(k["lit"]) > 0 {
+            legg_til(dp, 1)
+            _la_til(dp, _leb(lengde(k["lit"])))
+            _la_til(dp, k["lit"])
+        }
+        hvis lengde(k["data"]) > 0 {
+            _la_til(dp, [0, 65, 0, 11])
+            _la_til(dp, _leb(lengde(k["data"])))
+            _la_til(dp, k["data"])
+        }
         _la_til(m, w.seksjon(11, dp))
     }
 

@@ -1,0 +1,876 @@
+# std/wasm_atom.no — runtime-atom for WASM-backenden (W1): små WASM-funksjonar som
+# gjev Norscode-verdiane same semantikk i nettlesaren som i VM-en.
+#
+# Atoma blir skrivne her som WASM-instruksjonar med ein liten assembler (lg, ls, iff, …),
+# og std/wasm_lowring.no tek med berre dei atoma modulen treng (transitiv lukking over
+# `atom_avheng`). Kvart atom har ein fast signatur (`atom_sig`) og ein kropp
+# (`atom_kropp`) som kan kalle andre atom, importar og tekstliteralar via konteksten k:
+#   k["atom_idx"][namn]    funksjonsindeks for eit atom
+#   k["import_idx"][namn]  funksjonsindeks for ein import («logg», «logg_test», «flyt_tekst»)
+#   k["postkasse"]         byteadressa til postkassa i minnet «m» (tekst over JS-grensa)
+#   k["lit"], k["lit_idx"] det passive datasegmentet 0 med tekstliteralar
+#   k["flyt"], k["testbygg"]
+#
+# Verdimodell (WasmGC, sjå docs/WASM_KLIENT.md). Typeindeksane er faste:
+#   0 $boks   struct {i64}                          heltal utanfor i31
+#   1 $bool   struct {i32}                          to singletonar i global 0/1
+#   2 $flyt   struct {f64}                          desimaltall
+#   3 $tekst  array (mut i8)                        tekst (UTF-8-bytar, `lengde` = bytar)
+#   4 $arr    array (mut eqref)                     lagring for liste og ordbok
+#   5 $liste  struct {mut i32 n, mut ref $arr}      liste med amortisert vekst
+#   6 $ordbok struct {mut i32 n, mut ref $arr nøklar, mut ref $arr verdiar}
+#             innsetjingsordna (nøkler() gjev rekkjefølgja frå første innsetjing)
+# heltall er i31ref når verdien ligg i −2^30 … 2^30−1, elles $boks (kanonisk). null er
+# ref.null eq.
+#
+# Feil: VM-definerte feil (DivisjonMedNull, ModuloMedNull, IndeksFeil, Ugyldig heiltall,
+# Ugyldig venstre-/høgreskift) blir skrivne med same tekst som VM-en («ERROR: …») via
+# logg-importen, og så stoppar modulen med `unreachable` (unnatak kjem i W2). Typefeil der
+# VM-en ikkje har definert åtferd (t.d. liste − tal), stoppar med ein rein trap.
+
+# ─── Typar ───────────────────────────────────────────────────────────────────
+
+funksjon T_BOKS() -> heltall { returner 0 }
+funksjon T_BOOL() -> heltall { returner 1 }
+funksjon T_FLYT() -> heltall { returner 2 }
+funksjon T_TEKST() -> heltall { returner 3 }
+funksjon T_ARR() -> heltall { returner 4 }
+funksjon T_LISTE() -> heltall { returner 5 }
+funksjon T_ORDBOK() -> heltall { returner 6 }
+funksjon HT_I31() -> heltall { returner 108 }
+
+# Verdityper som bytelister (nullable referansar: 0x63 typeindeks).
+funksjon VT_EQ() -> liste { returner [109] }
+funksjon VT_I32() -> liste { returner [127] }
+funksjon VT_I64() -> liste { returner [126] }
+funksjon VT_F64() -> liste { returner [124] }
+funksjon VT_TEKST() -> liste { returner [99, 3] }
+funksjon VT_ARR() -> liste { returner [99, 4] }
+funksjon VT_LISTE() -> liste { returner [99, 5] }
+funksjon VT_ORDBOK() -> liste { returner [99, 6] }
+
+# Typeseksjonsoppføringane for dei sju GC-typane (i indeksrekkjefølgja over).
+funksjon gc_typar() -> liste {
+    returner [
+        [95, 1, 126, 0],
+        [95, 1, 127, 0],
+        [95, 1, 124, 0],
+        [94, 120, 1],
+        [94, 109, 1],
+        [95, 2, 127, 1, 99, 4, 1],
+        [95, 3, 127, 1, 99, 4, 1, 99, 4, 1]
+    ]
+}
+
+# ─── Assembler ───────────────────────────────────────────────────────────────
+
+funksjon _flat_inn(ut: liste, x) -> heltall {
+    hvis builtin.type(x) == "liste" {
+        la i = 0
+        mens i < lengde(x) {
+            _flat_inn(ut, x[i])
+            i = i + 1
+        }
+    } ellers {
+        legg_til(ut, x)
+    }
+    returner 0
+}
+
+# Flat ut ei nøsta liste av bytar og bytelister.
+funksjon flat(x: liste) -> liste {
+    la ut = []
+    _flat_inn(ut, x)
+    returner ut
+}
+
+funksjon leb_u(verdi: heltall) -> liste {
+    hvis verdi >= 0 og verdi < 128 { returner [verdi] }
+    la ut = []
+    la n = verdi
+    mens sann {
+        la b = n & 127
+        n = n >> 7
+        hvis n != 0 { b = b | 128 }
+        legg_til(ut, b)
+        hvis n == 0 { returner ut }
+    }
+    returner ut
+}
+
+funksjon leb_s(verdi: heltall) -> liste {
+    hvis verdi >= 0 og verdi < 64 { returner [verdi] }
+    la ut = []
+    la n = verdi
+    la meir = sann
+    mens meir {
+        la b = n & 127
+        n = n >> 7
+        la fs = b & 64
+        hvis (n == 0 og fs == 0) eller (n == -1 og fs != 0) { meir = usann } ellers { b = b | 128 }
+        legg_til(ut, b)
+    }
+    returner ut
+}
+
+funksjon lg(i: heltall) -> liste { returner [32, leb_u(i)] }
+funksjon ls(i: heltall) -> liste { returner [33, leb_u(i)] }
+funksjon lt(i: heltall) -> liste { returner [34, leb_u(i)] }
+funksjon i32c(n: heltall) -> liste { returner [65, leb_s(n)] }
+funksjon i64c(n: heltall) -> liste { returner [66, leb_s(n)] }
+
+# f64.const med IEEE-bitane som eit (signert) 64-bits heiltal.
+funksjon f64c(bits: heltall) -> liste {
+    la ut = [68]
+    la i = 0
+    mens i < 8 {
+        legg_til(ut, (bits >> (8 * i)) & 255)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _bt(t: liste) -> liste {
+    hvis lengde(t) == 0 { returner [64] }
+    returner t
+}
+
+funksjon blk(t: liste) -> liste { returner [2, _bt(t)] }
+funksjon lp(t: liste) -> liste { returner [3, _bt(t)] }
+funksjon iff(t: liste) -> liste { returner [4, _bt(t)] }
+funksjon ELS() -> heltall { returner 5 }
+funksjon END() -> heltall { returner 11 }
+funksjon br(d: heltall) -> liste { returner [12, d] }
+funksjon brif(d: heltall) -> liste { returner [13, d] }
+funksjon RET() -> heltall { returner 15 }
+funksjon TRAP() -> heltall { returner 0 }
+
+funksjon rtest(ht: heltall) -> liste { returner [251, 20, ht] }
+funksjon rcast(ht: heltall) -> liste { returner [251, 22, ht] }
+funksjon sny(t: heltall) -> liste { returner [251, 0, t] }
+funksjon sget(t: heltall, f: heltall) -> liste { returner [251, 2, t, f] }
+funksjon sset(t: heltall, f: heltall) -> liste { returner [251, 5, t, f] }
+funksjon anew_def(t: heltall) -> liste { returner [251, 7, t] }
+funksjon anew_fixed(t: heltall, n: heltall) -> liste { returner [251, 8, t, leb_u(n)] }
+funksjon anew_data(t: heltall, seg: heltall) -> liste { returner [251, 9, t, seg] }
+funksjon aget(t: heltall) -> liste { returner [251, 11, t] }
+funksjon aget_u(t: heltall) -> liste { returner [251, 13, t] }
+funksjon aset(t: heltall) -> liste { returner [251, 14, t] }
+funksjon ALEN() -> liste { returner [251, 15] }
+funksjon acopy(t1: heltall, t2: heltall) -> liste { returner [251, 17, t1, t2] }
+funksjon I31NY() -> liste { returner [251, 28] }
+funksjon NULL() -> liste { returner [208, 109] }
+funksjon LOAD8(adr: liste) -> liste { returner [adr, 45, 0, 0] }
+
+# Lokaldeklarasjonar: [[tal, verditype], ...]
+funksjon lokale(grupper: liste) -> liste {
+    la ut = [leb_u(lengde(grupper))]
+    la i = 0
+    mens i < lengde(grupper) {
+        legg_til(ut, leb_u(grupper[i][0]))
+        legg_til(ut, grupper[i][1])
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Kontekst: kall, importar og tekstliteralar ─────────────────────────────
+
+funksjon K(k: ordbok, namn: tekst) -> liste {
+    returner [16, leb_u(k["atom_idx"][namn])]
+}
+
+funksjon KI(k: ordbok, namn: tekst) -> liste {
+    returner [16, leb_u(k["import_idx"][namn])]
+}
+
+# (offset, lengd) for s i det passive datasegmentet 0 (dedup).
+funksjon lit_ref(k: ordbok, s: tekst) -> liste {
+    hvis ikkje finnes_nøkkel(k["lit_idx"], s) {
+        k["lit_idx"][s] = lengde(k["lit"])
+        la data = k["lit"]
+        la i = 0
+        mens i < lengde(s) {
+            legg_til(data, builtin.char_code(builtin.slice(s, i, i + 1)))
+            i = i + 1
+        }
+    }
+    returner [k["lit_idx"][s], lengde(s)]
+}
+
+# Ein $tekst med innhaldet s (array.new_data frå segment 0, eller tom array).
+funksjon LIT(k: ordbok, s: tekst) -> liste {
+    hvis lengde(s) == 0 { returner anew_fixed(T_TEKST(), 0) }
+    la r = lit_ref(k, s)
+    returner [i32c(r[0]), i32c(r[1]), anew_data(T_TEKST(), 0)]
+}
+
+# Ein $tekst frå (off, len) i lokalane a og b (namnet på funksjonen i feilmeldingar).
+funksjon LIT_LOK(a: heltall, b: heltall) -> liste {
+    returner [lg(a), lg(b), anew_data(T_TEKST(), 0)]
+}
+
+# Legg teiknet c til på tekstbufferen i lokal r ved posisjon i lokal p (p aukar).
+funksjon PUT(r: heltall, p: heltall, c: heltall) -> liste {
+    returner [lg(r), lg(p), i32c(c), aset(T_TEKST()), lg(p), i32c(1), 106, ls(p)]
+}
+
+# Kopier `len` bytar frå tekstlokalen src ved `frå` til tekstlokalen r ved p (p aukar).
+funksjon KOPI(r: heltall, p: heltall, src: heltall, frå: liste, len: liste) -> liste {
+    returner [lg(r), lg(p), lg(src), frå, len, acopy(T_TEKST(), T_TEKST()), lg(p), len, 106, ls(p)]
+}
+
+# Tel lokalen i ned til 0 og legg c til på r kvar gong.
+funksjon GJENTA(i: heltall, r: heltall, p: heltall, c: heltall) -> liste {
+    returner [blk([]), lp([]), lg(i), i32c(0), 76, brif(1), PUT(r, p, c), lg(i), i32c(1), 107, ls(i), br(0), END(), END()]
+}
+
+funksjon KAST_MELD(k: ordbok, melding: liste) -> liste {
+    returner [melding, K(k, "kast")]
+}
+
+# ─── Konstantar ──────────────────────────────────────────────────────────────
+
+funksjon I31_MIN() -> heltall { returner 0 - 1073741824 }
+funksjon I31_MAX() -> heltall { returner 1073741823 }
+funksjon INF_BITS() -> heltall { returner 9218868437227405312 }
+funksjon TO53_BITS() -> heltall { returner 4845873199050653696 }
+funksjon MAG_MASKE() -> heltall { returner 9223372036854775807 }
+
+# ─── Katalog ─────────────────────────────────────────────────────────────────
+
+# Rekkjefølgja atoma får i modulen (funksjonsindeksar etter importane).
+funksjon atom_rekkje() -> liste {
+    returner ["til_i64", "frå_i64", "er_tal", "er_num", "til_f64", "sannhet", "bool",
+              "konkat", "fmt_i64", "fmt_f64", "tekst_av", "til_minne", "logg_tekst", "kast", "skriv",
+              "add", "sub", "mul", "div", "mod", "div_k", "mod_k", "and", "or", "xor", "shl", "shr", "neg",
+              "tekst_lik", "liste_lik", "lik", "tekst_cmp", "cmp",
+              "lengde", "ordbok_finn", "ordbok_hent", "ordbok_set", "ordbok_frå_par", "liste_frå_arr",
+              "indeks_hent", "indeks_set", "legg_til", "har_nokkel", "nøkler", "for_iterabel",
+              "slice", "char_code", "chr", "type_namn", "heltall_av"]
+}
+
+funksjon atom_avheng(namn: tekst, flyt: bool) -> liste {
+    hvis namn == "er_num" { returner ["er_tal"] }
+    hvis namn == "til_f64" { returner ["til_i64"] }
+    hvis namn == "sannhet" { returner ["er_tal", "til_i64"] }
+    hvis namn == "tekst_av" {
+        hvis flyt { returner ["er_tal", "til_i64", "fmt_i64", "fmt_f64"] }
+        returner ["er_tal", "til_i64", "fmt_i64"]
+    }
+    hvis namn == "fmt_f64" { returner ["fmt_i64"] }
+    hvis namn == "logg_tekst" { returner ["til_minne"] }
+    hvis namn == "kast" { returner ["konkat", "logg_tekst"] }
+    hvis namn == "skriv" { returner ["tekst_av", "logg_tekst"] }
+    hvis namn == "add" { returner ["er_tal", "til_i64", "frå_i64", "er_num", "til_f64", "tekst_av", "konkat"] }
+    hvis namn == "sub" eller namn == "mul" eller namn == "div_k" eller namn == "mod_k" {
+        returner ["er_tal", "til_i64", "frå_i64", "er_num", "til_f64"]
+    }
+    hvis namn == "div" eller namn == "mod" {
+        returner ["er_tal", "til_i64", "frå_i64", "er_num", "til_f64", "konkat", "kast"]
+    }
+    hvis namn == "and" eller namn == "or" eller namn == "xor" { returner ["til_i64", "frå_i64"] }
+    hvis namn == "shl" eller namn == "shr" { returner ["til_i64", "frå_i64", "tekst_av", "konkat", "kast"] }
+    hvis namn == "neg" { returner ["er_tal", "til_i64", "frå_i64"] }
+    hvis namn == "liste_lik" { returner ["lik"] }
+    hvis namn == "lik" { returner ["er_tal", "til_i64", "er_num", "til_f64", "tekst_lik", "liste_lik"] }
+    hvis namn == "cmp" { returner ["er_tal", "er_num", "til_i64", "til_f64", "tekst_cmp"] }
+    hvis namn == "ordbok_finn" { returner ["lik"] }
+    hvis namn == "ordbok_hent" eller namn == "ordbok_set" { returner ["ordbok_finn"] }
+    hvis namn == "ordbok_frå_par" { returner ["ordbok_set"] }
+    hvis namn == "indeks_hent" { returner ["er_tal", "til_i64", "tekst_av", "fmt_i64", "konkat", "kast", "ordbok_hent"] }
+    hvis namn == "indeks_set" { returner ["er_tal", "til_i64", "tekst_av", "fmt_i64", "konkat", "kast", "ordbok_set"] }
+    hvis namn == "har_nokkel" { returner ["ordbok_finn", "bool"] }
+    hvis namn == "for_iterabel" { returner ["nøkler"] }
+    hvis namn == "slice" eller namn == "chr" { returner ["til_i64"] }
+    hvis namn == "type_namn" { returner ["er_tal"] }
+    hvis namn == "heltall_av" { returner ["er_tal", "frå_i64", "tekst_av", "konkat", "kast"] }
+    returner []
+}
+
+# Importar eit atom treng direkte (utan innpakkar).
+funksjon atom_importar(namn: tekst, testbygg: bool) -> liste {
+    hvis namn == "logg_tekst" {
+        hvis testbygg { returner ["logg_test"] }
+        returner ["logg"]
+    }
+    hvis namn == "fmt_f64" { returner ["flyt_tekst"] }
+    returner []
+}
+
+# Signatur: [[param-verdityper], [resultat-verdityper]]
+funksjon atom_sig(namn: tekst) -> liste {
+    la eq = VT_EQ()
+    la i32 = VT_I32()
+    hvis namn == "til_i64" { returner [[eq], [VT_I64()]] }
+    hvis namn == "frå_i64" { returner [[VT_I64()], [eq]] }
+    hvis namn == "er_tal" eller namn == "er_num" eller namn == "sannhet" { returner [[eq], [i32]] }
+    hvis namn == "til_f64" { returner [[eq], [VT_F64()]] }
+    hvis namn == "bool" { returner [[i32], [eq]] }
+    hvis namn == "konkat" { returner [[VT_TEKST(), VT_TEKST()], [VT_TEKST()]] }
+    hvis namn == "fmt_i64" { returner [[VT_I64()], [VT_TEKST()]] }
+    hvis namn == "fmt_f64" { returner [[VT_F64()], [VT_TEKST()]] }
+    hvis namn == "tekst_av" { returner [[eq], [VT_TEKST()]] }
+    hvis namn == "til_minne" { returner [[VT_TEKST()], [i32]] }
+    hvis namn == "logg_tekst" eller namn == "kast" { returner [[VT_TEKST()], []] }
+    hvis namn == "div" eller namn == "mod" { returner [[eq, eq, i32, i32], [eq]] }
+    hvis namn == "tekst_lik" eller namn == "tekst_cmp" { returner [[VT_TEKST(), VT_TEKST()], [i32]] }
+    hvis namn == "liste_lik" { returner [[VT_LISTE(), VT_LISTE()], [i32]] }
+    hvis namn == "lik" eller namn == "cmp" { returner [[eq, eq], [i32]] }
+    hvis namn == "ordbok_finn" { returner [[VT_ORDBOK(), eq], [i32]] }
+    hvis namn == "ordbok_hent" { returner [[VT_ORDBOK(), eq], [eq]] }
+    hvis namn == "ordbok_set" { returner [[VT_ORDBOK(), eq, eq], []] }
+    hvis namn == "ordbok_frå_par" eller namn == "liste_frå_arr" { returner [[VT_ARR()], [eq]] }
+    hvis namn == "indeks_hent" { returner [[eq, eq, i32, i32], [eq]] }
+    hvis namn == "indeks_set" { returner [[eq, eq, eq, i32, i32], [eq]] }
+    hvis namn == "skriv" eller namn == "neg" eller namn == "lengde" eller namn == "nøkler" eller namn == "for_iterabel" eller
+         namn == "char_code" eller namn == "chr" eller namn == "type_namn" eller namn == "heltall_av" {
+        returner [[eq], [eq]]
+    }
+    hvis namn == "slice" { returner [[eq, eq, eq], [eq]] }
+    returner [[eq, eq], [eq]]
+}
+
+# ─── Kroppar ─────────────────────────────────────────────────────────────────
+
+funksjon _i64_op(namn: tekst) -> heltall {
+    hvis namn == "add" { returner 124 }
+    hvis namn == "sub" { returner 125 }
+    hvis namn == "mul" { returner 126 }
+    hvis namn == "and" { returner 131 }
+    hvis namn == "or" { returner 132 }
+    hvis namn == "xor" { returner 133 }
+    hvis namn == "shl" { returner 134 }
+    hvis namn == "shr" { returner 135 }
+    kast "wasm_atom: ukjend i64-operasjon " + namn
+}
+
+funksjon _f64_op(namn: tekst) -> heltall {
+    hvis namn == "add" { returner 160 }
+    hvis namn == "sub" { returner 161 }
+    returner 162
+}
+
+# Begge heltal → i64-operasjon; begge tal → f64; elles `anna` (liste med instruksjonar).
+funksjon _aritm(k: ordbok, namn: tekst, anna: liste) -> liste {
+    returner [lg(0), K(k, "er_tal"), lg(1), K(k, "er_tal"), 113, iff(VT_EQ()),
+                lg(0), K(k, "til_i64"), lg(1), K(k, "til_i64"), _i64_op(namn), K(k, "frå_i64"),
+              ELS(), lg(0), K(k, "er_num"), lg(1), K(k, "er_num"), 113, iff(VT_EQ()),
+                lg(0), K(k, "til_f64"), lg(1), K(k, "til_f64"), _f64_op(namn), sny(T_FLYT()),
+              ELS(), anna, END(), END()]
+}
+
+# div/mod: med_sjekk = kast ved deling på null (namnet på funksjonen i lokal 2, 3).
+funksjon _divmod(k: ordbok, er_mod: bool, med_sjekk: bool) -> liste {
+    la tf = T_FLYT()
+    la fa = 2
+    la fb = 3
+    la x = 4
+    la y = 5
+    la b = []
+    hvis med_sjekk {
+        fa = 4
+        fb = 5
+        x = 6
+        y = 7
+        la melding = "DivisjonMedNull: divisjon med null ved "
+        hvis er_mod { melding = "ModuloMedNull: modulo med null ved " }
+        legg_til(b, lokale([[2, VT_F64()], [2, VT_I64()]]))
+        legg_til(b, [lg(1), K(k, "er_tal"), iff(VT_I32()), lg(1), K(k, "til_i64"), 80,
+                     ELS(), lg(1), rtest(tf), iff(VT_I32()), lg(1), rcast(tf), sget(tf, 0), f64c(0), 97,
+                     ELS(), i32c(0), END(), END(),
+                     iff([]), LIT(k, melding), LIT_LOK(2, 3), K(k, "konkat"), K(k, "kast"), END()])
+    } ellers {
+        legg_til(b, lokale([[2, VT_F64()], [2, VT_I64()]]))
+    }
+    la int_op = []
+    hvis er_mod {
+        # i64.rem_s gjev 0 for MIN % −1 (ingen trap)
+        int_op = [lg(x), lg(y), 129]
+    } ellers {
+        # MIN / −1 → MIN (som VM-en på arm64) i staden for trap
+        int_op = [lg(y), i64c(-1), 81, iff(VT_I64()), i64c(0), lg(x), 125, ELS(), lg(x), lg(y), 127, END()]
+    }
+    la f_op = []
+    hvis er_mod {
+        # trunkerande rest som VM-en: a − trunc(a/b)·b
+        f_op = [lg(fa), lg(fa), lg(fb), 163, 157, lg(fb), 162, 161]
+    } ellers {
+        f_op = [lg(fa), lg(fb), 163]
+    }
+    legg_til(b, [lg(0), K(k, "er_tal"), lg(1), K(k, "er_tal"), 113, iff(VT_EQ()),
+                   lg(0), K(k, "til_i64"), ls(x), lg(1), K(k, "til_i64"), ls(y), int_op, K(k, "frå_i64"),
+                 ELS(), lg(0), K(k, "er_num"), lg(1), K(k, "er_num"), 113, iff(VT_EQ()),
+                   lg(0), K(k, "til_f64"), ls(fa), lg(1), K(k, "til_f64"), ls(fb), f_op, sny(tf),
+                 ELS(), TRAP(), END(), END()])
+    returner b
+}
+
+funksjon _fmt_f64(k: ordbok) -> liste {
+    la P = k["postkasse"]
+    la tt = T_TEKST()
+    # lokale: 1 bits, 2 mag (i64); 3 neg, 4 n, 5 i, 6 c, 7 nd, 8 e10, 9 eneg, 10 rp, 11 j (i32);
+    #         12 ds, 13 r, 14 et (tekst)
+    la b = [lokale([[2, VT_I64()], [9, VT_I32()], [3, VT_TEKST()]])]
+    legg_til(b, [lg(0), 189, ls(1),
+                 lg(1), i64c(0), 83, ls(3),
+                 lg(1), i64c(MAG_MASKE()), 131, ls(2),
+                 lg(2), 80, iff([]), LIT(k, "0"), RET(), END(),
+                 lg(2), i64c(INF_BITS()), 89, iff([]),
+                   lg(2), i64c(INF_BITS()), 85, iff([]), LIT(k, "nan"), RET(), END(),
+                   lg(3), iff([]), LIT(k, "-inf"), RET(), END(),
+                   LIT(k, "inf"), RET(),
+                 END(),
+                 # heiltalsverdig og |x| < 2^53: heiltalet sjølv
+                 lg(0), 153, f64c(TO53_BITS()), 99, lg(0), 157, lg(0), 97, 113, iff([]),
+                   lg(0), 176, K(k, "fmt_i64"), RET(),
+                 END()])
+    # Kortaste sifferstreng frå verten (toExponential), skriven i postkassa
+    legg_til(b, [lg(0), i32c(P), KI(k, "flyt_tekst"), ls(4),
+                 i32c(0), ls(5),
+                 LOAD8(i32c(P)), i32c(45), 70, iff([]), i32c(1), ls(5), END(),
+                 i32c(32), anew_def(tt), ls(12),
+                 i32c(0), ls(7),
+                 blk([]), lp([]),
+                   lg(5), lg(4), 78, brif(1),
+                   LOAD8([i32c(P), lg(5), 106]), lt(6), i32c(101), 70, brif(1),
+                   lg(6), i32c(46), 71, iff([]), lg(12), lg(7), lg(6), aset(tt), lg(7), i32c(1), 106, ls(7), END(),
+                   lg(5), i32c(1), 106, ls(5), br(0),
+                 END(), END(),
+                 lg(5), i32c(1), 106, ls(5),
+                 LOAD8([i32c(P), lg(5), 106]), i32c(45), 70, ls(9),
+                 lg(5), i32c(1), 106, ls(5),
+                 i32c(0), ls(8),
+                 blk([]), lp([]),
+                   lg(5), lg(4), 78, brif(1),
+                   lg(8), i32c(10), 108, LOAD8([i32c(P), lg(5), 106]), i32c(48), 107, 106, ls(8),
+                   lg(5), i32c(1), 106, ls(5), br(0),
+                 END(), END(),
+                 lg(9), iff([]), i32c(0), lg(8), 107, ls(8), END()])
+    # Formatering som std.desimaltall_tekst._d_formater
+    legg_til(b, [i32c(64), anew_def(tt), ls(13),
+                 i32c(0), ls(10),
+                 lg(3), iff([]), PUT(13, 10, 45), END(),
+                 lg(8), i32c(0), 78, lg(8), i32c(17), 72, 113, iff([]),
+                   lg(7), lg(8), i32c(1), 106, 76, iff([]),
+                     KOPI(13, 10, 12, i32c(0), lg(7)),
+                     lg(8), i32c(1), 106, lg(7), 107, ls(11),
+                     GJENTA(11, 13, 10, 48),
+                   ELS(),
+                     KOPI(13, 10, 12, i32c(0), [lg(8), i32c(1), 106]),
+                     PUT(13, 10, 46),
+                     KOPI(13, 10, 12, [lg(8), i32c(1), 106], [lg(7), lg(8), i32c(1), 106, 107]),
+                   END(),
+                 ELS(),
+                   lg(8), i32c(0), 72, lg(8), i32c(-5), 74, 113, iff([]),
+                     PUT(13, 10, 48), PUT(13, 10, 46),
+                     i32c(0), lg(8), 107, i32c(1), 107, ls(11),
+                     GJENTA(11, 13, 10, 48),
+                     KOPI(13, 10, 12, i32c(0), lg(7)),
+                   ELS(),
+                     KOPI(13, 10, 12, i32c(0), i32c(1)),
+                     lg(7), i32c(1), 74, iff([]),
+                       PUT(13, 10, 46),
+                       KOPI(13, 10, 12, i32c(1), [lg(7), i32c(1), 107]),
+                     END(),
+                     PUT(13, 10, 101),
+                     lg(8), 172, K(k, "fmt_i64"), ls(14),
+                     KOPI(13, 10, 14, i32c(0), [lg(14), ALEN()]),
+                   END(),
+                 END(),
+                 lg(10), anew_def(tt), ls(12),
+                 lg(12), i32c(0), lg(13), i32c(0), lg(10), acopy(tt, tt),
+                 lg(12)])
+    returner b
+}
+
+funksjon _heltall_av(k: ordbok) -> liste {
+    la tt = T_TEKST()
+    la feil = [LIT(k, "Ugyldig heiltall: "), lg(0), K(k, "tekst_av"), K(k, "konkat"), K(k, "kast")]
+    # lokale: 1 t (tekst); 2 n, 3 i, 4 neg, 5 c (i32); 6 acc (i64)
+    returner [lokale([[1, VT_TEKST()], [4, VT_I32()], [1, VT_I64()]]),
+              lg(0), K(k, "er_tal"), iff([]), lg(0), RET(), END(),
+              lg(0), rtest(T_BOOL()), iff([]), lg(0), rcast(T_BOOL()), sget(T_BOOL(), 0), I31NY(), RET(), END(),
+              lg(0), rtest(tt), 69, iff([]), feil, END(),
+              lg(0), rcast(tt), ls(1), lg(1), ALEN(), ls(2),
+              lg(2), 69, iff([]), feil, END(),
+              i32c(0), ls(3), i32c(0), ls(4), i64c(0), ls(6),
+              lg(1), i32c(0), aget_u(tt), i32c(45), 70, iff([]),
+                i32c(1), ls(4), i32c(1), ls(3),
+                lg(2), i32c(1), 70, iff([]), feil, END(),
+              END(),
+              blk([]), lp([]),
+                lg(3), lg(2), 78, brif(1),
+                lg(1), lg(3), aget_u(tt), i32c(48), 107, ls(5),
+                lg(5), i32c(9), 75, iff([]), feil, END(),
+                lg(6), i64c(10), 126, lg(5), 173, 124, ls(6),
+                lg(3), i32c(1), 106, ls(3), br(0),
+              END(), END(),
+              lg(4), iff(VT_I64()), i64c(0), lg(6), 125, ELS(), lg(6), END(),
+              K(k, "frå_i64")]
+}
+
+funksjon _indeks_feil(k: ordbok, idx_lok: heltall, len_uttrykk: liste, fa: heltall, fb: heltall) -> liste {
+    returner [LIT(k, "IndeksFeil: indeks "), lg(idx_lok), K(k, "tekst_av"), K(k, "konkat"),
+              LIT(k, " utanfor lista (lengde "), K(k, "konkat"),
+              len_uttrykk, 172, K(k, "fmt_i64"), K(k, "konkat"),
+              LIT(k, ") ved "), K(k, "konkat"), LIT_LOK(fa, fb), K(k, "konkat"), K(k, "kast")]
+}
+
+# Kroppen (lokale + instruksjonar, utan avsluttande end) til atomet.
+funksjon atom_kropp(k: ordbok, namn: tekst) -> liste {
+    la tb = T_BOKS()
+    la tbo = T_BOOL()
+    la tf = T_FLYT()
+    la tt = T_TEKST()
+    la ta = T_ARR()
+    la tl = T_LISTE()
+    la td = T_ORDBOK()
+    la ingen = lokale([])
+    hvis namn == "til_i64" {
+        # i31 → i31.get_s + utvid; elles ref.cast $boks (trap for andre typar)
+        returner [ingen, lg(0), rtest(HT_I31()), iff(VT_I64()), lg(0), rcast(HT_I31()), 251, 29, 172,
+                  ELS(), lg(0), rcast(tb), sget(tb, 0), END()]
+    }
+    hvis namn == "frå_i64" {
+        returner [ingen, lg(0), 66, leb_s(I31_MIN()), 89, lg(0), 66, leb_s(I31_MAX()), 87, 113, iff(VT_EQ()),
+                  lg(0), 167, I31NY(), ELS(), lg(0), sny(tb), END()]
+    }
+    hvis namn == "er_tal" { returner [ingen, lg(0), rtest(HT_I31()), lg(0), rtest(tb), 114] }
+    hvis namn == "er_num" { returner [ingen, lg(0), K(k, "er_tal"), lg(0), rtest(tf), 114] }
+    hvis namn == "til_f64" {
+        returner [ingen, lg(0), rtest(tf), iff(VT_F64()), lg(0), rcast(tf), sget(tf, 0),
+                  ELS(), lg(0), K(k, "til_i64"), 185, END()]
+    }
+    hvis namn == "sannhet" {
+        # usann: null, usann, 0, 0.0 og ""; alt anna er sant
+        returner [ingen, lg(0), 209, iff(VT_I32()), i32c(0),
+                  ELS(), lg(0), rtest(tbo), iff(VT_I32()), lg(0), rcast(tbo), sget(tbo, 0),
+                  ELS(), lg(0), K(k, "er_tal"), iff(VT_I32()), lg(0), K(k, "til_i64"), i64c(0), 82,
+                  ELS(), lg(0), rtest(tf), iff(VT_I32()), lg(0), rcast(tf), sget(tf, 0), f64c(0), 98,
+                  ELS(), lg(0), rtest(tt), iff(VT_I32()), lg(0), rcast(tt), ALEN(), i32c(0), 71,
+                  ELS(), i32c(1), END(), END(), END(), END(), END()]
+    }
+    hvis namn == "bool" { returner [ingen, lg(0), iff(VT_EQ()), 35, 1, ELS(), 35, 0, END()] }
+    hvis namn == "konkat" {
+        returner [lokale([[2, VT_I32()], [1, VT_TEKST()]]),
+                  lg(0), ALEN(), ls(2), lg(1), ALEN(), ls(3),
+                  lg(2), lg(3), 106, anew_def(tt), ls(4),
+                  lg(4), i32c(0), lg(0), i32c(0), lg(2), acopy(tt, tt),
+                  lg(4), lg(2), lg(1), i32c(0), lg(3), acopy(tt, tt),
+                  lg(4)]
+    }
+    hvis namn == "fmt_i64" {
+        # lokale: 1 neg, 2 p (i32); 3 u (i64); 4 buf, 5 r (tekst)
+        returner [lokale([[2, VT_I32()], [1, VT_I64()], [2, VT_TEKST()]]),
+                  lg(0), i64c(0), 83, ls(1),
+                  lg(1), iff(VT_I64()), i64c(0), lg(0), 125, ELS(), lg(0), END(), ls(3),
+                  i32c(20), anew_def(tt), ls(4),
+                  i32c(20), ls(2),
+                  lp([]),
+                    lg(2), i32c(1), 107, ls(2),
+                    lg(4), lg(2), lg(3), i64c(10), 130, 167, i32c(48), 106, aset(tt),
+                    lg(3), i64c(10), 128, lt(3), i64c(0), 82, brif(0),
+                  END(),
+                  lg(1), iff([]), lg(2), i32c(1), 107, ls(2), lg(4), lg(2), i32c(45), aset(tt), END(),
+                  i32c(20), lg(2), 107, anew_def(tt), ls(5),
+                  lg(5), i32c(0), lg(4), lg(2), i32c(20), lg(2), 107, acopy(tt, tt),
+                  lg(5)]
+    }
+    hvis namn == "fmt_f64" { returner _fmt_f64(k) }
+    hvis namn == "tekst_av" {
+        la flyt_grein = [lg(0), rtest(tf), iff(VT_TEKST()), lg(0), rcast(tf), sget(tf, 0), K(k, "fmt_f64"), ELS()]
+        la flyt_slutt = [END()]
+        hvis ikkje k["flyt"] {
+            flyt_grein = []
+            flyt_slutt = []
+        }
+        returner [ingen, lg(0), 209, iff(VT_TEKST()), LIT(k, ""),
+                  ELS(), lg(0), rtest(tt), iff(VT_TEKST()), lg(0), rcast(tt),
+                  ELS(), lg(0), K(k, "er_tal"), iff(VT_TEKST()), lg(0), K(k, "til_i64"), K(k, "fmt_i64"),
+                  ELS(), flyt_grein,
+                  lg(0), rtest(tbo), iff(VT_TEKST()),
+                    lg(0), rcast(tbo), sget(tbo, 0), iff(VT_TEKST()), LIT(k, "sann"), ELS(), LIT(k, "usann"), END(),
+                  ELS(), LIT(k, "[verdi]"), END(), flyt_slutt,
+                  END(), END(), END()]
+    }
+    hvis namn == "til_minne" {
+        la P = k["postkasse"]
+        # lokale: 1 n, 2 i
+        returner [lokale([[2, VT_I32()]]),
+                  lg(0), ALEN(), ls(1),
+                  i32c(P), lg(1), 106, 63, 0, i32c(16), 116, 75, iff([]),
+                    i32c(P), lg(1), 106, 63, 0, i32c(16), 116, 107, i32c(65535), 106, i32c(16), 118, 64, 0, 26,
+                  END(),
+                  i32c(0), ls(2),
+                  blk([]), lp([]),
+                    lg(2), lg(1), 78, brif(1),
+                    i32c(P), lg(2), 106, lg(0), lg(2), aget_u(tt), 58, 0, 0,
+                    lg(2), i32c(1), 106, ls(2), br(0),
+                  END(), END(),
+                  lg(1)]
+    }
+    hvis namn == "logg_tekst" {
+        la imp = "logg"
+        hvis k["testbygg"] { imp = "logg_test" }
+        returner [ingen, i32c(k["postkasse"]), lg(0), K(k, "til_minne"), KI(k, imp)]
+    }
+    hvis namn == "kast" {
+        returner [ingen, LIT(k, "ERROR: "), lg(0), K(k, "konkat"), LIT(k, "\n"), K(k, "konkat"), K(k, "logg_tekst"), TRAP()]
+    }
+    hvis namn == "skriv" {
+        returner [ingen, lg(0), K(k, "tekst_av"), K(k, "logg_tekst"), i32c(0), I31NY()]
+    }
+    hvis namn == "add" {
+        returner [ingen, _aritm(k, "add", [lg(0), K(k, "tekst_av"), lg(1), K(k, "tekst_av"), K(k, "konkat")])]
+    }
+    hvis namn == "sub" eller namn == "mul" { returner [ingen, _aritm(k, namn, [TRAP()])] }
+    hvis namn == "div" { returner _divmod(k, usann, sann) }
+    hvis namn == "mod" { returner _divmod(k, sann, sann) }
+    hvis namn == "div_k" { returner _divmod(k, usann, usann) }
+    hvis namn == "mod_k" { returner _divmod(k, sann, usann) }
+    hvis namn == "and" eller namn == "or" eller namn == "xor" {
+        returner [ingen, lg(0), K(k, "til_i64"), lg(1), K(k, "til_i64"), _i64_op(namn), K(k, "frå_i64")]
+    }
+    hvis namn == "shl" eller namn == "shr" {
+        la melding = "Ugyldig venstreskift: "
+        hvis namn == "shr" { melding = "Ugyldig høgreskift: " }
+        returner [lokale([[1, VT_I64()]]),
+                  lg(1), K(k, "til_i64"), ls(2),
+                  lg(2), i64c(0), 83, lg(2), i64c(64), 89, 114, iff([]),
+                    LIT(k, melding), lg(1), K(k, "tekst_av"), K(k, "konkat"), K(k, "kast"),
+                  END(),
+                  lg(0), K(k, "til_i64"), lg(2), _i64_op(namn), K(k, "frå_i64")]
+    }
+    hvis namn == "neg" {
+        returner [ingen, lg(0), K(k, "er_tal"), iff(VT_EQ()), i64c(0), lg(0), K(k, "til_i64"), 125, K(k, "frå_i64"),
+                  ELS(), lg(0), rtest(tf), iff(VT_EQ()), lg(0), rcast(tf), sget(tf, 0), 154, sny(tf),
+                  ELS(), TRAP(), END(), END()]
+    }
+    hvis namn == "tekst_lik" {
+        # lokale: 2 n, 3 i
+        returner [lokale([[2, VT_I32()]]),
+                  lg(0), ALEN(), ls(2),
+                  lg(2), lg(1), ALEN(), 71, iff([]), i32c(0), RET(), END(),
+                  i32c(0), ls(3),
+                  blk([]), lp([]),
+                    lg(3), lg(2), 78, brif(1),
+                    lg(0), lg(3), aget_u(tt), lg(1), lg(3), aget_u(tt), 71, iff([]), i32c(0), RET(), END(),
+                    lg(3), i32c(1), 106, ls(3), br(0),
+                  END(), END(),
+                  i32c(1)]
+    }
+    hvis namn == "liste_lik" {
+        # lokale: 2 n, 3 i (i32); 4 a, 5 b (arr)
+        returner [lokale([[2, VT_I32()], [2, VT_ARR()]]),
+                  lg(0), sget(tl, 0), ls(2),
+                  lg(2), lg(1), sget(tl, 0), 71, iff([]), i32c(0), RET(), END(),
+                  lg(0), sget(tl, 1), ls(4), lg(1), sget(tl, 1), ls(5),
+                  i32c(0), ls(3),
+                  blk([]), lp([]),
+                    lg(3), lg(2), 78, brif(1),
+                    lg(4), lg(3), aget(ta), lg(5), lg(3), aget(ta), K(k, "lik"), 69, iff([]), i32c(0), RET(), END(),
+                    lg(3), i32c(1), 106, ls(3), br(0),
+                  END(), END(),
+                  i32c(1)]
+    }
+    hvis namn == "lik" {
+        returner [ingen, lg(0), K(k, "er_tal"), lg(1), K(k, "er_tal"), 113, iff(VT_I32()),
+                    lg(0), K(k, "til_i64"), lg(1), K(k, "til_i64"), 81,
+                  ELS(), lg(0), K(k, "er_num"), lg(1), K(k, "er_num"), 113, iff(VT_I32()),
+                    lg(0), K(k, "til_f64"), lg(1), K(k, "til_f64"), 97,
+                  ELS(), lg(0), lg(1), 211, iff(VT_I32()), i32c(1),
+                  ELS(), lg(0), rtest(tt), lg(1), rtest(tt), 113, iff(VT_I32()),
+                    lg(0), rcast(tt), lg(1), rcast(tt), K(k, "tekst_lik"),
+                  ELS(), lg(0), rtest(tl), lg(1), rtest(tl), 113, iff(VT_I32()),
+                    lg(0), rcast(tl), lg(1), rcast(tl), K(k, "liste_lik"),
+                  ELS(), i32c(0), END(), END(), END(), END(), END()]
+    }
+    hvis namn == "tekst_cmp" {
+        # lokale: 2 la, 3 lb, 4 i, 5 ca, 6 cb
+        returner [lokale([[5, VT_I32()]]),
+                  lg(0), ALEN(), ls(2), lg(1), ALEN(), ls(3),
+                  i32c(0), ls(4),
+                  blk([]), lp([]),
+                    lg(4), lg(2), 78, brif(1),
+                    lg(4), lg(3), 78, brif(1),
+                    lg(0), lg(4), aget_u(tt), ls(5), lg(1), lg(4), aget_u(tt), ls(6),
+                    lg(5), lg(6), 71, iff([]), lg(5), lg(6), 73, iff(VT_I32()), i32c(-1), ELS(), i32c(1), END(), RET(), END(),
+                    lg(4), i32c(1), 106, ls(4), br(0),
+                  END(), END(),
+                  lg(2), lg(3), 72, iff(VT_I32()), i32c(-1), ELS(), lg(2), lg(3), 74, END()]
+    }
+    hvis namn == "cmp" {
+        # −1, 0, 1, eller 2 (ikkje samanliknbare: alle ordna samanlikningar er usanne).
+        # null tel som 0 mot tal og mot null (som VM-en). lokale: 2 x, 3 y (i64); 4 fx, 5 fy (f64)
+        returner [lokale([[2, VT_I64()], [2, VT_F64()]]),
+                  lg(0), 209, iff([]), lg(1), 209, lg(1), K(k, "er_num"), 114, iff([]), i32c(0), I31NY(), ls(0), END(), END(),
+                  lg(1), 209, iff([]), lg(0), K(k, "er_num"), iff([]), i32c(0), I31NY(), ls(1), END(), END(),
+                  lg(0), K(k, "er_tal"), lg(1), K(k, "er_tal"), 113, iff(VT_I32()),
+                    lg(0), K(k, "til_i64"), ls(2), lg(1), K(k, "til_i64"), ls(3),
+                    lg(2), lg(3), 83, iff(VT_I32()), i32c(-1), ELS(), lg(2), lg(3), 85, END(),
+                  ELS(), lg(0), K(k, "er_num"), lg(1), K(k, "er_num"), 113, iff(VT_I32()),
+                    lg(0), K(k, "til_f64"), ls(4), lg(1), K(k, "til_f64"), ls(5),
+                    lg(4), lg(5), 99, iff(VT_I32()), i32c(-1),
+                    ELS(), lg(4), lg(5), 100, iff(VT_I32()), i32c(1),
+                    ELS(), lg(4), lg(5), 97, iff(VT_I32()), i32c(0), ELS(), i32c(2), END(), END(), END(),
+                  ELS(), lg(0), rtest(tt), lg(1), rtest(tt), 113, iff(VT_I32()),
+                    lg(0), rcast(tt), lg(1), rcast(tt), K(k, "tekst_cmp"),
+                  ELS(), i32c(2), END(), END(), END()]
+    }
+    hvis namn == "lengde" {
+        returner [ingen, lg(0), rtest(tt), iff(VT_I32()), lg(0), rcast(tt), ALEN(),
+                  ELS(), lg(0), rtest(tl), iff(VT_I32()), lg(0), rcast(tl), sget(tl, 0),
+                  ELS(), lg(0), rtest(td), iff(VT_I32()), lg(0), rcast(td), sget(td, 0),
+                  ELS(), TRAP(), END(), END(), END(), I31NY()]
+    }
+    hvis namn == "ordbok_finn" {
+        # lokale: 2 n, 3 i (i32); 4 nøklar (arr)
+        returner [lokale([[2, VT_I32()], [1, VT_ARR()]]),
+                  lg(0), sget(td, 0), ls(2), lg(0), sget(td, 1), ls(4), i32c(0), ls(3),
+                  blk([]), lp([]),
+                    lg(3), lg(2), 78, brif(1),
+                    lg(4), lg(3), aget(ta), lg(1), K(k, "lik"), iff([]), lg(3), RET(), END(),
+                    lg(3), i32c(1), 106, ls(3), br(0),
+                  END(), END(),
+                  i32c(-1)]
+    }
+    hvis namn == "ordbok_hent" {
+        returner [lokale([[1, VT_I32()]]),
+                  lg(0), lg(1), K(k, "ordbok_finn"), lt(2), i32c(0), 72, iff(VT_EQ()), NULL(),
+                  ELS(), lg(0), sget(td, 2), lg(2), aget(ta), END()]
+    }
+    hvis namn == "ordbok_set" {
+        # lokale: 3 i, 4 n, 5 cap (i32); 6 nk, 7 nv (arr)
+        returner [lokale([[3, VT_I32()], [2, VT_ARR()]]),
+                  lg(0), lg(1), K(k, "ordbok_finn"), lt(3), i32c(0), 78, iff([]),
+                    lg(0), sget(td, 2), lg(3), lg(2), aset(ta), RET(),
+                  END(),
+                  lg(0), sget(td, 0), ls(4),
+                  lg(0), sget(td, 1), ALEN(), ls(5),
+                  lg(4), lg(5), 78, iff([]),
+                    lg(5), i32c(1), 116, i32c(4), 106, ls(5),
+                    lg(5), anew_def(ta), ls(6), lg(5), anew_def(ta), ls(7),
+                    lg(6), i32c(0), lg(0), sget(td, 1), i32c(0), lg(4), acopy(ta, ta),
+                    lg(7), i32c(0), lg(0), sget(td, 2), i32c(0), lg(4), acopy(ta, ta),
+                    lg(0), lg(6), sset(td, 1), lg(0), lg(7), sset(td, 2),
+                  END(),
+                  lg(0), sget(td, 1), lg(4), lg(1), aset(ta),
+                  lg(0), sget(td, 2), lg(4), lg(2), aset(ta),
+                  lg(0), lg(4), i32c(1), 106, sset(td, 0)]
+    }
+    hvis namn == "ordbok_frå_par" {
+        # lokale: 1 d (ordbok); 2 i, 3 n (i32)
+        returner [lokale([[1, VT_ORDBOK()], [2, VT_I32()]]),
+                  lg(0), ALEN(), ls(3),
+                  i32c(0), lg(3), i32c(1), 118, anew_def(ta), lg(3), i32c(1), 118, anew_def(ta), sny(td), ls(1),
+                  i32c(0), ls(2),
+                  blk([]), lp([]),
+                    lg(2), lg(3), 78, brif(1),
+                    lg(1), lg(0), lg(2), aget(ta), lg(0), lg(2), i32c(1), 106, aget(ta), K(k, "ordbok_set"),
+                    lg(2), i32c(2), 106, ls(2), br(0),
+                  END(), END(),
+                  lg(1)]
+    }
+    hvis namn == "liste_frå_arr" { returner [ingen, lg(0), ALEN(), lg(0), sny(tl)] }
+    hvis namn == "indeks_hent" {
+        # (obj, indeks, fnamn-off, fnamn-len). lokale: 4 ix (i64); 5 l (liste); 6 t (tekst)
+        returner [lokale([[1, VT_I64()], [1, VT_LISTE()], [1, VT_TEKST()]]),
+                  lg(0), rtest(tl), iff(VT_EQ()),
+                    lg(1), K(k, "er_tal"), iff(VT_EQ()),
+                      lg(1), K(k, "til_i64"), ls(4), lg(0), rcast(tl), ls(5),
+                      lg(4), i64c(0), 83, lg(4), lg(5), sget(tl, 0), 172, 89, 114, iff([]),
+                        _indeks_feil(k, 1, [lg(5), sget(tl, 0)], 2, 3),
+                      END(),
+                      lg(5), sget(tl, 1), lg(4), 167, aget(ta),
+                    ELS(), NULL(), END(),
+                  ELS(), lg(0), rtest(tt), iff(VT_EQ()),
+                    lg(1), K(k, "er_tal"), iff(VT_EQ()),
+                      lg(1), K(k, "til_i64"), ls(4), lg(0), rcast(tt), ls(6),
+                      lg(4), i64c(0), 83, lg(4), lg(6), ALEN(), 172, 89, 114, iff(VT_EQ()), LIT(k, ""),
+                      ELS(), lg(6), lg(4), 167, aget_u(tt), anew_fixed(tt, 1), END(),
+                    ELS(), NULL(), END(),
+                  ELS(), lg(0), rtest(td), iff(VT_EQ()), lg(0), rcast(td), lg(1), K(k, "ordbok_hent"),
+                  ELS(), TRAP(), END(), END(), END()]
+    }
+    hvis namn == "indeks_set" {
+        # (obj, indeks, verdi, fnamn-off, fnamn-len). lokale: 5 ix (i64); 6 l (liste)
+        returner [lokale([[1, VT_I64()], [1, VT_LISTE()]]),
+                  lg(0), rtest(tl), iff([]),
+                    lg(1), K(k, "er_tal"), 69, iff([]), TRAP(), END(),
+                    lg(1), K(k, "til_i64"), ls(5), lg(0), rcast(tl), ls(6),
+                    lg(5), i64c(0), 83, lg(5), lg(6), sget(tl, 0), 172, 89, 114, iff([]),
+                      _indeks_feil(k, 1, [lg(6), sget(tl, 0)], 3, 4),
+                    END(),
+                    lg(6), sget(tl, 1), lg(5), 167, lg(2), aset(ta),
+                  ELS(), lg(0), rtest(td), iff([]), lg(0), rcast(td), lg(1), lg(2), K(k, "ordbok_set"),
+                  ELS(), TRAP(), END(), END(),
+                  lg(0)]
+    }
+    hvis namn == "legg_til" {
+        # lokale: 2 l (liste); 3 n (i32); 4 a, 5 na (arr)
+        returner [lokale([[1, VT_LISTE()], [1, VT_I32()], [2, VT_ARR()]]),
+                  lg(0), rcast(tl), ls(2),
+                  lg(2), sget(tl, 0), ls(3), lg(2), sget(tl, 1), ls(4),
+                  lg(3), lg(4), ALEN(), 78, iff([]),
+                    lg(3), i32c(1), 116, i32c(4), 106, anew_def(ta), ls(5),
+                    lg(5), i32c(0), lg(4), i32c(0), lg(3), acopy(ta, ta),
+                    lg(2), lg(5), sset(tl, 1), lg(5), ls(4),
+                  END(),
+                  lg(4), lg(3), lg(1), aset(ta),
+                  lg(2), lg(3), i32c(1), 106, sset(tl, 0),
+                  i32c(0), I31NY()]
+    }
+    hvis namn == "har_nokkel" {
+        returner [ingen, lg(0), rcast(td), lg(1), K(k, "ordbok_finn"), i32c(0), 78, K(k, "bool")]
+    }
+    hvis namn == "nøkler" {
+        # lokale: 1 d (ordbok); 2 n (i32); 3 a (arr)
+        returner [lokale([[1, VT_ORDBOK()], [1, VT_I32()], [1, VT_ARR()]]),
+                  lg(0), rcast(td), ls(1), lg(1), sget(td, 0), ls(2),
+                  lg(2), anew_def(ta), ls(3),
+                  lg(3), i32c(0), lg(1), sget(td, 1), i32c(0), lg(2), acopy(ta, ta),
+                  lg(2), lg(3), sny(tl)]
+    }
+    hvis namn == "for_iterabel" {
+        returner [ingen, lg(0), rtest(td), iff(VT_EQ()), lg(0), K(k, "nøkler"), ELS(), lg(0), END()]
+    }
+    hvis namn == "slice" {
+        # (x, frå, til), klemt til [0, lengde]; tom når til ≤ frå.
+        # lokale: 3 ia, 4 ib (i64); 5 len, 6 cnt (i32); 7 t, 8 r (tekst); 9 l (liste); 10 na (arr)
+        returner [lokale([[2, VT_I64()], [2, VT_I32()], [2, VT_TEKST()], [1, VT_LISTE()], [1, VT_ARR()]]),
+                  lg(0), rtest(tt), iff([]), lg(0), rcast(tt), ls(7), lg(7), ALEN(), ls(5),
+                  ELS(), lg(0), rcast(tl), ls(9), lg(9), sget(tl, 0), ls(5), END(),
+                  lg(1), K(k, "til_i64"), ls(3),
+                  lg(3), i64c(0), 83, iff([]), i64c(0), ls(3), END(),
+                  lg(3), lg(5), 172, 85, iff([]), lg(5), 172, ls(3), END(),
+                  lg(2), K(k, "til_i64"), ls(4),
+                  lg(4), i64c(0), 83, iff([]), i64c(0), ls(4), END(),
+                  lg(4), lg(5), 172, 85, iff([]), lg(5), 172, ls(4), END(),
+                  lg(4), lg(3), 83, iff([]), lg(3), ls(4), END(),
+                  lg(4), lg(3), 125, 167, ls(6),
+                  lg(0), rtest(tt), iff(VT_EQ()),
+                    lg(6), anew_def(tt), ls(8), lg(8), i32c(0), lg(7), lg(3), 167, lg(6), acopy(tt, tt), lg(8),
+                  ELS(),
+                    lg(6), anew_def(ta), ls(10), lg(10), i32c(0), lg(9), sget(tl, 1), lg(3), 167, lg(6), acopy(ta, ta),
+                    lg(6), lg(10), sny(tl),
+                  END()]
+    }
+    hvis namn == "char_code" {
+        returner [lokale([[1, VT_TEKST()]]),
+                  lg(0), rcast(tt), ls(1), lg(1), ALEN(), 69, iff(VT_I32()), i32c(0),
+                  ELS(), lg(1), i32c(0), aget_u(tt), END(), I31NY()]
+    }
+    hvis namn == "chr" { returner [ingen, lg(0), K(k, "til_i64"), 167, anew_fixed(tt, 1)] }
+    hvis namn == "type_namn" {
+        returner [ingen, lg(0), 209, iff(VT_EQ()), LIT(k, "ingenting"),
+                  ELS(), lg(0), K(k, "er_tal"), iff(VT_EQ()), LIT(k, "heltall"),
+                  ELS(), lg(0), rtest(tf), iff(VT_EQ()), LIT(k, "desimaltall"),
+                  ELS(), lg(0), rtest(tt), iff(VT_EQ()), LIT(k, "tekst"),
+                  ELS(), lg(0), rtest(tbo), iff(VT_EQ()), LIT(k, "boolsk"),
+                  ELS(), lg(0), rtest(tl), iff(VT_EQ()), LIT(k, "liste"),
+                  ELS(), LIT(k, "ordbok"), END(), END(), END(), END(), END(), END()]
+    }
+    hvis namn == "heltall_av" { returner _heltall_av(k) }
+    kast "wasm_atom: ukjent atom " + namn
+}
