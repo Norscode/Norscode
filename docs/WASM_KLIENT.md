@@ -1,6 +1,6 @@
-# Klientlogikk i Norscode kompilert til WebAssembly (W0–W6)
+# Klientlogikk i Norscode kompilert til WebAssembly (W0–W7)
 
-Status: milepælane W0–W6 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
+Status: milepælane W0–W7 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
 
 - **W0** gav vegen frå kjelde til nettlesar: heiltal, kontrollflyt, kall og DOM-vertsfunksjonar.
 - **W1** gav verdimodellen: tekst, desimaltal, lister og ordbøker, med same semantikk som VM-en. Eit paritetskorpus køyrer kvart program i VM-en og i Chrome og krev identisk utskrift.
@@ -9,6 +9,7 @@ Status: milepælane W0–W6 i WASM-sporet (app-kjensle del 2). Klientkode blir s
 - **W4** gav vertsfunksjonane for ei ekte interaktiv side (tekst frå DOM-en, attributt og klassar, hendingar med data og delegering, tidtakarar, navigasjon, lokal lagring, handtakstabell med `slepp`), atoma `fjern_nokkel` og `tid_ms`, ein cache for lowra runtime-funksjonar, serve-integrasjonen `std/wasm_serve.no` (appen importerer ikkje lenger noko under `build/`), og demoen `examples/wasm_skjema/`.
 - **W5** gav nettlesar-benken `std/wasm_nettlesar.no` og CLI-en `tools/wasm_nettlesar.no`: Chrome og JavaScriptCore frå Norscode, rydding av berre eigne prosessar, app-kjensle målt i WASM-sida sjølv og sidelastingstid frå Chrome-netloggen (sjå «Nettlesar-benken»).
 - **W6** gav asynk nett via tilbakekall: `std/wasm_nett.no` (fetch mot same opphav, JSON, status og headerar, tidsgrense og avbryting, tilbakekall i sende-rekkjefølgje) og demoen `examples/wasm_deltakarar/` (sjå «Nett»).
+- **W7** gav lokal lagring i IndexedDB: `std/wasm_lager.no` (database med oppgraderingsskjema, put/hent/slett/liste/tel, område- og indeksspørjingar, éin transaksjon per batch, tilbakekall i rekkjefølgje, LagerFeil, database per brukar og sletting ved utlogging), og ein lokal kopi i deltakar-demoen som blir vist straks ved omlasting (sjå «Lokal lagring»).
 
 ## Bygg og køyr
 
@@ -51,6 +52,7 @@ Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I 
 | `std/wasm_js.no` | Norscode→JS-emitter for lastaren |
 | `std/wasm_serve.no` | Serve-integrasjon: modul- og lastarsvar, script-tag og CSP (W4) |
 | `std/wasm_nett.no` | Nett for klientmodular: fetch mot same opphav med tilbakekall, kø i sende-rekkjefølgje, feilklassar (W6) |
+| `std/wasm_lager.no` | Lokal lagring i IndexedDB: skjema, op-ar, batch som éin transaksjon, kø i rekkjefølgje, LagerFeil, personvern (W7) |
 | `tools/nc_wasm.no` | CLI |
 | `std/wasm_nettlesar.no` | Nettlesar-benken: Chrome, jsc, serve, rydding, logg, mål og netlogg (W5; berre testar og verktøy) |
 | `std/wasm_jsc.no` | Vertsshimen for `jsc -e` som JS-tre (W5) |
@@ -86,6 +88,7 @@ Ein klientmodul er ei vanleg Norscode-fil med `start()`. Sjå `examples/wasm_skj
    - Lag element med `vert.lag("li")`, fyll dei med `sett_tekst`/`sett_attr`, set dei inn med `legg_inn`, og `slepp` handtaka du ikkje treng meir. Brukardata går aldri til HTML: `sett_tekst` set `textContent`, og `sett_html` escapar alltid verdien.
    - Reglar som ikkje rører DOM-en (validering, filtrering), bør vere reine funksjonar. Dei køyrer då likt i VM-en og kan testast der (sjå `tests/test_wasm_w4_chrome.no`).
    - **Nett (W6):** `bruk std.wasm_nett som nett`, så `nett.hent_json("/api/x", fun(svar) -> vis(svar["json"]), fun(feil) -> vis_feil(feil))`. Tilbakekalla til nett er closures med éin parameter (ikkje funksjonsnamn), og dei kjem i den rekkjefølgja førespurnadene vart sende. Sjå «Nett (W6)» og `examples/wasm_deltakarar/`.
+   - **Lokal lagring (W7):** `bruk std.wasm_lager som lager`, så `la db = lager.opne(lager.brukar_db_namn("nc-app", uid), 1, skjema, fun(d) -> klar(), fun(f) -> vis_feil(f))` og `lager.køyr(db, [lager.op_put("dok", v), …], fun(r) -> …, fun(f) -> …)`. Same tilbakekall-API som nett. Sjå «Lokal lagring (W7)».
 2. **Appen** (`app.no`): `bruk std.wasm_serve som ws`. WASM-sida blir levert med `ws.side(html)` (CSP med `'wasm-unsafe-eval'`), og HTML-en har `ws.script_tag()` i `<head>`. Alle andre sider brukar `ws.vanleg_side(html)`. Appen importerer ingenting under `build/`, og sida må fungere (utan klientlogikk) når WASM manglar.
 3. **Bygg** med `NC_WASM_KJELDE`, `NC_WASM_APP` og `NC_WASM_UT` (sjå over), og **server** `build/wasm/<app>/serve.no`.
 4. **Test**: bygg ein testklient med `NC_WASM_TESTBYGG=1` som importerer klienten, kallar `start()` og køyrer brukarsteg med testkrokane (`test_skriv`, `test_send`, `test_klikk`, `test_tast`). `skriv(...)` går då til `<pre id="nc-logg">`, som headless Chrome les (sjå `tests/fixtures/wasm_skjema_testklient.no`).
@@ -523,6 +526,14 @@ Hendingsdata blir lesne medan tilbakekallet køyrer (lastaren held hendinga i `V
 | `hent_start(førespurnad, "funksjon")` → handtak | `Q(S(…), x[…])`: `fetch` med førespurnaden (JSON), mode og credentials `same-origin`, `AbortSignal.any([k.signal, AbortSignal.timeout(t)])`; handtaket er AbortController-en `k` (`slepp` avbryt) |
 | `hent_svar()` → tekst | `R`: konvolutten til det siste svaret, `id\nstatus\nheaderar-JSON\nkropp`, eller `id\n0\nfeilnamn\n` |
 
+**Lokal lagring (W7)** — brukte av `std/wasm_lager.no`, ikkje direkte av klientkoden:
+
+| Funksjon | JS-operasjon |
+|---|---|
+| `lager_start(id, førespurnad, "funksjon")` | `I(id, S(…), x[…])`: éin IndexedDB-førespurnad (opne/oppgradere, ein batch som éin transaksjon, lukke eller slette databasen), styrt av JSON-en frå Norscode; tilbakekallet blir kalla med konvolutten i `J` |
+| `lager_svar()` → tekst | `J`: `JSON.stringify([id, feilnamn, melding, data])` |
+| `fjern_lokalt(nøkkel)` | `localStorage.removeItem` (utlogging) |
+
 **Testkrokar** (berre med `NC_WASM_TESTBYGG=1`; elles kompileringsfeil): `test_klikk(h)` (`click()`), `test_skriv(h, verdi)` (set `value` og sender `input` som boblar), `test_tast(h, tast)` (`keydown` med `key`) og `test_send(h)` (`requestSubmit()`, som sender `submit` gjennom lyttarane).
 
 **Handtakstabellen.** Eit handtak er ein indeks i tabellen `E` i lastaren. `slepp(h)`:
@@ -578,6 +589,7 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
 | `V`, `T` (W4) | Gjeldande hending og elementet ho gjeld |
 | `L` (W4) | Lyttar (direkte eller delegert), med `AbortController` og `preventDefault` for `send` |
 | `Q`, `R` (W6) | fetch og konvolutten til det siste svaret (berre når modulen importerer `hent_start`/`hent_svar`) |
+| `I`, `J` (W7) | IndexedDB og konvolutten til det siste svaret (berre når modulen importerer `lager_start`/`lager_svar`) |
 
 Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), har nodane `vilkår` (`?:`), `ikkje` (`!`) og `sekvens` (`(a,b)`), og skriv nøklar med æ, ø og å utan hermeteikn (`tøm:`, `gå_til:`).
 
@@ -595,14 +607,18 @@ Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), h
 | Heile produksjonstabellen utan nett (37 vertsfunksjonar: 33 for klientkoden og 4 interne, utan testkrokane) | 2 550 byte (uendra) | 2 560 byte (planbudsjettet, uendra) |
 | Nett-gruppa (W6: `hent_start`, `hent_svar`, hjelparane `Q` og `R`) | 405 byte | 448 byte (eige budsjett) |
 | Heile produksjonstabellen med nett (39) | 2 955 byte | 3 008 byte (2 560 + 448) |
-| Heile tabellen med testkrokane og nett (44) | 3 271 byte | 3 520 byte (W4: 3 072) |
+| Lagrings-gruppa (W7: `lager_start`, `lager_svar`, `fjern_lokalt`, hjelparane `I` og `J`) | 1 256 byte | 1 280 byte (eige budsjett) |
+| Heile produksjonstabellen med nett og lagring (42) | 4 211 byte | 4 288 byte (2 560 + 448 + 1 280) |
+| Heile tabellen med testkrokane, nett og lagring (47) | 4 523 byte | 4 800 byte (W6: 3 520) |
 | Skjema-demoen (22 importar) | 1 755 byte | 2 048 byte |
-| Deltakar-demoen (W6, 22 importar med nett) | 2 027 byte | 2 560 byte (`test_wasm_w6`) |
+| Deltakar-demoen (W7, 27 importar med nett og lagring) | 3 402 byte (W6: 2 027) | 3 840 byte (2 560 + 1 280, `test_wasm_w6` og `test_wasm_w7_demo`) |
 | W4-proben (7 importar: `finn`, `sett_tekst`, `hent_verdi`, `deleger`, `hending_data`, `lagre_lokalt`, `nå_ms`) | 994 byte | |
 
 Planen hadde 400 byte for W0-settet og 1 KB for eit typisk øy-program. Teljaren er framleis 543 byte (`H` og instansieringa åleine er om lag 300), og eit lite interaktivt program med lyttarar er rundt 1 KB. Skjema-demoen er større fordi han brukar 22 vertsfunksjonar og alle hjelparane (`L` åleine er om lag 300 byte).
 
 **Budsjettet for nett (W6).** Produksjonstabellen var 2 550 av 2 560 byte etter W4, så nett-gruppa fekk plass berre ved at noko anna vart kortare eller at taket vart justert. Grunngjevinga for eit eige budsjett i staden for å heve 2 560: tree-shakinga gjer at gruppa berre kostar modular som brukar `std/wasm_nett.no` (teljaren og skjema-demoen er uendra), og `Q` er éin fetch-kjede der det meste er påkravd API (`AbortSignal.any`/`timeout`, `Object.assign` for mode og credentials, `Object.fromEntries` for headerane). Planutkastet sitt `hent` (2 311 byte for heile settet) hadde verken tidsgrense, avbryting, headerar eller feilnamn. Den einaste innsparinga som vart gjord, er at `js_streng` skriv linjeskift som `\n` i staden for `\u000a`. `test_wasm_lastar` handhevar begge taka: resten ≤ 2 560 og nett-gruppa ≤ 448.
+
+**Budsjettet for lagring (W7).** Lagrings-gruppa har eige budsjett av same grunn: tree-shakinga gjer at berre modular som brukar `std/wasm_lager.no` betaler (teljaren, skjema-demoen og nett-klientane er byte-identiske med W6). Gruppa er 1 256 byte fordi IndexedDB-API-et er ordrikt: sju hendingsfelt (`onupgradeneeded`, `onsuccess`, `onerror`, `onblocked`, `oncomplete`, `onabort`, `onversionchange`), `objectStoreNames`/`indexNames`, `createObjectStore`/`createIndex`/`deleteObjectStore`/`deleteIndex` og `IDBKeyRange`. Alt anna er i Norscode: skjemaet kjem som data, og kvar op er eit metodenamn og ein argumentliste frå `std/wasm_lager.no` (`x[o.m].apply(x,o.a)`), så `I` har ingen greiner per op. Der var to val som kosta: `onversionchange` (ein gamal fane blokkerer ikkje oppgraderingar) og fjerning av indeksar og lager ved oppgradering (om lag 140 byte til saman). `test_wasm_lastar` handhevar taket (≤ 1 280) og at gruppa berre kjem med lagrings-importane.
 
 ## HTML-innsetjing og escaping
 
@@ -706,7 +722,81 @@ nett.avbryt(id)
 - «Hent på nytt», og feilmeldingar for nettverk, tidsavbrot og status (`klient.feilmelding`, ein rein funksjon som testane køyrer i VM-en).
 - Lagring: `nc serve` har korkje disk eller minne mellom førespurnader, så tenaren lagrar lista i ein HttpOnly-informasjonskapsel (`SameSite=Strict`, prosentkoda JSON). API-et til klienten er det same som mot ein database.
 
+**Lokal kopi (W7).** Av/på-knappen «Hugs lista på denne eininga» (`aria-pressed`) lagrar valet i `localStorage` og lista i IndexedDB (databasen `nc-deltakarar-<sha256("demo")[0:16]>`; ein app med innlogging brukar uid-en), i éin transaksjon kvar gong lista endrar seg: tøm, alle radene (nøkkelen er plassen i lista) og tilstanden (`ulagra`). Ved neste lasting blir kopien lesen medan tenaren blir spurd, og vist straks med statusen «Viser lagra kopi frå eininga (N deltakarar) – hentar frå tenaren …». Svaret frå tenaren ventar til kopien er lesen, så rekkjefølgja er fast. Når tenaren svarar, vinn tenarlista, unnateke når kopien har ulagra endringar: dei blir ståande, og statusen seier «Tenaren har N deltakarar. Du har ulagra endringar frå førre gong: lagre dei eller hent på nytt.» Eit nytt trykk på knappen slettar databasen og valet (`lager.logg_ut`). `#lokal` (`role="status"`) viser tilstanden til kopien, og feil i den lokale lagringa får eigne meldingar (`klient.lokal_feilmelding`).
+
+Resultat i Chrome 154 (`tests/test_wasm_w7_demo.no`, testbygg, same profil): i lasting 1 kom lista frå tenaren, knappen lagra ho lokalt, og «Ny Person» vart lagd til og Berit fjerna (ulagra). I lasting 2 (tenaren svarar etter 800 ms) vart dei 10 radene frå eininga (siste «Ny Person») viste før tenarsvaret, dei ulagra endringane vart ståande då tenaren svara med standardlista, «Lagre» lagra dei, og knappen sletta kopien. I lasting 3 var valet borte, databasen ny og tom, og lista kom frå tenaren. Ein fersk profil i lasting 2 viste ingen lokal kopi, berre standardlista (negativ kontroll). Ingen «Uncaught».
+
 Resultat i Chrome 154 (testbygg, `tests/test_wasm_w6_chrome.no`): lasta 10, la til 1, lagra 11, henta dei 11 att frå tenaren, fjerna 1, ei ugyldig liste gav «Kunne ikkje lagre: Deltakar 1: Namnet må ha minst 2 teikn. Deltakar 1: E-postadressa manglar namn før @.», og etter `/api/stopp` gav «Hent på nytt» «Kunne ikkje hente lista: fekk ikkje kontakt med tenaren.» med lista ståande. Ingen «Uncaught». I produksjonsbygg viser `/` dei 10 frå tenaren når sida er ferdig.
+
+## Lokal lagring (W7): `std/wasm_lager.no`
+
+Klientkoden lagrar data på eininga i IndexedDB med same tilbakekall-API som nett: kvar førespurnad får nøyaktig eitt tilbakekall seinare (ein closure med éin parameter), og feil er ei fangbar `LagerFeil`-ordbok. All logikk ligg i Norscode; lastaren har hjelparen `I`, som berre gjer IndexedDB-kalla som førespurnaden frå Norscode beskriv.
+
+```
+bruk std.wasm_lager som lager
+
+la skjema = [lager.lager("dok", "id", [lager.indeks("type", "type", usann), lager.indeks("epost", "epost", sann)]),
+             lager.lager_auto("logg", "nr", []),
+             lager.lager("meta", "", [])]
+la db = lager.opne(lager.brukar_db_namn("nc-app", uid), 1, skjema, fun(d) -> klar(d), fun(f) -> vis_feil(f))
+lager.put(db, "dok", {"id": 7, "type": "brev", "epost": "a@b.no"}, fun(k) -> 0, fun(f) -> vis_feil(f))
+lager.indeks_liste(db, "dok", "type", lager.lik("brev"), fun(l) -> vis(l), fun(f) -> vis_feil(f))
+lager.køyr(db, [lager.op_tøm("dok"), lager.op_put("dok", a), lager.op_put("dok", b)], fun(r) -> 0, fun(f) -> vis_feil(f))
+lager.logg_ut(db, lager.brukar_db_namn("nc-app", uid), ["nc-app-val"], fun(x) -> ut(), fun(f) -> vis_feil(f))
+```
+
+| Funksjon | |
+|---|---|
+| `lager(namn, nøkkelsti, indeksar)`, `lager_auto(…)`, `fjerna(namn)`, `indeks(namn, sti, unik)` | Skjemaet. `nøkkelsti` er feltet i verdien som er nøkkelen (`""`: nøkkelen blir gjeven med `put_med_nøkkel`); `lager_auto` lagar nøkkelen (1, 2, …) når verdien manglar feltet; `sti` kan vere nøsta (`"adresse.post"`) |
+| `opne(namn, versjon, skjema, ok, feil)` → db | Opnar og oppgraderer. Gjev databasen med ein gong; alt som blir gjort før opninga er ferdig, ventar på ho. `ok(db)`, der `db["oppgradert_frå"]` er versjonen før oppgraderinga (0 for ein ny database) eller `null` |
+| `put`, `put_med_nøkkel`, `hent`, `slett` (nøkkel eller område), `liste` (område), `tel`, `indeks_liste`, `indeks_hent` | Éin op i éin transaksjon; `ok` får resultatet |
+| `køyr(db, ops, ok, feil)` | Ein batch (`op_put`, `op_put_med_nøkkel`, `op_hent`, `op_slett`, `op_liste` og `op_nøklar` med grense, `op_tel`, `op_tøm`, `op_indeks_liste`, `op_indeks_tel`, `op_indeks_hent`) som **éin** transaksjon, readwrite når ein op skriv, elles readonly. `ok` får éin verdi per op: put → nøkkelen, hent → verdien eller `null`, liste → verdiane, nøklar → nøklane, tel → talet, slett og tøm → `null` |
+| `lik(k)`, `frå(a, open)`, `opp_til(b, open)`, `mellom(a, b, a_open, b_open)`, `prefiks(p)` | Område (`IDBKeyRange`); `null` er alt. Namnet `til` er eit nøkkelord i Norscode |
+| `lukk(db)`, `slett_database(namn, ok, feil)`, `logg_ut(db, namn, lokale_nøklar, ok, feil)` | Lukk, slett, og utlogging (lukk, fjern nøklane i localStorage, slett databasen) |
+| `brukar_db_namn(prefiks, uid)` | `prefiks-<16 hex av sha256(uid)>` |
+| `ventande()` | Førespurnader som ikkje er leverte |
+| `valider_skjema`, `skjema_json`, `er_nøkkel`, `op_js`, `batch_json`, `json_trygg`, `tolk_konvolutt`, `feil_art`, `batch_resultat`, `feil_tekst`, `kast_feil` | Reine funksjonar (paritetskorpuset `w7_lager`) |
+| `test_db`, `test_registrer`, `test_motta` | Berre for testar: køa utan IndexedDB (korpuset `w7_lager_ko`) |
+
+**Val: verdiar som JSON-tekst.** Ein verdi blir lagra som posten `{k: nøkkel, v: json_stringify(verdi), i: {indeks: verdi}}`, og lesen med `rt.json_parse`. Grunngjeving:
+- **Paritet:** same verdi kjem attende som i VM-en. Ein strukturert kopi (JS-objekt) ville gjort `2.0` til `2` (heltall), heiltal over 2⁵³ unøyaktige (`9007199254740993` → `…992`), og `JSON.parse` avviser kontrollteikn i strengar. Testen lagrar alle desse og får dei attende byte-like.
+- **Ingen omvending:** lastaren ser berre tekst (førespurnaden inn, konvolutten ut), så `I` treng inga kopiering av objekt, og verdien blir ikkje omsett frå Norscode til JS og attende.
+- **Storleik:** JSON-teksten er om lag like stor som ein strukturert kopi på disk (IndexedDB lagrar begge serialiserte). Indeksverdiane ligg ein gong til i `i`.
+- Nøklar og indeksverdiar må vere JS-verdiar, sidan IndexedDB sorterer dei. Dei blir henta ut av verdien i Norscode (nøkkelstien og indeksstiane), så lastaren har faste stiar: `keyPath: "k"` og `"i.<indeks>"`.
+
+**Nøklar.** `heltall` (|k| ≤ 2⁵³ − 1), endeleg `desimaltall` eller `tekst`; anna gjev `LagerFeil` «data» med ein gong. Tal sorterer før tekst og etter verdi (`1` og `1.0` er same nøkkel), tekst etter UTF-16-kodeeiningar (bytevis for tekst utan teikn over U+FFFF). Ein indeksverdi som ikkje er ein gyldig nøkkel (eller manglar), blir ikkje indeksert, som i IndexedDB.
+
+**Skjema og oppgradering.** Ved ein høgare versjon lagar `I` lager og indeksar som manglar, fjernar indeksar som ikkje lenger står i skjemaet, og fjernar lager berre når skjemaet seier det (`lager.fjerna("namn")`), så data ikkje forsvinn fordi eit lager vart gløymt i skjemaet. Å endre nøkkelstien, `auto` eller `unik` på noko som finst, krev eit nytt namn. Namn på lager og indeksar er ASCII-bokstavar, siffer og `_`.
+
+**Rekkjefølgje og konsistens.**
+- Tilbakekalla kjem i den rekkjefølgja førespurnadene vart gjorde (køa ligg i Norscode, som i nett), også når IndexedDB svarar i ei anna rekkjefølgje (readonly-transaksjonar kan bli ferdige i vilkårleg rekkjefølgje).
+- Eit tilbakekall som kastar, gjev `ERROR: <tekst>` og stoppar ikkje dei neste. Utan feil-tilbakekall blir feilen skriven som `ERROR: LagerFeil: …`. Ingenting når JavaScript som «Uncaught» (konvolutten blir laga i `Promise.then(…).catch(…)`).
+- Ein batch er éin transaksjon: feilar éin op (unik indeks brote, ukjent lager eller indeks, lukka database), blir alt i batchen rulla tilbake. Eit unnatak i `I` (t.d. `NotFoundError` frå `transaction()`) avbryt transaksjonen og svarar éin gong (onabort blir fjerna først).
+- Ei opning som blir levert som «blokkert» og som IndexedDB fullfører seinare, blir lukka straks.
+
+**Feil** (`{"type": "LagerFeil", "art", "id", "op", "database", "namn", "melding"}`; `fang (e: LagerFeil)` fangar både ordboka og `kast_feil(f)`):
+
+| `art` | Når |
+|---|---|
+| `open` | Databasen kunne ikkje opnast (ingen IndexedDB, avslått lagring, anna opningsfeil); køyr som venta på opninga, får same art |
+| `blokkert` | Ein annan fane med eldre kode held databasen open (`blocked`). Tilkoplingar frå `std/wasm_lager.no` lukkar seg sjølve ved `versionchange`, så dette skjer ikkje mellom faner med same kode |
+| `kvote` | `QuotaExceededError` |
+| `transaksjon` | Transaksjonen feila og vart rulla tilbake (`ConstraintError`, `NotFoundError`, `InvalidStateError`, `AbortError`, …) |
+| `versjon` | Databasen på eininga har ein høgare versjon (`VersionError`) |
+| `data` | Ugyldig nøkkel, verdi, område, namn eller skjema (kasta med ein gong, før noko blir sendt), `DataError`, eller ein lagra verdi som ikkje er gyldig JSON |
+
+**Personvern** (frå app-planen):
+- Innlogga data skal ikkje liggje att på eininga utan at brukaren har valt det. `std/wasm_lager.no` lagrar ingenting av seg sjølv; appen spør (demoen har ein av/på-knapp, og valet er det einaste i `localStorage`).
+- Éin database per brukar: `brukar_db_namn(prefiks, uid)` = `prefiks-` + 16 hex-teikn av sha256(uid), så uid-en ikkje står i klartekst i lista over databasar, og ein annan brukar på same eining ser ein annan (tom) database.
+- Utlogging: `logg_ut(db, namn, lokale_nøklar, …)` lukkar databasen, fjernar nøklane i `localStorage` og slettar databasen. Testen lastar sida på nytt med same profil og finn ein ny, tom database.
+
+**Konvolutten.** `I` kallar tilbakekallet `__lager_ferdig` (eksportert frå `std.wasm_lager`), og `lager_svar()` gjev `JSON.stringify([id, feilnamn, melding, data])`: for opning `[handtak, gamal versjon]`, for ein batch resultata per op (postar `{k, v, i}`, nøklar eller tal). Førespurnaden er JSON utan rå kontrollteikn (`json_trygg`: `json_stringify` escapar berre `\n`, `\r` og `\t`, og `JSON.parse` avviser dei andre inne i strengar).
+
+**Chrome og virtuell tid.** Med `--virtual-time-budget` går den virtuelle tida vidare når sida er ledig, og ho står berre stille medan ein førespurnad er på nettverket. IndexedDB-svar tel ikkje, så Chrome dumpa DOM-en før opninga var ferdig [V: 0 av 3 lastingar kom forbi `indexedDB.open`, med og utan virtuell tid]. Testklientane held difor ein «puls» i gang (`nett.hent("/api/puls")` om att og om att til dei er ferdige); då kom alle IndexedDB-svara (100 put i éin transaksjon på om lag 100 ms) [V]. Pulsen er berre i testklientane, ikkje i `std/wasm_lager.no`.
+
+**Nettlesarstøtte.** IndexedDB 2.0 (`getAll`, `getAllKeys`) finst i Chrome 58, Firefox 51 og Safari 10.1 [A], så golvet er framleis exnref/WasmGC. Chrome 154 er testa [V]. JavaScriptCore-skalet (`jsc`) har ikkje IndexedDB: ende-til-ende-testane er SKIP der, og `tests/fixtures/wasm_w7_utan_idb.no` viser at opninga og alt som venta på ho, får `LagerFeil` «open» i rekkjefølgje utan «Uncaught» (same veg som ein nettlesar der lagring er slått av).
+
+**Funn: rt-cachen og ncb_call_fn.** Analysecachen frå W4 tok opp verknadene til ein funksjon når setta av closures, dispatcharar og vertskall var like store før og etter analysen. Var dispatcharen for `ncb_call_fn` med same aritet alt registrert av ein annan funksjon, vart verknadene tekne opp utan han, og eit anna program som henta analysen av `std.wasm_lager._kall` frå cachen, fekk ein modul som validatoren avviste (`venta i32, fekk (ref null eq)`). Lowringa merkjer no opptaket som ureint når analysen rører closures, `CALL_VALUE`, `ncb_call_fn` eller vertsfunksjonar (`_opptak_urein`). `test_wasm_w7` byggjer to program etter kvarandre med ein fersk, delt cache og krev at modulen er byte-lik den utan cache.
 
 ## Nettlesar-benken (W5)
 
@@ -856,6 +946,18 @@ W6 (byte):
 
 Storleiken kjem mest frå `rt.json_parse`/`json_skriv` (om lag 15 KB, som `rt_json` i W3) og køa. W0–W4-modulane er uendra: nett-importane og `Q` kjem berre med når `std/wasm_nett.no` blir brukt.
 
+W7 (byte):
+
+| Modul | Storleik | Lastar |
+|---|---|---|
+| `w7_lager` (korpus, testbygg) | 36 605 | |
+| `w7_lager_ko` (korpus, testbygg) | 31 123 | |
+| `tests/fixtures/wasm_w7_utan_idb.no` (testbygg) | 32 720 | |
+| W7-testklienten (testbygg, med nett for pulsen) | 53 000 | 2 583 |
+| Deltakar-demoen (produksjon, med lokal kopi) | 52 213 (W6: 27 340) | 3 402 (W6: 2 027) |
+
+`std/wasm_lager.no` dreg med seg `rt.json_parse`/`json_skriv` og `sha256` (for `brukar_db_namn`). Demoen hadde alt JSON-delen frå nett; det nye er om lag 25 KB (lagringsmodulen, SHA-256 og den lokale kopien i klienten). W0–W6-modulane er uendra: lagrings-importane, `I` og `J` kjem berre med når `std/wasm_lager.no` blir brukt.
+
 ## Testar
 
 | Test | Kva han dekkjer |
@@ -876,6 +978,9 @@ Storleiken kjem mest frå `rt.json_parse`/`json_skriv` (om lag 15 KB, som `rt_js
 | `tests/test_wasm_w5.no` | Benken og CLI-en (W5): `NC_CHROME=/finst/ikkje` gjev exit ≠ 0 og «fann ikkje nettlesar», ukjend modus exit 2; tolking av loggen, «MÅL»-linjer, «Uncaught» og ein netlogg med ein førespurnad til eit anna opphav og ein som aldri vart ferdig; `rydd` drep ein prosess med økt-mappa og ikkje ein utan, og `drep_med` nektar ei nål utan benkmappe; jsc-skriptet. Med Chrome: `royk` gjev exit 0, eit krav som ikkje finst gjev exit 1, `maal` gjev mål og sidelastingstid med `feil=0`, og `pgrep -f build/wasm-nettlesar` finn ingen prosessar etter kvar køyring. Med jsc: fire korpusprogram lik fasiten og `kontroll_trap` med «Uncaught». |
 | `tests/test_wasm_w6.no` | W6 utan nettlesar: korpusa `w6_nett` (reine funksjonar) og `w6_nett_ko` (køa: levering i sende-rekkjefølgje med konvoluttar i ei anna rekkjefølgje, tilbakekall som kastar, manglande feil-tilbakekall, ukjend id, ny førespurnad under levering) i VM, bygg og Chrome; stubbane kastar i VM-en; ugyldige førespurnader kastar HentFeil; demo-reglane og `feilmelding` i VM-en; tenaren utan sokkel (GET, POST med informasjonskapsel, `Cookie` med stor forbokstav, 400 for ugyldig JSON, feil form og 61 deltakarar, øydelagd kapsel); bygga har nett-importane og `__hent_ferdig`, og demo-lastaren er ≤ 2 560 byte. |
 | `tests/test_wasm_w6_chrome.no` | Valfri. Nett-testklienten (ti førespurnader og offline) lik fasiten, utan «Uncaught», og `nc serve` stoppa av `/api/stopp`; deltakar-demoen i testbygg lik fasiten; produksjonsbygget viser dei 10 frå tenaren. |
+| `tests/test_wasm_w7.no` | W7 utan nettlesar: korpusa `w7_lager` (reine funksjonar) og `w7_lager_ko` (køa) i VM, bygg og Chrome; stubbane kastar i VM-en; ugyldige argument kastar LagerFeil «data» utan at noko blir registrert; den lokale kopien i demoen i VM-en (skjema, databasenamn, feilmeldingar); regresjon for rt-cachen (to program etter kvarandre med fersk, delt cache, byte-likt); jsc (valfri): korpusa lik fasiten, og utan IndexedDB gjev opninga LagerFeil «open» i rekkjefølgje utan «Uncaught» (ende til ende er SKIP i jsc). |
+| `tests/test_wasm_w7_chrome.no` | Valfri. W7-testklienten i tre lastingar med same profil: opne/oppgradere (v1→v2→v3, ny indeks, nytt lager, fjerna lager, v3 medan v2 er open), CRUD i rekkjefølgje med eit tilbakekall som kastar, verdiar attende like, nøkkelrekkjefølgje, 100 dokument i éin batch, område- og indeksspørjingar, batchar som rullar tilbake (unik indeks, ukjent lager), versjon, lukka database; dei 100 etter omlasting; ein annan brukar ser ein tom database; logg_ut; ny og tom database etter utlogging; lukk medan opninga går (det som alt var bede om, blir køyrt, det som kjem etter, får `transaksjon`). Negativ kontroll: fersk profil finn ingenting. Utan Chrome: bygget med lagrings-importane. |
+| `tests/test_wasm_w7_demo.no` | Valfri. Demoen: lokal kopi vist før tenarsvaret (tenaren svarar etter 800 ms), ulagra endringar som blir ståande, lagring, sletting med knappen, ingen kopi etter sletting; fersk profil utan kopi (negativ kontroll); produksjonsbygget viser dei 10 frå tenaren utan lokal kopi. Utan Chrome: bygga, lagrings-importane og lastartaket (3 840 byte). |
 
 Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag over nettlesar-benken `std/wasm_nettlesar.no`, med profilane under `build/wasm-nettlesar/fixtur/`). Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Serve utan sokkel (`NORSCODE_FAKE_HTTP_REQUESTS`) ligg i `tests/fixtures/wasm_serve_hjelp.no` (W6). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
 
@@ -909,6 +1014,8 @@ Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag
 | `w4_ordbok` (W4) | `fjern_nokkel`/`fjern_nøkkel`: rekkjefølgje, manglande nøkkel, nøkkel som kjem attende, alle bort, i lykkje; `tid_ms` |
 | `w6_nett` (W6) | validering av førespurnader, førespurnaden som JSON, konvolutten (headerar, kropp med linjeskift, feilnamn), klassifisering av 2xx, 3xx, 404, tidsavbrot, avbrote, nettverk og ugyldig JSON, HentFeil kasta og fanga |
 | `w6_nett_ko` (W6) | køa utan nettverk: konvoluttar i rekkjefølgja 3, 5, 4, 2, 1 gjev tilbakekall 1–5, eit ok- og eit feil-tilbakekall som kastar, manglande feil-tilbakekall, ukjend id, avbryt, ny førespurnad under levering |
+| `w7_lager` (W7) | skjemavalidering (9 tilfelle), skjemaet og opninga som JSON, nøklar (heiltal ved ±2⁵³, desimaltal, tekst, bool, null, liste), op-ane som JSON (put med nøsta indeksstiar, auto-nøkkel, eksplisitt nøkkel, område, grense, indeksar), 15 feil med ein gong, transaksjonsmodus og omfang, JSON utan rå kontrollteikn (rundtur), konvoluttar, feilklassar, resultat (auto-nøkkel sett inn, øydelagd lagra verdi), LagerFeil kasta og fanga, databasenamn per brukar |
+| `w7_lager_ko` (W7) | køa utan IndexedDB: konvoluttar i rekkjefølgja 3, 5, 4, 2, 1 gjev tilbakekall 1–5, tilbakekall som kastar, manglande feil-tilbakekall (kvote), ukjend id, eit andre svar på same id, ny førespurnad under levering |
 | `kontroll_trap` | ikkje paritet: positiv kontroll for konsollsjekken |
 
 Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome` køyrer dei i tre steg:
@@ -990,6 +1097,22 @@ Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen ra
 | W6: 3xx og 4xx som ok | `test_wasm_w6` (VM-steget, `w6_nett`) |
 | W6: informasjonskapselen lesen med `web.request_cookie` | `test_wasm_w6` (tenaren) |
 | W6: demoen viser ikkje feila frå tenaren | `test_wasm_w6` (`feilmelding` i VM-en) |
+| W7: køa leverer i kome-rekkjefølgje | `test_wasm_w7` (VM-steget, `w7_lager_ko`) |
+| W7: ok-tilbakekall utan `fang` | `test_wasm_w7` (VM-steget, `w7_lager_ko`) |
+| W7: `json_trygg` escapar ikkje kontrollteikn | `test_wasm_w7` (VM-steget, `w7_lager`) |
+| W7: same databasenamn for alle brukarar | `test_wasm_w7` (`w7_lager`) |
+| W7: auto-nøkkelen blir ikkje sett inn ved lesing | `test_wasm_w7` (`w7_lager`) |
+| W7: fiksen i analysecachen fjerna (`urein` ignorert) | `test_wasm_w7` (regresjonen: validatoren avviste `w7_lager_ko`) |
+| W7: `I` og `J` alltid med i lastaren | `test_wasm_lastar` |
+| W7: unntaket for on…-felt gjeld alle mottakarar | `test_wasm_lastar` |
+| W7: éin transaksjon per op (ingen tilbakerulling av batchen) | `test_wasm_w7_chrome` (steg 1: «tel 102, 201 {…}») |
+| W7: tilkoplinga lukkar seg ikkje ved `versionchange` | `test_wasm_w7_chrome` (v3 blokkert) |
+| W7: `logg_ut` slettar ikkje databasen | `test_wasm_w7_chrome` (steg 3 fann dei 100) |
+| W7: `I` utan `.catch` | `test_wasm_w7_chrome` (ukjent lager: «Uncaught», tilbakekallet kom aldri) |
+| W7: lukk under opninga sendt før det som venta | `test_wasm_w7_chrome` (steg 3: «tel: LagerFeil transaksjon InvalidStateError») |
+| W7: alle batchar readonly | `test_wasm_w7_chrome` |
+| W7: demoen held ikkje på ulagra endringar frå eininga | `test_wasm_w7_demo` |
+| W7: demoen lagrar utan at brukaren har valt det | `test_wasm_w7_demo` |
 
 Kontrollar:
 - Ein semantisk no-op i lenkinga gav grøn `test_wasm_w4`.
@@ -1015,38 +1138,56 @@ JavaScriptCore (macOS 26.6.2) gav identisk utskrift for `w4_ordbok` (scratch-skr
 
 ### Tid
 
-Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W6-koden (siste køyring). W4-tala står i parentes.
+Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W7-koden (siste køyring; Linux inkluderer oppstarten av Docker-behaldaren). W6-tala står i parentes.
 
 | Test | macOS standard | macOS fast | Linux standard | Linux fast |
 |---|---|---|---|---|
-| `test_wasm_w0` | 14 (14) | 11 (8) | 17 (17) | 12 (12) |
-| `test_wasm_les` | 7 (6) | 5 (5) | 12 (10) | 10 (9) |
-| `test_wasm_w1` | 8 (8) | 6 (5) | 15 (11) | 11 (11) |
-| `test_wasm_w2` | 11 (11) | 7 (7) | 14 (12) | 11 (12) |
-| `test_wasm_w3` | 15 (15) | 11 (9) | 17 (17) | 12 (12) |
-| `test_wasm_w4` | 18 (18) | 15 (14) | 23 (24) | 20 (21) |
-| `test_wasm_lastar` | 10 (9) | 11 (10) | 15 (14) | 15 (14) |
-| `test_wasm_serve` | 8 (9) | 3 (3) | 10 (11) | 5 (7) |
-| `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 2 | ≤ 2 |
-| `test_wasm_korpus_chrome` (W1) | 29 (53 med W2) | 24 (44) | 22 (39) | 21 (39) |
-| `test_wasm_korpus_w2` (ny, W2) | 30 | 25 | 22 | 30 |
-| `test_wasm_korpus_w3` | 28 (28) | 24 (24) | 23 (22) | 27 (22) |
-| `test_wasm_w0_chrome` | 12 (11) | 10 (10) | 4 (2) | 3 (2) |
-| `test_wasm_w4_chrome` | 23 (19) | 17 (17) | 16 (13) | 13 (14) |
-| `test_wasm_w5` (ny) | 32 | 23 | 7 | 4 |
-| `test_wasm_w6` (ny) | 32 | 25 | 29 | 27 |
-| `test_wasm_w6_chrome` (ny) | 26 | 21 | 10 | 9 |
+| `test_wasm_w0` | 15 (14) | 8 (11) | 18 (17) | 13 (12) |
+| `test_wasm_les` | 6 (7) | 5 (5) | 13 (12) | 9 (10) |
+| `test_wasm_w1` | 9 (8) | 6 (6) | 16 (15) | 11 (11) |
+| `test_wasm_w2` | 11 (11) | 6 (7) | 14 (14) | 12 (11) |
+| `test_wasm_w3` | 14 (15) | 10 (11) | 17 (17) | 13 (12) |
+| `test_wasm_w4` | 19 (18) | 15 (15) | 23 (23) | 21 (20) |
+| `test_wasm_lastar` | 13 (10) | 13 (11) | 17 (15) | 17 (15) |
+| `test_wasm_serve` | 7 (8) | 3 (3) | 9 (10) | 5 (5) |
+| `test_wasm_korpus_chrome` | 29 (29) | 27 (24) | 24 (22) | 22 (21) |
+| `test_wasm_korpus_w2` | 31 (30) | 27 (25) | 24 (22) | 23 (30) |
+| `test_wasm_korpus_w3` | 28 (28) | 25 (24) | 35 (23) | 23 (27) |
+| `test_wasm_w0_chrome` | 12 (12) | 10 (10) | 5 (4) | 2 (3) |
+| `test_wasm_w4_chrome` | 24 (23) | 17 (17) | 17 (16) | 14 (13) |
+| `test_wasm_w5` | 33 (32) | 24 (23) | 8 (7) | 4 (4) |
+| `test_wasm_w6` | 38 (32) | 31 (25) | 38 (29) | 30 (27) |
+| `test_wasm_w6_chrome` | 32 (26) | 31 (21) | 15 (10) | 12 (9) |
+| `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 4 | 2 |
+| `test_wasm_w7` (ny) | 45 | 34 | 36 | 33 |
+| `test_wasm_w7_chrome` (ny) | 19 | 18 | 14 | 12 |
+| `test_wasm_w7_demo` (ny) | 30 | 30 | 23 | 23 |
 
 - **`test_wasm_lastar`:** med W4-tabellen tok emitteringa og tokeniseringa av dei fulle lastarane om lag 3 minutt i standard-VM-en (189 s målt). Sjekkane står i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus, som valideringa i W3.
 - **`test_wasm_korpus_chrome`** var 53–55 s etter W4, rett under grensa. W5 delte W2-programma ut i `test_wasm_korpus_w2`.
 - **W5-benken og testtida:** ein første versjon av benken importerte emitteren (for jsc) og venta på at hjelpeprosessane til Chrome skulle avslutte etter kvar side. Det gav om lag +3 s per test som importerte `wasm_test_hjelp` og +5 s for korpustesten i standard-VM-en. jsc-køyringa ligg difor i `std/wasm_jsc.no`, `wasm_test_hjelp` importerer ikkje benken (han har sitt eige `bygg`), og `benk.rydd(økt)` drep det som er att til slutt.
 - **`test_wasm_w6`** (56 s med Chrome-stega i same test) er delt i `test_wasm_w6` og `test_wasm_w6_chrome`.
-- Ingen wasm-test er over 55 s i standard-VM-en (høgst 32 s på macOS og 29 s på Linux). Tidene varierer med ±3 s mellom køyringar.
+- Ingen wasm-test er over 55 s i standard-VM-en (W7: høgst 45 s på macOS og 38 s på Linux). Tidene varierer med ±3 s mellom køyringar.
+- **W6-testane** er 6–10 s tregare enn i W6: demoen byggjer no ein modul på 52 KB (den lokale kopien, `std/wasm_lager.no` og SHA-256) i staden for 27 KB.
+- **`test_wasm_w7`** hadde først bygga av testklienten og demoen med (60 s i fastmodus); dei er flytte til `test_wasm_w7_chrome` og `test_wasm_w7_demo`, som byggjer dei uansett, og regresjonen for rt-cachen brukar den minste modulen (`wasm_w7_utan_idb`).
 - Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome eller jsc, så dei stega er SKIP der. VM-, bygg- og tenarstega køyrer (også ryddetesten til benken og JSON-rutene til demoen). Alle testane er grøne på begge plattformene og i begge modusane.
 
-## Gjenstår før W7
+## Gjenstår før W8
 
-- **W5/W6 (nytt):**
+- **W7 (nytt):**
+  - IndexedDB er berre testa i Chrome 154. JavaScriptCore-skalet har ikkje IndexedDB (ende til ende er SKIP der; berre vegen utan IndexedDB er testa), og Safari og Firefox er ikkje testa med lagring.
+  - Chrome med `--virtual-time-budget` ventar ikkje på IndexedDB. Testklientane held ein puls mot tenaren (`/api/puls`); ein testmodus utan puls krev CDP eller at benken sjølv held ein førespurnad open. Produksjonsbygget av demoen kan difor ikkje testast for den lokale kopien (det blir dumpa før IndexedDB svarar); testbygget køyrer den ekte klienten.
+  - `kvote` og `blokkert` er klassifiserte og har meldingar i demoen, men er ikkje provoserte i ein test (kvoten krev store mengder data; `blocked` krev ein fane med eldre kode, sidan tilkoplingane frå `std/wasm_lager.no` lukkar seg ved `versionchange`).
+  - Ei «blokkert»-opning blir levert som feil med ein gong. IndexedDB fullfører ho kanskje seinare; tilkoplinga blir då lukka, men appen må opne på nytt sjølv.
+  - Tilkoplinga som lukkar seg ved `versionchange`, seier ikkje frå til Norscode: neste `køyr` får `transaksjon` (`InvalidStateError`). W9 bør gje ei hending («databasen vart oppgradert i ein annan fane; last sida på nytt»).
+  - Ingen markør (cursor): `liste` med grense har ingen retning (nyaste først) og ingen side-for-side-lesing. W9 (synk) treng truleg `openCursor` med retning, eller ein indeks på tid.
+  - Nøklar er tal og tekst, ikkje samansette (lister) og ikkje bytar. Samansette indeksar (t.d. `[samling, endra]`) må lagast som tekst.
+  - Verdiar er JSON-tekst: `Date`, `Blob` og bytar blir ikkje lagra direkte (bytar kan lagrast som hex eller base64).
+  - Lagrings-gruppa er 1 256 byte (eige budsjett 1 280). Heile produksjonstabellen med nett og lagring er 4 211 byte.
+  - rt-cachen vart retta for funksjonar med closures og `ncb_call_fn` (sjå «Funn: rt-cachen og ncb_call_fn»); cachefilene blir framleis aldri rydda.
+  - Utlogging slettar databasen og nøklane appen nemner; han veit ikkje om andre databasar eller nøklar appen har laga.
+
+- **W5/W6:**
   - `nc serve` tek éi tilkopling om gongen. Parallelle førespurnader med avbrot eller tidsavbrot medan dei ventar på ei tilkopling kan få tenaren til å vente på ein sokkel utan førespurnad (sjå «Nett»). Krev ein apptenar med fleire tilkoplingar (A6/R1); til då: høgst seks om gongen og avbrot etter at førespurnaden er skriven.
   - Tidsgrenser kan berre testast i Chrome med virtuell tid når sida sjølv held klokka i gang (testklienten ventar aktivt i 60 ms). Ein testmodus utan virtuell tid krev CDP eller ein ekstra ressurs som held `load` att.
   - Offline-modusen i benken finst, men utan service worker viser den andre lastinga ingenting (W8).
