@@ -1,0 +1,146 @@
+// A0 (app-kjensle): std/http_cache.no lagar svar i den felles responskontrakten
+// (toppnøklar status/body/content_type/etag, alt anna i headers med små bokstavar,
+// same header aldri begge stader), sterk ETag frå builtin.sha256 og header_trygg
+// som kastar på CR/LF/NUL.
+bruk std.http_cache som hc
+
+funksjon kastar_header_trygg(verdi: tekst) -> bool {
+    prøv {
+        hc.header_trygg(verdi)
+    } fang (e) {
+        returner sann
+    }
+    returner usann
+}
+
+funksjon kastar_med_header(namn: tekst, verdi: tekst) -> bool {
+    prøv {
+        hc.med_header(hc.nytt_svar(200, "text/plain", "x"), namn, verdi)
+    } fang (e) {
+        returner sann
+    }
+    returner usann
+}
+
+// Uavhengig av hc.kontrakt_feil: ingen ukjende toppnøklar, headernamn med små
+// bokstavar, og content-type/etag berre som toppnøklar.
+funksjon krev_kontrakt(namn: tekst, s: ordbok_tekst) -> heiltall {
+    la feil = hc.kontrakt_feil(s)
+    hvis feil != "" { skriv("kontraktbrot i " + namn + ": " + feil + "\n") }
+    assert_eq(feil, "")
+    la topp = nøkler(s)
+    la i: heiltall = 0
+    mens i < lengde(topp) {
+        la k = tekst(topp[i])
+        assert(k == "status" eller k == "body" eller k == "content_type" eller k == "etag" eller k == "headers")
+        i = i + 1
+    }
+    la h = s["headers"]
+    la ks = nøkler(h)
+    la j: heiltall = 0
+    mens j < lengde(ks) {
+        la k = tekst(ks[j])
+        assert_eq(k, tekst_til_liten(k))
+        assert(k != "content-type")
+        assert(k != "etag")
+        j = j + 1
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    // Sterk ETag: kjent svar (SHA-256 av ""), deterministisk, ny ved endra innhald.
+    assert_eq(hc.etag_av(""), "\"e3b0c44298fc1c149afbf4c8996fb924\"")
+    assert_eq(hc.versjon_av("abc"), "ba7816bf8f01")
+    la e1 = hc.etag_av("<p>hei</p>")
+    assert_eq(e1, hc.etag_av("<p>hei</p>"))
+    assert(e1 != hc.etag_av("<p>hei!</p>"))
+    assert(builtin.starts_with(e1, "\""))
+    assert_eq(lengde(e1), 34)
+
+    // header_trygg: CR, LF, CRLF-injeksjon og NUL kastar; vanlege verdiar og HTAB går.
+    assert(kastar_header_trygg("a\r\nSet-Cookie: x=1"))
+    assert(kastar_header_trygg("a\nb"))
+    assert(kastar_header_trygg("a\rb"))
+    la nul = builtin.chr(0)
+    hvis lengde(nul) == 1 {
+        assert(kastar_header_trygg("a" + nul + "b"))
+    } ellers {
+        skriv("merk: runtimen kan ikkje lage NUL i tekst; NUL-greina er ikkje prøvd\n")
+    }
+    assert_eq(hc.header_trygg("no-cache"), "no-cache")
+    assert_eq(hc.header_trygg("a\tb"), "a\tb")
+    assert(ikkje kastar_header_trygg("public, max-age=31536000, immutable"))
+    // Injeksjon via med_header og via content_type blir stoppa.
+    assert(kastar_med_header("x-norscode-title", "a\r\nSet-Cookie: x=1"))
+    assert(kastar_med_header("x norscode", "1"))
+    prøv {
+        hc.nytt_svar(200, "text/html\r\nSet-Cookie: x=1", "")
+        assert(usann)
+    } fang (e) { }
+
+    // Kontraktforma for kvar hjelpar.
+    la body = "<p>hei</p>"
+    la rev = hc.svar_revalider(body, "text/html; charset=utf-8")
+    krev_kontrakt("svar_revalider", rev)
+    assert_eq(rev["status"], 200)
+    assert_eq(rev["body"], body)
+    assert_eq(rev["content_type"], "text/html; charset=utf-8")
+    assert_eq(rev["etag"], hc.etag_av(body))
+    assert_eq(rev["headers"]["cache-control"], "no-cache")
+
+    la priv = hc.svar_privat(body, "text/html; charset=utf-8")
+    krev_kontrakt("svar_privat", priv)
+    assert_eq(priv["headers"]["cache-control"], "private, no-cache")
+    assert_eq(priv["etag"], hc.etag_av(body))
+
+    // svar_immutable: immutable berre når v er versjonen av akkurat dette innhaldet.
+    la css = "main{display:block}"
+    la v = hc.versjon_av(css)
+    la rett = hc.svar_immutable(css, "text/css; charset=utf-8", v)
+    krev_kontrakt("svar_immutable rett v", rett)
+    assert_eq(rett["headers"]["cache-control"], "public, max-age=31536000, immutable")
+    la feil_v = hc.svar_immutable(css, "text/css; charset=utf-8", hc.versjon_av("main{}"))
+    krev_kontrakt("svar_immutable feil v", feil_v)
+    assert_eq(feil_v["headers"]["cache-control"], "no-cache")
+    assert_eq(hc.svar_immutable(css, "text/css; charset=utf-8", "")["headers"]["cache-control"], "no-cache")
+    assert(ikkje builtin.contains(feil_v["headers"]["cache-control"], "immutable"))
+
+    // versjonert_url
+    assert_eq(hc.versjonert_url("/_nc/stil.css", css), "/_nc/stil.css?v=" + v)
+    assert_eq(hc.versjonert_url("/a.js?x=1", css), "/a.js?x=1&v=" + v)
+
+    // med_tryggleik: nosniff, standard-CSP og referrer-policy; appen sitt val står.
+    la trygg = hc.med_tryggleik(hc.svar_revalider(body, "text/html; charset=utf-8"))
+    krev_kontrakt("med_tryggleik", trygg)
+    assert_eq(trygg["headers"]["x-content-type-options"], "nosniff")
+    assert_eq(trygg["headers"]["content-security-policy"], hc.csp_standard())
+    assert(builtin.contains(hc.csp_standard(), "object-src 'none'"))
+    assert(builtin.contains(hc.csp_standard(), "frame-ancestors 'none'"))
+    assert(trygg["headers"]["referrer-policy"] != "")
+    la eigen = hc.med_header(hc.svar_revalider(body, "text/html"), "Content-Security-Policy", "default-src 'none'")
+    la eigen_t = hc.med_tryggleik(eigen)
+    krev_kontrakt("med_tryggleik eigen CSP", eigen_t)
+    assert_eq(eigen_t["headers"]["content-security-policy"], "default-src 'none'")
+
+    // med_vary slår saman utan duplikat og utan å skrive over.
+    la vs = hc.med_vary(hc.med_vary(hc.svar_revalider(body, "text/html"), "x-norscode-fragment"), "Accept-Encoding")
+    krev_kontrakt("med_vary", vs)
+    assert_eq(vs["headers"]["vary"], "x-norscode-fragment, Accept-Encoding")
+    assert_eq(hc.med_vary(vs, "X-Norscode-Fragment")["headers"]["vary"], "x-norscode-fragment, Accept-Encoding")
+
+    // Same header aldri begge stader: toppnøklane blir avviste i headers.
+    assert(kastar_med_header("Content-Type", "text/plain"))
+    assert(kastar_med_header("ETag", "\"x\""))
+
+    // Porten seier nei: kontrakt_feil finn brot.
+    assert(hc.kontrakt_feil({"status": 200, "body": "", "cache_control": "no-cache"}) != "")
+    assert(hc.kontrakt_feil({"status": 200, "body": "", "headers": {"Cache-Control": "no-cache"}}) != "")
+    assert(hc.kontrakt_feil({"status": 200, "body": "", "etag": "\"a\"", "headers": {"etag": "\"a\""}}) != "")
+    assert(hc.kontrakt_feil({"status": 200, "body": "", "headers": {"x-a": "1\r\nSet-Cookie: x=1"}}) != "")
+    assert(hc.kontrakt_feil({"body": ""}) != "")
+    assert_eq(hc.kontrakt_feil({"status": 200, "body": "", "headers": {"cache-control": "no-cache"}}), "")
+
+    skriv("test_http_cache OK\n")
+    returner 0
+}
