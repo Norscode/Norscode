@@ -1,12 +1,14 @@
-# Klientlogikk i Norscode kompilert til WebAssembly (W0–W4)
+# Klientlogikk i Norscode kompilert til WebAssembly (W0–W6)
 
-Status: milepælane W0–W4 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
+Status: milepælane W0–W6 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
 
 - **W0** gav vegen frå kjelde til nettlesar: heiltal, kontrollflyt, kall og DOM-vertsfunksjonar.
 - **W1** gav verdimodellen: tekst, desimaltal, lister og ordbøker, med same semantikk som VM-en. Eit paritetskorpus køyrer kvart program i VM-en og i Chrome og krev identisk utskrift.
 - **W2** gav unnatak (`prøv`/`fang`/`endeleg`, `utsett`, typa `fang`, innebygde feil som fangbare unnatak), closures og funksjonsverdiar, strukturmetodar, og ein stakk- og typesjekk i validatoren.
 - **W3** gav runtime-biblioteket `std/wasm_rt.no`: tekstfunksjonar, JSON, sortering og SHA-256 skrivne i vanleg Norscode og kompilerte av same backend, med tree-shaking. Vertsfunksjonane tek tekstverdiar.
 - **W4** gav vertsfunksjonane for ei ekte interaktiv side (tekst frå DOM-en, attributt og klassar, hendingar med data og delegering, tidtakarar, navigasjon, lokal lagring, handtakstabell med `slepp`), atoma `fjern_nokkel` og `tid_ms`, ein cache for lowra runtime-funksjonar, serve-integrasjonen `std/wasm_serve.no` (appen importerer ikkje lenger noko under `build/`), og demoen `examples/wasm_skjema/`.
+- **W5** gav nettlesar-benken `std/wasm_nettlesar.no` og CLI-en `tools/wasm_nettlesar.no`: Chrome og JavaScriptCore frå Norscode, rydding av berre eigne prosessar, app-kjensle målt i WASM-sida sjølv og sidelastingstid frå Chrome-netloggen (sjå «Nettlesar-benken»).
+- **W6** gav asynk nett via tilbakekall: `std/wasm_nett.no` (fetch mot same opphav, JSON, status og headerar, tidsgrense og avbryting, tilbakekall i sende-rekkjefølgje) og demoen `examples/wasm_deltakarar/` (sjå «Nett»).
 
 ## Bygg og køyr
 
@@ -48,9 +50,13 @@ Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I 
 | `std/wasm_vert.no` | Vertstabell, klient-API, lister over trygge attributt, taggar og hendingar, og HTML-escape |
 | `std/wasm_js.no` | Norscode→JS-emitter for lastaren |
 | `std/wasm_serve.no` | Serve-integrasjon: modul- og lastarsvar, script-tag og CSP (W4) |
+| `std/wasm_nett.no` | Nett for klientmodular: fetch mot same opphav med tilbakekall, kø i sende-rekkjefølgje, feilklassar (W6) |
 | `tools/nc_wasm.no` | CLI |
+| `std/wasm_nettlesar.no` | Nettlesar-benken: Chrome, jsc, serve, rydding, logg, mål og netlogg (W5; berre testar og verktøy) |
+| `std/wasm_jsc.no` | Vertsshimen for `jsc -e` som JS-tre (W5) |
+| `tools/wasm_nettlesar.no` | CLI for benken: `royk`, `korpus`, `maal`, `offline` (W5) |
 
-Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed. `std/wasm_rt.no` importerer `std/sha256.no` (som ligg i lukkinga), men endrar han ikkje. `std/wasm_serve.no` importerer `std/web.no`, som heller ikkje ligg i lukkinga.
+Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed. `std/wasm_rt.no` importerer `std/sha256.no` (som ligg i lukkinga), men endrar han ikkje. `std/wasm_serve.no` importerer `std/web.no`, som heller ikkje ligg i lukkinga. `std/wasm_nettlesar.no` brukar `std/prosess.no` og prosess-ABI-en (som testane i W0–W4).
 
 ## Slik skriv du ein klientmodul
 
@@ -79,9 +85,11 @@ Ein klientmodul er ei vanleg Norscode-fil med `start()`. Sjå `examples/wasm_skj
    - Mange like element (rader i ei liste): gje dei `data-nc-klikk="fjern"` (i HTML-en, eller med `vert.sett_handlar(h, "klikk", "fjern")`) og `data-id`, og registrer éin gong: `vert.deleger("klikk", "fjern")`. Ingen lyttar per rad.
    - Lag element med `vert.lag("li")`, fyll dei med `sett_tekst`/`sett_attr`, set dei inn med `legg_inn`, og `slepp` handtaka du ikkje treng meir. Brukardata går aldri til HTML: `sett_tekst` set `textContent`, og `sett_html` escapar alltid verdien.
    - Reglar som ikkje rører DOM-en (validering, filtrering), bør vere reine funksjonar. Dei køyrer då likt i VM-en og kan testast der (sjå `tests/test_wasm_w4_chrome.no`).
+   - **Nett (W6):** `bruk std.wasm_nett som nett`, så `nett.hent_json("/api/x", fun(svar) -> vis(svar["json"]), fun(feil) -> vis_feil(feil))`. Tilbakekalla til nett er closures med éin parameter (ikkje funksjonsnamn), og dei kjem i den rekkjefølgja førespurnadene vart sende. Sjå «Nett (W6)» og `examples/wasm_deltakarar/`.
 2. **Appen** (`app.no`): `bruk std.wasm_serve som ws`. WASM-sida blir levert med `ws.side(html)` (CSP med `'wasm-unsafe-eval'`), og HTML-en har `ws.script_tag()` i `<head>`. Alle andre sider brukar `ws.vanleg_side(html)`. Appen importerer ingenting under `build/`, og sida må fungere (utan klientlogikk) når WASM manglar.
 3. **Bygg** med `NC_WASM_KJELDE`, `NC_WASM_APP` og `NC_WASM_UT` (sjå over), og **server** `build/wasm/<app>/serve.no`.
 4. **Test**: bygg ein testklient med `NC_WASM_TESTBYGG=1` som importerer klienten, kallar `start()` og køyrer brukarsteg med testkrokane (`test_skriv`, `test_send`, `test_klikk`, `test_tast`). `skriv(...)` går då til `<pre id="nc-logg">`, som headless Chrome les (sjå `tests/fixtures/wasm_skjema_testklient.no`).
+   Nettlesar-benken (W5) gjer resten: `bruk std.wasm_nettlesar som benk`, `benk.bygg`, `benk.ny_økt`, `benk.start_serve`, `benk.last_side` (gjev loggen, DOM-en, «Uncaught» og mål) og `benk.rydd`. Eller frå kommandolinja: `NC_NETTLESAR_KJELDE=… NC_NETTLESAR_APP=… NC_NETTLESAR_KREV=… ./bin/nc run tools/wasm_nettlesar.no`. Asynkrone steg (nett) kan kjedast med closures som klienten kallar når sida er oppdatert (sjå `tests/fixtures/wasm_deltakarar_testklient.no`).
 
 Det som ikkje går, blir avvist ved kompilering med ei liste over alle feil: attributtnamn som ikkje er konstantar eller ikkje er trygge, taggar som `script`, ukjende hendingar, tilbakekall med parametrar eller som ikkje finst, og testkrokar utan testbygg.
 
@@ -508,6 +516,13 @@ Hendingsdata blir lesne medan tilbakekallet køyrer (lastaren held hendinga i `V
 | `hent_lokalt(nøkkel)` | `localStorage.getItem(nøkkel) ?? ""` |
 | `skriv(x)` | `console.log` (i testbygg: `#nc-logg`) |
 
+**Nett (W6)** — brukte av `std/wasm_nett.no`, ikkje direkte av klientkoden:
+
+| Funksjon | JS-operasjon |
+|---|---|
+| `hent_start(førespurnad, "funksjon")` → handtak | `Q(S(…), x[…])`: `fetch` med førespurnaden (JSON), mode og credentials `same-origin`, `AbortSignal.any([k.signal, AbortSignal.timeout(t)])`; handtaket er AbortController-en `k` (`slepp` avbryt) |
+| `hent_svar()` → tekst | `R`: konvolutten til det siste svaret, `id\nstatus\nheaderar-JSON\nkropp`, eller `id\n0\nfeilnamn\n` |
+
 **Testkrokar** (berre med `NC_WASM_TESTBYGG=1`; elles kompileringsfeil): `test_klikk(h)` (`click()`), `test_skriv(h, verdi)` (set `value` og sender `input` som boblar), `test_tast(h, tast)` (`keydown` med `key`) og `test_send(h)` (`requestSubmit()`, som sender `submit` gjennom lyttarane).
 
 **Handtakstabellen.** Eit handtak er ein indeks i tabellen `E` i lastaren. `slepp(h)`:
@@ -562,6 +577,7 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
 | `N` (W4) | Norske hendingsnamn → DOM-hendingar, frå `hendingar()` |
 | `V`, `T` (W4) | Gjeldande hending og elementet ho gjeld |
 | `L` (W4) | Lyttar (direkte eller delegert), med `AbortController` og `preventDefault` for `send` |
+| `Q`, `R` (W6) | fetch og konvolutten til det siste svaret (berre når modulen importerer `hent_start`/`hent_svar`) |
 
 Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), har nodane `vilkår` (`?:`), `ikkje` (`!`) og `sekvens` (`(a,b)`), og skriv nøklar med æ, ø og å utan hermeteikn (`tøm:`, `gå_til:`).
 
@@ -576,12 +592,17 @@ Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), h
 |---|---|---|
 | Teljar (W0-settet) | 543 byte (uendra) | 600 byte |
 | Eitt import (`sett_tekst`) | 247 byte (uendra) | 400 byte |
-| Heile produksjonstabellen (37 vertsfunksjonar: 33 for klientkoden og 4 interne, utan testkrokane) | 2 550 byte | 2 560 byte (planbudsjettet) |
-| Heile tabellen med testkrokane (42) | 2 866 byte | 3 072 byte |
+| Heile produksjonstabellen utan nett (37 vertsfunksjonar: 33 for klientkoden og 4 interne, utan testkrokane) | 2 550 byte (uendra) | 2 560 byte (planbudsjettet, uendra) |
+| Nett-gruppa (W6: `hent_start`, `hent_svar`, hjelparane `Q` og `R`) | 405 byte | 448 byte (eige budsjett) |
+| Heile produksjonstabellen med nett (39) | 2 955 byte | 3 008 byte (2 560 + 448) |
+| Heile tabellen med testkrokane og nett (44) | 3 271 byte | 3 520 byte (W4: 3 072) |
 | Skjema-demoen (22 importar) | 1 755 byte | 2 048 byte |
+| Deltakar-demoen (W6, 22 importar med nett) | 2 027 byte | 2 560 byte (`test_wasm_w6`) |
 | W4-proben (7 importar: `finn`, `sett_tekst`, `hent_verdi`, `deleger`, `hending_data`, `lagre_lokalt`, `nå_ms`) | 994 byte | |
 
 Planen hadde 400 byte for W0-settet og 1 KB for eit typisk øy-program. Teljaren er framleis 543 byte (`H` og instansieringa åleine er om lag 300), og eit lite interaktivt program med lyttarar er rundt 1 KB. Skjema-demoen er større fordi han brukar 22 vertsfunksjonar og alle hjelparane (`L` åleine er om lag 300 byte).
+
+**Budsjettet for nett (W6).** Produksjonstabellen var 2 550 av 2 560 byte etter W4, så nett-gruppa fekk plass berre ved at noko anna vart kortare eller at taket vart justert. Grunngjevinga for eit eige budsjett i staden for å heve 2 560: tree-shakinga gjer at gruppa berre kostar modular som brukar `std/wasm_nett.no` (teljaren og skjema-demoen er uendra), og `Q` er éin fetch-kjede der det meste er påkravd API (`AbortSignal.any`/`timeout`, `Object.assign` for mode og credentials, `Object.fromEntries` for headerane). Planutkastet sitt `hent` (2 311 byte for heile settet) hadde verken tidsgrense, avbryting, headerar eller feilnamn. Den einaste innsparinga som vart gjord, er at `js_streng` skriv linjeskift som `\n` i staden for `\u000a`. `test_wasm_lastar` handhevar begge taka: resten ≤ 2 560 og nett-gruppa ≤ 448.
 
 ## HTML-innsetjing og escaping
 
@@ -623,6 +644,124 @@ Brukardata kan dermed ikkje nå `innerHTML` uescapa. W3: verdien til `sett_html`
 | Rå tekstliteral (W4) | < 5 ms (ikkje målbart) | < 5 ms |
 
 W4 skriv bytane som **éin rå tekstliteral** i `klient_data.wasm()`. Norscode-strengar er bytebaserte, og lexeren les literalen byte for byte. Det er prøvd for alle 256 byteverdiane under `nc serve`, med `cmp` mot fasiten. Berre `\` og `"` må escapast (mutasjonstestane viser det). Linjeskift, CR, tab og NUL blir likevel escapa for lesbarheit. `test_wasm_serve` skriv ut kostnaden: for teljaren (2 153 B) tok 1 førespurnad 72 ms og 21 førespurnader 75 ms, altså om lag 0 ms per ekstra førespurnad.
+
+## Nett (W6): `std/wasm_nett.no`
+
+Asynkrone API-ar er callback-baserte (planen §3.1). Klientkoden sender ein førespurnad og får nøyaktig eitt tilbakekall seinare. Tilbakekalla er **closures med éin parameter** (`fun(svar) -> …`), så dei kan fange tilstand og kalle funksjonar i modulen. All logikk ligg i Norscode; lastaren gjer berre fetch.
+
+```
+bruk std.wasm_nett som nett
+
+nett.hent_json("/api/deltakarar", fun(s) -> vis(s["json"]), fun(f) -> vis_feil(f))
+nett.send_json("POST", "/api/deltakarar", {"deltakarar": liste}, fun(s) -> lagra(s), fun(f) -> vis_feil(f))
+la f = nett.med_header(nett.med_tidsgrense(nett.førespurnad("GET", "/api/treg"), 2000), "X-Nc", "1")
+la id = nett.send(f, fun(s) -> ok(s), null)
+nett.avbryt(id)
+```
+
+| Funksjon | |
+|---|---|
+| `førespurnad(metode, url)` | `{"metode", "url", "headerar": {}, "kropp": null, "tidsgrense_ms": 8000, "json": usann}` |
+| `med_header(f, namn, verdi)`, `med_tekst(f, kropp, type)`, `med_json(f, verdi)`, `forvent_json(f)`, `med_tidsgrense(f, ms)` | Byggjarar (headernamn med små bokstavar; `med_json` = `json_stringify` + `Content-Type`/`Accept` + forventa JSON-svar) |
+| `send(f, ok, feil)` → id | Validerer og sender. Feil argument kastar `HentFeil: ugyldig førespurnad: …` med ein gong |
+| `hent(url, ok, feil)`, `hent_json(url, ok, feil)`, `send_json(metode, url, verdi, ok, feil)` | Snarvegar |
+| `avbryt(id)` → bool | Avbryt ein førespurnad som ikkje er ferdig (usann når id-en er ukjend eller alt ferdig) |
+| `ventande()` | Førespurnader som ikkje er leverte |
+| `valider(f)`, `førespurnad_json(id, f)`, `tolk_konvolutt(k)`, `resultat(f, k)`, `feil_tekst(feil)`, `kast_feil(feil)` | Reine funksjonar (paritetskorpuset `w6_nett`) |
+| `test_registrer(f, ok, feil)`, `test_motta(konvolutt)` | Berre for testar: køa utan nettverk (korpuset `w6_nett_ko`) |
+
+**Svar og feil.** `ok` får `{"id", "status", "ok": sann, "kropp", "headerar"}` (headernamn med små bokstavar, `Object.fromEntries(r.headers)`) og `"json"` når JSON var forventa. `feil` får `{"type": "HentFeil", "art", "id", "metode", "url", "status", "melding", "kropp", "headerar"}`:
+
+| `art` | Når | `status` |
+|---|---|---|
+| `status` | svar utanfor 2xx (kroppen er med, t.d. `{"feil": […]}` frå tenaren) | 404, 500, … |
+| `nettverk` | ingen kontakt (tenaren nede, offline, avvist av nettlesaren; `TypeError`) | 0 |
+| `tidsavbrot` | tidsgrensa gjekk ut (`TimeoutError`) | 0 |
+| `avbrote` | `avbryt(id)` (`AbortError`) | 0 |
+| `json` | 2xx, men kroppen var ikkje gyldig JSON (`rt.json_parse`, melding som `JSON: uventa teikn: i`) | 2xx |
+
+`type` gjer at `kast feil` blir fanga av `fang (e: HentFeil)`. `kast_feil(feil)` kastar `feil_tekst(feil)` («HentFeil: status GET /api/404: status 404»), som òg blir fanga slik. Utan feil-tilbakekall (`null`) blir feilen skriven som `ERROR: HentFeil: …`.
+
+**Garantiar**
+- **Same opphav:** URL-en må vere ein sti (`/…`, ikkje `//…`, utan mellomrom og linjeskift). Lastaren set `mode` og `credentials` til `same-origin` *etter* førespurnaden frå Norscode (`Object.assign`), så dei kan ikkje overstyrast. `test_wasm_lastar` sjekkar det.
+- **Rekkjefølgje:** tilbakekalla kjem i den rekkjefølgja førespurnadene vart sende, same kva rekkjefølgje svara kjem i. Køa ligg i Norscode (`_kø`, `_ventar`): eit svar som kjem før eit tidlegare, ventar til det tidlegare er levert. Ein tidsavbroten eller avbroten førespurnad får feil-tilbakekallet på sin plass i køa.
+- **Eitt tilbakekall per førespurnad**, og eit tilbakekall som kastar, gjev `ERROR: <tekst>` (som eit uhandtert unnatak) utan at dei neste i køa blir stoppa. Ingenting når JavaScript, så konsollen er fri for «Uncaught».
+- **Tidsgrense** 8 000 ms som standard (A2), 1–600 000 ms. **Avbryting** via handtaket: `avbryt` kallar `slepp`, som kallar `abort()` på AbortController-en.
+- **JSON som VM-en:** førespurnaden er `json_stringify` (same tekst som i VM-en), og svaret blir lese med `rt.json_parse` (same verdiar som `json_parse_raw` i VM-en for gyldig JSON, og kastar for ugyldig). Paritetskorpuset køyrer same kode i VM-en, Chrome og jsc.
+
+**Konvolutten.** Lastaren kallar tilbakekallet `__hent_ferdig` (eksportert frå `std.wasm_nett`) når eit svar er klart, og `hent_svar()` gjev `id\nstatus\nheaderar-JSON\nkropp` (feil: `id\n0\nfeilnamn\n`). `tolk_konvolutt` deler på dei tre første linjeskifta, så kroppen kan innehalde linjeskift.
+
+**Nettlesarstøtte.** `AbortSignal.any` finst frå Chrome 116, Firefox 124 og Safari 17.4 [A]. For modular med unnatak (alle som brukar `std/wasm_nett.no`) er golvet framleis exnref (Chrome 137, Firefox 131, Safari 18.4), så Firefox 131 og nyare, der begge finst, er det reelle golvet. Chrome 154 er testa [V].
+
+**`nc serve` og parallelle førespurnader.** `nc serve` tek éi tilkopling om gongen. Chrome opnar opptil seks tilkoplingar per opphav, og ein førespurnad som blir avbroten (eller får tidsavbrot) medan han ventar på ei tilkopling, kan etterlate ein open sokkel utan førespurnad. Då ventar `nc serve` på han, og alt anna står [V: med ni parallelle førespurnader og eitt avbrot hekk 4 av 10 køyringar; med seks om gongen og avbrot etter 20 ms 0 av 8 (og alle testkøyringane sidan). Eit tidsavbrot i ein andre bolk, etter at tilkoplingane frå den første var brukte, hekk 1 av 2]. Testklienten held seg difor til seks om gongen og avbryt først når førespurnaden er skriven. Ein apptenar med fleire tilkoplingar (A6/R1) fjernar problemet.
+
+**Funn: headernamn under `nc serve`.** `nc serve` gjev headerane med namna slik klienten skreiv dei, og `web.request_header` samanliknar eksakt. `fetch` skriv namna med små bokstavar, men nettlesaren sender `Cookie` med stor forbokstav, så `web.request_cookie(ctx, …)` finn han ikkje. Demoen les headerane uavhengig av store og små bokstavar (`app.header`). `std/web.no` er ikkje endra.
+
+### Deltakar-demoen
+
+`examples/wasm_deltakarar/` er ei side der lista blir henta frå og lagra til tenaren via JSON-ruta `/api/deltakarar`:
+- Ved start: `hent_json`, med «Hentar deltakarlista …» i statusfeltet, knappane av og `aria-busy="true"` til svaret kjem.
+- «Legg til» validerer med `reglar.no` (dei same reglane som tenaren brukar) og legg til lokalt; «Ulagra endringar» blir synleg. «Fjern» er delegert.
+- «Lagre på tenaren» sender heile lista (`send_json("POST", …)`). Tenaren parsar med `rt.json_parse` og validerer med `reglar.valider_liste` på nytt; 400 med `{"feil": […]}` blir vist i feilfeltet (`role="alert"`).
+- «Hent på nytt», og feilmeldingar for nettverk, tidsavbrot og status (`klient.feilmelding`, ein rein funksjon som testane køyrer i VM-en).
+- Lagring: `nc serve` har korkje disk eller minne mellom førespurnader, så tenaren lagrar lista i ein HttpOnly-informasjonskapsel (`SameSite=Strict`, prosentkoda JSON). API-et til klienten er det same som mot ein database.
+
+Resultat i Chrome 154 (testbygg, `tests/test_wasm_w6_chrome.no`): lasta 10, la til 1, lagra 11, henta dei 11 att frå tenaren, fjerna 1, ei ugyldig liste gav «Kunne ikkje lagre: Deltakar 1: Namnet må ha minst 2 teikn. Deltakar 1: E-postadressa manglar namn før @.», og etter `/api/stopp` gav «Hent på nytt» «Kunne ikkje hente lista: fekk ikkje kontakt med tenaren.» med lista ståande. Ingen «Uncaught». I produksjonsbygg viser `/` dei 10 frå tenaren når sida er ferdig.
+
+## Nettlesar-benken (W5)
+
+`std/wasm_nettlesar.no` er éin stad for det alle nettlesartestane treng, skrive i Norscode (`tests/fixtures/wasm_chrome_hjelp.no` er no eit tynt lag over han; `wasm_test_hjelp` har framleis sitt eige `bygg`, sidan det å importere benken der kosta om lag 3 s per test i standard-VM-en):
+
+| Funksjon | |
+|---|---|
+| `finn_chrome()`, `finn_jsc()` | `NC_CHROME`/`NC_JSC`, elles standardstiane; "" når ingen svarar (`--version`, `print(6*7)`) |
+| `bygg(kjelde, utmappe, testbygg, prefiks, app)` | `tools/nc_wasm.no` i ein barneprosess i fastmodus → `{"ok", "linje", "ut"}` |
+| `ny_økt(namn)` | Unik mappe `build/wasm-nettlesar/<namn>-<tid>/` for profilar og netloggar |
+| `start_serve(økt, app, port)`, `stopp_serve(økt)`, `serve_køyrer(h)` | Barne-`nc serve` med eksplisitt miljø, venta til «Socket-lytting aktiv» |
+| `last_side(økt, url, op)` | Headless Chrome med flagga frå §4.4 → `{"dom", "konsoll", "logg", "uncaught", "ms", "tidsavbrot", "mål", "sidelasting"}`. `op`: `profil` (same namn = same profil), `behald_profil`, `virtuell_ms` (standard 5 000), `netlog`, `grense_ms` (standard 60 000) |
+| `rydd(økt)` | Stoppar serve, drep det som er att med økt-mappa i kommandolinja (`pkill -f`), sjekkar med `pgrep` og slettar mappa → `{"drepne", "attverande"}` |
+| `logg_frå_dom`, `har_uncaught`, `mål_frå_logg`, `sidelasting_frå_netlog`, `skriv_resultat` | Tolking og resultatfiler (`build/wasm-nettlesar/resultat/<namn>.json`, aldri committa) |
+| `shim.jsc_køyr(jsc, utmappe)` (`std/wasm_jsc.no`) | Modulen og lastaren i JavaScriptCore → `{"logg", "uncaught", "exit", "stderr"}` |
+
+**Berre eigne prosessar.** Kvar Chrome-prosess (også hjelpeprosessane) har profilmappa i kommandolinja, og profilane ligg alltid under `build/wasm-nettlesar/`. `drep_med` nektar ei nål utan ei benkmappe, så `pkill -f` kan ikkje treffe andre prosessar. `test_wasm_w5` startar ein prosess med økt-mappa og ein utan, og krev at `rydd` drep den eine og let den andre vere.
+
+**CLI:** `./bin/nc run tools/wasm_nettlesar.no` med `NC_NETTLESAR_MODUS`:
+- `royk` (standard): teljar-demoen (eller `NC_NETTLESAR_KJELDE`/`APP`/`STI`), DOM-en må innehalde `NC_NETTLESAR_KREV`, ingen «Uncaught».
+- `korpus`: `NC_NETTLESAR_KJELDE` er ei kommaliste med korpusprogram; kvart blir bygd i testbygg og køyrt i Chrome og i jsc mot «#=»-fasiten.
+- `maal`: app-kjensle (sjå under), median over `NC_NETTLESAR_GONGER` lastingar.
+- `offline`: last sida, stopp `nc serve`, last om att med same profil (W8: service workeren). Utan `NC_NETTLESAR_KREV` blir berre resultatet skrive.
+- `NC_CHROME=/finst/ikkje` gjev exit 2 og «fann ikkje nettlesar». Etter kvar køyring er ingen prosessar med `build/wasm-nettlesar` att (CLI-en skriv `rydding: n prosessar drepne, 0 att`, og exit-koden er 1 om nokon er att).
+
+**Virtuell tid.** Med `--virtual-time-budget` står klokka i sida stille medan ein førespurnad ventar på nettverket, og ho går berre når sida køyrer JavaScript [V: `Date.now()` gjekk 63 ms i ei travel lykkje, men berre 77 ms medan ein førespurnad venta 1,5 s på tenaren]. Ein tidsgrense på 200 ms slo difor aldri til mot ein treg tenar. Testklienten held sida oppteken i 60 ms etter at han har sendt, så tidsgrensa på 20 ms går ut. Utan virtuell tid dumpar Chrome DOM-en ved `load`, før WASM-en er ferdig, så virtuell tid er framleis vegen.
+
+### App-kjensle (målt)
+
+`tests/fixtures/wasm_kjensle_testklient.no` måler i WASM-sida sjølv med `builtin.tid_ms()` (`Date.now()`), frå hendinga blir send gjennom testkroken og den ekte hendingsdelegeringa til DOM-en er oppdatert, som gjennomsnitt over mange hendingar. Etter kvar hending blir DOM-en lesen og samanlikna med det venta (`feil` skal vere 0; ei hending som ikkje når fram, syner). Sidelastingstida kjem frå Chrome-netloggen (`--log-net-log`): frå starten av dokumentet til slutten av den siste førespurnaden til same opphav. `nc serve` loggar ikkje førespurnader, så tenarloggen gjev ingen tider.
+
+Skjema-demoen, macOS (Apple Silicon), Chrome 154 headless, `nc serve` i fastmodus, `maal` med median over 5 lastingar:
+
+| Mål | Median | Alle fem |
+|---|---|---|
+| `start_ms`: `s.start()` med 50 rader | 2 ms | 3, 2, 2, 2, 1 |
+| `filter_us`: input i filteret → 7 eller 50 rader gjengjevne | 0,30 ms | 0,40, 0,30, 0,30, 0,30, 0,33 |
+| `klikk_us`: delegert «Fjern» → rad borte og lista gjengjeven | 0,40 ms | 0,40, 0,50, 0,40, 0,50, 0,40 |
+| `send_us`: submit → validering, ny rad, gjengjeving, lokal lagring, status | 1,2 ms | 1,4, 1,1, 1,2, 1,2, 1,2 |
+| `feil` (hendingar utan venta DOM-endring) | 0 | 0, 0, 0, 0, 0 |
+| Sidelasting (`/test`, 70 KB side + lastar + 12 KB modul) | 55 ms | 114 (kald), 58, 50, 55, 52 |
+
+Deltakar-demoen i produksjonsbygg (`royk`): sidelasting 23 ms frå dokumentet til svaret på `/api/deltakarar` (6 førespurnader: `/` 3 ms, `stil.css` 2, `nc.js` 3, `app.wasm` 4 (27 KB), `/api/deltakarar` 2).
+
+Resultatet står i `build/wasm-nettlesar/resultat/maal.json`.
+
+### JavaScriptCore utan JS-filer
+
+`jsc -e <skript>` køyrer eit skript frå kommandolinja, så det trengst inga JS-fil, verken i repoet eller under `build/`. Skriptet er vertsshimen i `std/wasm_jsc.no` (JS-tre, emittert av `std/wasm_js.no` som lastaren) pluss lastaren `nc.js` som `tools/nc_wasm.no` emitterte:
+- `console.log` og `document.getElementById(…).append` skriv kvar loggbit som éi JSON-strenglinje med `print`, så benken set saman den eksakte teksten;
+- `TextDecoder`/`TextEncoder` for UTF-8 (`decodeURIComponent(escape(…))`, konstruerbare via `Object.bind(null, o)`);
+- `fetch` gjev URL-en attende, og `WebAssembly.instantiateStreaming` les modulfila med `readFile`;
+- lastaren får `.catch`, som skriv «Uncaught <feil>» når ein trap når JavaScript.
+
+`test_wasm_w5` køyrer `unntak_endeleg`, `closure_fangst`, `rt_json_feil` og `w4_ordbok` i jsc (macOS 26.6.2, Safari 26.6-motoren) med utskrift lik fasiten, og `kontroll_trap` gjev «Uncaught». `tools/wasm_nettlesar.no` (korpus) køyrer kva som helst av korpuset i både Chrome og jsc; `w6_nett` og `w6_nett_ko` gav fasiten i begge. Programma treng berre `logg_test`/`logg` og tal- og tidsfunksjonane, ikkje DOM-en.
 
 ## Der VM-ane er usamde
 
@@ -706,6 +845,17 @@ W4 endra ikkje W1–W3-korpuset: det er byte-identisk med W3, og `rt_json` har s
 | Skjema-demoen (`examples/wasm_skjema/klient.no`) | 10 242 | 1 755 |
 | Skjema-demoen med testklienten (testbygg) | 13 976 | 2 235 |
 
+W6 (byte):
+
+| Modul | Storleik | Lastar |
+|---|---|---|
+| `w6_nett` (korpus, testbygg) | 22 400 | |
+| Deltakar-demoen (`examples/wasm_deltakarar/klient.no`) | 27 340 | 2 027 |
+| `w6_nett_ko` (korpus, testbygg) | 19 710 | |
+| Nett-testklienten (testbygg) | 25 530 | 1 148 |
+
+Storleiken kjem mest frå `rt.json_parse`/`json_skriv` (om lag 15 KB, som `rt_json` i W3) og køa. W0–W4-modulane er uendra: nett-importane og `Q` kjem berre med når `std/wasm_nett.no` blir brukt.
+
 ## Testar
 
 | Test | Kva han dekkjer |
@@ -715,15 +865,19 @@ W4 endra ikkje W1–W3-korpuset: det er byte-identisk med W3, og `rt_json` har s
 | `tests/test_wasm_les.no` | W2-typesjekken: ein handbygd modul (kontrollflyt, i64, GC, `try_table`/`throw`, `ref.func`, `call_ref`, globalar) blir godteken. 17 variantar med éin feil kvar blir avviste med rett melding (W3: validerte i `tests/fixtures/wasm_les_typesjekk.no` i fastmodus, og testen sjekkar kvar linje). Ekte korpusmodular blir godtekne, og avviste etter mutasjon: utan elementsegmentet, og med feil tag-type. |
 | `tests/test_wasm_w2.no` | W2-lowringa på bytenivå: ingen tag- eller elementseksjon utan unnatak og closures. Init i `try_table` og `throw` for `THROW`. `unntak_passar` berre ved typa fang. `kast` er `throw`, ikkje trap. Deklarativt elementsegment og `call_ref` for closures. `$lambda`-typen for `ncb_call_fn`. |
 | `tests/test_wasm_w3.no` | W3-lenkinga: `lenk_rt` fører berre rt-modulane inn (ikkje drivaren) og endrar ikkje inndata. Utan lenking er `split` ein kompileringsfeil. Tree-shaking frå CLI-en: `split` gjev `rt=splitt` og ingen desimalimport, `sha256` gjev `rt=sha256_hex`, og `desimaltall(tekst)` gjev `tekst_flyt`. Heile biblioteket har alle 17 offentlege funksjonar og er under taket på 24 KB. Fail-closed rapport med biblioteket lenka inn. |
-| `tests/test_wasm_korpus_chrome.no` | Paritetskorpuset (W1 + W2), sjå under. |
+| `tests/test_wasm_korpus_chrome.no` | Paritetskorpuset for W1, sjå under. |
+| `tests/test_wasm_korpus_w2.no` | Paritetskorpuset for W2 (delt ut i W5 for tidsgrensa). |
 | `tests/test_wasm_korpus_w3.no` | Paritetskorpuset for W3 (`kh.korpus_w3()`), og tekstverdiar i DOM-en i Chrome: `sett_tekst` via utrekna selektorar, med HTML-teikn og eit desimaltal, og `sett_html` med ein `<script>`-tagg i verdien. |
 | `tests/test_wasm_lastar.no` | Byte-tak og tree-shaking. Importnamna i lastaren er lik importseksjonen (også namn med æøå). Strukturen kjem frå tabellen. Ingen JS-fragment i literalane. Kvart lastartoken finst i emitteren eller i tabellen (proveniens). Escape er lik `std.html.escape`. W4: produksjonstabellen ≤ 2 560 byte, med testkrokar ≤ 3 072 og skjema-demoen ≤ 2 048; `U`/`L`/`N`/`P`/`F` blir tree-shaka etter bruk; `setAttribute` og `createElement` berre med namn som er kontrollerte ved kompilering; ingen tildeling til `on…`-felt; navigasjon berre til same opphav; presedens i emitteren. Sjekkane står i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus. |
 | `tests/test_wasm_serve.no` | Barne-`nc serve` av serve-inngangen (W4): `application/wasm` byte-identisk; `immutable` berre ved rett `v`; ETag og 304; lastaren utan `v` med `no-cache`; `wasm-unsafe-eval` berre på WASM-sida; `<script type="module">`; versjonen endrar seg når éin byte endrar seg; appen åleine (utan bygg) kan serverast; målt kostnad per førespurnad. |
 | `tests/test_wasm_w4.no` | Fail-closed rapport for utrygge vertskall (11 feil). Atom og importar for dei nye vegane i ein ekte modul, men ikkje i teljaren. rt-cachen: bygga utan cache, med kald og med varm cache er byte-identiske. Den varme hentar kropp og analyse for alle `std.*`-funksjonane. Ei endra oppføring blir lowra på nytt, og ein øydelagd kropp blir brukt (validatoren avviser han). Filnamnet følgjer backend-kjeldene. Stubbane kastar i VM-en. |
 | `tests/test_wasm_w4_chrome.no` | Korpuset `w4_ordbok` (VM, bygg, Chrome). Skjema-demoen i testbygg med brukarsteg gjennom testkrokane mot fasit (reglane er rekna i VM-en), og i produksjonsbygg med `?q=`. Negativ kontroll med standard-CSP. Sjå «Skjema-demoen». |
 | `tests/test_wasm_w0_chrome.no` | Valfri. Teljaren etter tre klikk, negativ CSP-kontroll og W0-korpuset mot VM-en. |
+| `tests/test_wasm_w5.no` | Benken og CLI-en (W5): `NC_CHROME=/finst/ikkje` gjev exit ≠ 0 og «fann ikkje nettlesar», ukjend modus exit 2; tolking av loggen, «MÅL»-linjer, «Uncaught» og ein netlogg med ein førespurnad til eit anna opphav og ein som aldri vart ferdig; `rydd` drep ein prosess med økt-mappa og ikkje ein utan, og `drep_med` nektar ei nål utan benkmappe; jsc-skriptet. Med Chrome: `royk` gjev exit 0, eit krav som ikkje finst gjev exit 1, `maal` gjev mål og sidelastingstid med `feil=0`, og `pgrep -f build/wasm-nettlesar` finn ingen prosessar etter kvar køyring. Med jsc: fire korpusprogram lik fasiten og `kontroll_trap` med «Uncaught». |
+| `tests/test_wasm_w6.no` | W6 utan nettlesar: korpusa `w6_nett` (reine funksjonar) og `w6_nett_ko` (køa: levering i sende-rekkjefølgje med konvoluttar i ei anna rekkjefølgje, tilbakekall som kastar, manglande feil-tilbakekall, ukjend id, ny førespurnad under levering) i VM, bygg og Chrome; stubbane kastar i VM-en; ugyldige førespurnader kastar HentFeil; demo-reglane og `feilmelding` i VM-en; tenaren utan sokkel (GET, POST med informasjonskapsel, `Cookie` med stor forbokstav, 400 for ugyldig JSON, feil form og 61 deltakarar, øydelagd kapsel); bygga har nett-importane og `__hent_ferdig`, og demo-lastaren er ≤ 2 560 byte. |
+| `tests/test_wasm_w6_chrome.no` | Valfri. Nett-testklienten (ti førespurnader og offline) lik fasiten, utan «Uncaught», og `nc serve` stoppa av `/api/stopp`; deltakar-demoen i testbygg lik fasiten; produksjonsbygget viser dei 10 frå tenaren. |
 
-Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no`. Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
+Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag over nettlesar-benken `std/wasm_nettlesar.no`, med profilane under `build/wasm-nettlesar/fixtur/`). Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Serve utan sokkel (`NORSCODE_FAKE_HTTP_REQUESTS`) ligg i `tests/fixtures/wasm_serve_hjelp.no` (W6). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
 
 ### Paritetskorpuset
 
@@ -753,6 +907,8 @@ Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no`. Der les `dump_me
 | `rt_sorter` (W3) | `rt.sorter` med closure (stigande, synkande, etter lengd og etter felt, fanga variabel), stabilitet, `rt.sortert`, tomme og eittelements lister, 200 element, `rt.tekst_til_liste` |
 | `rt_sha256` (W3) | FIPS-vektorane (`abc`, tom, 448 og 896 bit), UTF-8, 55/56/63/64/65/1000 byte |
 | `w4_ordbok` (W4) | `fjern_nokkel`/`fjern_nøkkel`: rekkjefølgje, manglande nøkkel, nøkkel som kjem attende, alle bort, i lykkje; `tid_ms` |
+| `w6_nett` (W6) | validering av førespurnader, førespurnaden som JSON, konvolutten (headerar, kropp med linjeskift, feilnamn), klassifisering av 2xx, 3xx, 404, tidsavbrot, avbrote, nettverk og ugyldig JSON, HentFeil kasta og fanga |
+| `w6_nett_ko` (W6) | køa utan nettverk: konvoluttar i rekkjefølgja 3, 5, 4, 2, 1 gjev tilbakekall 1–5, eit ok- og eit feil-tilbakekall som kastar, manglande feil-tilbakekall, ukjend id, avbryt, ny førespurnad under levering |
 | `kontroll_trap` | ikkje paritet: positiv kontroll for konsollsjekken |
 
 Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome` køyrer dei i tre steg:
@@ -765,7 +921,7 @@ Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome
 
 **Resultat:** alle 18 programma gav identisk utskrift i VM-en og i Chrome 154 (macOS), utan «Uncaught». Dei same 18 modulane gav identisk utskrift i JavaScriptCore frå macOS 26.6.2 (Safari 26.6-motoren), køyrt med eit scratch-skript utanfor repoet. Linux i Docker har ikkje Chrome, så der køyrer steg 1 og 2.
 
-**W3-resultat:** alle 5 W3-programma gav identisk utskrift i VM-en (macOS og Linux) og i Chrome 154, utan «Uncaught», og DOM-sida viste tekstverdiane som venta. Med den endelege W3-koden gav alle 23 korpusmodulane identisk utskrift i JavaScriptCore frå macOS 26.6.2. Scratch-skriptet utanfor repoet køyrer den genererte `nc.js` med ein shim for `document`, `fetch` og `TextEncoder`/`TextDecoder`.
+**W3-resultat:** alle 5 W3-programma gav identisk utskrift i VM-en (macOS og Linux) og i Chrome 154, utan «Uncaught», og DOM-sida viste tekstverdiane som venta. Med den endelege W3-koden gav alle 23 korpusmodulane identisk utskrift i JavaScriptCore frå macOS 26.6.2. Scratch-skriptet utanfor repoet køyrer den genererte `nc.js` med ein shim for `document`, `fetch` og `TextEncoder`/`TextDecoder`. W5: scratch-skriptet er erstatta av nettlesar-benken, som køyrer same vegen med `jsc -e` og ein shim emittert frå Norscode-data (sjå «JavaScriptCore utan JS-filer»).
 
 Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen raud:
 
@@ -820,6 +976,20 @@ Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen ra
 | W4: `"` eller `\` ikkje escapa i den rå literalen | `test_wasm_serve` |
 | W4: `L` utan `N` i avhengnadene | `test_wasm_lastar` (via barneprosessen) |
 | W4: `lytt_klikk` via `onclick=` | `test_wasm_lastar` |
+| W5: `rydd` utan `drep_med` | `test_wasm_w5` (rydding) |
+| W5: `mål_frå_logg` utan krav om `=` | `test_wasm_w5` (tolking) |
+| W5: netloggen utan opphavsfilter | `test_wasm_w5` (tolking) |
+| W5: jsc-shimen utan UTF-8-dekoding | `test_wasm_w5` (jsc-korpuset) |
+| W5: `royk` utan kravet til DOM-en | `test_wasm_w5` (royk med feil krav gav exit 0) |
+| W5: klikka i kjensle-klienten treffer ikkje | `test_wasm_w5` (`feil` > 0) |
+| W6: levering i kome-rekkjefølgje (utan køa) | `test_wasm_w6` (VM-steget, `w6_nett_ko`) og Chrome |
+| W6: ok-tilbakekall utan `fang` | `test_wasm_w6` (VM-steget, `w6_nett_ko`) |
+| W6: feil-tilbakekall utan `fang` | `test_wasm_w6_chrome` (nr. 6 kom aldri) |
+| W6: lastaren utan `AbortSignal.timeout` | `test_wasm_w6_chrome` (nr. 6 fekk svar) |
+| W6: `avbryt` utan `slepp` | `test_wasm_w6_chrome` (nr. 3 fekk svar) |
+| W6: 3xx og 4xx som ok | `test_wasm_w6` (VM-steget, `w6_nett`) |
+| W6: informasjonskapselen lesen med `web.request_cookie` | `test_wasm_w6` (tenaren) |
+| W6: demoen viser ikkje feila frå tenaren | `test_wasm_w6` (`feilmelding` i VM-en) |
 
 Kontrollar:
 - Ein semantisk no-op i lenkinga gav grøn `test_wasm_w4`.
@@ -845,33 +1015,49 @@ JavaScriptCore (macOS 26.6.2) gav identisk utskrift for `w4_ordbok` (scratch-skr
 
 ### Tid
 
-Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W4-koden. W3-tala står i parentes der testen fanst før.
+Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W6-koden (siste køyring). W4-tala står i parentes.
 
 | Test | macOS standard | macOS fast | Linux standard | Linux fast |
 |---|---|---|---|---|
-| `test_wasm_w0` | 14 (9) | 8 (6) | 17 | 12 |
-| `test_wasm_les` | 6 (6) | 5 (6) | 10 | 9 |
-| `test_wasm_w1` | 8 (11) | 5 (5) | 11 | 11 |
-| `test_wasm_w2` | 11 (11) | 7 (5) | 12 | 12 |
-| `test_wasm_w3` | 15 (11) | 9 (10) | 17 | 12 |
-| `test_wasm_w4` (ny) | 18 | 14 | 24 | 21 |
-| `test_wasm_lastar` | 9 (23) | 10 (4) | 14 | 14 |
-| `test_wasm_serve` | 9 (5) | 3 (3) | 11 | 7 |
+| `test_wasm_w0` | 14 (14) | 11 (8) | 17 (17) | 12 (12) |
+| `test_wasm_les` | 7 (6) | 5 (5) | 12 (10) | 10 (9) |
+| `test_wasm_w1` | 8 (8) | 6 (5) | 15 (11) | 11 (11) |
+| `test_wasm_w2` | 11 (11) | 7 (7) | 14 (12) | 11 (12) |
+| `test_wasm_w3` | 15 (15) | 11 (9) | 17 (17) | 12 (12) |
+| `test_wasm_w4` | 18 (18) | 15 (14) | 23 (24) | 20 (21) |
+| `test_wasm_lastar` | 10 (9) | 11 (10) | 15 (14) | 15 (14) |
+| `test_wasm_serve` | 8 (9) | 3 (3) | 10 (11) | 5 (7) |
 | `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 2 | ≤ 2 |
-| `test_wasm_korpus_chrome` | 53 (53) | 44 (46) | 39 | 39 |
-| `test_wasm_korpus_w3` | 28 (30) | 24 (27) | 22 | 22 |
-| `test_wasm_w0_chrome` | 11 (12) | 10 (9) | 2 | 2 |
-| `test_wasm_w4_chrome` (ny) | 19 | 17 | 13 | 14 |
+| `test_wasm_korpus_chrome` (W1) | 29 (53 med W2) | 24 (44) | 22 (39) | 21 (39) |
+| `test_wasm_korpus_w2` (ny, W2) | 30 | 25 | 22 | 30 |
+| `test_wasm_korpus_w3` | 28 (28) | 24 (24) | 23 (22) | 27 (22) |
+| `test_wasm_w0_chrome` | 12 (11) | 10 (10) | 4 (2) | 3 (2) |
+| `test_wasm_w4_chrome` | 23 (19) | 17 (17) | 16 (13) | 13 (14) |
+| `test_wasm_w5` (ny) | 32 | 23 | 7 | 4 |
+| `test_wasm_w6` (ny) | 32 | 25 | 29 | 27 |
+| `test_wasm_w6_chrome` (ny) | 26 | 21 | 10 | 9 |
 
-- **`test_wasm_lastar`:** med W4-tabellen tok emitteringa og tokeniseringa av dei fulle lastarane om lag 3 minutt i standard-VM-en (189 s målt). Sjekkane står no i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus, som valideringa i W3.
-- **`test_wasm_korpus_chrome`** var 57–58 s ei stund i W4. Årsaka var at kvart bygg rekna nøkkelen til rt-cachen (sha256 over ~175 KB, ~110 ms), også for program utan rt-funksjonar. Lowringa les no cachen først når ein funksjon kan cachast (korpusbygget: 1,42 → 1,20 s; W3: 1,01 s). Resten av skilnaden mot W3 er større modular å laste og ein større vertstabell.
-- Ingen wasm-test er over 55 s i standard-VM-en på macOS. Tidene varierer med ±3 s mellom køyringar.
-- Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome, så Chrome-stega er SKIP der. VM- og byggstega i dei valfrie testane køyrer. Alle testane er grøne på begge plattformene og i begge modusane.
+- **`test_wasm_lastar`:** med W4-tabellen tok emitteringa og tokeniseringa av dei fulle lastarane om lag 3 minutt i standard-VM-en (189 s målt). Sjekkane står i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus, som valideringa i W3.
+- **`test_wasm_korpus_chrome`** var 53–55 s etter W4, rett under grensa. W5 delte W2-programma ut i `test_wasm_korpus_w2`.
+- **W5-benken og testtida:** ein første versjon av benken importerte emitteren (for jsc) og venta på at hjelpeprosessane til Chrome skulle avslutte etter kvar side. Det gav om lag +3 s per test som importerte `wasm_test_hjelp` og +5 s for korpustesten i standard-VM-en. jsc-køyringa ligg difor i `std/wasm_jsc.no`, `wasm_test_hjelp` importerer ikkje benken (han har sitt eige `bygg`), og `benk.rydd(økt)` drep det som er att til slutt.
+- **`test_wasm_w6`** (56 s med Chrome-stega i same test) er delt i `test_wasm_w6` og `test_wasm_w6_chrome`.
+- Ingen wasm-test er over 55 s i standard-VM-en (høgst 32 s på macOS og 29 s på Linux). Tidene varierer med ±3 s mellom køyringar.
+- Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome eller jsc, så dei stega er SKIP der. VM-, bygg- og tenarstega køyrer (også ryddetesten til benken og JSON-rutene til demoen). Alle testane er grøne på begge plattformene og i begge modusane.
 
-## Gjenstår før W5
+## Gjenstår før W7
+
+- **W5/W6 (nytt):**
+  - `nc serve` tek éi tilkopling om gongen. Parallelle førespurnader med avbrot eller tidsavbrot medan dei ventar på ei tilkopling kan få tenaren til å vente på ein sokkel utan førespurnad (sjå «Nett»). Krev ein apptenar med fleire tilkoplingar (A6/R1); til då: høgst seks om gongen og avbrot etter at førespurnaden er skriven.
+  - Tidsgrenser kan berre testast i Chrome med virtuell tid når sida sjølv held klokka i gang (testklienten ventar aktivt i 60 ms). Ein testmodus utan virtuell tid krev CDP eller ein ekstra ressurs som held `load` att.
+  - Offline-modusen i benken finst, men utan service worker viser den andre lastinga ingenting (W8).
+  - `web.request_header` og `web.request_cookie` skil mellom store og små bokstavar under `nc serve` (demoen går rundt det). Bør rettast i `std/web.no` (utanfor lukkinga) i eit eige steg.
+  - Nett-gruppa i lastaren har eige budsjett (448 byte). Heile produksjonstabellen med nett er 2 955 byte.
+  - Firefox er framleis ikkje testa. Safari-motoren (jsc) er testa for korpusprogram utan DOM; demoane treng ein DOM og er berre køyrde i Chrome.
+  - `hent_*` og `sett_*` på eit element som ikkje finst, gjev framleis ein JS-feil («Uncaught»), ikkje eit Norscode-unnatak (testklienten for demoen måtte unngå det).
+  - Sidelastingstida kjem frå Chrome-netloggen; `nc serve` loggar ikkje førespurnader.
 
 - **Nettlesarar:**
-  - Skjema-demoen er køyrd i Chrome 154, men ikkje i JavaScriptCore (han treng ein DOM). JSC (macOS 26.6.2) er køyrd for `w4_ordbok` med eit scratch-skript utanfor repoet, med identisk utskrift.
+  - Skjema- og deltakar-demoen er køyrde i Chrome 154, men ikkje i JavaScriptCore (dei treng ein DOM). Korpusprogramma køyrer i JSC via benken (`jsc -e`, W5); scratch-skriptet frå W2–W4 trengst ikkje lenger.
   - Firefox er ikkje testa.
   - Safari kan ikkje automatiserast utan å slå på fjernstyring i innstillingane.
 - **Lastaren:**
@@ -905,4 +1091,3 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
   - `ncb_call_fn` samanliknar metodenamn lineært.
   - Ordbøker har lineære oppslag.
 - **Validator:** subtyping mellom ulike typeindeksar og legacy-unnatak er ikkje støtta.
-- **W5 (planen):** nettlesar-testbenk som verktøy. Chrome-hjelparane (`dump_med_konsoll`, testkrokar, `#nc-logg`) er byrjinga.
