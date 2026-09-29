@@ -849,19 +849,19 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 
 | Test | macOS standard | macOS fast | Linux standard | Linux fast |
 |---|---|---|---|---|
-| `test_wasm_w0` | 14 (9) | 7 (6) | 16 | 12 |
-| `test_wasm_les` | 7 (6) | 5 (6) | 12 | 9 |
-| `test_wasm_w1` | 8 (11) | 6 (5) | 15 | 10 |
-| `test_wasm_w2` | 11 (11) | 6 (5) | 13 | 11 |
-| `test_wasm_w3` | 14 (11) | 10 (10) | 17 | 13 |
-| `test_wasm_w4` (ny) | 21 | 14 | 23 | 20 |
-| `test_wasm_lastar` | 10 (23) | 12 (4) | 15 | 14 |
-| `test_wasm_serve` | 8 (5) | 4 (3) | 10 | 6 |
-| `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 3 | 2 |
-| `test_wasm_korpus_chrome` | 53 (53) | 46 (46) | 40 | 38 |
-| `test_wasm_korpus_w3` | 28 (30) | 25 (27) | 23 | 24 |
-| `test_wasm_w0_chrome` | 11 (12) | 11 (9) | 4 | 3 |
-| `test_wasm_w4_chrome` (ny) | 20 | 18 | 16 | 13 |
+| `test_wasm_w0` | 14 (9) | 8 (6) | 17 | 12 |
+| `test_wasm_les` | 6 (6) | 5 (6) | 10 | 9 |
+| `test_wasm_w1` | 8 (11) | 5 (5) | 11 | 11 |
+| `test_wasm_w2` | 11 (11) | 7 (5) | 12 | 12 |
+| `test_wasm_w3` | 15 (11) | 9 (10) | 17 | 12 |
+| `test_wasm_w4` (ny) | 18 | 14 | 24 | 21 |
+| `test_wasm_lastar` | 9 (23) | 10 (4) | 14 | 14 |
+| `test_wasm_serve` | 9 (5) | 3 (3) | 11 | 7 |
+| `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 2 | ≤ 2 |
+| `test_wasm_korpus_chrome` | 53 (53) | 44 (46) | 39 | 39 |
+| `test_wasm_korpus_w3` | 28 (30) | 24 (27) | 22 | 22 |
+| `test_wasm_w0_chrome` | 11 (12) | 10 (9) | 2 | 2 |
+| `test_wasm_w4_chrome` (ny) | 19 | 17 | 13 | 14 |
 
 - **`test_wasm_lastar`:** med W4-tabellen tok emitteringa og tokeniseringa av dei fulle lastarane om lag 3 minutt i standard-VM-en (189 s målt). Sjekkane står no i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus, som valideringa i W3.
 - **`test_wasm_korpus_chrome`** var 57–58 s ei stund i W4. Årsaka var at kvart bygg rekna nøkkelen til rt-cachen (sha256 over ~175 KB, ~110 ms), også for program utan rt-funksjonar. Lowringa les no cachen først når ein funksjon kan cachast (korpusbygget: 1,42 → 1,20 s; W3: 1,01 s). Resten av skilnaden mot W3 er større modular å laste og ein større vertstabell.
