@@ -1,10 +1,11 @@
-# Klientlogikk i Norscode kompilert til WebAssembly (W0, W1, W2)
+# Klientlogikk i Norscode kompilert til WebAssembly (W0–W3)
 
-Status: milepælane W0, W1 og W2 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
+Status: milepælane W0, W1, W2 og W3 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
 
 - **W0** gav vegen frå kjelde til nettlesar: heiltal, kontrollflyt, kall og DOM-vertsfunksjonar.
 - **W1** gav verdimodellen: tekst, desimaltal, lister og ordbøker, med same semantikk som VM-en. Eit paritetskorpus køyrer kvart program i VM-en og i Chrome og krev identisk utskrift.
 - **W2** gav unnatak (`prøv`/`fang`/`endeleg`, `utsett`, typa `fang`, innebygde feil som fangbare unnatak), closures og funksjonsverdiar, strukturmetodar, og ein stakk- og typesjekk i validatoren.
+- **W3** gav runtime-biblioteket `std/wasm_rt.no`: tekstfunksjonar, JSON, sortering og SHA-256 skrivne i vanleg Norscode og kompilerte av same backend, med tree-shaking. Vertsfunksjonane tek tekstverdiar.
 
 ## Bygg og køyr
 
@@ -15,7 +16,7 @@ NC_WASM_NCB=build/wasm/wasm_teljar/klient.ncb.json NC_WASM_UT=build/wasm/wasm_te
 ./bin/nc serve examples/wasm_teljar/app.no --port 8080
 ```
 
-`tools/nc_wasm.no` skriv tre filer til `NC_WASM_UT`, som må liggje under `build/wasm/`:
+`tools/nc_wasm.no` kompilerer først runtime-biblioteket (sjå «Runtime-bibliotek») og lenkar det inn i NCB-en. Så skriv han tre filer til `NC_WASM_UT`, som må liggje under `build/wasm/`:
 
 | Fil | Innhald |
 |---|---|
@@ -28,10 +29,10 @@ Alt er generert og blir aldri committa. Både `build/` og `*.wasm` er git-ignore
 Verktøyet validerer modulen med `std/wasm_les.no` før det skriv han, og skriv éi linje:
 
 ```
-WASM: app.wasm <n> byte, lastar <m> byte, v=<12 hex> importar=<a,b> eksportar=<m,i> atom=<…>
+WASM: app.wasm <n> byte, lastar <m> byte, v=<12 hex> importar=<a,b> eksportar=<m,i> atom=<…> rt=<…>
 ```
 
-Importane og eksportane er dei validatoren las ut av bytane. `atom` er runtime-atoma modulen fekk med.
+Importane og eksportane er dei validatoren las ut av bytane. `atom` er runtime-atoma modulen fekk med, og `rt` er funksjonane frå `std/wasm_rt.no` (utan modulprefikset).
 
 Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I standard-VM-en tek same modul om lag 110 s, fordi kvart funksjonskall og kvart oppslag som gjev ei liste eller ordbok kostar millisekund der. Bygg difor med CLI-en i fastmodus. Testane gjer det same.
 
@@ -42,11 +43,12 @@ Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I 
 | `std/wasm_lowring.no` | NCB → WASM: analyse (stakkhøgder og unnatakstilstand), dispatch-lykkje, unnatakshandterar, closures, seksjonar |
 | `std/wasm_atom.no` | Runtime-atom: verdimodellen som WASM-funksjonar, skrivne med ein liten assembler |
 | `std/wasm_les.no` | Validator: struktur (W0/W1) og stakk- og typesjekk (W2) |
+| `std/wasm_rt.no` | Runtime-bibliotek i vanleg Norscode (W3) |
 | `std/wasm_vert.no` | Vertstabell, klient-API og HTML-escape |
 | `std/wasm_js.no` | Norscode→JS-emitter for lastaren |
 | `tools/nc_wasm.no` | CLI |
 
-Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed.
+Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed. `std/wasm_rt.no` importerer `std/sha256.no` (som ligg i lukkinga), men endrar han ikkje.
 
 ## Verdimodell (WasmGC)
 
@@ -190,7 +192,7 @@ Begge gjev «ulik unntakstilstand ved blokk …» i rapporten, i staden for oppf
 | Motor | Kva som er brukt | Status |
 |---|---|---|
 | Chrome 154 (macOS) | `try_table`/`throw` med tag, WasmGC, `call_ref`, deklarativt elementsegment | **[V]** Heile korpuset (18 program) gav identisk utskrift som VM-en, utan «Uncaught» |
-| JavaScriptCore i macOS 26.6.2 (= Safari 26.6) | same modular | **[V]** Alle 18 korpusmodulane gav identisk utskrift i `jsc`, utan uhandterte unnatak (skriptet ligg utanfor repoet) |
+| JavaScriptCore i macOS 26.6.2 (= Safari 26.6) | same modular | **[V]** Alle 18 korpusmodulane (W3: 23) gav identisk utskrift i `jsc`, utan uhandterte unnatak (skriptet ligg utanfor repoet) |
 | Chrome/Edge | exnref (`try_table`) | [A] frå versjon 137. WasmGC og typa funksjonsreferansar frå 119. |
 | Firefox | exnref | [A] frå versjon 131. WasmGC frå 120. Firefox var ikkje installert og er ikkje testa. |
 | Safari | exnref | [A] frå 18.4. WasmGC frå 18.2. |
@@ -226,6 +228,83 @@ Kompilatoren lowrar ikkje strukturar til eigne typar i NCB-en:
 - `p.metode(a)`, der `p` er ein lokal variabel, blir `builtin.ncb_call_fn(modul + "." + p["__type__"] + ".metode", p, a)`. Dispatcharen samanliknar med alle funksjonane i NCB-en med namnet `modul.Type.metode` og rett aritet. Dei blir tekne med i modulen, sidan typen først er kjend ved køyring.
 - `type(p)` er `ordbok`, og `nøkler(p)` byrjar med `__type__`, som i VM-en.
 - Struktur-literalen `Punkt { x: 1 }` er broten i kompilatoren på denne greina (`LOAD_NAME Punkt`, «Ukjent variabel» i VM-en). Han er difor ikkje med.
+
+## Runtime-bibliotek (W3)
+
+`std/wasm_rt.no` er vanleg Norscode. Backenden kompilerer det med same lowring som klientkoden, så det finst ingen handskriven WASM for desse funksjonane. Biblioteket brukar berre builtins som er atom (`lengde`, `slice`, `char_code`, `chr`, `legg_til`, `tekst`, `heltall`, `desimaltall`, `type`, `nøkler`), så det kan ikkje kalle seg sjølv via tabellen.
+
+### Lenking og tree-shaking
+
+1. `tools/nc_wasm.no` skriv ein drivar (`bruk std.wasm_rt som rt`) til `NC_WASM_UT/rt/` og kompilerer han med `nc compile` i ein barneprosess (om lag 45 ms).
+2. `lowring.lenk_rt(ncb, rt_ncb)` fører funksjonane, globalnamna og modulinitialiseringane til modulane i rt-NCB-en (utanom `__main__`) inn i klient-NCB-en. Det klienten alt har, blir ikkje overskrive.
+3. Lowringa byter `CALL builtin.X` ut med eit kall til `std.wasm_rt.<namn>` etter `rt_tabell()`. Funksjonen blir nåbar, og berre nåbare funksjonar kjem med i modulen. Eit program som berre brukar `split`, får berre `splitt` (2 792 byte). `sha256` dreg med seg `std/sha256.no`, men berre funksjonane `hash` når.
+4. Aritet blir sjekka mot rt-funksjonen. Utan lenking (t.d. `lowring.kompiler` direkte) er eit rt-builtin ein kompileringsfeil som peikar på biblioteket.
+
+Program som ikkje brukar biblioteket, er byte-identiske med W2 (`minimal` er framleis byte-eksakt mot fasiten, og heile W1/W2-korpuset har uendra storleik).
+
+### Builtins som blir kopla til biblioteket
+
+| Builtin (og alias) | `std.wasm_rt` | Semantikk (som VM-en) |
+|---|---|---|
+| `split`, `tekst_splitt` | `splitt` | Per byte med tom skiljar. `split("", ",")` gjev `[""]`, tomme felt blir behaldne, treff frå venstre utan overlapp. |
+| `join`, `tekst_join` | `saman` | `tekst(x)` per element. Parvis samansetjing, så kostnaden er O(n log n) og ikkje O(n²). |
+| `trim`, `tekst_trim` | `trim_tekst` | Fjernar mellomrom, `\t`, `\n`, `\v`, `\f` og `\r` i begge endar (ikkje NBSP). |
+| `replace`, `tekst_erstatt` | `erstatt` | Tom `gammal` gjev teksten uendra. |
+| `starts_with`, `tekst_starter_med` | `starter_med` | |
+| `ends_with`, `tekst_slutter_med` | `slutter_med` | |
+| `contains`, `tekst_inneholder` | `inneheld` | `contains("", "")` er `sann`. |
+| `index_of`, `tekst_indeks` | `finn_indeks` | Byteindeks, `-1` utan treff, `0` for tom nål. |
+| `lower`, `tekst_sma`, `tekst_til_liten` | `til_små` | Berre ASCII A–Z. |
+| `upper`, `tekst_store`, `tekst_til_store` | `til_store` | Berre ASCII a–z. |
+| `json_parse_raw` | `json_parse` | Typa verdiar, sjå under. |
+| `json_stringify` | `json_skriv` | `selfhost/json.no` sin `json_skriv`. |
+| `sha256` | `sha256_hex` | `std/sha256.no` (`hash`), hex over UTF-8-bytane. |
+| `verdier` | `verdiar` | Verdiane i nøkkelrekkjefølgja. |
+
+Nytt atom: `desimaltall` (`desimal_av`). Desimaltal blir uendra, og heiltal blir konverterte. Tekst blir parsa av verten med den interne vertsfunksjonen `tekst_flyt` (`parseFloat`, korrekt avrunda som `strtod`). NaN blir `0.0`, som VM-en gjev for ugyldig tekst.
+
+**Store og små bokstavar.** Begge VM-ane endrar berre ASCII. `tekst_til_liten("ÆØÅ")` er `ÆØÅ` og `tekst_til_store("æøå")` er `æøå`, både i VM-en og i WASM. Planen nemnde æøå. Paritet med VM-en vann, og korpuset testar at æøå, `ü`, `é` og `ß` står urørte.
+
+### JSON
+
+**`json_stringify`** er ein port av `json_skriv` i `selfhost/json.no`:
+- Kompakt, med nøklar i innsetjingsrekkjefølgje.
+- Berre `"`, `\`, `\n`, `\r` og `\t` blir escapa. Andre kontrollteikn og all UTF-8 går uendra.
+- Heiltalsverdige desimaltal får `.0` (`2.0`). `inf` og `nan` blir `null`.
+
+**`json_parse_raw`** (`rt.json_parse`) gjev same verdi som VM-en for gyldig JSON:
+- Objekt blir ordbøker. Ein duplikatnøkkel overskriv verdien og held plassen.
+- Tal utan brøk og eksponent blir `heltall`, med wrap ved overflyt som i VM-en (`12345678901234567890` → `-6101065172474983726`). Elles blir dei `desimaltall`.
+- `\uXXXX` og surrogatpar blir UTF-8. Einslege surrogatar blir tre bytar, som i VM-en.
+- Rå kontrollteikn i strengar blir godtekne, sidan `json_stringify` ikkje escapar dei og rundturen må gå.
+
+**Ugyldig JSON kastar** eit fangbart unnatak. Tekstane følgjer stilen i `selfhost/json.no`:
+
+| Feil | Tekst |
+|---|---|
+| Uventa teikn (også tekst etter verdien, `[1,]`, `01`) | `JSON: uventa teikn: X` (heile UTF-8-teiknet) |
+| Slutt på input | `JSON: uventa slutt` |
+| Streng utan avsluttande `"` | `JSON: uavslutta streng` |
+| Ukjend escape | `JSON: ugyldig escape: \x` |
+| Ugyldig hex i `\u` | `JSON: ugyldig \u-escape` |
+
+Alle byrjar med `JSON:`, så `fang (e: JSON)` fangar dei. VM-en sin `json_parse_raw` kastar ikkje, men gjev ein delvis verdi (`"[1,"` → `[1, 0]`). Det er udefinert oppførsel i VM-en, og WASM er strengare. Program som skal oppføre seg likt, kan kalle `rt.json_parse` direkte (sjå `rt_json_feil` i korpuset).
+
+**VM-en sin `json_parse`** (utan `_raw`) gjev tekstverdiar (`[1,2]` → `{"0": "1", "1": "2"}`). Han blir avvist som `ustøtta builtin: json_parse`, med eit hint om `json_parse_raw`.
+
+### Funksjonar utan builtin
+
+Klientkoden skriv `bruk std.wasm_rt som rt`. Same kode køyrer då i VM-en (som Norscode) og i nettlesaren.
+
+| Funksjon | |
+|---|---|
+| `rt.sorter(l, samanlikn)` | Stabil flettesortering nedanfrå og opp, som gjev ei ny liste. `samanlikn(a, b) < 0` set `a` før `b`. Komparatoren er ein closure og kan fange variablar. |
+| `rt.sortert(l)` | Stabil sortering med `<` (tal mot tal, tekst bytevis). |
+| `rt.tekst_til_liste(s)` | UTF-8-teikna som ei liste av tekstar (`"a😀☃b"` → 4 element). VM-en har ingen slik builtin, så `builtin.tekst_til_liste` gjev kompileringsfeil med hint. |
+
+### Storleik
+
+Tala gjeld ein tom app som brukar heile biblioteket (`tests/fixtures/wasm_w3_alle.no`): 20 198 byte ukomprimert, med alle 17 offentlege rt-funksjonane og hjelparane deira. Planbudsjettet er 60 KB. `test_wasm_w3` har taket 24 KB.
 
 ## Validator (`std/wasm_les.no`)
 
@@ -272,9 +351,9 @@ I tillegg:
 
 Typar blir samanlikna på indeks. Backenden dedupliserer funksjonstypane sine, og GC-typane er ulike.
 
-**Kostnad:** 47 ms for ein modul på 1 KB i fastmodus, og om lag 12 s i standard-VM-en. CLI-en og testane validerer difor i fastmodus.
+**Kostnad:** 47 ms for ein modul på 1 KB i fastmodus, og om lag 12 s i standard-VM-en. CLI-en og testane validerer difor i fastmodus, i barneprosessar (W3: også dei handbygde modulane i `test_wasm_les` og korpusmodulane i `test_wasm_w0`). For `rt_json` (17 KB) brukar CLI-en 1,9 s på lowringa og 1,2 s på valideringa i fastmodus.
 
-## Subsett (W2)
+## Subsett (W2, W3)
 
 **Opkodar**
 - `PUSH_CONST`: heltall, desimaltall, tekst, bool og null.
@@ -297,9 +376,11 @@ Typar blir samanlikna på indeks. Backenden dedupliserer funksjonstypane sine, o
 - `slice`, `char_code` og `chr`.
 - `type` og `for_iterabel`.
 - W2: `ncb_call_fn` (closure eller metodenamn) og struktur-konstruktørar (`builtin.<Stor forbokstav>`).
+- W3: `desimaltall`, og builtinane i `rt_tabell()` (sjå «Runtime-bibliotek»).
 
 Alt anna gjev kompileringsfeil med ei liste over alle funna. Det gjeld:
 - `område`, som VM-en heller ikkje har;
+- VM-en sin `json_parse` (tekstverdiar) og builtins som ikkje finst i VM-en (t.d. `tekst_til_liste`). Rapporten har eit hint om den støtta vegen;
 - asynkrone funksjonar;
 - ukjende builtins;
 - hopp ut av `prøv` og `utsett` i lykkjer (sjå over).
@@ -310,9 +391,9 @@ Det finst ingen stille fallback.
 
 | Funksjon | DOM-operasjon |
 |---|---|
-| `vert.finn("#id")` | `document.querySelector` → handtak |
-| `vert.sett_tekst(h, tal)` | `textContent` |
-| `vert.sett_html(h, "mal med {}", tal)` | `innerHTML`, alltid med escape (sjå under) |
+| `vert.finn(selektor)` | `document.querySelector` → handtak. Selektoren kan vere rekna ut (W3). |
+| `vert.sett_tekst(h, verdi)` | `textContent = tekst(verdi)`. Verdien kan vere tekst, tal eller kva som helst (W3). |
+| `vert.sett_html(h, "mal med {}", verdi)` | `innerHTML`: malen er ein konstant, og `tekst(verdi)` blir alltid escapa (sjå under) |
 | `vert.lytt_klikk(h, "funksjonsnamn")` | `click`-lyttar som kallar funksjonen i same modul |
 | `vert.test_klikk(h)` | `element.click()`, berre med `NC_WASM_TESTBYGG=1` |
 
@@ -323,13 +404,15 @@ Det finst ingen stille fallback.
 | `logg(s)` | `console.log(S(a,b))` | `skriv(x)` og `ERROR: …` |
 | `logg_test(s)` | `document.getElementById("nc-logg").append(S(a,b))` | same, i testbygg. Ein headless nettlesar les utskrifta frå DOM-en. |
 | `flyt_tekst(x, p)` | `W(a.toExponential(),b)` | `tekst(desimaltall)`. Skriv sifra i postkassa og gjev lengda. |
+| `tekst_flyt(s)` (W3) | `parseFloat(S(a,b))` | `desimaltall(tekst)`, og dermed tal med brøk eller eksponent i `json_parse_raw`. Resultattypen er `desimal` (f64). |
 
 W2 har ingen nye importar. Unnatak er heilt inne i modulen, og taggen blir ikkje importert eller eksportert. Lastaren er difor uendra.
 
 Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, resultat og operasjonen som eit JS-uttrykkstre.
 
 - Parametertypane i W1 er `tekst`, `funksjon`, `handtak`, `heltall`, `verdi`, `desimal` og `postkasse`.
-- Resultattypane er `handtak`, `ingen` og `lengd`.
+- Resultattypane er `handtak`, `ingen`, `lengd` og (W3, berre interne) `desimal`.
+- W3: `finn`, `sett_tekst` og verdien til `sett_html` har typen `verdi`. Innpakkaren gjer `tekst(x)` og skriv UTF-8-bytane i postkassa, og lastaren les dei med `S`. Ein vertsfunksjon har høgst éin `verdi`-parameter, sidan alle deler postkassa. `tekst` (berre konstantar) er framleis typen til HTML-malen og funksjonsnamnet til `lytt_klikk`.
 
 `std/wasm_js.no` byggjer lastaren token for token frå tabellen. Berre importerte funksjonar og hjelparane dei brukar kjem med:
 
@@ -349,11 +432,14 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
 
 | Lastar | Storleik | Tak |
 |---|---|---|
-| Teljar | 529 byte | 600 byte |
-| Eitt import | 174 byte | 400 byte |
-| Heile tabellen | 774 byte | 900 byte (planbudsjettet er 2,5 KB) |
+| Teljar | 543 byte (W2: 529) | 600 byte |
+| Eitt import (`sett_tekst`) | 247 byte (W2: 174) | 400 byte |
+| Heile tabellen | 825 byte (W2: 774) | 900 byte (planbudsjettet er 2,5 KB) |
 | Typisk korpusprogram i testbygg (`logg_test`) | 265–281 byte | |
 | Med `flyt_tekst` òg | 389 byte | |
+| W3: JSON med desimaltal (`logg_test`, `flyt_tekst`, `tekst_flyt`) | 421 byte | |
+
+Taka er uendra i W3. Tekstverdiane kostar 14 byte i teljarlastaren, som alt hadde `S` for `finn`. For `sett_tekst` åleine kostar dei 73 byte, fordi lastaren no treng `S`. `tekst_flyt` er 32 byte og kjem berre med når modulen parsar desimaltal.
 
 ## HTML-innsetjing og escaping
 
@@ -365,7 +451,7 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
   - Det er same tabell som `std.html.escape` brukar.
   - `wasm_vert.html_escape` gir identisk tekst i VM-en. Testen påstår likskapen.
 
-Brukardata kan dermed ikkje nå `innerHTML` uescapa. Enno tek `sett_tekst` og `sett_html` berre heiltal. Når dei får tekstverdiar (W4), skal dei gå same vegen. Parametertypen `verdi` finst alt, med postkasse og `S` i lastaren.
+Brukardata kan dermed ikkje nå `innerHTML` uescapa. W3: verdien til `sett_html` og `sett_tekst` er ein tekstverdi (typen `verdi`: `tekst(x)` i postkassa). `sett_html` sender han alltid gjennom `H`, og `sett_tekst` set `textContent`, som nettlesaren ikkje tolkar som HTML. `test_wasm_korpus_w3` sjekkar begge i Chrome, med ein `<script>`-tagg og HTML-teikn i verdien.
 
 ## CSP, versjonering og cache
 
@@ -392,11 +478,17 @@ VM-en er ikkje eintydig for alle kombinasjonar. Det blei målt med `nc run` på 
 | `[1, 2] == [1, 2.0]` | `usann` | `sann` | `sann` |
 | `d[1]` og `d["1"]` | same nøkkel | ulike nøklar | ulike nøklar |
 | `"abc"[99]` | éin byte | `""` | `""` |
+| W3: `starts_with("abc", "")`, `ends_with("abc", "")` | `sann` | `usann` | `sann` |
+| W3: `join([1, 2.5], "-")` | `1-4612811918334230528` (bitane til 2.5) | krasj | `1-2.5` |
+| W3: `json_parse_raw("[1,")` | `[1, 0]` | `[1, 0]` | kastar `JSON: uventa slutt` |
 
 Paritetskorpuset testar berre kombinasjonar der begge VM-ane er samde.
 
 - For `+` følgjer WASM den tekstbaserte regelen. Der er den eine VM-en udefinert.
 - For sanning følgjer WASM den tilsikta regelen: `""` og `0.0` er usanne.
+- W3: tom prefiks eller suffiks gjev `sann` (som `contains` og `index_of`, og som i JavaScript). `join` brukar `tekst(x)` for element som ikkje er tekst. Ugyldig JSON kastar (sjå «JSON»).
+
+W3-korpuset (5 program) gav same utskrift på begge VM-ane. `tekst_til_liten` blir berre køyrd på korte tekstar, sidan Linux-stage0 heng eller får SEGV på `lower` over 256 byte.
 
 W2-korpuset (9 program) gav same utskrift og exit-kode på begge VM-ane. Det gjeld òg typa fang av ikkje-tekst (`unntak_typar`):
 - `kast 42` blir fanga av `fang (e: heiltall)`, men ikkje av `fang (e: heltall)`, på begge VM-ane. Typenamnet kjem frå `vm_type_name` (`heiltall`, `bool`, `kart`, `desimaltall`, `liste`, `null`), og WASM følgjer det.
@@ -428,21 +520,38 @@ Modulane er like store på macOS og Linux. Tala er i byte, testbygg (med `logg_t
 
 - W1-programma som kan kaste (divisjon, indeksering, `heltall`), er 35–36 byte større. Dei har fått taggen, `uhandtert` og `try_table` i init. `kast` har mista loggkallet.
 - Program utan feilveg er byte-identiske med W1 (`minimal` er framleis byte-eksakt mot fasiten).
+- W3 endra ingen av desse: program som ikkje brukar runtime-biblioteket, er byte-identiske med W2.
+
+W3-korpuset (testbygg, byte):
+
+| Modul | Storleik | rt-funksjonar |
+|---|---|---|
+| `rt_tekst` | 8 206 | tekstfunksjonane og `verdiar` |
+| `rt_json` | 17 271 | `json_parse` og `json_skriv` med hjelparar |
+| `rt_json_feil` | 15 507 | same |
+| `rt_sorter` | 6 360 | `sorter`, `sortert`, `tekst_til_liste` |
+| `rt_sha256` | 8 721 | `sha256_hex` (`std/sha256.no`) og `json_skriv` |
+| Tom app + heile biblioteket | 20 198 | alle 17 |
+| Berre `split` (utan testbygg) | 2 792 | `splitt` |
+
+Modular som brukar `vert.finn` eller `vert.sett_tekst`, har vorte litt større, fordi innpakkaren gjer `tekst(x)` og skriv til postkassa. Dei får då atoma `tekst_av` og `til_minne`.
 
 ## Testar
 
 | Test | Kva han dekkjer |
 |---|---|
-| `tests/test_wasm_w0.no` | Validatoren godtek fasitmodular og avviser éin feil om gongen. Korpuset blir bygd med CLI-en, med dei venta importane og eksportane. `minimal.no` er byte-eksakt både i testprosessen og frå CLI-en. Rapporten er fail-closed: åtte feil i `feil_ustotta.no`, mellom anna `bryt` ut av `prøv` og `utsett` i ei lykkje (W2), og `ustøtta builtin: ukjend`. Versjonen følgjer bytane. |
+| `tests/test_wasm_w0.no` | Validatoren godtek fasitmodular og avviser éin feil om gongen. Korpuset blir bygd med CLI-en, med dei venta importane og eksportane. `minimal.no` frå CLI-en er byte-eksakt og har ingen rt-funksjonar. Rapporten frå CLI-en er fail-closed: åtte feil i `feil_ustotta.no`, mellom anna `bryt` ut av `prøv` og `utsett` i ei lykkje (W2), ein HTML-mal som ikkje er konstant (W3), og `ustøtta builtin: ukjend`. Sju i testbygg. Versjonen følgjer bytane. W3: lowring og validering skjer berre i CLI-barneprosessane. |
 | `tests/test_wasm_w1.no` | GC-fasitmodulen frå proben blir bygd på nytt med assembleren og er byte-eksakt. Kodingane til GC-typane og instruksjonane er rette. W1-validatoren (datacount, array-typar) avviser éin feil om gongen. Tree-shakinga er rett. |
-| `tests/test_wasm_les.no` | W2-typesjekken: ein handbygd modul (kontrollflyt, i64, GC, `try_table`/`throw`, `ref.func`, `call_ref`, globalar) blir godteken. 17 variantar med éin feil kvar blir avviste med rett melding. Ekte korpusmodular blir godtekne, og avviste etter mutasjon: utan elementsegmentet, og med feil tag-type. |
+| `tests/test_wasm_les.no` | W2-typesjekken: ein handbygd modul (kontrollflyt, i64, GC, `try_table`/`throw`, `ref.func`, `call_ref`, globalar) blir godteken. 17 variantar med éin feil kvar blir avviste med rett melding (W3: validerte i `tests/fixtures/wasm_les_typesjekk.no` i fastmodus, og testen sjekkar kvar linje). Ekte korpusmodular blir godtekne, og avviste etter mutasjon: utan elementsegmentet, og med feil tag-type. |
 | `tests/test_wasm_w2.no` | W2-lowringa på bytenivå: ingen tag- eller elementseksjon utan unnatak og closures. Init i `try_table` og `throw` for `THROW`. `unntak_passar` berre ved typa fang. `kast` er `throw`, ikkje trap. Deklarativt elementsegment og `call_ref` for closures. `$lambda`-typen for `ncb_call_fn`. |
+| `tests/test_wasm_w3.no` | W3-lenkinga: `lenk_rt` fører berre rt-modulane inn (ikkje drivaren) og endrar ikkje inndata. Utan lenking er `split` ein kompileringsfeil. Tree-shaking frå CLI-en: `split` gjev `rt=splitt` og ingen desimalimport, `sha256` gjev `rt=sha256_hex`, og `desimaltall(tekst)` gjev `tekst_flyt`. Heile biblioteket har alle 17 offentlege funksjonar og er under taket på 24 KB. Fail-closed rapport med biblioteket lenka inn. |
 | `tests/test_wasm_korpus_chrome.no` | Paritetskorpuset (W1 + W2), sjå under. |
+| `tests/test_wasm_korpus_w3.no` | Paritetskorpuset for W3 (`kh.korpus_w3()`), og tekstverdiar i DOM-en i Chrome: `sett_tekst` via utrekna selektorar, med HTML-teikn og eit desimaltal, og `sett_html` med ein `<script>`-tagg i verdien. |
 | `tests/test_wasm_lastar.no` | Byte-tak og tree-shaking. Importnamna i lastaren er lik importseksjonen. Strukturen kjem frå tabellen. Ingen JS-fragment i literalane. Kvart lastartoken finst i emitteren eller i tabellen (proveniens). Escape er lik `std.html.escape`. |
 | `tests/test_wasm_serve.no` | Barne-`nc serve` leverer `application/wasm` byte-identisk, med versjonert cache og CSP per side. |
 | `tests/test_wasm_w0_chrome.no` | Valfri. Teljaren etter tre klikk, negativ CSP-kontroll og W0-korpuset mot VM-en. |
 
-Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no`. Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess.
+Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no`. Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
 
 ### Paritetskorpuset
 
@@ -466,6 +575,11 @@ Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no`. Der les `dump_me
 | `closure_fangst` (W2) | by-value, teljar-closure, closure frå funksjon, komposisjon via `ncb_call_fn`, closures i liste, fleire fangarar, nøsta |
 | `hogare_orden` (W2) | kart, filter, fold og sortering med closure, skrivne i Norscode |
 | `struct_metode` (W2) | konstruktør, felt, metodar som endrar self, dispatch på to typar, nøkkelrekkjefølgje |
+| `rt_tekst` (W3) | `split`, `join`, `trim`, `tekst_erstatt`/`replace`, `starts_with`, `ends_with`, `contains`, `index_of`, `lower`/`upper` og `verdier`: UTF-8, tomme tekstar og felt, overlapp, æøå urørt av store/små bokstavar |
+| `rt_json` (W3) | `json_stringify` med escaping, desimaltal og tomme strukturar; rundtur for 20 NSP/1-liknande dokument; ikkje-kanonisk input, `\u`-escape, surrogatpar, tal (wrap, eksponent, `-0`), duplikatnøklar, 60 nivå nøsting |
+| `rt_json_feil` (W3) | 22 ugyldige input med feiltekstane, `fang (e: JSON)`, feil gjennom to rammer, `fang (e: tekst)` bak ein handterar som ikkje passar, og at gyldig input gjev same verdi som builtinen |
+| `rt_sorter` (W3) | `rt.sorter` med closure (stigande, synkande, etter lengd og etter felt, fanga variabel), stabilitet, `rt.sortert`, tomme og eittelements lister, 200 element, `rt.tekst_til_liste` |
+| `rt_sha256` (W3) | FIPS-vektorane (`abc`, tom, 448 og 896 bit), UTF-8, 55/56/63/64/65/1000 byte |
 | `kontroll_trap` | ikkje paritet: positiv kontroll for konsollsjekken |
 
 Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome` køyrer dei i tre steg:
@@ -474,7 +588,11 @@ Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome
 2. Byggjer kvart program i testbygg med CLI-en. Modulen blir validert, med typesjekk, og må importere `logg_test`. W2-programma må ha `uhandtert`.
 3. Startar éin barne-`nc serve` med ei side per program. Headless Chrome køyrer sidene. Teksten i `<pre id="nc-logg">` må vere identisk med VM-utskrifta, og konsollen må vere fri for «Uncaught». Utan Chrome blir dette steget SKIP. `NC_CHROME` vel binær.
 
+`test_wasm_korpus_w3` køyrer W3-programma på same måten (`kh.køyr_korpus`). `rt_json_feil` og `rt_sorter` kallar rt-funksjonane direkte (`bruk std.wasm_rt som rt`), så VM-steget køyrer sjølve biblioteket som Norscode. Dei andre kallar builtins, som er vertsbuiltins i VM-en og biblioteket i WASM. Då samanliknar korpuset semantikken til biblioteket med VM-en.
+
 **Resultat:** alle 18 programma gav identisk utskrift i VM-en og i Chrome 154 (macOS), utan «Uncaught». Dei same 18 modulane gav identisk utskrift i JavaScriptCore frå macOS 26.6.2 (Safari 26.6-motoren), køyrt med eit scratch-skript utanfor repoet. Linux i Docker har ikkje Chrome, så der køyrer steg 1 og 2.
+
+**W3-resultat:** alle 5 W3-programma gav identisk utskrift i VM-en (macOS og Linux) og i Chrome 154, utan «Uncaught», og DOM-sida viste tekstverdiane som venta. Med den endelege W3-koden gav alle 23 korpusmodulane identisk utskrift i JavaScriptCore frå macOS 26.6.2. Scratch-skriptet utanfor repoet køyrer den genererte `nc.js` med ein shim for `document`, `fetch` og `TextEncoder`/`TextDecoder`.
 
 Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen raud:
 
@@ -498,37 +616,63 @@ Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen ra
 | W2: taggen alltid med | `test_wasm_w2` |
 | W2: `unntak_passar` også for jokertype | `test_wasm_w2` |
 | W2: passivt i staden for deklarativt elementsegment | `test_wasm_w2` |
+| W3: `splitt` utan det siste feltet | `test_wasm_korpus_w3` |
+| W3: `\t` ikkje escapa i `json_skriv` | `test_wasm_korpus_w3` |
+| W3: ustabil `sorter` (`<= 0`) | `test_wasm_korpus_w3` (VM-steget, `rt_sorter`) |
+| W3: `ends_with` kopla til `starter_med` i `rt_tabell` | `test_wasm_korpus_w3` (Chrome-steget, `rt_tekst`) |
+| W3: `sett_html` utan escape | `test_wasm_korpus_w3` (DOM-sjekken) |
+| W3: `sett_tekst` via `innerHTML` | `test_wasm_korpus_w3` (DOM-sjekken) |
+| W3: `sha256_hex` på feil input | `test_wasm_korpus_w3` |
+| W3: feiltekst for uavslutta streng endra | `test_wasm_korpus_w3` (VM-steget, `rt_json_feil`) |
+| W3: alle rt-kall dreg med `json_parse` (utan tree-shaking) | `test_wasm_w3` |
+| W3: `lenk_rt` lenkar òg inn drivaren (`__main__`) | `test_wasm_w3` |
+| W3: `område` manglar i feilrapporten | `test_wasm_w0` (CLI-rapporten) |
+| W3: høgdesjekken ved `end` slått av (etter flyttinga til barneprosessen) | `test_wasm_les` |
 
 ### Tid
 
-Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast). Tala i parentes er W1.
+Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast). «Før» er målt på same maskin rett før W3-endringane, med W2-koden.
 
-| Test | macOS standard | macOS fast | Linux standard | Linux fast |
+| Test | macOS standard før → etter | macOS fast før → etter | Linux standard | Linux fast |
 |---|---|---|---|---|
-| `test_wasm_w0` | 81 (27) | 5 (4) | 13 | 13 |
-| `test_wasm_w1` | 10 (10) | 5 (3) | 10 | 12 |
-| `test_wasm_w2` | 13 | 5 | 11 | 10 |
-| `test_wasm_les` | 53 | 5 | 13 | 12 |
-| `test_wasm_lastar` | 24 (24) | 3 (3) | 10 | 13 |
-| `test_wasm_serve` | 6 | 3 | 5 | 6 |
-| `test_wasm_korpus_chrome` | 53 (43) | 44 (16) | 35 | 39 |
-| `test_wasm_w0_chrome` | 11 | 8 | 2 | 5 |
+| `test_wasm_w0` | 69 → 9 | 6 → 6 | 17 | 12 |
+| `test_wasm_les` | 47 → 6 | 5 → 6 | 14 | 11 |
+| `test_wasm_w1` | 7 → 11 | 4 → 5 | 16 | 12 |
+| `test_wasm_w2` | 11 → 11 | 4 → 5 | 16 | 13 |
+| `test_wasm_w3` (ny) | 11 | 10 | 20 | 16 |
+| `test_wasm_lastar` | 19 → 23 | 3 → 4 | 18 | 10 |
+| `test_wasm_serve` | 3 → 5 | 2 → 3 | 10 | 6 |
+| `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 4 | 3 |
+| `test_wasm_korpus_chrome` | 49 → 53 | 42 → 46 | 45 | 44 |
+| `test_wasm_korpus_w3` (ny) | 30 | 27 | 29 | 25 |
+| `test_wasm_w0_chrome` | 10 → 12 | 8 → 9 | 4 | 2 |
 
-- `test_wasm_w0` i standard-VM-en er tregare fordi validatoren, med typesjekken, køyrer i testprosessen på fasitmodulane og `minimal`. Typesjekken kostar om lag 12 s per KB der.
-- Korpustesten har 18 program i staden for 9, og les konsollen i Chrome.
-- Linux (Docker, `nc-x86tools`, stage0 frå `bootstrap/`) har ikkje Chrome, så Chrome-stega er SKIP der. `test_wasm`, `test_wasm_binary` og dei andre W0/W1-testane er òg grøne på begge plattformene og i begge modusane.
+- **`test_wasm_w0` (69 → 9 s):** lowringa og valideringa av `minimal` og `feil_ustotta` skjer ikkje lenger i testprosessen. Testen les modulen og feilrapporten frå CLI-en, som køyrer i fastmodus. I standard-VM-en tok lowringa av `feil_ustotta` om lag 18 s (to gonger), og typesjekken av `minimal` 15 s.
+- **`test_wasm_les` (47 → 6 s):** dei 18 handbygde modulane blir validerte i `tests/fixtures/wasm_les_typesjekk.no` i fastmodus. Testen sjekkar kvar linje mot forventinga.
+- Korpuset er delt i to testar, W1+W2 (18 program) og W3 (5 program + DOM-sida). Kvar held seg dermed under minuttet. Ein korpustest med alle 23 ville ha teke om lag 80 s i standard-VM-en.
+- Ingen wasm-test er over 55 s i standard-VM-en på macOS. Dei største er dei to korpustestane, og der går tida til barneprosessar og Chrome, ikkje til testprosessen. Utan Chrome (CI) blir dei kortare.
+- Tidene varierer med ±3 s mellom køyringar (sjå `test_wasm_w1`, som ikkje er endra).
+- Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome, så Chrome-stega er SKIP der. Alle testane er grøne på begge plattformene og i begge modusane.
 
-## Gjenstår før W3
+## Gjenstår før W4
 
-- **W3 og seinare:**
-  - tekstverdiar til `sett_tekst`/`sett_html`;
-  - `split`, `join` og `json` i `std/wasm_rt.no`. `json_parse` kan no kaste med W2-unnatak.
+- **Vertsfunksjonar (W4, import-ABI v1):**
+  - Tekst frå DOM-en til WASM (t.d. `input.value`). Vegen finst (`skriv_tekst` til postkassa og resultattypen `lengd`), men han manglar eit atom som byggjer `$tekst` frå minnet, og ein Norscode-stubb.
+  - Berre éin `verdi`-parameter per vertsfunksjon, sidan alle deler postkassa. Fleire krev ein forskyving per parameter.
+  - Hendingar med data (input, submit), og fleire DOM-operasjonar.
+- **Runtime-biblioteket:**
+  - `fjern_nokkel` (seks treff i `std/html*.no`, `std/frontend.no` og `examples/`) treng eit atom som fjernar frå `$ordbok` og held rekkjefølgja. Det kan ikkje skrivast i Norscode.
+  - VM-en sin `json_parse` (tekstverdiar) er avvist med hint. Skal han støttast, må han speglast nøyaktig.
+  - `tekst_til_liten`/`tekst_til_store` endrar berre ASCII, i begge VM-ane og i WASM. Skal æøå med, må VM-en endrast samtidig, elles bryt pariteten.
+  - Ugyldig JSON kastar i WASM, men gjev ein delvis verdi i VM-en (udefinert oppførsel der).
+- **Byggjetid:** rt-funksjonane blir lowra på nytt i kvart bygg (1,9 s for `rt_json` i fastmodus). Ein cache for lowra rt-funksjonar per kjeldehash ville kutta det.
 - **Unnatak:**
   - `bryt`/`fortsett` ut av `prøv` og `utsett` i lykkjer er avviste. Dei krev dynamisk try- og opprydjingsstakk, eller at kompilatoren emitterer `TRY_END` før hoppet (reseed).
 - **Closures:**
-  - Kall av ein fanga closure som `f(x)` inne i ein lambda krev ei endring i kompilatoren (reseed). Til då går det med `ncb_call_fn`.
+  - Kall av ein fanga closure som `f(x)` inne i ein lambda krev ei endring i kompilatoren (reseed). Til då går det med `ncb_call_fn`. Ein closure som parameter (som komparatoren til `rt.sorter`) kan kallast direkte.
   - Funksjonsnamn som verdi (`kart(l, dobbel)`) blir `LOAD_NAME` av eit ukjent namn, også i VM-en.
 - **Ytelse (W10):**
+  - Tekstfunksjonane i biblioteket lagar eitt utsnitt per byteposisjon (`slice` + `char_code`). Eit atom for bytetilgang, eller ein unboxa i32-sti, ville gjere dei raskare.
   - Handteraren sjekkar typar med tekstsamanlikning per handterar.
   - `ncb_call_fn` samanliknar metodenamn lineært.
   - Metodekall byggjer namnet med to tekstkonkateneringar. Ein statisk tabell per `__type__` ville vore raskare.
