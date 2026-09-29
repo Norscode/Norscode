@@ -1,5 +1,6 @@
 # examples/wasm_deltakarar/klient.no — deltakarliste som blir henta frå og lagra til tenaren
-# (W6): klientlogikk i Norscode, kompilert til WebAssembly av tools/nc_wasm.no (sjå app.no).
+# (W6), med ein lokal kopi i IndexedDB når brukaren vel det (W7): klientlogikk i Norscode,
+# kompilert til WebAssembly av tools/nc_wasm.no (sjå app.no).
 #
 #   - Ved start blir lista henta med nett.hent_json("/api/deltakarar") (fetch mot same opphav).
 #     Medan førespurnaden går, står det «Hentar deltakarlista …» i statusfeltet, og knappane
@@ -12,6 +13,15 @@
 #   - «Hent på nytt» hentar lista frå tenaren igjen (ulagra endringar forsvinn).
 #   - Nettverksfeil, tidsavbrot og andre statusar gjev ei tydeleg melding (feilmelding()),
 #     og lista som alt er vist, blir ståande.
+#   - W7, lokal kopi (std/wasm_lager.no): «Hugs lista på denne eininga» lagrar lista i
+#     IndexedDB (databasen nc-deltakarar-<sha256>, éin batch = éin transaksjon) kvar gong ho
+#     endrar seg, også ulagra endringar. Ved neste lasting blir kopien vist straks, før
+#     tenaren har svara («Viser lagra kopi frå eininga …»). Svarar tenaren etterpå, vinn
+#     tenarlista, unnateke når kopien har ulagra endringar: då blir dei ståande, og
+#     statusen seier det. Eit nytt trykk på knappen (aria-pressed) gløymer kopien: databasen
+#     og valet (localStorage) blir sletta (lager.logg_ut).
+#     Personvern: ingenting blir lagra på eininga før brukaren har valt det, og valet er
+#     det einaste som ligg i localStorage. #lokal viser tilstanden til kopien.
 #
 # Svara kjem gjennom tilbakekall (closures) i den rekkjefølgja førespurnadene vart sende.
 # last_inn og lagre tek ein valfri closure `etter` som blir kalla når sida er oppdatert
@@ -19,6 +29,7 @@
 
 bruk std.wasm_vert som vert
 bruk std.wasm_nett som nett
+bruk std.wasm_lager som lager
 bruk std.wasm_rt som rt
 bruk examples.wasm_deltakarar.reglar som reglar
 
@@ -35,6 +46,17 @@ la epost_h: heltall = 0
 la lagre_h: heltall = 0
 la last_h: heltall = 0
 la treff_h: heltall = 0
+# W7: lokal kopi
+la db: ordbok = {}
+la hugs: bool = usann
+la behald_ulagra: bool = usann
+# Svaret frå tenaren ventar på den lokale kopien (så han alltid blir lesen først)
+la lokal_lest: bool = sann
+la ventande_svar: liste = []
+la api_url: tekst = "/api/deltakarar"
+la etter_lokal = null
+la lokal_h: heltall = 0
+la hugs_h: heltall = 0
 
 # ─── Reine funksjonar (same resultat i VM-en og i WASM) ──────────────────────
 
@@ -73,6 +95,44 @@ funksjon til_tenaren(l: liste) -> liste {
 
 funksjon antal() -> heltall {
     returner lengde(liste)
+}
+
+# ─── Lokal kopi (W7): reine funksjonar ───────────────────────────────────────
+
+# Valet til brukaren (localStorage): "1" når lista skal lagrast på eininga.
+funksjon hugs_nøkkel() -> tekst {
+    returner "nc-deltakarar-hugs"
+}
+
+# Demoen har ingen innlogging; ein app med innlogging brukar uid-en til brukaren, så kvar
+# brukar får sin eigen database (og uid-en står ikkje i klartekst i nettlesaren).
+funksjon db_namn() -> tekst {
+    returner lager.brukar_db_namn("nc-deltakarar", "demo")
+}
+
+funksjon skjema() -> liste {
+    returner [lager.lager("deltakarar", "pos", [lager.indeks("epost", "epost", usann)]), lager.lager("meta", "", [])]
+}
+
+# Radene slik dei blir lagra: plassen i lista er nøkkelen (så rekkjefølgja blir halden).
+funksjon lokale_rader(l: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(ut, {"pos": i, "namn": l[i]["namn"], "epost": l[i]["epost"]})
+        i = i + 1
+    }
+    returner ut
+}
+
+# Meldinga brukaren ser når den lokale kopien feilar (LagerFeil frå std/wasm_lager.no).
+funksjon lokal_feilmelding(f: ordbok) -> tekst {
+    la art = f["art"]
+    hvis art == "kvote" { returner "Eininga har ikkje meir plass til den lokale kopien." }
+    hvis art == "open" { returner "Nettlesaren tillèt ikkje lokal lagring her." }
+    hvis art == "blokkert" { returner "Lukk andre faner med sida og prøv igjen." }
+    hvis art == "versjon" { returner "Ein nyare versjon av sida har lagra lista. Last sida på nytt." }
+    returner "Den lokale kopien kunne ikkje oppdaterast (" + tekst(art) + ")."
 }
 
 # ─── Visning ─────────────────────────────────────────────────────────────────
@@ -154,12 +214,25 @@ funksjon last_inn(etter) -> heltall {
     opptatt(sann)
     vis_feil("")
     vis_status("Hentar deltakarlista …")
-    nett.hent_json("/api/deltakarar", fun(s) -> lasta(s, etter), fun(f) -> feila("Kunne ikkje hente lista", f, etter))
+    nett.hent_json(api_url, fun(s) -> lasta(s, etter), fun(f) -> feila("Kunne ikkje hente lista", f, etter))
     returner 0
 }
 
 funksjon lasta(s: ordbok, etter) -> heltall {
+    hvis ikkje lokal_lest {
+        # Kom før den lokale kopien: vent på han (lokal_lasta/lokal_les_feila held fram)
+        ventande_svar = [s, etter]
+        returner 0
+    }
     la frå = s["json"]["deltakarar"]
+    hvis behald_ulagra {
+        # Den lokale kopien hadde ulagra endringar: dei blir ståande til brukaren lagrar
+        # eller hentar på nytt
+        behald_ulagra = usann
+        vis_status("Tenaren har " + tekst(lengde(frå)) + " deltakarar. Du har ulagra endringar frå førre gong: lagre dei eller hent på nytt.")
+        opptatt(usann)
+        returner ferdig(etter)
+    }
     liste = []
     la i = 0
     mens i < lengde(frå) {
@@ -171,6 +244,7 @@ funksjon lasta(s: ordbok, etter) -> heltall {
     sett_ulagra(usann)
     vis_status(tekst(lengde(liste)) + " deltakarar.")
     opptatt(usann)
+    lagre_lokal(null)
     returner ferdig(etter)
 }
 
@@ -190,9 +264,140 @@ funksjon lagre(etter) -> heltall {
 
 funksjon lagra(s: ordbok, etter) -> heltall {
     sett_ulagra(usann)
+    lagre_lokal(null)
     vis_status("Lagra " + tekst(s["json"]["lagra"]) + " deltakarar.")
     opptatt(usann)
     returner ferdig(etter)
+}
+
+# ─── Lokal kopi (W7) ─────────────────────────────────────────────────────────
+
+funksjon vis_lokal(t: tekst) -> heltall {
+    vert.sett_tekst(lokal_h, t)
+    returner 0
+}
+
+# Knappen «Hugs lista på denne eininga» er ein av/på-knapp (aria-pressed).
+funksjon vis_hugs() -> heltall {
+    hvis hugs { vert.sett_attr(hugs_h, "aria-pressed", "true") } ellers { vert.sett_attr(hugs_h, "aria-pressed", "false") }
+    returner 0
+}
+
+funksjon kall_etter(etter) -> heltall {
+    hvis etter != null { builtin.ncb_call_fn(etter, lengde(liste)) }
+    returner 0
+}
+
+funksjon opne_lokal() -> heltall {
+    hvis lengde(db) == 0 {
+        db = lager.opne(db_namn(), 1, skjema(), null, fun(f) -> lokal_feila(f, null))
+    }
+    returner 0
+}
+
+funksjon les_lokal() -> heltall {
+    vis_lokal("Les den lokale kopien …")
+    lokal_lest = usann
+    lager.køyr(db, [lager.op_liste("deltakarar", null, 0), lager.op_hent("meta", "tilstand")],
+        fun(r) -> lokal_lasta(r), fun(f) -> lokal_les_feila(f))
+    returner 0
+}
+
+# Den lokale kopien er lesen (eller feila): eit svar frå tenaren som kom først, blir brukt no.
+funksjon lokal_ferdig() -> heltall {
+    lokal_lest = sann
+    kall_etter(etter_lokal)
+    hvis lengde(ventande_svar) > 0 {
+        la v = ventande_svar
+        ventande_svar = []
+        lasta(v[0], v[1])
+    }
+    returner 0
+}
+
+funksjon lokal_les_feila(f: ordbok) -> heltall {
+    vis_lokal(lokal_feilmelding(f))
+    returner lokal_ferdig()
+}
+
+# Den lokale kopien er lesen. Er tenaren ikkje ferdig enno, blir kopien vist straks.
+funksjon lokal_lasta(r: liste) -> heltall {
+    la rader = r[0]
+    la meta = r[1]
+    hvis meta == null {
+        vis_lokal("Lista blir lagra på eininga.")
+        returner lokal_ferdig()
+    }
+    liste = []
+    la i = 0
+    mens i < lengde(rader) {
+        legg_til(liste, {"id": neste_id, "namn": rader[i]["namn"], "epost": rader[i]["epost"]})
+        neste_id = neste_id + 1
+        i = i + 1
+    }
+    gjengje()
+    sett_ulagra(meta["ulagra"] == sann)
+    behald_ulagra = meta["ulagra"] == sann
+    vis_status("Viser lagra kopi frå eininga (" + tekst(lengde(liste)) + " deltakarar) – hentar frå tenaren …")
+    vis_lokal("Lista er lagra på eininga.")
+    returner lokal_ferdig()
+}
+
+# Lagre lista som vist (med ulagra-flagget) på eininga, i éin transaksjon: tøm, alle rader og
+# tilstanden. Berre når brukaren har valt det.
+funksjon lagre_lokal(etter) -> heltall {
+    hvis ikkje hugs eller lengde(db) == 0 { returner kall_etter(etter) }
+    la ops = [lager.op_tøm("deltakarar")]
+    la rader = lokale_rader(liste)
+    la i = 0
+    mens i < lengde(rader) {
+        legg_til(ops, lager.op_put("deltakarar", rader[i]))
+        i = i + 1
+    }
+    legg_til(ops, lager.op_put_med_nøkkel("meta", "tilstand", {"ulagra": ulagra, "tal": lengde(liste)}))
+    lager.køyr(db, ops, fun(x) -> lokalt_lagra(etter), fun(f) -> lokal_feila(f, etter))
+    returner 0
+}
+
+funksjon lokalt_lagra(etter) -> heltall {
+    vis_lokal("Lista er lagra på eininga (" + tekst(lengde(liste)) + " deltakarar).")
+    returner kall_etter(etter)
+}
+
+funksjon lokal_feila(f: ordbok, etter) -> heltall {
+    vis_lokal(lokal_feilmelding(f))
+    returner kall_etter(etter)
+}
+
+# «Hugs lista på denne eininga»: lagre valet og lista.
+funksjon hugs_på(etter) -> heltall {
+    hugs = sann
+    vert.lagre_lokalt(hugs_nøkkel(), "1")
+    vis_hugs()
+    opne_lokal()
+    returner lagre_lokal(etter)
+}
+
+# «Gløym lokal kopi»: slett databasen og valet (lager.logg_ut).
+funksjon gløym(etter) -> heltall {
+    hugs = usann
+    la d = null
+    hvis lengde(db) > 0 { d = db }
+    db = {}
+    vis_hugs()
+    vis_lokal("Slettar den lokale kopien …")
+    lager.logg_ut(d, db_namn(), [hugs_nøkkel()], fun(x) -> gløymt(etter), fun(f) -> lokal_feila(f, etter))
+    returner 0
+}
+
+funksjon gløymt(etter) -> heltall {
+    vis_lokal("Den lokale kopien er sletta. Lista blir ikkje lagra på eininga.")
+    returner kall_etter(etter)
+}
+
+funksjon hugs_klikk() -> heltall {
+    hvis hugs { returner gløym(null) }
+    returner hugs_på(null)
 }
 
 funksjon feila(kva: tekst, f: ordbok, etter) -> heltall {
@@ -218,6 +423,7 @@ funksjon legg_til_deltakar() -> heltall {
     vert.sett_verdi(epost_h, "")
     gjengje()
     sett_ulagra(sann)
+    lagre_lokal(null)
     vert.fokus(namn_h)
     returner 0
 }
@@ -233,6 +439,7 @@ funksjon fjern() -> heltall {
     liste = ny
     gjengje()
     sett_ulagra(sann)
+    lagre_lokal(null)
     returner 0
 }
 
@@ -251,6 +458,16 @@ funksjon last_klikk() -> heltall {
 
 # Start med ein closure som blir kalla når lista er henta (testklienten), eller null.
 funksjon start_med(etter) -> heltall {
+    returner start_med_val({"etter": etter})
+}
+
+# Start med val (testklientane): "etter" (lista er henta frå tenaren), "etter_lokal" (den
+# lokale kopien er lesen) og "url" (API-ruta; standard /api/deltakarar).
+funksjon start_med_val(val: ordbok) -> heltall {
+    la etter = null
+    hvis finnes_nøkkel(val, "etter") { etter = val["etter"] }
+    hvis finnes_nøkkel(val, "etter_lokal") { etter_lokal = val["etter_lokal"] }
+    hvis finnes_nøkkel(val, "url") { api_url = val["url"] }
     liste_h = vert.finn("#liste")
     status_h = vert.finn("#status")
     ulagra_h = vert.finn("#ulagra")
@@ -267,6 +484,18 @@ funksjon start_med(etter) -> heltall {
     vert.lytt(lagre_h, "klikk", "lagre_klikk")
     vert.lytt(last_h, "klikk", "last_klikk")
     vert.deleger("klikk", "fjern")
+    lokal_h = vert.finn("#lokal")
+    hugs_h = vert.finn("#hugs")
+    vert.lytt(hugs_h, "klikk", "hugs_klikk")
+    # W7: den lokale kopien (berre når brukaren har valt det) blir lesen medan tenaren blir spurd
+    hugs = vert.hent_lokalt(hugs_nøkkel()) == "1"
+    vis_hugs()
+    hvis hugs {
+        opne_lokal()
+        les_lokal()
+    } ellers {
+        vis_lokal("Lista blir ikkje lagra på eininga.")
+    }
     returner last_inn(etter)
 }
 
