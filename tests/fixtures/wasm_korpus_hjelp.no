@@ -1,7 +1,9 @@
-# Hjelparar for paritetskorpuset i WASM-sporet (W1, W2): fasitane i korpusfilene, køyring i
-# VM-en (barne-`nc run`), bygg for nettlesaren og ein generert serve-app med éi side per
-# program. Alt som blir skrive, hamnar under build/wasm/.
+# Hjelparar for paritetskorpuset i WASM-sporet (W1–W3): fasitane i korpusfilene, køyring i
+# VM-en (barne-`nc run`), bygg for nettlesaren, ein generert serve-app med éi side per
+# program, og heile tre-stegs-køyringa (`køyr_korpus`). Alt som blir skrive, hamnar under
+# build/wasm/.
 bruk tests.fixtures.wasm_test_hjelp som hjelp
+bruk tests.fixtures.wasm_chrome_hjelp som ch
 
 # Paritetsprogramma i tests/wasm_korpus/ (kvart har ein fasit i «#=»-linjer).
 funksjon korpus_w1() -> liste {
@@ -15,7 +17,13 @@ funksjon korpus_w2() -> liste {
               "closure_fangst", "hogare_orden", "struct_metode"]
 }
 
-# Heile paritetskorpuset.
+# W3: runtime-biblioteket std/wasm_rt.no (tekst, JSON og JSON-feil, sortering, SHA-256).
+# Eigen test (tests/test_wasm_korpus_w3.no), så kvar korpustest held seg under tidsgrensa.
+funksjon korpus_w3() -> liste {
+    returner ["rt_tekst", "rt_json", "rt_json_feil", "rt_sorter", "rt_sha256"]
+}
+
+# W1 + W2 (tests/test_wasm_korpus_chrome.no).
 funksjon korpus() -> liste {
     la ut = korpus_w1()
     la w2 = korpus_w2()
@@ -130,11 +138,149 @@ funksjon app_kjelde(rot: tekst, namn: liste) -> tekst {
 }
 
 # Talet på byte i «app.wasm <n> byte» i WASM-linja frå tools/nc_wasm.no.
-funksjon storleik(linje: tekst) -> tekst {
+funksjon storleik_av(linje: tekst) -> tekst {
     la p = builtin.index_of(linje, "app.wasm ")
     hvis p < 0 { returner "?" }
     la rest = builtin.slice(linje, p + 9, lengde(linje))
     la s = builtin.index_of(rest, " ")
     hvis s < 0 { returner rest }
     returner builtin.slice(rest, 0, s)
+}
+
+funksjon _inneheld(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Paritetskøyringa for `program` (sjå tests/test_wasm_korpus_chrome.no):
+#   1. VM mot fasit (feil_*-program: exit ≠ 0 og «ERROR: …»);
+#   2. bygg med CLI-en (testbygg, validert), med logg_test, og atomet uhandtert for dei i
+#      `kastar` (W2-programma);
+#   3. Chrome (valfri): éin barne-`nc serve`, DOM-loggen lik VM-utskrifta og ingen
+#      «Uncaught», med negativ kontroll (ei side som ikkje finst gjev ingen logg) og positiv
+#      kontroll (kontroll_trap gjev «Uncaught»).
+# `ekstra` er sider i tillegg (namn → kjelde, bygde og serverte på /k/<namn>); DOM-dumpane
+# deira kjem attende i «ekstra». Gjev {"chrome": bool, "storleik": {namn: byte},
+# "ekstra": {namn: dom}}.
+funksjon køyr_korpus(testnamn: tekst, rot: tekst, program: liste, kastar: liste, port: tekst, ekstra: ordbok) -> ordbok {
+    hjelp.mkdir(rot)
+    # ── 1. VM mot fasit ──
+    la vm_ut = {}
+    la i = 0
+    mens i < lengde(program) {
+        la n = program[i]
+        la f = fasit(n)
+        assert(lengde(f) > 0)
+        la r = køyr_vm(n)
+        hvis r["ut"] != f {
+            skriv(n + ": VM-utskrifta er ikkje lik fasiten, " + skilnad(r["ut"], f) + "\nVM:\n" + r["ut"] + "\nstderr:\n" + r["stderr"] + "\n")
+            assert(usann)
+        }
+        hvis builtin.starts_with(n, "feil_") {
+            assert(r["exit"] != 0)
+            assert(builtin.index_of(r["ut"], "ERROR: ") >= 0)
+        } ellers {
+            assert_eq(r["exit"], 0)
+        }
+        vm_ut[n] = r["ut"]
+        i = i + 1
+    }
+    skriv("VM: " + tekst(lengde(program)) + " program lik fasiten\n")
+
+    # ── 2. Bygg og valider ──
+    la storleik = {}
+    la st_tekst = ""
+    la sider = []
+    i = 0
+    mens i < lengde(program) {
+        la n = program[i]
+        # CLI-en validerer modulen (std/wasm_les.no) før han skriv app.wasm, og exit 1 elles.
+        la linje = hjelp.bygg_klient_med(kjelde(n), rot + "/" + n, sann, "/_nc/" + n + "/")
+        assert(_inneheld(hjelp.liste_felt(linje, "importar"), "logg_test"))
+        hvis _inneheld(kastar, n) {
+            assert(_inneheld(hjelp.liste_felt(linje, "atom"), "uhandtert"))
+        }
+        storleik[n] = storleik_av(linje)
+        st_tekst = st_tekst + " " + n + "=" + storleik_av(linje)
+        legg_til(sider, n)
+        i = i + 1
+    }
+    skriv("WASM-storleikar (byte):" + st_tekst + "\n")
+    # Kontrollprogrammet (trap) blir bygd og servert, men har ingen VM-fasit
+    hjelp.bygg_klient_med(kjelde("kontroll_trap"), rot + "/kontroll_trap", sann, "/_nc/kontroll_trap/")
+    legg_til(sider, "kontroll_trap")
+    la ek = nøkler(ekstra)
+    i = 0
+    mens i < lengde(ek) {
+        hjelp.bygg_klient_med(tekst(ekstra[ek[i]]), rot + "/" + ek[i], sann, "/_nc/" + ek[i] + "/")
+        legg_til(sider, ek[i])
+        i = i + 1
+    }
+
+    la chrome = ch.finn_chrome()
+    hvis chrome == "" {
+        skriv(testnamn + " OK (VM og bygg; SKIP Chrome: fann ikkje Chrome/Chromium, set NC_CHROME=<sti>)\n")
+        returner {"chrome": usann, "storleik": storleik, "ekstra": {}}
+    }
+    skriv("Chrome: " + chrome + "\n")
+
+    # ── 3. Chrome ──
+    la app = rot + "/app.no"
+    fil_skriv(hjelp.root() + "/" + app, app_kjelde(rot, sider))
+    la s = ch.start_serve(app, port)
+    hvis s["status"] != "kjorer" {
+        skriv("nc serve for korpuset starta ikkje:\n" + tekst(s["ut"]) + "\n")
+        assert(usann)
+    }
+    la dumpar = {}
+    i = 0
+    mens i < lengde(sider) {
+        la n = sider[i]
+        la profil = hjelp.root() + "/" + rot + "/profil-" + n
+        ch.rydd_profil(profil)
+        dumpar[n] = ch.dump_med_konsoll(chrome, "http://127.0.0.1:" + port + "/k/" + n, profil)
+        ch.rydd_profil(profil)
+        i = i + 1
+    }
+    # Negativ kontroll: ei side som ikkje finst gjev ingen logg (NUL-markøren)
+    la tom = ch.dump_side(chrome, "http://127.0.0.1:" + port + "/k/finst_ikkje", rot, "negativ")
+    ch.stopp(s)
+
+    i = 0
+    mens i < lengde(program) {
+        la n = program[i]
+        la d = dumpar[n]["dom"]
+        ch.krev(d, "</html>", n)
+        la w = ch.logg_frå_dom(d)
+        hvis w != vm_ut[n] {
+            skriv(n + ": WASM i Chrome skil seg frå VM-en, " + skilnad(w, vm_ut[n]) + "\nChrome:\n" + w + "\nVM:\n" + vm_ut[n] + "\n")
+            assert(usann)
+        }
+        hvis builtin.index_of(dumpar[n]["konsoll"], "Uncaught") >= 0 {
+            skriv(n + ": konsollen har «Uncaught»:\n" + dumpar[n]["konsoll"] + "\n")
+            assert(usann)
+        }
+        i = i + 1
+    }
+    assert(ch.logg_frå_dom(tom) != vm_ut[program[0]])
+    assert_eq(ch.logg_frå_dom(tom), builtin.chr(0))
+    # Positiv kontroll: trapen når JavaScript, og konsollsjekken ser det
+    la kt = dumpar["kontroll_trap"]
+    assert_eq(ch.logg_frå_dom(kt["dom"]), "før\n")
+    hvis builtin.index_of(kt["konsoll"], "Uncaught") < 0 {
+        skriv("kontroll_trap: venta «Uncaught» i konsollen, fekk:\n" + kt["konsoll"] + "\n")
+        assert(usann)
+    }
+    skriv("Chrome: " + tekst(lengde(program)) + " program gav identisk utskrift som VM-en, utan «Uncaught»\n")
+    la ekstra_dom = {}
+    i = 0
+    mens i < lengde(ek) {
+        ekstra_dom[ek[i]] = dumpar[ek[i]]["dom"]
+        i = i + 1
+    }
+    returner {"chrome": sann, "storleik": storleik, "ekstra": ekstra_dom}
 }
