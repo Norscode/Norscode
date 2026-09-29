@@ -1,0 +1,340 @@
+# Testklient for W7 (lokal lagring i IndexedDB, testbygg) mot tests/fixtures/wasm_w7_lager_testapp.no.
+# tests/test_wasm_w7_chrome.no lastar /test?steg=1, 2 og 3 med same Chrome-profil (og steg 2
+# òg med ein fersk profil, som negativ kontroll) og samanliknar loggen med fasiten.
+#
+# steg=1 (fersk profil):
+#   opne v1 (oppgradert frå 0) med lagera dokument (nøkkelsti id; indeksar type, namn,
+#     epost (unik) og meta.tal) og meta (nøklar gjevne eksplisitt)
+#   CRUD: put, hent, put (endring), hent, slett, hent (null), put_med_nøkkel, tel — sende på
+#     ein gong, tilbakekalla i same rekkjefølgje; eit tilbakekall som kastar, stoppar ikkje
+#     dei neste
+#   verdiar: heiltal over 2^53, 2.0, æøå, emoji, kontrollteikn, hermeteikn og nøsting kjem
+#     attende like (json_stringify); nøklar sorterer tal før tekst
+#   100 dokument i éin batch; område på nøkkelen (mellom, frå, til, grense) og indeksspørjingar
+#     (type, prefiks på namn, unik epost, nøsta sti meta.tal)
+#   rullar tilbake: ein batch der tredje put bryt den unike indeksen (ConstraintError), og ein
+#     batch med eit ukjent lager (NotFoundError): ingenting av dei blir skrive
+#   feil med ein gong (data): nøkkel som ikkje er tal eller tekst, heiltal over 2^53
+#   oppgradering: lukk, opne v2 (ny indeks «ny», nytt lager «ekstra», fjern «meta»); opne v1
+#     gjev versjon; opne v3 medan v2 er open: v2 lukkar seg sjølv (versionchange), og køyr
+#     på v2 etterpå gjev transaksjon
+#   lokal nøkkel til utlogginga: localStorage «nc-w7-sist»
+# steg=2 (same profil): v3 utan oppgradering; dei 100 og verdiane er der, ingenting frå
+#   batchane som rulla tilbake; ein annan brukar har ein annan database (tom); logg_ut slettar
+#   databasen og localStorage-nøkkelen.
+# steg=3 (same profil): databasen er ny (oppgradert frå 0) og tom; nøkkelen er borte.
+bruk std.wasm_vert som vert
+bruk std.wasm_nett som nett
+bruk std.wasm_lager som lager
+
+la ferdig_flagg: bool = usann
+la pulsar: heltall = 0
+la db: ordbok = {}
+la db2: ordbok = {}
+
+funksjon logg(t: tekst) -> heltall {
+    skriv(t + "\n")
+    returner 0
+}
+
+funksjon j(v) -> tekst {
+    returner builtin.json_stringify(v)
+}
+
+# ─── Puls: held den virtuelle tida i Chrome stille medan IndexedDB arbeider ──
+
+funksjon puls() -> heltall {
+    hvis ferdig_flagg { returner 0 }
+    pulsar = pulsar + 1
+    nett.hent("/api/puls", fun(s) -> puls(), fun(f) -> puls())
+    returner 0
+}
+
+funksjon ferdig() -> heltall {
+    logg("ferdig")
+    vert.sett_tekst(vert.finn("#nc-resultat"), "ferdig")
+    ferdig_flagg = sann
+    returner 0
+}
+
+funksjon feil_logg(kva: tekst, f: ordbok) -> heltall {
+    logg(kva + ": LagerFeil " + tekst(f["art"]) + " " + tekst(f["namn"]))
+    returner 0
+}
+
+# ─── Skjema ──────────────────────────────────────────────────────────────────
+
+funksjon db_namn() -> tekst {
+    returner lager.brukar_db_namn("nc-w7", "ola@eksempel.no")
+}
+
+funksjon skjema_v1() -> liste {
+    returner [lager.lager("dokument", "id", [lager.indeks("type", "type", usann), lager.indeks("namn", "namn", usann),
+                                            lager.indeks("epost", "epost", sann), lager.indeks("tal", "meta.tal", usann)]),
+              lager.lager("meta", "", [])]
+}
+
+funksjon skjema_v2() -> liste {
+    returner [lager.lager("dokument", "id", [lager.indeks("type", "type", usann), lager.indeks("namn", "namn", usann),
+                                            lager.indeks("epost", "epost", sann), lager.indeks("tal", "meta.tal", usann),
+                                            lager.indeks("ny", "ny", usann)]),
+              lager.lager_auto("ekstra", "nr", []),
+              lager.fjerna("meta")]
+}
+
+funksjon nr_tekst(i: heltall) -> tekst {
+    hvis i < 10 { returner "00" + tekst(i) }
+    hvis i < 100 { returner "0" + tekst(i) }
+    returner tekst(i)
+}
+
+funksjon dok(i: heltall) -> ordbok {
+    la type = "odde"
+    hvis i % 2 == 0 { type = "par" }
+    returner {"id": i, "type": type, "namn": "n" + nr_tekst(i), "epost": "e" + tekst(i) + "@x.no", "meta": {"tal": i % 7}}
+}
+
+funksjon ider(l: liste) -> tekst {
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(ut, tekst(l[i]["id"]))
+        i = i + 1
+    }
+    returner builtin.join(ut, ",")
+}
+
+funksjon vanskeleg() -> ordbok {
+    returner {"id": "vanskeleg", "stort": 9007199254740993, "neg": -9007199254740993, "flyt": 2.0, "brøk": 0.1,
+              "tekst": "æøå ÆØÅ 😀 \"sitat\" \\ \n\t" + builtin.chr(1) + builtin.chr(31) + " slutt",
+              "liste": [1, [2, [3]], {"a": null, "b": sann, "c": usann}], "tom": {}, "tomliste": []}
+}
+
+# ─── steg=1 ──────────────────────────────────────────────────────────────────
+
+funksjon steg1() -> heltall {
+    db = lager.opne(db_namn(), 1, skjema_v1(), fun(d) -> opna1(d), fun(f) -> feil_logg("opne v1", f))
+    # Køyr før opninga er ferdig: ventar på ho, og kjem etter ok-tilbakekallet til opne
+    lager.tel(db, "dokument", null, fun(n) -> logg("tel før opna ferdig: " + tekst(n)), null)
+    returner 0
+}
+
+funksjon opna1(d: ordbok) -> heltall {
+    logg("opna v1 frå " + tekst(d["oppgradert_frå"]) + ", same db: " + tekst(d == db))
+    crud()
+    returner 0
+}
+
+funksjon crud() -> heltall {
+    lager.put(db, "dokument", {"id": 1, "type": "odde", "namn": "Åse", "epost": "a@x.no"}, fun(k) -> logg("1 put " + j(k)), fun(f) -> feil_logg("1", f))
+    lager.hent(db, "dokument", 1, fun(v) -> logg("2 hent " + j(v)), fun(f) -> feil_logg("2", f))
+    lager.put(db, "dokument", {"id": 1, "type": "odde", "namn": "Åse Berg", "epost": "a@x.no"}, fun(k) -> kast_i_tilbakekall(k), fun(f) -> feil_logg("3", f))
+    lager.hent(db, "dokument", 1, fun(v) -> logg("4 hent " + tekst(v["namn"])), fun(f) -> feil_logg("4", f))
+    lager.slett(db, "dokument", 1, fun(v) -> logg("5 slett " + j(v)), fun(f) -> feil_logg("5", f))
+    lager.hent(db, "dokument", 1, fun(v) -> logg("6 hent " + j(v)), fun(f) -> feil_logg("6", f))
+    lager.put_med_nøkkel(db, "meta", "versjon", {"v": 1}, fun(k) -> logg("7 put_med_nøkkel " + j(k)), fun(f) -> feil_logg("7", f))
+    lager.hent(db, "meta", "versjon", fun(v) -> logg("8 hent " + j(v)), fun(f) -> feil_logg("8", f))
+    lager.tel(db, "dokument", null, fun(n) -> verdiar(n), fun(f) -> feil_logg("9", f))
+    returner 0
+}
+
+funksjon kast_i_tilbakekall(k) -> heltall {
+    logg("3 put " + j(k) + ", kastar")
+    kast "Uventa i tilbakekallet til nr. 3"
+}
+
+funksjon verdiar(n: heltall) -> heltall {
+    logg("9 tel " + tekst(n))
+    la v = vanskeleg()
+    lager.put(db, "dokument", v, fun(k) -> 0, fun(f) -> feil_logg("vanskeleg put", f))
+    lager.hent(db, "dokument", "vanskeleg", fun(w) -> logg("vanskeleg lik: " + tekst(j(w) == j(vanskeleg())) + " " + j(w["stort"]) + " " + j(w["flyt"]) + " " + tekst(lengde(w["tekst"]))), null)
+    la ops = [lager.op_put_med_nøkkel("meta", 10, "ti"), lager.op_put_med_nøkkel("meta", 2, "to"), lager.op_put_med_nøkkel("meta", "b", "b"),
+              lager.op_put_med_nøkkel("meta", 2.5, "to og ein halv"), lager.op_put_med_nøkkel("meta", "a", "a"), lager.op_nøklar("meta", null, 0)]
+    lager.køyr(db, ops, fun(r) -> logg("nøklar sortert: " + j(r[5])), null)
+    lager.køyr(db, [lager.op_slett("meta", lager.mellom(0, 100, usann, usann)), lager.op_nøklar("meta", null, 0)],
+        fun(r) -> logg("etter slett av tal: " + j(r[1])), null)
+    lager.slett(db, "dokument", "vanskeleg", fun(x) -> hundre(), null)
+    returner 0
+}
+
+funksjon hundre() -> heltall {
+    la ops = []
+    la i = 1
+    mens i <= 100 {
+        legg_til(ops, lager.op_put("dokument", dok(i)))
+        i = i + 1
+    }
+    lager.køyr(db, ops, fun(r) -> logg("100 i éin batch: " + tekst(lengde(r)) + " nøklar, første " + j(r[0]) + " siste " + j(r[99])), fun(f) -> feil_logg("100", f))
+    spørjingar()
+    returner 0
+}
+
+funksjon spørjingar() -> heltall {
+    la ops = [
+        lager.op_tel("dokument", null),
+        lager.op_liste("dokument", lager.mellom(10, 19, usann, usann), 0),
+        lager.op_liste("dokument", lager.frå(95, sann), 0),
+        lager.op_liste("dokument", lager.opp_til(3, usann), 0),
+        lager.op_liste("dokument", null, 4),
+        lager.op_nøklar("dokument", lager.mellom(40, 45, sann, sann), 0),
+        lager.op_indeks_tel("dokument", "type", lager.lik("par")),
+        lager.op_indeks_liste("dokument", "namn", lager.prefiks("n09"), 0),
+        lager.op_indeks_hent("dokument", "epost", "e42@x.no"),
+        lager.op_indeks_hent("dokument", "epost", "finst@ikkje"),
+        lager.op_indeks_liste("dokument", "tal", lager.lik(3), 0),
+        lager.op_indeks_liste("dokument", "type", lager.lik("odde"), 3)
+    ]
+    lager.køyr(db, ops, fun(r) -> vis_spørjingar(r), fun(f) -> feil_logg("spørjingar", f))
+    returner 0
+}
+
+funksjon vis_spørjingar(r: liste) -> heltall {
+    logg("tel " + j(r[0]))
+    logg("mellom 10 og 19: " + ider(r[1]))
+    logg("frå 95 (open): " + ider(r[2]))
+    logg("til 3: " + ider(r[3]))
+    logg("grense 4: " + ider(r[4]))
+    logg("nøklar 41–44: " + j(r[5]))
+    logg("type=par: " + j(r[6]))
+    logg("namn med prefiks n09: " + ider(r[7]))
+    logg("epost e42: " + j(r[8]["id"]) + " " + r[8]["namn"])
+    logg("epost finst ikkje: " + j(r[9]))
+    logg("meta.tal=3: " + ider(r[10]))
+    logg("type=odde, grense 3: " + ider(r[11]))
+    tilbakerulling()
+    returner 0
+}
+
+funksjon tilbakerulling() -> heltall {
+    la b1 = [lager.op_put("dokument", {"id": 201, "epost": "ny1@x.no"}), lager.op_put("dokument", {"id": 202, "epost": "ny2@x.no"}),
+             lager.op_put("dokument", {"id": 203, "epost": "e1@x.no"})]
+    lager.køyr(db, b1, fun(r) -> logg("unik: skulle feile"), fun(f) -> feil_logg("unik brote", f))
+    la b2 = [lager.op_put("dokument", {"id": 301}), lager.op_liste("finst_ikkje", null, 0)]
+    lager.køyr(db, b2, fun(r) -> logg("ukjent lager: skulle feile"), fun(f) -> feil_logg("ukjent lager", f))
+    lager.køyr(db, [lager.op_tel("dokument", null), lager.op_hent("dokument", 201), lager.op_hent("dokument", 202), lager.op_hent("dokument", 301)],
+        fun(r) -> logg("etter tilbakerulling: tel " + j(r[0]) + ", 201 " + j(r[1]) + ", 202 " + j(r[2]) + ", 301 " + j(r[3])), null)
+    # Feil med ein gong (før noko blir sendt): LagerFeil «data»
+    prøv {
+        lager.put(db, "dokument", {"id": sann}, null, null)
+    } fang (e: LagerFeil) {
+        logg("data: " + tekst(e["art"]) + " " + tekst(e["melding"]))
+    }
+    prøv {
+        lager.hent(db, "dokument", 9007199254740993, null, null)
+    } fang (e: LagerFeil) {
+        logg("data: " + tekst(e["art"]) + " " + tekst(e["melding"]))
+    }
+    prøv {
+        lager.opne("x", 1, [lager.lager("ugyldig namn", "", [])], null, null)
+    } fang (e: LagerFeil) {
+        logg("data: " + tekst(e["art"]) + " " + tekst(e["melding"]))
+    }
+    # Oppgradering: lukk og opne v2
+    lager.tel(db, "dokument", null, fun(n) -> oppgrader(), null)
+    returner 0
+}
+
+funksjon oppgrader() -> heltall {
+    lager.lukk(db)
+    lager.tel(db, "dokument", null, fun(n) -> logg("lukka: skulle feile"), fun(f) -> feil_logg("køyr på lukka", f))
+    db = lager.opne(db_namn(), 2, skjema_v2(), fun(d) -> opna2(d), fun(f) -> feil_logg("opne v2", f))
+    returner 0
+}
+
+funksjon opna2(d: ordbok) -> heltall {
+    logg("opna v2 frå " + tekst(d["oppgradert_frå"]))
+    lager.liste(db, "meta", null, fun(l) -> logg("meta: skulle vere fjerna"), fun(f) -> feil_logg("meta fjerna", f))
+    lager.put(db, "dokument", {"id": 500, "ny": "ja"}, null, null)
+    lager.indeks_liste(db, "dokument", "ny", null, fun(l) -> logg("indeksen ny: " + ider(l)), null)
+    lager.put(db, "ekstra", {"tekst": "a"}, fun(k) -> logg("auto-nøkkel " + j(k)), null)
+    lager.put(db, "ekstra", {"tekst": "b"}, fun(k) -> logg("auto-nøkkel " + j(k)), null)
+    lager.liste(db, "ekstra", null, fun(l) -> logg("ekstra: " + j(l)), null)
+    lager.slett(db, "dokument", 500, fun(x) -> versjonar(), null)
+    returner 0
+}
+
+funksjon versjonar() -> heltall {
+    lager.opne(db_namn(), 1, skjema_v1(), fun(d) -> logg("v1: skulle feile"), fun(f) -> feil_logg("opne v1 etter v2", f))
+    # v3 medan v2 er open: v2 lukkar seg sjølv, så oppgraderinga blir ikkje blokkert
+    db2 = lager.opne(db_namn(), 3, skjema_v2(), fun(d) -> opna3(d), fun(f) -> feil_logg("opne v3", f))
+    returner 0
+}
+
+funksjon opna3(d: ordbok) -> heltall {
+    logg("opna v3 frå " + tekst(d["oppgradert_frå"]))
+    lager.tel(db, "dokument", null, fun(n) -> logg("v2 etter v3: skulle feile"), fun(f) -> feil_logg("v2 etter v3", f))
+    lager.tel(db2, "dokument", null, fun(n) -> steg1_slutt(n), fun(f) -> feil_logg("v3 tel", f))
+    returner 0
+}
+
+funksjon steg1_slutt(n: heltall) -> heltall {
+    logg("v3 tel " + tekst(n))
+    vert.lagre_lokalt("nc-w7-sist", "ola")
+    logg("ventande " + tekst(lager.ventande()))
+    lager.lukk(db2)
+    ferdig()
+    returner 0
+}
+
+# ─── steg=2 ──────────────────────────────────────────────────────────────────
+
+funksjon steg2() -> heltall {
+    logg("lokalt: «" + vert.hent_lokalt("nc-w7-sist") + "»")
+    db = lager.opne(db_namn(), 3, skjema_v2(), fun(d) -> logg("opna v3 frå " + j(d["oppgradert_frå"])), fun(f) -> feil_logg("opne", f))
+    la ops = [lager.op_tel("dokument", null), lager.op_hent("dokument", 42), lager.op_hent("dokument", 201), lager.op_hent("dokument", 301),
+              lager.op_indeks_tel("dokument", "type", lager.lik("par"))]
+    lager.køyr(db, ops, fun(r) -> logg("att etter omlasting: tel " + j(r[0]) + ", 42 " + j(r[1]) + ", 201 " + j(r[2]) + ", 301 " + j(r[3]) + ", par " + j(r[4])),
+        fun(f) -> feil_logg("les", f))
+    # Ein annan brukar har ein annan database
+    la kari = lager.brukar_db_namn("nc-w7", "kari@eksempel.no")
+    logg("namn ulike: " + tekst(kari != db_namn()) + ", lengd " + tekst(lengde(db_namn())))
+    db2 = lager.opne(kari, 3, skjema_v2(), fun(d) -> 0, fun(f) -> feil_logg("kari", f))
+    lager.tel(db2, "dokument", null, fun(n) -> logg("kari ser " + tekst(n)), null)
+    lager.tel(db2, "dokument", null, fun(n) -> logg_ut(), null)
+    returner 0
+}
+
+funksjon logg_ut() -> heltall {
+    lager.logg_ut(db2, lager.brukar_db_namn("nc-w7", "kari@eksempel.no"), [], null, null)
+    lager.logg_ut(db, db_namn(), ["nc-w7-sist"], fun(x) -> logga_ut(), fun(f) -> feil_logg("logg_ut", f))
+    lager.tel(db, "dokument", null, fun(n) -> logg("etter logg_ut: skulle feile"), fun(f) -> etter_logg_ut(f))
+    returner 0
+}
+
+funksjon logga_ut() -> heltall {
+    logg("logga ut, lokalt: «" + vert.hent_lokalt("nc-w7-sist") + "»")
+    returner 0
+}
+
+funksjon etter_logg_ut(f: ordbok) -> heltall {
+    feil_logg("køyr etter logg_ut", f)
+    ferdig()
+    returner 0
+}
+
+# ─── steg=3 ──────────────────────────────────────────────────────────────────
+
+funksjon steg3() -> heltall {
+    logg("lokalt: «" + vert.hent_lokalt("nc-w7-sist") + "»")
+    db = lager.opne(db_namn(), 3, skjema_v2(), fun(d) -> logg("opna v3 frå " + j(d["oppgradert_frå"])), fun(f) -> feil_logg("opne", f))
+    lager.tel(db, "dokument", null, fun(n) -> steg3_slutt(n), fun(f) -> feil_logg("tel", f))
+    returner 0
+}
+
+funksjon steg3_slutt(n: heltall) -> heltall {
+    logg("etter utlogging: tel " + tekst(n))
+    lager.logg_ut(db, db_namn(), [], fun(x) -> ferdig(), null)
+    returner 0
+}
+
+funksjon start() -> heltall {
+    la s = vert.hent_parameter("steg")
+    logg("steg " + s)
+    puls()
+    hvis s == "1" { returner steg1() }
+    hvis s == "2" { returner steg2() }
+    hvis s == "3" { returner steg3() }
+    logg("ukjent steg")
+    ferdig()
+    returner 0
+}
