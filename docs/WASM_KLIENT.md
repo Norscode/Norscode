@@ -546,7 +546,7 @@ Hendingsdata blir lesne medan tilbakekallet køyrer (lastaren held hendinga i `V
 |---|---|
 | `sw_registrer(url, "funksjon")` | `G`: `navigator.serviceWorker.register(url)`, `update()`, lyttarar på `updatefound`/`statechange`, `controllerchange` og `ready`; hendinga i `O` |
 | `sw_status()` → tekst | `O + " " + [kontrollert, installerer, ventar, aktiv]` som 0/1 |
-| `sw_send(melding)` | `B.waiting.postMessage(melding)` (når ein ventar) |
+| `sw_send(melding)` | `(B.waiting || B.installing).postMessage(melding)`: den ventande workeren, eller den som nettopp er installert (i `statechange` er `B.waiting` ikkje alltid oppdatert enno, målt) |
 | `sw_lytt("hending", "funksjon")` | (SW) `A[hending] = x[funksjon]` |
 | `sw_inn()` → tekst | (SW) dataa til hendinga (`D`; før den første: konfigurasjonen `C`) |
 | `sw_ut(plan)` | (SW) planen (`Y`) |
@@ -631,11 +631,11 @@ Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), h
 | Lagrings-gruppa (W7: `lager_start`, `lager_svar`, `fjern_lokalt`, hjelparane `I` og `J`) | 1 256 byte | 1 280 byte (eige budsjett) |
 | Heile produksjonstabellen med nett og lagring (42) | 4 211 byte | 4 288 byte (2 560 + 448 + 1 280) |
 | Heile tabellen med testkrokane, nett og lagring (47) | 4 523 byte | 4 800 byte (W6: 3 520) |
-| PWA-gruppa (W8: `sw_registrer`, `sw_status`, `sw_send`, `G`, `B`, `O`) | 674 byte | 704 byte (eige budsjett) |
-| Heile produksjonstabellen med nett, lagring og PWA (W8) | 4 885 byte | 4 992 byte |
-| Heile tabellen med testkrokane (W8, med PWA og `test_cachar`/`test_bilete`/`test_resultat`) | 5 553 byte | 5 888 byte (3 520 + 1 280 + 704 + 384) |
+| PWA-gruppa (W8: `sw_registrer`, `sw_status`, `sw_send`, `G`, `B`, `O`) | 706 byte | 736 byte (eige budsjett) |
+| Heile produksjonstabellen med nett, lagring og PWA (W8) | 4 917 byte | 5 024 byte |
+| Heile tabellen med testkrokane (W8, med PWA og `test_cachar`/`test_bilete`/`test_resultat`) | 5 585 byte | 5 920 byte (3 520 + 1 280 + 736 + 384) |
 | SW-lastaren (W8, `sw.js` utan konfigurasjonen) | 1 751 byte | 1 792 byte (eige tak) |
-| Deltakar-demoen (W8, med PWA) | 4 204 byte | 4 544 byte (2 560 + 1 280 + 704) |
+| Deltakar-demoen (W8, med PWA) | 4 236 byte | 4 576 byte (2 560 + 1 280 + 736) |
 | Skjema-demoen (22 importar) | 1 755 byte | 2 048 byte |
 | Deltakar-demoen (W7, 27 importar med nett og lagring) | 3 402 byte (W6: 2 027) | 3 840 byte (2 560 + 1 280, `test_wasm_w6` og `test_wasm_w7_demo`) |
 | W4-proben (7 importar: `finn`, `sett_tekst`, `hent_verdi`, `deleger`, `hending_data`, `lagre_lokalt`, `nå_ms`) | 994 byte | |
@@ -927,6 +927,8 @@ Det er policyen på **svaret for `sw.js`** som gjeld i workeren, ikkje policyen 
 - **Virtuell tid:** med `--virtual-time-budget` ventar ikkje Chrome på at workeren blir installert (som IndexedDB i W7). Testklientane held ein puls (`/api/puls`) i gang til workeren er `klar`. Utan puls (produksjonsbygget) blir ikkje installasjonen ferdig før DOM-en blir dumpa.
 - **Aktivering:** Chrome aktiverer ikkje ein ventande worker (heller ikkje etter `skipWaiting`) så lenge den gamle har hendingar i gang, og ein jamn straum av `fetch` gjennom den gamle (pulsen) held han oppteken. Lastaren slepp difor `forbi`-førespurnader rett til nettet utan `respondWith` når modulen er klar, og testklienten byter pulsen ut med éin treg førespurnad om gongen (`/api/vent`, 1 s) medan han ventar på `aktivert`.
 - **skipWaiting under install** (første utkast, planen `s` ved install) gjorde ikkje at Chrome aktiverte workeren når han var installert, målt med eit reint JS-probe og med den ekte workeren. Den automatiske aktiveringa går difor via `nc-auto`-meldinga, med talet på faner, etter at sida har fått `ventar`.
+- **`statechange` og `B.waiting`:** når den nye workeren blir `installed`, er `registration.waiting` ikkje alltid oppdatert i `statechange`-handteraren. Auto-meldinga gjekk då til `null` og forsvann (om lag 1 av 3 køyringar). `sw_send` sender difor til `B.waiting || B.installing`.
+- **Aktivering tek tid:** `controllerchange` kjem når den nye workeren byrjar å aktiverast, før `activate` (som slettar den gamle cachen) er ferdig. Testklienten ventar med treige førespurnader til det berre er éin cache att.
 - **Kopien før respondWith:** `c.put(n, s.clone())` inne i `caches.open().then()` gav «Response body is already used» (Uncaught i konsollen, fanga av testen): kopien blir laga synkront før svaret går vidare.
 - **Navigasjon:** headless Chrome med `--dump-dom` og virtuell tid dumpar aldri DOM-en etter ein JS-navigasjon (målt: hang til tidsgrensa). Omlastinga etter aktiveringa er difor slått av i testbygget (`last_på_nytt`: usann), og avgjerda er testa i VM-en.
 - **Offline utan workeren:** Chrome skriv «Page load failed: net::ERR_CONNECTION_REFUSED» og dumpar ingenting; benken stoppar då med ein gong (`side_feila`) i staden for å vente til tidsgrensa.
@@ -939,9 +941,9 @@ Det er policyen på **svaret for `sw.js`** som gjeld i workeren, ikkje policyen 
 | `sw.wasm` (std/wasm_sw.no med JSON frå runtime-biblioteket) | 23 274 |
 | SW-lastaren (`sw_lastar.js`) | 1 751 (tak 1 792) |
 | `sw.js` for demoen (konfigurasjon + lastar) | 2 473 |
-| PWA-gruppa i sidelastaren (`G`, `B`, `O`, `sw_registrer`, `sw_status`, `sw_send`) | 674 (tak 704) |
+| PWA-gruppa i sidelastaren (`G`, `B`, `O`, `sw_registrer`, `sw_status`, `sw_send`) | 706 (tak 736) |
 | Testkrokane `test_cachar`, `test_bilete`, `test_resultat` (`M`) | 352 (tak 384) |
-| Deltakar-demoen, produksjon: `app.wasm` / `nc.js` | 54 949 / 4 204 (W7: 52 213 / 3 402) |
+| Deltakar-demoen, produksjon: `app.wasm` / `nc.js` | 54 949 / 4 236 (W7: 52 213 / 3 402) |
 | Ikon 192 / 512 px | 4 886 / 33 366 |
 
 Planen hadde 1,5 KB for SW-lastaren. Utkastet der (1 168 byte) hadde verken svarmetadata til Norscode (regelen for lagring ligg i Norscode, ikkje i lastaren), kopien før `respondWith`, fallbacken til nettet når modulen ikkje kan startast, den synkrone gjennomsleppinga av `forbi` eller talet på faner i meldingane. `test_wasm_lastar` handhevar det nye taket, proveniensen for kvart token i `sw.js` og at han berre kan importere SW-funksjonane.
@@ -1313,36 +1315,43 @@ JavaScriptCore (macOS 26.6.2) gav identisk utskrift for `w4_ordbok` (scratch-skr
 
 ### Tid
 
-Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W7-koden (siste køyring; Linux inkluderer oppstarten av Docker-behaldaren). W6-tala står i parentes.
+Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bin/nc test` (fast), med W8-koden (siste køyring; Linux inkluderer oppstarten av Docker-behaldaren). W7-tala står i parentes.
 
 | Test | macOS standard | macOS fast | Linux standard | Linux fast |
 |---|---|---|---|---|
-| `test_wasm_w0` | 15 (14) | 8 (11) | 18 (17) | 13 (12) |
-| `test_wasm_les` | 6 (7) | 5 (5) | 13 (12) | 9 (10) |
-| `test_wasm_w1` | 9 (8) | 6 (6) | 16 (15) | 11 (11) |
-| `test_wasm_w2` | 11 (11) | 6 (7) | 14 (14) | 12 (11) |
-| `test_wasm_w3` | 14 (15) | 10 (11) | 17 (17) | 13 (12) |
-| `test_wasm_w4` | 19 (18) | 15 (15) | 23 (23) | 21 (20) |
-| `test_wasm_lastar` | 13 (10) | 13 (11) | 17 (15) | 17 (15) |
-| `test_wasm_serve` | 7 (8) | 3 (3) | 9 (10) | 5 (5) |
-| `test_wasm_korpus_chrome` | 29 (29) | 27 (24) | 24 (22) | 22 (21) |
-| `test_wasm_korpus_w2` | 31 (30) | 27 (25) | 24 (22) | 23 (30) |
-| `test_wasm_korpus_w3` | 28 (28) | 25 (24) | 35 (23) | 23 (27) |
-| `test_wasm_w0_chrome` | 12 (12) | 10 (10) | 5 (4) | 2 (3) |
-| `test_wasm_w4_chrome` | 24 (23) | 17 (17) | 17 (16) | 14 (13) |
-| `test_wasm_w5` | 33 (32) | 24 (23) | 8 (7) | 4 (4) |
-| `test_wasm_w6` | 38 (32) | 31 (25) | 38 (29) | 30 (27) |
-| `test_wasm_w6_chrome` | 32 (26) | 31 (21) | 15 (10) | 12 (9) |
+| `test_wasm_w0` | 15 (15) | 13 (8) | 22 (18) | 13 (13) |
+| `test_wasm_les` | 9 (6) | 6 (5) | 15 (13) | 11 (9) |
+| `test_wasm_w1` | 13 (9) | 7 (6) | 17 (16) | 11 (11) |
+| `test_wasm_w2` | 14 (11) | 7 (6) | 16 (14) | 13 (12) |
+| `test_wasm_w3` | 15 (14) | 13 (10) | 17 (17) | 13 (13) |
+| `test_wasm_w4` | 20 (19) | 19 (15) | 27 (23) | 25 (21) |
+| `test_wasm_lastar` | 19 (13) | 18 (13) | 21 (17) | 22 (17) |
+| `test_wasm_serve` | 8 (7) | 7 (3) | 11 (9) | 5 (5) |
+| `test_wasm_korpus_chrome` | 32 (29) | 26 (27) | 26 (24) | 25 (22) |
+| `test_wasm_korpus_w2` | 32 (31) | 27 (27) | 25 (24) | 24 (23) |
+| `test_wasm_korpus_w3` | 31 (28) | 26 (25) | 27 (35) | 25 (23) |
+| `test_wasm_w0_chrome` | 13 (12) | 11 (10) | 5 (5) | 3 (2) |
+| `test_wasm_w4_chrome` | 25 (24) | 22 (17) | 18 (17) | 15 (14) |
+| `test_wasm_w5` | 35 (33) | 30 (24) | 9 (8) | 4 (4) |
+| `test_wasm_w6` | 42 (38) | 37 (31) | 39 (38) | 35 (30) |
+| `test_wasm_w6_chrome` | 40 (32) | 36 (31) | 14 (15) | 13 (12) |
 | `test_wasm_binary`, `test_wasm` | ≤ 1 | ≤ 1 | 4 | 2 |
-| `test_wasm_w7` (ny) | 45 | 34 | 36 | 33 |
-| `test_wasm_w7_chrome` (ny) | 19 | 18 | 14 | 12 |
-| `test_wasm_w7_demo` (ny) | 30 | 30 | 23 | 23 |
+| `test_wasm_w7` | 50 (45) | 41 (34) | 37 (36) | 36 (33) |
+| `test_wasm_w7_chrome` | 21 (19) | 17 (18) | 13 (14) | 13 (12) |
+| `test_wasm_w7_demo` | 38 (30) | 35 (30) | 25 (23) | 25 (23) |
+| `test_wasm_w8` (ny) | 42 | 25 | 27 | 19 |
+| `test_wasm_w8_serve` (ny) | 30 | 29 | 31 | 26 (82 med kald rt-cache) |
+| `test_wasm_w8_demo` (ny) | 36 | 31 | 22 | 28 |
+| `test_wasm_w8_oppdatering` (ny) | 51 | 50 | 21 | 22 |
+
+- **W8:** `test_wasm_w8_oppdatering` er den tyngste (51 s i standard-VM-en på macOS): eit bygg med workeren (om lag 20 s i fastmodus), fire `nc serve`-oppstartar og seks lastingar i Chrome, der éi er om lag 9 s (nettlesaren ser etter den nye versjonen og installerer han). Ventinga på aktiveringa er korta ned til treige førespurnader på 0,4 s. Linux har ikkje Chrome, så der er berre bygget og serve-variantane med. Den første køyringa etter ei endring i `std/wasm_vert.no` (ny nøkkel for rt-cachen) tek lenger tid: `test_wasm_w8_serve` tok då 82 s i fastmodus på Linux (26 s med varm cache).
+- Dei andre testane er 1–8 s tregare enn i W7: rt-cachen fekk ny nøkkel (`std/wasm_vert.no` er endra), og demoen byggjer no òg PWA-gruppa.
 
 - **`test_wasm_lastar`:** med W4-tabellen tok emitteringa og tokeniseringa av dei fulle lastarane om lag 3 minutt i standard-VM-en (189 s målt). Sjekkane står i `tests/fixtures/wasm_lastar_sjekk.no` og køyrer i ein barneprosess i fastmodus, som valideringa i W3.
 - **`test_wasm_korpus_chrome`** var 53–55 s etter W4, rett under grensa. W5 delte W2-programma ut i `test_wasm_korpus_w2`.
 - **W5-benken og testtida:** ein første versjon av benken importerte emitteren (for jsc) og venta på at hjelpeprosessane til Chrome skulle avslutte etter kvar side. Det gav om lag +3 s per test som importerte `wasm_test_hjelp` og +5 s for korpustesten i standard-VM-en. jsc-køyringa ligg difor i `std/wasm_jsc.no`, `wasm_test_hjelp` importerer ikkje benken (han har sitt eige `bygg`), og `benk.rydd(økt)` drep det som er att til slutt.
 - **`test_wasm_w6`** (56 s med Chrome-stega i same test) er delt i `test_wasm_w6` og `test_wasm_w6_chrome`.
-- Ingen wasm-test er over 55 s i standard-VM-en (W7: høgst 45 s på macOS og 38 s på Linux). Tidene varierer med ±3 s mellom køyringar.
+- Ingen wasm-test er over 55 s i standard-VM-en (W8: høgst 51 s på macOS og 39 s på Linux). Tidene varierer med ±3 s mellom køyringar.
 - **W6-testane** er 6–10 s tregare enn i W6: demoen byggjer no ein modul på 52 KB (den lokale kopien, `std/wasm_lager.no` og SHA-256) i staden for 27 KB.
 - **`test_wasm_w7`** hadde først bygga av testklienten og demoen med (60 s i fastmodus); dei er flytte til `test_wasm_w7_chrome` og `test_wasm_w7_demo`, som byggjer dei uansett, og regresjonen for rt-cachen brukar den minste modulen (`wasm_w7_utan_idb`).
 - Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome eller jsc, så dei stega er SKIP der. VM-, bygg- og tenarstega køyrer (også ryddetesten til benken og JSON-rutene til demoen). Alle testane er grøne på begge plattformene og i begge modusane.
