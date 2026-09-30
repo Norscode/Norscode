@@ -1,0 +1,411 @@
+# Testklient for den installerbare deltakar-demoen (W8, testbygg): startar den ekte
+# examples/wasm_deltakarar/klient.no (som registrerer service workeren) og køyrer stega som
+# closures. Testsida /test er app-skal i tests/fixtures/wasm_deltakarar_pwa_testapp.no.
+#
+# tests/test_wasm_w8_demo.no (same Chrome-profil; nc serve blir stoppa før steg 3):
+#   steg=1  (på nett, fersk profil) lista frå tenaren; workeren blir installert og er «klar»;
+#           «Hugs lista på denne eininga» lagrar ho i IndexedDB; Cache Storage har éin cache
+#           «nc-<16 hex>» med app-skalet, offline-ruta og dei versjonerte ressursane
+#   steg=2  (på nett, kontrollert) offline-ruta /nyheiter: ?ny=1 (lagringsbart) oppdaterer
+#           oppføringa, ?feil=403 og ?privat=1 (Cache-Control private) gjer det ikkje; /api/ og
+#           /mi-side blir aldri lagra (cachen har berre precache-URL-ane)
+#   steg=3  (utan nett) sida kjem frå cachen, den lokale kopien blir vist før feilen frå
+#           tenaren, ikona kjem frå cachen (192 og 512 px), og /nyheiter frå cachen er «nyheiter
+#           v2» (ikkje 403 eller den private utgåva)
+# tests/test_wasm_w8_oppdatering.no (same profil, nye versjonar av appen mellom stega):
+#   steg=u1 (versjon A) workeren er klar; namnet på cachen blir hugsa (localStorage)
+#   steg=u2 (versjon B, ventar på klikk) «ventar»: meldinga og knappen er synlege, to cachar;
+#           klikk på «Oppdater» → skipWaiting → «aktivert»; berre éin cache att, og den gamle er
+#           sletta. Omlastinga etter aktiveringa er slått av (headless Chrome dumpar ikkje DOM-en
+#           etter ein navigasjon); avgjerda er demo.sw_handling, testa i VM-en
+#   steg=u4 (versjon C, éi fane) «aktivert» utan klikk; den førre cachen er sletta
+#   steg=u5 (sw.js utan 'wasm-unsafe-eval', fersk profil) workeren blir aldri aktiv
+# Chrome med --virtual-time-budget ventar ikkje på service workeren eller IndexedDB, så
+# klienten held ein puls (/api/puls) i gang til han er ferdig (sjå W7).
+bruk std.wasm_vert som vert
+bruk std.wasm_nett som nett
+bruk std.wasm_rt som rt
+bruk std.wasm_pwa_klient som pwa
+bruk examples.wasm_deltakarar.klient som d
+
+la ferdig_flagg: bool = usann
+la sw_klar: bool = usann
+la lista_lasta: bool = usann
+la trinn: tekst = ""
+la bilete: liste = []
+la etter_cachar = null
+la start_linjer: liste = []
+la reg_linje: tekst = ""
+la klar_linje: tekst = ""
+la vidare_starta: bool = usann
+la siste_cachar: liste = []
+la såg_ventar: bool = usann
+la pulsar: heltall = 0
+la u5_ferdig_flagg: bool = usann
+# Oppdateringa: Chrome aktiverer ikkje ein ny worker (heller ikkje etter skipWaiting) medan
+# sida sender ein jamn straum av førespurnader (pulsen) gjennom den gamle. Når den nye ventar,
+# blir pulsen difor bytt ut med éin treg førespurnad om gongen (/api/vent, som tenaren svarar
+# på etter 0,4 s, og som workeren slepp rett til nettet): han held den virtuelle tida i ro medan
+# workeren blir aktivert.
+la vent_modus: bool = usann
+la aktivert: bool = usann
+la ventingar: heltall = 0
+la rydd_etter = null
+la rydd_rundar: heltall = 0
+
+funksjon puls() -> heltall {
+    hvis ferdig_flagg eller vent_modus { returner 0 }
+    pulsar = pulsar + 1
+    u5_sjekk()
+    hvis ferdig_flagg { returner 0 }
+    nett.hent("/api/puls", fun(s) -> puls(), fun(f) -> puls())
+    returner 0
+}
+
+funksjon ferdig() -> heltall {
+    skriv("ferdig\n")
+    ferdig_flagg = sann
+    returner 0
+}
+
+funksjon tekst_av(sel: tekst) -> tekst {
+    la h = vert.finn(sel)
+    la t = vert.hent_tekst(h)
+    vert.slepp(h)
+    returner t
+}
+
+funksjon klikk(sel: tekst) -> heltall {
+    la h = vert.finn(sel)
+    vert.test_klikk(h)
+    vert.slepp(h)
+    returner 0
+}
+
+funksjon logg_linje(namn: tekst) -> tekst {
+    returner namn + ": " + tekst_av("#nc-resultat") + " | status=" + tekst_av("#status") + " | feil=" + tekst_av("#feil") +
+        " | lokal=" + tekst_av("#lokal") + "\n"
+}
+
+funksjon logg(namn: tekst) -> heltall {
+    skriv(logg_linje(namn))
+    returner 0
+}
+
+# Hendingane ved start (workeren registrert og klar, den lokale kopien og lista) kjem i ei
+# rekkjefølgje som avheng av nettet: dei blir haldne att og skrivne i fast rekkjefølgje når
+# både lista og workeren er klare (vidare).
+funksjon hald(linje: tekst) -> heltall {
+    legg_til(start_linjer, linje)
+    returner 0
+}
+
+# «?v=<hex>» → «?v=*», så loggen ikkje avheng av versjonane
+funksjon utan_versjon(u: tekst) -> tekst {
+    la p = builtin.index_of(u, "?v=")
+    hvis p < 0 { returner u }
+    returner builtin.slice(u, 0, p) + "?v=*"
+}
+
+funksjon sti_av(url: tekst) -> tekst {
+    la p = builtin.index_of(url, "://")
+    la rest = builtin.slice(url, p + 3, lengde(url))
+    returner builtin.slice(rest, builtin.index_of(rest, "/"), lengde(rest))
+}
+
+funksjon er_cachenamn(n: tekst) -> bool {
+    hvis ikkje builtin.starts_with(n, "nc-") eller lengde(n) != 19 { returner usann }
+    la i = 3
+    mens i < 19 {
+        la c = builtin.char_code(builtin.slice(n, i, i + 1))
+        hvis ikkje ((c >= 48 og c <= 57) eller (c >= 97 og c <= 102)) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon skriv_cachar(etter) -> heltall {
+    vert.test_cachar("cachar_klare")
+    etter_cachar = etter
+    returner 0
+}
+
+funksjon cachar_klare() -> heltall {
+    la c = rt.json_parse(vert.test_resultat())
+    siste_cachar = []
+    skriv("cachar: " + tekst(lengde(c)) + "\n")
+    la i = 0
+    mens i < lengde(c) {
+        la namn = tekst(c[i][0])
+        legg_til(siste_cachar, namn)
+        hvis er_cachenamn(namn) { skriv("cache nc-<16 hex>\n") } ellers { skriv("cache " + namn + "\n") }
+        la stiar = []
+        la j = 0
+        mens j < lengde(c[i][1]) {
+            legg_til(stiar, utan_versjon(sti_av(tekst(c[i][1][j]))))
+            j = j + 1
+        }
+        la s = rt.sortert(stiar)
+        la k = 0
+        mens k < lengde(s) {
+            skriv("  " + s[k] + "\n")
+            k = k + 1
+        }
+        i = i + 1
+    }
+    hvis etter_cachar != null { builtin.ncb_call_fn(etter_cachar, 0) }
+    returner 0
+}
+
+# Ventar på «aktivert» med éin treg førespurnad om gongen (sjå vent_modus), høgst 25.
+funksjon vent_nett() -> heltall {
+    hvis ferdig_flagg eller aktivert { returner 0 }
+    ventingar = ventingar + 1
+    hvis ventingar > 25 {
+        skriv("vart aldri aktivert\n")
+        returner ferdig()
+    }
+    nett.hent("/api/vent", fun(s) -> vent_nett(), fun(f) -> vent_nett())
+    returner 0
+}
+
+# Ventar (éin treg førespurnad om gongen, høgst 20) til activate har sletta den gamle cachen,
+# så kallar han `etter`.
+funksjon når_rydda(etter) -> heltall {
+    # Den treige førespurnaden først: medan han går, står den virtuelle tida i Chrome i ro
+    rydd_etter = etter
+    nett.hent("/api/vent", fun(s) -> vert.test_cachar("rydd_sjekk"), fun(f) -> vert.test_cachar("rydd_sjekk"))
+    returner 0
+}
+
+funksjon rydd_sjekk() -> heltall {
+    la c = rt.json_parse(vert.test_resultat())
+    rydd_rundar = rydd_rundar + 1
+    hvis lengde(c) <= 1 eller rydd_rundar > 20 {
+        builtin.ncb_call_fn(rydd_etter, 0)
+        returner 0
+    }
+    nett.hent("/api/vent", fun(s) -> når_rydda(rydd_etter), fun(f) -> når_rydda(rydd_etter))
+    returner 0
+}
+
+# Namna på cachane i den siste skriv_cachar, komma-separerte.
+funksjon cachenamna() -> tekst {
+    returner builtin.join(siste_cachar, ",")
+}
+
+# Hendingar frå service workeren (via demoen).
+funksjon sw(s: ordbok) -> heltall {
+    la h = s["hending"]
+    hvis h == "registrert" {
+        reg_linje = "sw registrert, kontrollert=" + tekst(s["kontrollert"]) + "\n"
+    }
+    hvis h == "klar" og ikkje sw_klar {
+        sw_klar = sann
+        klar_linje = "sw klar, aktiv=" + tekst(s["aktiv"]) + "\n"
+        vidare()
+    }
+    hvis h == "ventar" og trinn == "u2" og ikkje såg_ventar {
+        såg_ventar = sann
+        skriv("sw ventar: kontrollert=" + tekst(s["kontrollert"]) + " ventar=" + tekst(s["ventar"]) + " aktiv=" + tekst(s["aktiv"]) +
+              " | " + tekst_av("#ny-versjon") + " | knapp synleg=" + tekst(synleg("#oppdatering")) + "\n")
+        skriv_cachar(fun(x) -> u2_klikk())
+    }
+    hvis h == "ventar" og trinn == "u4" og ikkje vent_modus {
+        vent_modus = sann
+        vent_nett()
+    }
+    hvis h == "aktivert" og trinn == "u2" {
+        aktivert = sann
+        skriv("sw aktivert etter klikket | sida blir lasta på nytt: " + tekst(d.sw_handling("aktivert", sann)["last_på_nytt"]) + "\n")
+        # controllerchange kjem når den nye workeren byrjar å aktiverast, før activate (som slettar
+        # den gamle cachen) er ferdig: vent éin runde før cachane blir lista
+        når_rydda(fun(x) -> skriv_cachar(fun(y) -> u2_ferdig()))
+    }
+    hvis h == "aktivert" og trinn == "u4" {
+        aktivert = sann
+        skriv("sw aktivert utan klikk | " + tekst_av("#ny-versjon") + " | knapp synleg=" + tekst(synleg("#oppdater")) + "\n")
+        når_rydda(fun(x) -> skriv_cachar(fun(y) -> u4_ferdig()))
+    }
+    returner 0
+}
+
+# Er elementet synleg (utan hidden-attributtet)? querySelector gjev det første treffet i
+# dokumentet: elementet når det er skjult, elles #nc-logg (som står sist i <body>).
+funksjon synleg(sel: tekst) -> bool {
+    la h = vert.finn(sel + "[hidden], #nc-logg")
+    la id = vert.hent_attr(h, "id")
+    vert.slepp(h)
+    returner id == "nc-logg"
+}
+
+funksjon lasta() -> heltall {
+    lista_lasta = sann
+    hald(logg_linje("lasta"))
+    vidare()
+    returner 0
+}
+
+# Går vidare når både lista og workeren er klare.
+funksjon vidare() -> heltall {
+    hvis ikkje (sw_klar og lista_lasta) eller vidare_starta { returner 0 }
+    vidare_starta = sann
+    skriv(reg_linje + klar_linje + builtin.join(start_linjer, ""))
+    hvis trinn == "1" {
+        klikk("#hugs")
+        d.lagre_lokal(fun(n) -> s1_hugsa())
+        returner 0
+    }
+    hvis trinn == "2" {
+        # Positiv kontroll først (eit lagringsbart svar oppdaterer oppføringa), så eit feilsvar
+        # og eit privat svar, som ikkje skal skrive over ho
+        nett.hent("/nyheiter?ny=1", fun(s) -> nyheiter("ny=1", s, "/nyheiter?feil=403"), fun(f) -> nyheiter_feil("ny=1", f, "/nyheiter?feil=403"))
+        returner 0
+    }
+    hvis trinn == "3" {
+        vert.test_bilete(ikon_192(), "bilete_klart")
+        returner 0
+    }
+    hvis trinn == "u1" {
+        returner skriv_cachar(fun(x) -> u1_ferdig())
+    }
+    hvis trinn == "u2" eller trinn == "u4" {
+        # ventar på hendingane frå den nye workeren (sw)
+        returner 0
+    }
+    returner ferdig()
+}
+
+funksjon s1_hugsa() -> heltall {
+    logg("hugsa")
+    returner skriv_cachar(fun(x) -> ferdig())
+}
+
+# ─── Steg 2 og 3: offline-ruta /nyheiter ─────────────────────────────────────
+
+funksjon neste_nyheiter(etter: tekst) -> heltall {
+    hvis etter == "/nyheiter?feil=403" {
+        nett.hent(etter, fun(s) -> nyheiter("feil=403", s, "/nyheiter?privat=1"), fun(f) -> nyheiter_feil("feil=403", f, "/nyheiter?privat=1"))
+        returner 0
+    }
+    hvis etter == "/nyheiter?privat=1" {
+        nett.hent(etter, fun(s) -> nyheiter("privat=1", s, ""), fun(f) -> nyheiter_feil("privat=1", f, ""))
+        returner 0
+    }
+    returner skriv_cachar(fun(x) -> ferdig())
+}
+
+funksjon nyheiter(namn: tekst, s: ordbok, etter: tekst) -> heltall {
+    skriv("nyheiter " + namn + ": " + tekst(s["status"]) + " " + s["kropp"] + "\n")
+    hvis trinn == "3" { returner skriv_cachar(fun(x) -> ferdig()) }
+    returner neste_nyheiter(etter)
+}
+
+funksjon nyheiter_feil(namn: tekst, f: ordbok, etter: tekst) -> heltall {
+    skriv("nyheiter " + namn + ": " + f["art"] + " " + tekst(f["status"]) + " " + tekst(f["kropp"]) + "\n")
+    hvis trinn == "3" { returner skriv_cachar(fun(x) -> ferdig()) }
+    returner neste_nyheiter(etter)
+}
+
+# URL-en til 192-ikonet frå <link rel="icon"> (med versjonen).
+funksjon ikon_192() -> tekst {
+    la h = vert.finn("link[rel=icon]")
+    la href = vert.hent_attr(h, "href")
+    vert.slepp(h)
+    returner href
+}
+
+funksjon bilete_klart() -> heltall {
+    legg_til(bilete, vert.test_resultat())
+    hvis lengde(bilete) == 1 {
+        # 512-ikonet: URL-en står i manifestet (frå cachen)
+        nett.hent_json("/manifest.webmanifest", fun(s) -> manifest(s), fun(f) -> manifest_feil(f))
+        returner 0
+    }
+    skriv("ikon frå cachen: " + builtin.join(bilete, ", ") + "\n")
+    # Offline-ruta frå cachen: skal vere den siste lagringsbare utgåva (v2), ikkje 403 eller privat
+    nett.hent("/nyheiter", fun(s) -> nyheiter("utan nett", s, ""), fun(f) -> nyheiter_feil("utan nett", f, ""))
+    returner 0
+}
+
+funksjon manifest(s: ordbok) -> heltall {
+    la ikon = s["json"]["icons"]
+    la i = 0
+    mens i < lengde(ikon) {
+        hvis ikon[i]["sizes"] == "512x512" og ikon[i]["purpose"] == "any" {
+            vert.test_bilete(ikon[i]["src"], "bilete_klart")
+            returner 0
+        }
+        i = i + 1
+    }
+    skriv("manifestet manglar 512-ikonet\n")
+    returner ferdig()
+}
+
+funksjon manifest_feil(f: ordbok) -> heltall {
+    skriv("manifestet kom ikkje frå cachen: " + nett.feil_tekst(f) + "\n")
+    returner ferdig()
+}
+
+# ─── Oppdateringsflyten (u1–u5) ──────────────────────────────────────────────
+
+funksjon u1_ferdig() -> heltall {
+    vert.lagre_lokalt("w8-cachar", cachenamna())
+    returner ferdig()
+}
+
+funksjon u2_klikk() -> heltall {
+    skriv("cachar medan den nye ventar: " + tekst(lengde(siste_cachar)) + ", den gamle er med: " + tekst(vert.er_i(siste_cachar, vert.hent_lokalt("w8-cachar"))) + "\n")
+    skriv("klikkar «Oppdater»\n")
+    vent_modus = sann
+    klikk("#oppdater")
+    vent_nett()
+    returner 0
+}
+
+funksjon u2_ferdig() -> heltall {
+    skriv("den gamle cachen er sletta: " + tekst(ikkje vert.er_i(siste_cachar, vert.hent_lokalt("w8-cachar"))) + "\n")
+    vert.lagre_lokalt("w8-cachar", cachenamna())
+    returner ferdig()
+}
+
+funksjon u4_ferdig() -> heltall {
+    skriv("den førre cachen er sletta: " + tekst(ikkje vert.er_i(siste_cachar, vert.hent_lokalt("w8-cachar"))) + "\n")
+    returner ferdig()
+}
+
+# Steg u5 (CSP utan 'wasm-unsafe-eval' på sw.js): workeren kan ikkje kompilere sw.wasm, så
+# han blir aldri aktiv. Etter `u5_grense` pulsar blir statusen og cachane skrivne.
+funksjon u5_sjekk() -> heltall {
+    hvis trinn != "u5" eller u5_ferdig_flagg { returner 0 }
+    hvis sw_klar {
+        u5_ferdig_flagg = sann
+        skriv("u5: workeren vart aktiv (skulle ikkje skje)\n")
+        returner ferdig()
+    }
+    hvis pulsar >= u5_grense() {
+        u5_ferdig_flagg = sann
+        la s = pwa.status()
+        skriv(reg_linje + builtin.join(start_linjer, ""))
+        skriv("u5: etter " + tekst(u5_grense()) + " pulsar: aktiv=" + tekst(s["aktiv"]) + " installerer=" + tekst(s["installerer"]) +
+              " ventar=" + tekst(s["ventar"]) + " kontrollert=" + tekst(s["kontrollert"]) + "\n")
+        returner skriv_cachar(fun(x) -> ferdig())
+    }
+    returner 0
+}
+
+funksjon u5_grense() -> heltall {
+    returner 300
+}
+
+funksjon start() -> heltall {
+    trinn = vert.hent_parameter("steg")
+    skriv("steg " + trinn + "\n")
+    puls()
+    la val = {"etter": fun(n) -> lasta(), "sw_etter": fun(s) -> sw(s)}
+    hvis trinn == "3" { val["etter_lokal"] = fun(n) -> hald(logg_linje("lokal")) }
+    # Headless Chrome dumpar ikkje DOM-en etter ein navigasjon: omlastinga er slått av her, og
+    # avgjerda (sw_handling) blir testa i VM-en
+    hvis trinn == "u2" { val["last_på_nytt"] = usann }
+    returner d.start_med_val(val)
+}

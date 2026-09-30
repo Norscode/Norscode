@@ -1,0 +1,253 @@
+# Hjelparar for testane av std/apptenar.no og std/synk.no: start ein barne-`nc run`
+# med deploy-miljøet (avgrensa caps, disk berre i datamappa) og snakk HTTP/1.1 med han
+# over std.socket. Barnet får eit eksplisitt miljø, så NORSCODE_CMD/FILE frå ein
+# CI-adapter ikkje kan vinne.
+bruk std.prosess som prosess
+bruk std.socket som socket
+bruk std.deploy som deploy
+
+funksjon root() -> tekst {
+    returner tekst(builtin.system_info()["cwd"])
+}
+
+funksjon runtime() -> tekst {
+    returner tekst(builtin.system_info()["executable"])
+}
+
+funksjon policy() -> ordbok_tekst {
+    la p = prosess.ny_policy("apptenar-test")
+    prosess.tillat_alle(p)
+    prosess.aktiver_køyring(p)
+    returner p
+}
+
+# Ny, tom datamappe under build/ (absolutt sti).
+funksjon ny_datamappe(namn: tekst) -> tekst {
+    la sti = root() + "/build/apptenar-test/" + namn + "-" + tekst(builtin.tid_ms()) + "-" + builtin.random_hex(4)
+    builtin.mkdir_p(sti)
+    returner sti
+}
+
+funksjon grunnmiljø() -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_ROOT": root(),
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_FAKE_HTTP_REQUESTS": ""
+    }
+}
+
+# Start `app` (relativ til rota) under deploy-malen sitt miljø pluss `ekstra`.
+# Gjev {"status": "kjorer", "h", "port", "ut"} eller {"status": "feil", "ut"}.
+funksjon start_app(app: tekst, datamappe: tekst, ekstra: ordbok_tekst) -> ordbok {
+    la m = grunnmiljø()
+    la d = deploy.apptenar_miljø(root() + "/" + app, datamappe, sann)
+    la dk = nøkler(d)
+    la i = 0
+    mens i < lengde(dk) {
+        m[dk[i]] = d[dk[i]]
+        i = i + 1
+    }
+    la ek = nøkler(ekstra)
+    i = 0
+    mens i < lengde(ek) {
+        m[ek[i]] = ekstra[ek[i]]
+        i = i + 1
+    }
+    la plan = prosess.start_argv_plan(runtime(), [])
+    prosess.med_cwd(plan, root())
+    prosess.med_miljø(plan, m)
+    prosess.med_timeout(plan, 300)
+    prosess.med_sandbox(plan, "none", 4294967296, 1024, usann)
+    la h = prosess.start_argv_async_trygt(policy(), plan)
+    hvis h["status"] != "kjorer" { returner {"status": "feil", "ut": "spawn: " + tekst(h["status"])} }
+    la ut = ""
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < 180000 {
+        ut = ut + les_ut(h)
+        la p = builtin.index_of(ut, "APPTENAR klar 127.0.0.1:")
+        hvis p >= 0 {
+            la rest = builtin.slice(ut, p + 24, lengde(ut))
+            la s = builtin.index_of(rest, " ")
+            hvis s > 0 {
+                la port = heltall_fra_tekst(builtin.slice(rest, 0, s))
+                returner {"status": "kjorer", "h": h, "port": port, "ut": ut}
+            }
+        }
+        la v = prosess.native_async_vent(h, 100)
+        hvis v["status"] != "kjorer" {
+            ut = ut + les_ut(h)
+            prosess.native_async_lukk(h)
+            returner {"status": "feil", "ut": ut}
+        }
+    }
+    stopp(h)
+    returner {"status": "feil", "ut": ut + " (tidsavbrot)"}
+}
+
+funksjon les_ut(h: ordbok_tekst) -> tekst {
+    la r = prosess.native_async_les(h)
+    la ut = ""
+    hvis finnes_nøkkel(r, "stdout") { ut = ut + tekst(r["stdout"]) }
+    hvis finnes_nøkkel(r, "stderr") { ut = ut + tekst(r["stderr"]) }
+    returner ut
+}
+
+funksjon køyrer(h: ordbok_tekst) -> bool {
+    returner prosess.native_async_poll(h)["status"] == "kjorer"
+}
+
+# Vent til prosessen avsluttar seg sjølv. Gjev exit-koden (-1 ved tidsavbrot).
+funksjon vent_slutt(h: ordbok_tekst, ms: heltall) -> heltall {
+    la v = prosess.native_async_vent(h, ms)
+    hvis v["status"] == "kjorer" { returner -1 }
+    hvis finnes_nøkkel(v, "exit_code") { returner heltall_fra_tekst(tekst(v["exit_code"])) }
+    returner 0
+}
+
+# SIGTERM, så SIGKILL etter 3 s.
+funksjon stopp(h: ordbok_tekst) -> heltall {
+    la st = prosess.native_async_poll(h)
+    hvis st["status"] == "kjorer" {
+        prosess.native_async_signal(h, 15)
+        la v = prosess.native_async_vent(h, 3000)
+        hvis v["status"] == "kjorer" {
+            prosess.native_async_signal(h, 9)
+            prosess.native_async_vent(h, 3000)
+        }
+    }
+    prosess.native_async_lukk(h)
+    returner 0
+}
+
+# ─── HTTP-klient over std.socket ─────────────────────────────────────────────
+
+funksjon koble(port: heltall) -> ordbok_tekst {
+    la s = socket.native_tilkoble("127.0.0.1", port)
+    hvis s["status"] != "connected" {
+        skriv("tilkopling feila: " + tekst(s["status"]) + " " + tekst(s["error"]) + "\n")
+        assert(usann)
+    }
+    returner s
+}
+
+funksjon send(s: ordbok_tekst, data: tekst) -> heltall {
+    la pos = 0
+    la frist = builtin.tid_ms() + 5000
+    mens pos < lengde(data) og builtin.tid_ms() < frist {
+        la r = socket.native_skriv(s, builtin.slice(data, pos, lengde(data)))
+        hvis r["status"] == "ventende" {
+            socket.native_poll_vent(s, 2, 20)
+        } ellers hvis r["status"] != "ok" {
+            returner -1
+        } ellers {
+            pos = pos + heltall_fra_tekst(tekst(r["value"]))
+        }
+    }
+    returner pos
+}
+
+# Les rå data til `nål` finst i bufferen eller fristen er ute. Gjev {"data", "eof"}.
+funksjon les_til(s: ordbok_tekst, buf: tekst, nål: tekst, ms: heltall) -> ordbok {
+    la data = buf
+    la frist = builtin.tid_ms() + ms
+    mens builtin.index_of(data, nål) < 0 og builtin.tid_ms() < frist {
+        la r = socket.native_les(s, 65536)
+        hvis r["status"] == "ok" {
+            data = data + tekst(r["data"])
+        } ellers hvis r["status"] == "ventende" {
+            socket.native_poll_vent(s, 1, 20)
+        } ellers {
+            returner {"data": data, "eof": sann}
+        }
+    }
+    returner {"data": data, "eof": usann}
+}
+
+# Er socketen lukka av tenaren innan `ms`? (les gjev eof/feil)
+funksjon lukka_innan(s: ordbok_tekst, ms: heltall) -> bool {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        la r = socket.native_les(s, 65536)
+        hvis r["status"] == "eof" eller r["status"] == "feil" { returner sann }
+        hvis r["status"] == "ventende" { socket.native_poll_vent(s, 1, 20) }
+    }
+    returner usann
+}
+
+# Les eitt HTTP-svar. `head`: ingen kropp sjølv med Content-Length. Gjev
+# {"status", "headers" (små bokstavar), "body", "rest", "ok"}.
+funksjon les_svar(s: ordbok_tekst, buf: tekst, head: bool, ms: heltall) -> ordbok {
+    la r = les_til(s, buf, "\r\n\r\n", ms)
+    la data = r["data"]
+    la slutt = builtin.index_of(data, "\r\n\r\n")
+    hvis slutt < 0 { returner {"ok": usann, "status": 0, "headers": {}, "body": "", "rest": data, "eof": r["eof"]} }
+    la linjer = builtin.split(builtin.slice(data, 0, slutt), "\r\n")
+    la sl = builtin.split(linjer[0], " ")
+    la status = heltall_fra_tekst(sl[1])
+    la h = {}
+    la i = 1
+    mens i < lengde(linjer) {
+        la k = builtin.index_of(linjer[i], ":")
+        hvis k > 0 {
+            h[builtin.lower(builtin.slice(linjer[i], 0, k))] = builtin.trim(builtin.slice(linjer[i], k + 1, lengde(linjer[i])))
+        }
+        i = i + 1
+    }
+    la kropp = builtin.slice(data, slutt + 4, lengde(data))
+    la n = 0
+    hvis finnes_nøkkel(h, "content-length") og ikkje head og status != 304 og status != 204 {
+        n = heltall_fra_tekst(h["content-length"])
+    }
+    la frist = builtin.tid_ms() + ms
+    mens lengde(kropp) < n og builtin.tid_ms() < frist {
+        la q = socket.native_les(s, 65536)
+        hvis q["status"] == "ok" {
+            kropp = kropp + tekst(q["data"])
+        } ellers hvis q["status"] == "ventende" {
+            socket.native_poll_vent(s, 1, 20)
+        } ellers {
+            bryt
+        }
+    }
+    la body = builtin.slice(kropp, 0, n)
+    la rest = builtin.slice(kropp, n, lengde(kropp))
+    returner {"ok": lengde(body) == n, "status": status, "headers": h, "body": body, "rest": rest, "eof": usann}
+}
+
+funksjon hdr(svar: ordbok, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(svar["headers"], namn) { returner svar["headers"][namn] }
+    returner ""
+}
+
+# Éin førespurnad på ei ny tilkopling (Connection: close).
+funksjon kall(port: heltall, metode: tekst, sti: tekst, headerar: ordbok_tekst, kropp: tekst) -> ordbok {
+    la s = koble(port)
+    send(s, førespurnad(metode, sti, headerar, kropp, usann))
+    la r = les_svar(s, "", metode == "HEAD", 10000)
+    socket.native_lukk(s)
+    returner r
+}
+
+funksjon førespurnad(metode: tekst, sti: tekst, headerar: ordbok_tekst, kropp: tekst, keep_alive: bool) -> tekst {
+    la ut = metode + " " + sti + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+    la ks = nøkler(headerar)
+    la i = 0
+    mens i < lengde(ks) {
+        ut = ut + ks[i] + ": " + headerar[ks[i]] + "\r\n"
+        i = i + 1
+    }
+    hvis kropp != "" eller metode == "POST" { ut = ut + "Content-Length: " + tekst(lengde(kropp)) + "\r\n" }
+    hvis ikkje keep_alive { ut = ut + "Connection: close\r\n" }
+    returner ut + "\r\n" + kropp
+}

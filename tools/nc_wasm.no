@@ -1,0 +1,364 @@
+# tools/nc_wasm.no — Norscode-klient → WebAssembly-modul + generert lastar (W0–W4).
+#
+# Bruk (W4: eitt steg, verktøyet kompilerer kjelda sjølv):
+#   NC_WASM_KJELDE=examples/wasm_skjema/klient.no NC_WASM_APP=examples/wasm_skjema/app.no \
+#   NC_WASM_UT=build/wasm/wasm_skjema ./bin/nc run tools/nc_wasm.no
+#   ./bin/nc serve build/wasm/wasm_skjema/serve.no
+#
+# Miljø:
+#   NC_WASM_KJELDE    klientkjelda (.no, relativ til rota); blir kompilert med `nc compile` i ein
+#                     barneprosess
+#   NC_WASM_NCB       alternativt: NCB-JSON frå `nc compile` (W0–W3-vegen)
+#   NC_WASM_UT        utmappe, må liggje under build/wasm/ (påkravd, blir laga ved behov)
+#   NC_WASM_APP       valfri serve-app (.no, relativ til rota). Då blir NC_WASM_UT/serve.no
+#                     laga: inngangen for `nc serve`, som importerer appen og klient_data og
+#                     leverer modulen og lastaren (std/wasm_serve.no). Appen sjølv importerer
+#                     ingenting under build/. Mappene i NC_WASM_APP og NC_WASM_UT blir modulnamn
+#                     (build.wasm.x.klient_data), så dei må vere gyldige namn og ikkje nøkkelord
+#                     (t.d. ikkje «test»).
+#   NC_WASM_TESTBYGG  «1» tillèt testvertsfunksjonar (test_klikk, test_skriv …); aldri i produksjon
+#   NC_WASM_PREFIKS   URL-prefiks for ressursane (standard «/_nc/»)
+#   NC_WASM_RT_CACHE  «0» slår av cachen av lowra runtime-funksjonar (standard på)
+#   NC_WASM_RT_CACHE_MAPPE  mappa for cachen (standard build/wasm/rt_cache, må liggje under
+#                     build/wasm/)
+#   NC_WASM_SW        «1» (W8) byggjer òg service workeren: std/wasm_sw.no (eller
+#                     NC_WASM_SW_KJELDE) → sw.wasm og ein generert SW-lastar. serve.no får då
+#                     rutene /sw.js, <prefiks>sw.wasm, /manifest.webmanifest, /_nc/ikon-*.png og
+#                     /_nc/offline etter app.pwa_konfig() (std/wasm_pwa.no). Klientmodulen kan
+#                     ikkje importere SW-funksjonane, og workeren berre dei (vert.sw_tillatne).
+#   NC_WASM_SW_KJELDE valfri eiga kjelde for service workeren (standard: ein generert drivar som
+#                     kallar std.wasm_sw.start())
+#
+# Utdata i NC_WASM_UT (alt generert, aldri committa — build/ er git-ignorert):
+#   app.wasm        modulen
+#   nc.js           lastaren, emittert av std/wasm_js.no frå Norscode-data (for innsyn)
+#   klient_data.no  Norscode-modul med bytane som EIN tekstliteral (rå bytar, berre \ " \n \r \t
+#                   og NUL er escapa), lastaren og versjonane. `nc serve` har ingen disk-
+#                   kapabilitet og ingen modulglobalar, så bytane må vere ein konstant: ein
+#                   rå literal kostar ingenting per førespurnad (hex-dekoding gjorde det).
+#   serve.no        (med NC_WASM_APP) inngangen for `nc serve`
+#   sw.wasm, sw_lastar.js  (W8, NC_WASM_SW=1) service workeren og SW-lastaren (for innsyn; sw.js
+#                   er konfigurasjonen frå tenaren + lastaren, og klient_data har sw_wasm(),
+#                   sw_versjon() og sw_lastar())
+# Versjonen v er dei 12 første hex-teikna av sha256 over bytane (sha256_bytes).
+# Utdatalinja: `WASM: app.wasm <n> byte, lastar <m> byte, v=<12 hex> importar=<a,b> eksportar=<m,i>
+# atom=<…> rt=<…> rt_cache=<treff>/<rt-funksjonar>` — importane og eksportane er dei validatoren
+# (std/wasm_les.no) las ut av modulen.
+# W8: med NC_WASM_SW=1 kjem ei linje til: `SW: sw.wasm <n> byte, sw-lastar <m> byte, v=<12 hex>
+# importar=<…> eksportar=<…> rt=<…>`.
+# Ukjende opkodar og builtins gjev exit 1 med ei liste over alle feil (ingen fallback).
+#
+# W3: runtime-biblioteket std/wasm_rt.no (vanleg Norscode) blir kompilert med `nc compile`
+# i ein barneprosess (via ein generert drivar i NC_WASM_UT/rt/) og lenka inn i NCB-en
+# (lowring.lenk_rt). Lowringa tek berre med rt-funksjonane programmet når.
+# W4: dei lowra rt-funksjonane blir lagra flyttbart i build/wasm/rt_cache/<nøkkel>.json, der
+# nøkkelen er sha256 over kjeldene til backenden. Ein funksjon blir berre brukt frå cachen
+# når NCB-koden hans er den same. Modulen er byte-identisk med og utan cache (utan cache
+# blir kroppane emitterte direkte, som før W4, og rt_cache=0/0).
+
+bruk std.wasm_lowring som lowring
+bruk std.wasm_js som js
+bruk std.wasm_les som les
+bruk std.wasm_vert som vert
+bruk std.runtime.process_abi som process_abi
+
+# Norscode-strengliteral: escape \ og ".
+funksjon _no_streng(s: tekst) -> tekst {
+    la bs = "\\"
+    la q = "\""
+    returner q + builtin.replace(builtin.replace(s, bs, bs + bs), q, bs + q) + q
+}
+
+# Norscode-strengliteral for vilkårlege bytar (W4): berre \ " linjeskift, CR, tab og NUL
+# blir escapa; alle andre bytar (også ugyldig UTF-8) står rått. Lexeren les dei tilbake
+# byte for byte (prøvd for alle 256 bytar under nc serve).
+funksjon _no_bytar(s: tekst) -> tekst {
+    la bs = "\\"
+    la r = builtin.replace(s, bs, bs + bs)
+    r = builtin.replace(r, "\"", bs + "\"")
+    r = builtin.replace(r, "\n", bs + "n")
+    r = builtin.replace(r, builtin.chr(13), bs + "r")
+    r = builtin.replace(r, "\t", bs + "t")
+    r = builtin.replace(r, builtin.chr(0), bs + "0")
+    returner "\"" + r + "\""
+}
+
+funksjon klient_data_modul(rå: tekst, v: tekst, lastar: tekst, lastar_v: tekst, n: heltall, prefiks: tekst) -> tekst {
+    la ut = "# GENERERT av tools/nc_wasm.no. Ikkje rediger og ikkje commit (ligg under build/).\n"
+    ut = ut + "# WASM-modulen som rå bytar, lastaren emittert frå Norscode-data, og versjonane.\n\n"
+    ut = ut + "funksjon wasm() -> tekst { returner " + _no_bytar(rå) + " }\n\n"
+    ut = ut + "funksjon wasm_versjon() -> tekst { returner " + _no_streng(v) + " }\n\n"
+    ut = ut + "funksjon wasm_storleik() -> heltall { returner " + tekst(n) + " }\n\n"
+    ut = ut + "funksjon lastar() -> tekst { returner " + _no_bytar(lastar) + " }\n\n"
+    ut = ut + "funksjon lastar_versjon() -> tekst { returner " + _no_streng(lastar_v) + " }\n\n"
+    ut = ut + "funksjon prefiks() -> tekst { returner " + _no_streng(prefiks) + " }\n"
+    returner ut
+}
+
+# Modulnamnet til ei .no-fil relativt til rota (examples/a/app.no → examples.a.app).
+funksjon modulnamn(sti: tekst) -> tekst {
+    la s = sti
+    hvis builtin.ends_with(s, ".no") { s = builtin.slice(s, 0, lengde(s) - 3) }
+    returner builtin.replace(s, "/", ".")
+}
+
+# Inngangen for `nc serve` (W4): importerer appen (rutene hennar blir med) og klient_data,
+# og leverer modulen og lastaren med std/wasm_serve.no. W8 (pwa): òg service workeren,
+# manifestet, ikona og offline-sida (std/wasm_pwa.no) etter app.pwa_konfig().
+funksjon serve_modul(app: tekst, ut: tekst, prefiks: tekst, pwa: bool) -> tekst {
+    la s = "# GENERERT av tools/nc_wasm.no. Ikkje rediger og ikkje commit (ligg under build/).\n"
+    s = s + "# Inngang for `nc serve`: appen " + app + " + WASM-klienten i " + ut + ".\n\n"
+    s = s + "bruk std.web som web\n"
+    s = s + "bruk std.wasm_serve som ws\n"
+    hvis pwa { s = s + "bruk std.wasm_pwa som pwa\n" }
+    s = s + "bruk " + modulnamn(app) + " som app\n"
+    s = s + "bruk " + modulnamn(ut + "/klient_data.no") + " som klient\n\n"
+    s = s + "funksjon _nc_wasm_modul(ctx: ordbok_tekst) -> ordbok_tekst {\n"
+    s = s + "    web.route(" + _no_streng("GET " + prefiks + "app.wasm") + ")\n"
+    s = s + "    returner ws.modul_svar(ctx, klient.wasm(), klient.wasm_versjon())\n}\n\n"
+    s = s + "funksjon _nc_wasm_lastar(ctx: ordbok_tekst) -> ordbok_tekst {\n"
+    s = s + "    web.route(" + _no_streng("GET " + prefiks + "nc.js") + ")\n"
+    s = s + "    returner ws.lastar_svar(ctx, klient.lastar(), klient.lastar_versjon())\n}\n\n"
+    hvis pwa { s = s + pwa_ruter(prefiks) }
+    s = s + "funksjon start() -> heltall {\n    returner app.start()\n}\n"
+    returner s
+}
+
+# W8: rutene til service workeren og PWA-ressursane i serve-inngangen.
+funksjon _pwa_rute(namn: tekst, rute: tekst, kropp: tekst) -> tekst {
+    returner "funksjon " + namn + "(ctx: ordbok_tekst) -> ordbok_tekst {\n    web.route(" + _no_streng(rute) + ")\n    returner " + kropp + "\n}\n\n"
+}
+
+funksjon pwa_ruter(prefiks: tekst) -> tekst {
+    la s = "# W8: byggversjonane (klient_data) til std/wasm_pwa.no.\n"
+    s = s + "funksjon _nc_pwa_info() -> ordbok {\n"
+    s = s + "    returner {\"klient_v\": klient.wasm_versjon(), \"lastar\": klient.lastar(), \"sw_v\": klient.sw_versjon(), \"sw_lastar\": klient.sw_lastar(), \"prefiks\": klient.prefiks()}\n}\n\n"
+    s = s + _pwa_rute("_nc_pwa_sw", "GET /sw.js", "pwa.sw_svar(app.pwa_konfig(), _nc_pwa_info())")
+    s = s + _pwa_rute("_nc_pwa_sw_wasm", "GET " + prefiks + "sw.wasm", "ws.modul_svar(ctx, klient.sw_wasm(), klient.sw_versjon())")
+    s = s + _pwa_rute("_nc_pwa_manifest", "GET /manifest.webmanifest", "pwa.manifest_svar(app.pwa_konfig())")
+    s = s + _pwa_rute("_nc_pwa_ikon_192", "GET /_nc/ikon-192.png", "pwa.ikon_svar(ctx, app.pwa_konfig(), \"192\")")
+    s = s + _pwa_rute("_nc_pwa_ikon_512", "GET /_nc/ikon-512.png", "pwa.ikon_svar(ctx, app.pwa_konfig(), \"512\")")
+    s = s + _pwa_rute("_nc_pwa_ikon_maskable", "GET /_nc/ikon-maskable.png", "pwa.ikon_svar(ctx, app.pwa_konfig(), \"maskable\")")
+    s = s + _pwa_rute("_nc_pwa_offline", "GET /_nc/offline", "pwa.offline_svar(app.pwa_konfig())")
+    returner s
+}
+
+funksjon _rot() -> tekst {
+    la r = miljo_hent("NORSCODE_ROOT")
+    hvis r == "" { r = tekst(builtin.system_info()["cwd"]) }
+    returner r
+}
+
+funksjon _abs(rot: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner rot + "/" + sti
+}
+
+# `nc compile kjelde -o ut` i ein barneprosess med eksplisitt miljø (ikkje arva CMD/FILE frå
+# ein CI-adapter). Gjev sann når NCB-en vart skriven.
+funksjon nc_compile(rot: tekst, kjelde: tekst, utfil: tekst) -> bool {
+    la miljø = {
+        "PATH": "/usr/bin:/bin", "HOME": miljo_hent("HOME"), "TMPDIR": "/tmp", "NORSCODE_ROOT": rot,
+        "NORSCODE_CMD": "compile", "NORSCODE_FILE": kjelde, "NORSCODE_OUTPUT": utfil,
+        "NORSCODE_VM_FAST": "1", "NORSCODE_MODULE": "", "NORSCODE_VM_CI_COMMAND": "", "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "", "NORSCODE_RUN_DIRECT_HOST": "0", "NORSCODE_HOST_NCB_FILE": "", "NORSCODE_NCB_FILE": ""
+    }
+    la req = process_abi.request(tekst(builtin.system_info()["executable"]), [], rot, "", 300000, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, miljø)
+    la res = builtin.process_spawn_argv(req)
+    la ec = -1
+    hvis finnes_nøkkel(res, "exit_code") { ec = heltall_fra_tekst(tekst(res["exit_code"])) }
+    hvis ec != 0 eller ikkje builtin.fil_finnes(utfil) {
+        skriv("nc_wasm: kompilering av " + kjelde + " feila (exit " + tekst(ec) + "):\n" + tekst(res["stdout"]) + tekst(res["stderr"]) + "\n")
+        returner usann
+    }
+    returner sann
+}
+
+# Kompiler ein drivar som importerer std.wasm_rt. Gjev rt-NCB-en, eller {} ved feil.
+funksjon kompiler_rt(rot: tekst, ut: tekst) -> ordbok {
+    la mappe = _abs(rot, ut) + "/rt"
+    builtin.mkdir_p(mappe)
+    fil_skriv(mappe + "/rt_drivar.no", "# GENERERT av tools/nc_wasm.no\nbruk std.wasm_rt som rt\n\nfunksjon start() -> heltall {\n    returner 0\n}\n")
+    hvis ikkje nc_compile(rot, mappe + "/rt_drivar.no", mappe + "/rt.ncb.json") { returner {} }
+    returner builtin.json_parse_raw(fil_les(mappe + "/rt.ncb.json"))
+}
+
+funksjon start() -> heltall {
+    la kjelde = miljo_hent("NC_WASM_KJELDE")
+    la ncb_sti = miljo_hent("NC_WASM_NCB")
+    la ut = miljo_hent("NC_WASM_UT")
+    hvis (ncb_sti == "" og kjelde == "") eller ut == "" {
+        skriv("nc_wasm: set NC_WASM_KJELDE (eller NC_WASM_NCB) og NC_WASM_UT\n")
+        returner 2
+    }
+    hvis ikkje builtin.starts_with(ut, "build/wasm/") og ikkje builtin.contains(ut, "/build/wasm/") {
+        skriv("nc_wasm: NC_WASM_UT må liggje under build/wasm/ (generert, aldri committa): " + ut + "\n")
+        returner 2
+    }
+    la app = miljo_hent("NC_WASM_APP")
+    hvis app != "" og (builtin.starts_with(app, "/") eller builtin.starts_with(ut, "/")) {
+        skriv("nc_wasm: NC_WASM_APP og NC_WASM_UT må vere relative til rota når serve.no skal lagast\n")
+        returner 2
+    }
+    la prefiks = miljo_hent("NC_WASM_PREFIKS")
+    hvis prefiks == "" { prefiks = "/_nc/" }
+    la testbygg = miljo_hent("NC_WASM_TESTBYGG") == "1"
+    la rot = _rot()
+    builtin.mkdir_p(_abs(rot, ut))
+
+    hvis kjelde != "" {
+        ncb_sti = _abs(rot, ut) + "/klient.ncb.json"
+        hvis ikkje nc_compile(rot, _abs(rot, kjelde), ncb_sti) { returner 1 }
+    }
+    la ncb = builtin.json_parse_raw(fil_les(ncb_sti))
+    la rt_ncb = kompiler_rt(rot, ut)
+    hvis lengde(rt_ncb) == 0 { returner 1 }
+
+    # W4: cache av lowra rt-funksjonar
+    la cache_på = miljo_hent("NC_WASM_RT_CACHE") != "0"
+    la cache_mappe = miljo_hent("NC_WASM_RT_CACHE_MAPPE")
+    hvis cache_mappe == "" { cache_mappe = "build/wasm/rt_cache" }
+    hvis ikkje builtin.starts_with(cache_mappe, "build/wasm/") og ikkje builtin.contains(cache_mappe, "/build/wasm/") {
+        skriv("nc_wasm: NC_WASM_RT_CACHE_MAPPE må liggje under build/wasm/: " + cache_mappe + "\n")
+        returner 2
+    }
+    la opsjonar = {"testbygg": testbygg}
+    # Utan cache blir kroppane emitterte direkte (same veg som før W4), så ein feil i
+    # lenkinga av flyttbare kroppar syner som ein skilnad mot bygget med cache. Med cache
+    # finn og les lowringa fila (lowring.rt_cache_sti) først når ein funksjon kan cachast.
+    hvis cache_på {
+        opsjonar["rt_cache_mappe"] = cache_mappe
+        opsjonar["rt_cache_rot"] = rot
+    }
+    la bygd = lowr(ncb, rt_ncb, opsjonar, cache_på, rot, cache_mappe)
+    hvis ikkje bygd["ok"] { returner 1 }
+    la res = bygd["res"]
+    la bytar = bygd["bytar"]
+    la vi = bygd["info"]
+    # W8: sida kan ikkje importere vertsfunksjonane til service workeren (dei finst berre i sw.js)
+    la ii = 0
+    mens ii < lengde(vi["importar"]) {
+        hvis vert.er_i(vert.sw_funksjonar(), tekst(vi["importar"][ii])) {
+            skriv("nc_wasm: klientmodulen importerer " + tekst(vi["importar"][ii]) + ", som berre finst i service workeren (std/wasm_sw.no)\n")
+            returner 1
+        }
+        ii = ii + 1
+    }
+    la v = lowring.versjon(bytar)
+    la l = js.bygg_lastar(res["importar"], prefiks + "app.wasm?v=" + v, res["har_init"])
+    la lastar = l["js"]
+    la lastar_v = builtin.slice(builtin.sha256(lastar), 0, 12)
+
+    # W8: service workeren (NC_WASM_SW=1): std/wasm_sw.no (eller NC_WASM_SW_KJELDE) → sw.wasm og
+    # den genererte SW-lastaren. Aldri testbygg (ein service worker har ingen DOM).
+    la sw = {}
+    hvis miljo_hent("NC_WASM_SW") == "1" {
+        sw = bygg_sw(rot, ut, rt_ncb, cache_på, cache_mappe, prefiks)
+        hvis lengde(sw) == 0 { returner 1 }
+    }
+
+    la wasm_fil = _abs(rot, ut) + "/app.wasm"
+    builtin.fil_skriv_binær(wasm_fil, bytar)
+    fil_skriv(_abs(rot, ut) + "/nc.js", lastar)
+    # fil_les er byte-eksakt: rå-teksten er bytane til modulen
+    la data = klient_data_modul(fil_les(wasm_fil), v, lastar, lastar_v, lengde(bytar), prefiks)
+    hvis lengde(sw) > 0 { data = data + sw_data_funksjonar(sw) }
+    fil_skriv(_abs(rot, ut) + "/klient_data.no", data)
+    hvis app != "" {
+        fil_skriv(_abs(rot, ut) + "/serve.no", serve_modul(app, ut, prefiks, lengde(sw) > 0))
+    }
+    skriv("WASM: app.wasm " + tekst(lengde(bytar)) + " byte, lastar " + tekst(lengde(lastar)) + " byte, v=" + v +
+          " importar=" + builtin.join(vi["importar"], ",") + " eksportar=" + builtin.join(vi["eksportar"], ",") +
+          " atom=" + builtin.join(res["atom"], ",") + " rt=" + builtin.join(res["rt"], ",") +
+          " rt_cache=" + tekst(res["rt_treff"]) + "/" + tekst(res["rt_treff"] + res["rt_bomm"]) +
+          " rt_analyse=" + tekst(res["rt_analyse_treff"]) + "\n")
+    hvis lengde(sw) > 0 {
+        skriv("SW: sw.wasm " + tekst(sw["storleik"]) + " byte, sw-lastar " + tekst(lengde(sw["lastar"])) + " byte, v=" + sw["v"] +
+              " importar=" + builtin.join(sw["info"]["importar"], ",") + " eksportar=" + builtin.join(sw["info"]["eksportar"], ",") +
+              " rt=" + builtin.join(sw["res"]["rt"], ",") + "\n")
+    }
+    returner 0
+}
+
+# Lowr og valider ein NCB med runtime-biblioteket lenka inn, og lagre nye rt-funksjonar i
+# cachen. Gjev {"ok", "res", "bytar", "info"} (info frå validatoren: importar og eksportar).
+funksjon lowr(ncb: ordbok, rt_ncb: ordbok, opsjonar: ordbok, cache_på: bool, rot: tekst, cache_mappe: tekst) -> ordbok {
+    la res = lowring.kompiler(lowring.lenk_rt(ncb, rt_ncb), opsjonar)
+    hvis ikkje res["ok"] {
+        skriv(lowring.feilrapport(res))
+        returner {"ok": usann}
+    }
+    hvis cache_på og lengde(res["rt_ny"]) > 0 og res["rt_cache_fil"] != "" {
+        # Lowringa las fila då ho starta, så eit bygg tidlegare i same køyring (klienten før
+        # workeren) er med
+        la cache = res["rt_cache"]
+        la nye = nøkler(res["rt_ny"])
+        la ni = 0
+        mens ni < lengde(nye) {
+            cache[nye[ni]] = res["rt_ny"][nye[ni]]
+            ni = ni + 1
+        }
+        builtin.mkdir_p(_abs(rot, cache_mappe))
+        fil_skriv(res["rt_cache_fil"], builtin.json_stringify(cache))
+    }
+    la bytar = res["bytar"]
+    la sjekk = les.valider(bytar)
+    hvis ikkje sjekk["ok"] {
+        skriv("nc_wasm: intern feil, validatoren avviste modulen: " + sjekk["feil"] + "\n")
+        returner {"ok": usann}
+    }
+    returner {"ok": sann, "res": res, "bytar": bytar, "info": sjekk["info"]}
+}
+
+# W8: bygg service workeren. Kjelda er NC_WASM_SW_KJELDE, elles ein generert drivar som
+# startar std/wasm_sw.no. Modulen kan berre importere vertsfunksjonane til workeren
+# (std.wasm_vert.sw_tillatne). Skriv sw.wasm og sw_lastar.js (innsyn: sw.js er konfigurasjonen
+# frå tenaren + denne lastaren). Gjev {"v", "bytar_rå", "lastar", "storleik", "res", "info"}
+# eller {} ved feil.
+funksjon bygg_sw(rot: tekst, ut: tekst, rt_ncb: ordbok, cache_på: bool, cache_mappe: tekst, prefiks: tekst) -> ordbok {
+    la mappe = _abs(rot, ut) + "/sw"
+    builtin.mkdir_p(mappe)
+    la kjelde = miljo_hent("NC_WASM_SW_KJELDE")
+    hvis kjelde == "" {
+        kjelde = mappe + "/sw_drivar.no"
+        fil_skriv(kjelde, "# GENERERT av tools/nc_wasm.no (NC_WASM_SW=1): service workeren i std/wasm_sw.no\nbruk std.wasm_sw som sw\n\nfunksjon start() -> heltall {\n    returner sw.start()\n}\n")
+    } ellers {
+        kjelde = _abs(rot, kjelde)
+    }
+    hvis ikkje nc_compile(rot, kjelde, mappe + "/sw.ncb.json") { returner {} }
+    la opsjonar = {"testbygg": usann}
+    hvis cache_på {
+        opsjonar["rt_cache_mappe"] = cache_mappe
+        opsjonar["rt_cache_rot"] = rot
+    }
+    la bygd = lowr(builtin.json_parse_raw(fil_les(mappe + "/sw.ncb.json")), rt_ncb, opsjonar, cache_på, rot, cache_mappe)
+    hvis ikkje bygd["ok"] { returner {} }
+    la imp = bygd["info"]["importar"]
+    la tillatne = vert.sw_tillatne()
+    la i = 0
+    mens i < lengde(imp) {
+        hvis ikkje vert.er_i(tillatne, tekst(imp[i])) {
+            skriv("nc_wasm: service workeren importerer " + tekst(imp[i]) + ", som ikkje finst i ein service worker (tillatne: " + builtin.join(tillatne, ", ") + ")\n")
+            returner {}
+        }
+        i = i + 1
+    }
+    la bytar = bygd["bytar"]
+    la v = lowring.versjon(bytar)
+    la lastar = js.bygg_sw_lastar(bygd["res"]["importar"], prefiks + "sw.wasm?v=" + v)["js"]
+    la fil = _abs(rot, ut) + "/sw.wasm"
+    builtin.fil_skriv_binær(fil, bytar)
+    fil_skriv(_abs(rot, ut) + "/sw_lastar.js", lastar)
+    returner {"v": v, "bytar_rå": fil_les(fil), "lastar": lastar, "storleik": lengde(bytar), "res": bygd["res"], "info": bygd["info"]}
+}
+
+# W8: funksjonane klient_data får når service workeren er bygd.
+funksjon sw_data_funksjonar(sw: ordbok) -> tekst {
+    la ut = "\n# W8: service workeren (std/wasm_sw.no) og den genererte SW-lastaren.\n\n"
+    ut = ut + "funksjon sw_wasm() -> tekst { returner " + _no_bytar(sw["bytar_rå"]) + " }\n\n"
+    ut = ut + "funksjon sw_versjon() -> tekst { returner " + _no_streng(sw["v"]) + " }\n\n"
+    ut = ut + "funksjon sw_lastar() -> tekst { returner " + _no_bytar(sw["lastar"]) + " }\n"
+    returner ut
+}

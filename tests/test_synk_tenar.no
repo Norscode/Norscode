@@ -1,0 +1,250 @@
+# A7: NSP/1-tenaren ende til ende (std/synk.no under std/apptenar.no i ein barne-nc run
+# med deploy-malen). Idempotent push, hol → 409, klient_eigar → 403, LWW per felt,
+# tombstone utan data, brukarscopa ETag og 304, sidevis pull, HLC-klemme, SSE,
+# persistens over omstart, restore → 410 og resync utan tap, epoke og sletting av
+# brukardata (også frå filene).
+bruk tests.fixtures.apptenar_hjelp som ah
+bruk tests.fixtures.synk_hjelp som sh
+bruk std.synk_kjerne som k
+bruk std.socket som socket
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool {
+    returner builtin.index_of(t, nål) >= 0
+}
+
+funksjon filtekst(data: tekst) -> tekst {
+    la ut = ""
+    hvis fil_finnes(data + "/synk.bilete") { ut = ut + fil_les(data + "/synk.bilete") }
+    la g = 0
+    mens g < 40 {
+        la j = data + "/synk." + tekst(g) + ".journal"
+        hvis fil_finnes(j) { ut = ut + fil_les(j) }
+        g = g + 1
+    }
+    returner ut
+}
+
+funksjon start() -> heltall {
+    la data = ah.ny_datamappe("synk")
+    la app = sh.start_tenar(data, {"SYNK_SJEKKPUNKT_BYTE": "3000"})
+    la port = app["port"]
+    la no = builtin.tid_ms()
+
+    # ── hallo ──
+    la h1 = sh.hallo(port, "t-u1")
+    sh.krev("hallo u1", h1, 200)
+    la csrf1 = h1["json"]["csrf"]
+    la epoke = h1["json"]["epoke"]
+    assert_eq(lengde(csrf1), 128)
+    la h2 = sh.hallo(port, "t-u2")
+    la csrf2 = h2["json"]["csrf"]
+    assert(h1["json"]["brukar"] != h2["json"]["brukar"])
+
+    # ── Push og idempotens ──
+    la ops1 = [
+        sh.op_put(1, "oppg", "a1", sh.hlc(no, 0, "k1"), "{\"tittel\":\"Kjøp mjølk | og brød\",\"ferdig\":false}"),
+        sh.op_put(2, "oppg", "a2", sh.hlc(no, 1, "k1"), "{\"tittel\":\"Tombstone-tittel\"}"),
+        sh.op_put(3, "oppg", "a3", sh.hlc(no, 2, "k1"), "{\"tittel\":\"Tredje\",\"pri\":2}")
+    ]
+    la p1 = sh.push(port, "t-u1", csrf1, epoke, "k1", 0, ops1)
+    sh.krev("push 1", p1, 200)
+    assert_eq(p1["json"]["siste_seq"], 3)
+    assert_eq(p1["json"]["res"][2]["v"], 3)
+    la retry = sh.push(port, "t-u1", csrf1, epoke, "k1", 3, ops1)
+    sh.krev("retry", retry, 200)
+    assert(retry["json"]["res"][0]["dup"])
+    assert(retry["json"]["res"][2]["dup"])
+    assert_eq(retry["json"]["v"], 3)
+    skriv("push: 3 op-ar gav v=1..3; same batch på nytt gav dup på alle og ingen nye versjonar\n")
+
+    # ── Hol → 409, og så vidare utan evig 409 ──
+    la hol = sh.push(port, "t-u1", csrf1, epoke, "k1", 3, [sh.op_put(6, "oppg", "a1", sh.hlc(no, 9, "k1"), "{\"pri\":1}")])
+    sh.krev_feil("hol", hol, 409, "hol")
+    assert_eq(hol["json"]["siste_seq"], 3)
+    la etter_hol = sh.push(port, "t-u1", csrf1, epoke, "k1", 3, [sh.op_put(4, "oppg", "a1", sh.hlc(no, 3, "k1"), "{\"pri\":1}")])
+    sh.krev("etter hol", etter_hol, 200)
+    assert_eq(etter_hol["json"]["siste_seq"], 4)
+
+    # ── Klient-id eigd av ein annan brukar → 403 ──
+    sh.krev_feil("klient_eigar", sh.push(port, "t-u2", csrf2, epoke, "k1", 0, [sh.op_put(1, "oppg", "x", sh.hlc(no, 0, "k1"), "{\"pri\":1}")]), 403, "klient_eigar")
+    skriv("hol gav 409 med siste_seq=3, og neste seq gav 200; klient-id-en til u1 gav 403 klient_eigar for u2\n")
+
+    # ── LWW per felt frå ein annan klient (k2): eldre tittel tapar, nyare ferdig vinn ──
+    la lww = sh.push(port, "t-u1", csrf1, epoke, "k2", 0, [
+        sh.op_put(1, "oppg", "a1", sh.hlc(no - 1000, 0, "k2"), "{\"tittel\":\"eldre\"}"),
+        sh.op_put(2, "oppg", "a1", sh.hlc(no + 1000, 0, "k2"), "{\"ferdig\":true}")
+    ])
+    sh.krev("lww", lww, 200)
+    assert(ikkje lww["json"]["res"][0]["endra"])
+    la pa = sh.pull(port, "t-u1", 0, {})
+    sh.krev("pull u1", pa, 200)
+    la a1 = sh.endring(pa, "oppg", "a1")
+    assert_eq(a1["dok"]["tittel"], "Kjøp mjølk | og brød")
+    assert_eq(a1["dok"]["ferdig"], sann)
+    assert_eq(a1["dok"]["pri"], 1)
+    assert_eq(lengde(pa["json"]["endringar"]), 3)
+    skriv("LWW per felt: eldre tittel frå k2 tapte, nyare ferdig vann; UTF-8 og «|» uskadde\n")
+
+    # ── ETag per brukar og 304 ──
+    la etag = pa["etag"]
+    assert(etag != "")
+    sh.krev("304 same brukar", sh.pull(port, "t-u1", 0, {"If-None-Match": etag}), 304)
+    la pb = sh.pull(port, "t-u2", 0, {"If-None-Match": etag})
+    sh.krev("u2 med ETag-en til u1", pb, 200)
+    assert_eq(lengde(pb["json"]["endringar"]), 0)
+    # Sidevis
+    la side = ah.kall(port, "GET", "/_synk/pull?sidan=0&grense=2", sh.cookie("t-u1"), "")
+    la sj = builtin.json_parse_raw(side["body"])
+    assert(sj["meir"])
+    assert_eq(lengde(sj["endringar"]), 2)
+    la side2 = builtin.json_parse_raw(ah.kall(port, "GET", "/_synk/pull?sidan=" + tekst(sj["v"]) + "&grense=2", sh.cookie("t-u1"), "")["body"])
+    assert(ikkje side2["meir"])
+    assert_eq(lengde(side2["endringar"]), 1)
+    skriv("pull: 304 med eigen ETag, 200 og ingen data for u2 med ETag-en til u1, to sider med grense=2\n")
+
+    # ── Tombstone utan data ──
+    la v_før = pa["json"]["v"]
+    la d = sh.push(port, "t-u1", csrf1, epoke, "k1", 4, [sh.op_del(5, "oppg", "a2", sh.hlc(no, 20, "k1"))])
+    sh.krev("del", d, 200)
+    la pd = sh.pull(port, "t-u1", v_før, {})
+    la a2 = sh.endring(pd, "oppg", "a2")
+    assert(a2 != null)
+    assert(a2["dok"] == null)
+    assert(ikkje har_nokkel(a2, "hlc"))
+    sh.krev("sjekkpunkt", {"status": ah.kall(port, "POST", "/test/sjekkpunkt", {}, "")["status"], "r": {"body": ""}}, 200)
+    assert(ikkje inneheld(filtekst(data), "Tombstone-tittel"))
+    assert(inneheld(fil_les(data + "/synk.bilete"), "\"id\":\"a2\",\"e\":\"u1\""))
+    skriv("tombstone: pull gav dok:null utan hlc, og tittelen finst ikkje lenger i filene\n")
+
+    # ── HLC: klemme av framtid, og klient med treg klokke som har sett ein nyare verdi ──
+    la fram = sh.push(port, "t-u1", csrf1, epoke, "k1", 5, [sh.op_put(6, "oppg", "a3", sh.hlc(no + 600000, 0, "k1"), "{\"pri\":9}")])
+    sh.krev("framtid", fram, 200)
+    la tenar_hlc = fram["json"]["hlc"]
+    la ms = k.hlc_les(tenar_hlc)["ms"]
+    assert(ms <= builtin.tid_ms() + 60000)
+    assert(ms >= no + 50000)
+    la treg = k.hlc_send(k.hlc_motta("", tenar_hlc, no - 300000, "treg"), no - 300000, "treg")
+    la tp = sh.push(port, "t-u1", csrf1, epoke, "treg", 0, [sh.op_put(1, "oppg", "a3", treg, "{\"pri\":4}")])
+    sh.krev("treg klokke", tp, 200)
+    assert(ikkje har_nokkel(tp["json"]["res"][0], "endra"))
+    la a3 = sh.endring(sh.pull(port, "t-u1", 0, {}), "oppg", "a3")
+    assert_eq(a3["dok"]["pri"], 4)
+    skriv("HLC: 10 min fram vart klemt til no + 60 s; klient 5 min bak vann etter å ha motteke tenar-HLC-en\n")
+
+    # ── SSE: u1 får hendinga, u2 ikkje ──
+    la e1 = ah.koble(port)
+    ah.send(e1, ah.førespurnad("GET", "/_synk/hendingar", sh.cookie("t-u1"), "", sann))
+    la s1 = ah.les_til(e1, "", "event: v\ndata: ", 5000)
+    assert(inneheld(s1["data"], "text/event-stream"))
+    la e2 = ah.koble(port)
+    ah.send(e2, ah.førespurnad("GET", "/_synk/hendingar", sh.cookie("t-u2"), "", sann))
+    la s2 = ah.les_til(e2, "", "event: v\ndata: 0", 5000)
+    assert(inneheld(s2["data"], "data: 0"))
+    la ny = sh.push(port, "t-u1", csrf1, epoke, "k1", 6, [sh.op_put(7, "oppg", "a4", sh.hlc(no, 30, "k1"), "{\"tittel\":\"Fjerde\"}")])
+    sh.krev("push under SSE", ny, 200)
+    la venta = "data: " + tekst(ny["json"]["v"]) + "\n"
+    la s1b = ah.les_til(e1, s1["data"], venta, 5000)
+    assert(inneheld(s1b["data"], venta))
+    la s2b = ah.les_til(e2, s2["data"], venta, 600)
+    assert(ikkje inneheld(s2b["data"], venta))
+    socket.native_lukk(e1)
+    socket.native_lukk(e2)
+    skriv("SSE: push frå u1 gav hendinga v til straumen til u1 og ikkje til u2\n")
+
+    # ── Backup, meir skriving, stopp og restore → 410, resync utan tap ──
+    ah.kall(port, "POST", "/test/sjekkpunkt", {}, "")
+    la st = builtin.json_parse_raw(ah.kall(port, "GET", "/test/status", {}, "")["body"])
+    la gen = st["gen"]
+    la backup_bilete = fil_les(data + "/synk.bilete")
+    la p5 = sh.push(port, "t-u1", csrf1, epoke, "k1", 7, [
+        sh.op_put(8, "oppg", "a5", sh.hlc(no, 40, "k1"), "{\"tittel\":\"Etter backup\"}"),
+        sh.op_put(9, "oppg", "a1", sh.hlc(no, 41, "k1"), "{\"notat\":\"etter backup\"}")
+    ])
+    sh.krev("etter backup", p5, 200)
+    assert_eq(p5["json"]["siste_seq"], 9)
+    # Krasj (SIGTERM, ingen sjekkpunkt) midt i ei journalskriving: ei avbroten linje sist
+    ah.stopp(app["h"])
+    la journal = data + "/synk." + tekst(gen) + ".journal"
+    assert(inneheld(fil_les(journal), "Etter backup"))
+    # Ei fullstendig linje med feil lengd (øydelagd) og så ei avbroten linje
+    builtin.fil_append(journal, "97\t{\"t\":\"m\",\"hw\":999,\"hlc\":\"\",\"a9\":1}\n97\t{\"t\":\"d\",\"k\":\"oppg|a9|u1\"")
+    # Omstart: journalen blir spelt av, halen blir ignorert
+    la app2 = sh.start_tenar(data, {})
+    la port2 = app2["port"]
+    la pr = sh.pull(port2, "t-u1", 0, {})
+    assert_eq(sh.endring(pr, "oppg", "a5")["dok"]["tittel"], "Etter backup")
+    assert_eq(sh.endring(pr, "oppg", "a1")["dok"]["notat"], "etter backup")
+    assert(sh.endring(pr, "oppg", "a9") == null)
+    assert(pr["json"]["v"] < 999)
+    assert_eq(pr["json"]["epoke"], epoke)
+    assert(ikkje inneheld(fil_les(journal), "a9"))
+    # Vidare skriving etter krasjen hamnar etter den gode delen av journalen
+    sh.krev("etter krasj", sh.push(port2, "t-u1", sh.hallo(port2, "t-u1")["json"]["csrf"], epoke, "k1", 9, [sh.op_put(10, "oppg", "a7", sh.hlc(no, 45, "k1"), "{\"tittel\":\"sjuande\"}")]), 200)
+    ah.kall(port2, "POST", "/test/stopp", {}, "")
+    assert_eq(ah.vent_slutt(app2["h"], 15000), 0)
+    ah.stopp(app2["h"])
+    la app2b = sh.start_tenar(data, {})
+    assert_eq(sh.endring(sh.pull(app2b["port"], "t-u1", 0, {}), "oppg", "a7")["dok"]["tittel"], "sjuande")
+    ah.kall(app2b["port"], "POST", "/test/stopp", {}, "")
+    ah.vent_slutt(app2b["h"], 15000)
+    ah.stopp(app2b["h"])
+    skriv("persistens: etter krasj vart journalen spelt av og den avbrotne halen kasta; etter stopp og omstart var alt der\n")
+    # Restore: biletet frå backupen, og ingen journal etter han
+    fil_skriv(data + "/synk.bilete", backup_bilete)
+    la g = gen
+    mens g < gen + 10 {
+        hvis fil_finnes(data + "/synk." + tekst(g) + ".journal") { fil_slett(data + "/synk." + tekst(g) + ".journal") }
+        g = g + 1
+    }
+    la app3 = sh.start_tenar(data, {})
+    la port3 = app3["port"]
+    la h3 = sh.hallo(port3, "t-u1")
+    la csrf3 = h3["json"]["csrf"]
+    assert(sh.endring(sh.pull(port3, "t-u1", 0, {}), "oppg", "a5") == null)
+    # Klienten har kvittering for seq 9, tenaren kjenner berre 7 → 410
+    la r410 = sh.push(port3, "t-u1", csrf3, epoke, "k1", 9, [sh.op_put(10, "oppg", "a6", sh.hlc(no, 50, "k1"), "{\"tittel\":\"sjette\"}")])
+    sh.krev_feil("restore", r410, 410, "resync")
+    # Resync: ny klient-id, seq frå 1, heile køa (alle lokale dokument) på nytt
+    la rs = sh.push(port3, "t-u1", csrf3, epoke, "k1-r", 0, [
+        sh.op_put(1, "oppg", "a5", sh.hlc(no, 40, "k1"), "{\"tittel\":\"Etter backup\"}"),
+        sh.op_put(2, "oppg", "a1", sh.hlc(no, 41, "k1"), "{\"notat\":\"etter backup\"}"),
+        sh.op_put(3, "oppg", "a6", sh.hlc(no, 50, "k1"), "{\"tittel\":\"sjette\"}")
+    ])
+    sh.krev("resync", rs, 200)
+    la p4 = sh.pull(port3, "t-u1", 0, {})
+    assert_eq(sh.endring(p4, "oppg", "a5")["dok"]["tittel"], "Etter backup")
+    assert_eq(sh.endring(p4, "oppg", "a1")["dok"]["notat"], "etter backup")
+    assert_eq(sh.endring(p4, "oppg", "a6")["dok"]["tittel"], "sjette")
+    sh.krev("etter resync", sh.push(port3, "t-u1", csrf3, epoke, "k1-r", 3, [sh.op_put(4, "oppg", "a6", sh.hlc(no, 60, "k1"), "{\"pri\":3}")]), 200)
+    skriv("restore: kvittert over tenaren sin seq gav 410; resync med ny klient-id gav alt att og ingen 409\n")
+
+    # ── Epoke ──
+    sh.krev_feil("feil epoke", sh.push(port3, "t-u1", csrf3, "e-feil", "k1-r", 4, []), 410, "resync")
+    la ny_epoke = ah.kall(port3, "POST", "/test/ny_epoke", {}, "")["body"]
+    assert(ny_epoke != epoke)
+    sh.krev_feil("gammal epoke", sh.push(port3, "t-u1", csrf3, epoke, "k1-r", 4, []), 410, "resync")
+    assert_eq(sh.hallo(port3, "t-u1")["json"]["epoke"], ny_epoke)
+    la pe = sh.pull(port3, "t-u1", 0, {"If-None-Match": p4["etag"]})
+    sh.krev("pull etter ny epoke", pe, 200)
+    skriv("epoke: feil og gammal epoke gav 410; ny ETag etter ny epoke\n")
+
+    # ── Sletting av brukardata (også frå filene) ──
+    la u2 = sh.push(port3, "t-u2", sh.hallo(port3, "t-u2")["json"]["csrf"], ny_epoke, "k-u2", 0, [sh.op_put(1, "merke", "m1", sh.hlc(no, 0, "k-u2"), "{\"namn\":\"U2-merke\"}")])
+    sh.krev("u2 push", u2, 200)
+    la n = heltall_fra_tekst(ah.kall(port3, "POST", "/test/slett/u1", {}, "")["body"])
+    assert(n >= 5)
+    assert_eq(lengde(sh.pull(port3, "t-u1", 0, {})["json"]["endringar"]), 0)
+    assert_eq(lengde(sh.pull(port3, "t-u2", 0, {})["json"]["endringar"]), 1)
+    la filer = filtekst(data)
+    assert(ikkje inneheld(filer, "Etter backup"))
+    assert(ikkje inneheld(filer, "\"e\":\"u1\""))
+    assert(inneheld(filer, "U2-merke"))
+    la st3 = builtin.json_parse_raw(ah.kall(port3, "GET", "/test/status", {}, "")["body"])
+    assert_eq(st3["klientar"], 1)
+    skriv("slett_brukar: " + tekst(n) + " dokument og alle klientar til u1 borte frå minnet og filene; u2 urørt\n")
+    ah.kall(port3, "POST", "/test/stopp", {}, "")
+    assert_eq(ah.vent_slutt(app3["h"], 15000), 0)
+    ah.stopp(app3["h"])
+    skriv("test_synk_tenar OK\n")
+    returner 0
+}

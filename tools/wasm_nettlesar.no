@@ -1,0 +1,340 @@
+# tools/wasm_nettlesar.no — nettlesar-testbenk for Norscode-klientmodular i WebAssembly (W5).
+#
+# Byggjer ein klient med tools/nc_wasm.no, startar `nc serve`, køyrer sida i headless Chrome
+# (flagga frå planen §4.4, fersk profil under build/wasm-nettlesar/) og sjekkar resultatet.
+# All logikk ligg i std/wasm_nettlesar.no; dette er CLI-en.
+#
+#   ./bin/nc run tools/wasm_nettlesar.no                        # royk: teljar-demoen
+#   NC_NETTLESAR_MODUS=korpus NC_NETTLESAR_KJELDE=tests/wasm_korpus/fak.no,tests/wasm_korpus/rt_json.no \
+#       ./bin/nc run tools/wasm_nettlesar.no                    # paritet mot «#=»-fasiten, Chrome og jsc
+#   NC_NETTLESAR_MODUS=maal ./bin/nc run tools/wasm_nettlesar.no  # app-kjensle i skjema-demoen
+#   NC_NETTLESAR_MODUS=offline ./bin/nc run tools/wasm_nettlesar.no
+#
+# Miljø:
+#   NC_CHROME              Chrome/Chromium-binær (elles standardstiane). Finst han ikkje:
+#                          exit 2 og «fann ikkje nettlesar».
+#   NC_JSC                 jsc-binær for korpusmodusen (elles JavaScriptCore.framework på macOS;
+#                          utan jsc blir det steget SKIP)
+#   NC_NETTLESAR_MODUS     royk (standard) | korpus | maal | offline
+#   NC_NETTLESAR_KJELDE    klientkjelda (korpus: kommaliste med program med «#=»-fasit)
+#   NC_NETTLESAR_APP       serve-appen (royk/maal/offline)
+#   NC_NETTLESAR_STI       stien som blir lasta (standard «/»)
+#   NC_NETTLESAR_STI_OFFLINE  offline: stien i den andre lastinga (standard NC_NETTLESAR_STI)
+#   NC_NETTLESAR_SW        offline: «0» byggjer utan service worker (negativ kontroll)
+#   NC_NETTLESAR_KREV      tekst som må finnast i DOM-en etter lastinga (royk/offline)
+#   NC_NETTLESAR_TESTBYGG  «1»: testbygg (testkrokar og #nc-logg)
+#   NC_NETTLESAR_PORT      port for nc serve (standard 48480)
+#   NC_NETTLESAR_GONGER    maal: tal på lastingar (standard 3)
+#
+# Modusar:
+#   royk     éi lasting; DOM-en må innehalde NC_NETTLESAR_KREV, og konsollen må vere fri for
+#            «Uncaught».
+#   korpus   kvart program: bygg i testbygg, generert serve-app med /k/<namn>, Chrome-loggen i
+#            #nc-logg og (valfritt) jsc-loggen må vere lik fasiten i «#=»-linjene, utan «Uncaught».
+#   maal     app-kjensle: testklienten måler i WASM-sida sjølv med tid_ms og skriv
+#            «MÅL namn=verdi» i loggen; sidelastingstida kjem frå Chrome-netloggen. Resultatet
+#            (median over NC_NETTLESAR_GONGER lastingar) blir skrive til
+#            build/wasm-nettlesar/resultat/maal.json.
+#   offline  (W8) bygg med service workeren (NC_WASM_SW=1; NC_NETTLESAR_SW=0 slår han av), last
+#            NC_NETTLESAR_STI, stopp nc serve, og last NC_NETTLESAR_STI_OFFLINE (standard same sti)
+#            med same profil. Andre lastinga må kome frå workeren (ikkje «Page load failed») og
+#            innehalde NC_NETTLESAR_KREV. Merk: headless Chrome med virtuell tid ventar ikkje på
+#            at workeren blir installert, så den første sida må halde nettet i gang til han er
+#            klar (testbygg med puls, t.d. tests/fixtures/wasm_deltakarar_pwa_testklient.no med
+#            steg=1 og steg=3; sjå docs/WASM_KLIENT.md).
+# Etter kvar køyring er alle prosessar benken starta, stoppa (pgrep -f build/wasm-nettlesar
+# finn ingen), og exit-koden er 0 berre når alle sjekkane gjekk gjennom.
+bruk std.wasm_nettlesar som benk
+bruk std.wasm_jsc som shim
+
+funksjon miljø_eller(namn: tekst, standard: tekst) -> tekst {
+    la v = miljo_hent(namn)
+    hvis v == "" { returner standard }
+    returner v
+}
+
+funksjon ut_mappe(namn: tekst) -> tekst {
+    returner "build/wasm/nettlesar_" + namn
+}
+
+funksjon _no_streng(s: tekst) -> tekst {
+    la bs = "\\"
+    la q = "\""
+    returner q + builtin.replace(builtin.replace(s, bs, bs + bs), q, bs + q) + q
+}
+
+# Fasiten i «#= »-linjene til eit korpusprogram.
+funksjon fasit(kjelde: tekst) -> tekst {
+    la linjer = builtin.split(fil_les(benk.rot() + "/" + kjelde), "\n")
+    la ut = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = tekst(linjer[i])
+        hvis builtin.starts_with(l, "#= ") { ut = ut + builtin.slice(l, 3, lengde(l)) + "\n" }
+        ellers hvis l == "#=" { ut = ut + "\n" }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon programnamn(kjelde: tekst) -> tekst {
+    la s = kjelde
+    la p = builtin.index_of(s, "/")
+    mens p >= 0 {
+        s = builtin.slice(s, p + 1, lengde(s))
+        p = builtin.index_of(s, "/")
+    }
+    hvis builtin.ends_with(s, ".no") { s = builtin.slice(s, 0, lengde(s) - 3) }
+    returner s
+}
+
+# Serve-app for korpusmodusen: ei side per program med <pre id="nc-logg">.
+funksjon korpus_app(rot: tekst, namn: liste) -> tekst {
+    la ut = "# GENERERT av tools/wasm_nettlesar.no (korpus). Ikkje commit.\nbruk std.web som web\nbruk std.wasm_serve som ws\n"
+    la i = 0
+    mens i < lengde(namn) {
+        ut = ut + "bruk " + builtin.replace(rot, "/", ".") + "." + namn[i] + ".klient_data som k_" + namn[i] + "\n"
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(namn) {
+        la n = namn[i]
+        ut = ut + "\nfunksjon side_" + n + "(ctx: ordbok_tekst) -> ordbok_tekst {\n    web.route(" + _no_streng("GET /k/" + n) + ")\n"
+        ut = ut + "    returner ws.side(" + _no_streng("<!doctype html><html><head><meta charset=\"utf-8\"><title>" + n + "</title>" +
+            "<script type=\"module\" src=\"/_nc/" + n + "/nc.js\"></script></head><body><pre id=\"nc-logg\"></pre></body></html>") + ")\n}\n"
+        ut = ut + "\nfunksjon lastar_" + n + "(ctx: ordbok_tekst) -> ordbok_tekst {\n    web.route(" + _no_streng("GET /_nc/" + n + "/nc.js") + ")\n"
+        ut = ut + "    returner ws.lastar_svar(ctx, k_" + n + ".lastar(), k_" + n + ".lastar_versjon())\n}\n"
+        ut = ut + "\nfunksjon modul_" + n + "(ctx: ordbok_tekst) -> ordbok_tekst {\n    web.route(" + _no_streng("GET /_nc/" + n + "/app.wasm") + ")\n"
+        ut = ut + "    returner ws.modul_svar(ctx, k_" + n + ".wasm(), k_" + n + ".wasm_versjon())\n}\n"
+        i = i + 1
+    }
+    returner ut + "\nfunksjon start() -> heltall {\n    returner 0\n}\n"
+}
+
+funksjon royk(økt: ordbok, port: tekst) -> bool {
+    la kjelde = miljø_eller("NC_NETTLESAR_KJELDE", "examples/wasm_teljar/klient.no")
+    la app = miljø_eller("NC_NETTLESAR_APP", "examples/wasm_teljar/app.no")
+    la krav = miljø_eller("NC_NETTLESAR_KREV", "<p id=\"sum\">Sum 1..n = <b>0</b> (partal)</p>")
+    la sti = miljø_eller("NC_NETTLESAR_STI", "/")
+    la b = benk.bygg(kjelde, ut_mappe("royk"), miljo_hent("NC_NETTLESAR_TESTBYGG") == "1", "", app)
+    hvis ikkje b["ok"] {
+        skriv("wasm_nettlesar: bygget feila:\n" + b["ut"] + "\n")
+        returner usann
+    }
+    skriv(b["linje"] + "\n")
+    la s = benk.start_serve(økt, ut_mappe("royk") + "/serve.no", port)
+    hvis s["status"] != "kjorer" {
+        skriv("wasm_nettlesar: nc serve starta ikkje:\n" + tekst(s["ut"]) + "\n")
+        returner usann
+    }
+    la r = benk.last_side(økt, "http://127.0.0.1:" + port + sti, {"netlog": sann})
+    la ok = sann
+    hvis r["tidsavbrot"] {
+        skriv("royk: fekk ikkje </html> innan tidsgrensa\n")
+        ok = usann
+    }
+    hvis builtin.index_of(r["dom"], krav) < 0 {
+        skriv("royk: fann ikkje «" + krav + "» i DOM-en:\n" + r["dom"] + "\n")
+        ok = usann
+    }
+    hvis r["uncaught"] {
+        skriv("royk: konsollen har «Uncaught»:\n" + r["konsoll"] + "\n")
+        ok = usann
+    }
+    skriv("royk: " + sti + " lasta på " + tekst(r["ms"]) + " ms (Chrome inkludert), sidelasting " +
+          builtin.json_stringify(r["sidelasting"]) + "\n")
+    benk.skriv_resultat("royk", {"ok": ok, "ms": r["ms"], "sidelasting": r["sidelasting"]})
+    returner ok
+}
+
+funksjon korpus(økt: ordbok, port: tekst) -> bool {
+    la kjelder = builtin.split(miljø_eller("NC_NETTLESAR_KJELDE", "tests/wasm_korpus/fak.no"), ",")
+    la rot = ut_mappe("korpus")
+    la namn = []
+    la i = 0
+    mens i < lengde(kjelder) {
+        la k = builtin.trim(tekst(kjelder[i]))
+        la n = programnamn(k)
+        la b = benk.bygg(k, rot + "/" + n, sann, "/_nc/" + n + "/", "")
+        hvis ikkje b["ok"] {
+            skriv("korpus: bygget av " + k + " feila:\n" + b["ut"] + "\n")
+            returner usann
+        }
+        legg_til(namn, n)
+        i = i + 1
+    }
+    fil_skriv(benk.rot() + "/" + rot + "/app.no", korpus_app(rot, namn))
+    la s = benk.start_serve(økt, rot + "/app.no", port)
+    hvis s["status"] != "kjorer" {
+        skriv("korpus: nc serve starta ikkje:\n" + tekst(s["ut"]) + "\n")
+        returner usann
+    }
+    la jsc = benk.finn_jsc()
+    la ok = sann
+    i = 0
+    mens i < lengde(namn) {
+        la n = namn[i]
+        la f = fasit(builtin.trim(tekst(kjelder[i])))
+        la r = benk.last_side(økt, "http://127.0.0.1:" + port + "/k/" + n, {})
+        la status = "OK"
+        hvis r["logg"] != f eller r["uncaught"] {
+            status = "FEIL"
+            ok = usann
+        }
+        la js_status = "SKIP (fann ikkje jsc; set NC_JSC=<sti>)"
+        hvis jsc != "" {
+            la j = shim.jsc_køyr(jsc, rot + "/" + n)
+            js_status = "OK"
+            hvis j["logg"] != f eller j["uncaught"] {
+                js_status = "FEIL"
+                ok = usann
+                skriv(n + " (jsc):\n" + j["logg"] + "\n" + j["stderr"] + "\n")
+            }
+        }
+        skriv(n + ": Chrome " + status + ", jsc " + js_status + "\n")
+        hvis status != "OK" {
+            skriv(n + " (Chrome):\n" + r["logg"] + "\nFasit:\n" + f + "\nKonsoll:\n" + r["konsoll"] + "\n")
+        }
+        i = i + 1
+    }
+    returner ok
+}
+
+# Median av tal (som tekst eller heltall).
+funksjon median(l: liste) -> heltall {
+    la t = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(t, heltall(tekst(l[i])))
+        i = i + 1
+    }
+    # innsetjingssortering (små lister)
+    la a = 1
+    mens a < lengde(t) {
+        la x = t[a]
+        la b = a - 1
+        mens b >= 0 og t[b] > x {
+            t[b + 1] = t[b]
+            b = b - 1
+        }
+        t[b + 1] = x
+        a = a + 1
+    }
+    hvis lengde(t) == 0 { returner -1 }
+    returner t[lengde(t) / 2]
+}
+
+funksjon maal(økt: ordbok, port: tekst) -> bool {
+    la kjelde = miljø_eller("NC_NETTLESAR_KJELDE", "tests/fixtures/wasm_kjensle_testklient.no")
+    la app = miljø_eller("NC_NETTLESAR_APP", "tests/fixtures/wasm_skjema_testapp.no")
+    la sti = miljø_eller("NC_NETTLESAR_STI", "/test")
+    la gonger = heltall(miljø_eller("NC_NETTLESAR_GONGER", "3"))
+    la b = benk.bygg(kjelde, ut_mappe("maal"), sann, "", app)
+    hvis ikkje b["ok"] {
+        skriv("maal: bygget feila:\n" + b["ut"] + "\n")
+        returner usann
+    }
+    la s = benk.start_serve(økt, ut_mappe("maal") + "/serve.no", port)
+    hvis s["status"] != "kjorer" {
+        skriv("maal: nc serve starta ikkje:\n" + tekst(s["ut"]) + "\n")
+        returner usann
+    }
+    la mål = {}
+    la last = []
+    la ok = sann
+    la g = 0
+    mens g < gonger {
+        la r = benk.last_side(økt, "http://127.0.0.1:" + port + sti, {"netlog": sann})
+        hvis r["uncaught"] eller lengde(r["mål"]) == 0 {
+            skriv("maal: lasting " + tekst(g + 1) + " gav ingen MÅL-linjer eller «Uncaught»:\n" + r["logg"] + "\n" + r["konsoll"] + "\n")
+            ok = usann
+        }
+        la k = nøkler(r["mål"])
+        la i = 0
+        mens i < lengde(k) {
+            hvis ikkje finnes_nøkkel(mål, k[i]) { mål[k[i]] = [] }
+            legg_til(mål[k[i]], r["mål"][k[i]])
+            i = i + 1
+        }
+        hvis finnes_nøkkel(r["sidelasting"], "totalt_ms") { legg_til(last, r["sidelasting"]["totalt_ms"]) }
+        g = g + 1
+    }
+    la res = {"gonger": gonger, "sidelasting_ms": median(last), "sidelasting_alle": last, "wasm": b["linje"]}
+    la k2 = nøkler(mål)
+    la j = 0
+    mens j < lengde(k2) {
+        res[k2[j]] = median(mål[k2[j]])
+        skriv("MÅL " + k2[j] + " = " + tekst(median(mål[k2[j]])) + " (alle: " + builtin.join(mål[k2[j]], ", ") + ")\n")
+        j = j + 1
+    }
+    skriv("MÅL sidelasting_ms = " + tekst(median(last)) + " (alle: " + builtin.join(last, ", ") + ")\n")
+    skriv("resultat: " + benk.skriv_resultat("maal", res) + "\n")
+    returner ok
+}
+
+funksjon offline(økt: ordbok, port: tekst) -> bool {
+    la kjelde = miljø_eller("NC_NETTLESAR_KJELDE", "examples/wasm_deltakarar/klient.no")
+    la app = miljø_eller("NC_NETTLESAR_APP", "examples/wasm_deltakarar/app.no")
+    la sti = miljø_eller("NC_NETTLESAR_STI", "/")
+    la sti2 = miljø_eller("NC_NETTLESAR_STI_OFFLINE", sti)
+    la krav = miljo_hent("NC_NETTLESAR_KREV")
+    # W8: med service workeren (appen må ha pwa_konfig()); NC_NETTLESAR_SW=0 slår han av
+    la b = benk.bygg_med_sw(kjelde, ut_mappe("offline"), miljo_hent("NC_NETTLESAR_TESTBYGG") == "1", "", app, miljo_hent("NC_NETTLESAR_SW") != "0")
+    hvis ikkje b["ok"] {
+        skriv("offline: bygget feila:\n" + b["ut"] + "\n")
+        returner usann
+    }
+    la s = benk.start_serve(økt, ut_mappe("offline") + "/serve.no", port)
+    hvis s["status"] != "kjorer" {
+        skriv("offline: nc serve starta ikkje:\n" + tekst(s["ut"]) + "\n")
+        returner usann
+    }
+    la url = "http://127.0.0.1:" + port + sti
+    la r1 = benk.last_side(økt, url, {"profil": "offline", "behald_profil": sann})
+    benk.stopp_serve(økt)
+    la r2 = benk.last_side(økt, "http://127.0.0.1:" + port + sti2, {"profil": "offline", "grense_ms": 20000})
+    skriv("offline: første lasting " + tekst(lengde(r1["dom"])) + " byte DOM, andre (serve stoppa) " + tekst(lengde(r2["dom"])) + " byte\n")
+    hvis r2["side_feila"] { skriv("offline: den andre lastinga feila i Chrome (ingen service worker svara)\n") }
+    benk.skriv_resultat("offline", {"første": r1["dom"], "andre": r2["dom"]})
+    hvis krav != "" og builtin.index_of(r2["dom"], krav) < 0 {
+        skriv("offline: fann ikkje «" + krav + "» i den andre lastinga:\n" + r2["dom"] + "\n")
+        returner usann
+    }
+    returner ikkje r1["uncaught"] og ikkje r2["side_feila"]
+}
+
+funksjon start() -> heltall {
+    la modus = miljø_eller("NC_NETTLESAR_MODUS", "royk")
+    hvis modus != "royk" og modus != "korpus" og modus != "maal" og modus != "offline" {
+        skriv("wasm_nettlesar: ukjend modus «" + modus + "» (royk, korpus, maal, offline)\n")
+        returner 2
+    }
+    la chrome = benk.finn_chrome()
+    hvis chrome == "" {
+        skriv("wasm_nettlesar: fann ikkje nettlesar (Chrome/Chromium); set NC_CHROME=<sti>\n")
+        returner 2
+    }
+    skriv("wasm_nettlesar: " + modus + " med " + chrome + "\n")
+    la port = miljø_eller("NC_NETTLESAR_PORT", "48480")
+    la økt = benk.ny_økt(modus)
+    økt["chrome"] = chrome
+    la ok = usann
+    prøv {
+        hvis modus == "royk" { ok = royk(økt, port) }
+        ellers hvis modus == "korpus" { ok = korpus(økt, port) }
+        ellers hvis modus == "maal" { ok = maal(økt, port) }
+        ellers { ok = offline(økt, port) }
+    } fang (e) {
+        skriv("wasm_nettlesar: feil: " + tekst(e) + "\n")
+        ok = usann
+    }
+    la ry = benk.rydd(økt)
+    skriv("rydding: " + tekst(ry["drepne"]) + " prosessar drepne, " + tekst(ry["attverande"]) + " att\n")
+    hvis ry["attverande"] != 0 { ok = usann }
+    hvis ok {
+        skriv("wasm_nettlesar: " + modus + " OK\n")
+        returner 0
+    }
+    skriv("wasm_nettlesar: " + modus + " FEILA\n")
+    returner 1
+}

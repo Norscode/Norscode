@@ -1,0 +1,168 @@
+# W8 (WASM-sporet): service workeren i bygget og i serve-inngangen, utan nettlesar.
+#
+#   1. Bygg (tools/nc_wasm.no, NC_WASM_SW=1) av deltakar-demoen i produksjon: workeren importerer
+#      berre sw_lytt, sw_inn og sw_ut (og dei interne), eksporterer handterarane, og SW-lastaren
+#      er under taket (1792 byte); sida importerer PWA-gruppa, men ingen SW-funksjonar.
+#   2. Rutene i serve-inngangen (nc serve utan sokkel, fastmodus):
+#        /sw.js                 text/javascript, no-cache, Service-Worker-Allowed: /, CSP med
+#                               'wasm-unsafe-eval'; kroppen er `let C="<konfig>"` + sw_lastar.js
+#        /_nc/sw.wasm?v=…       application/wasm, byte-lik sw.wasm, immutable ved rett v
+#        /manifest.webmanifest  application/manifest+json, same manifest som std/wasm_pwa.no lagar
+#        /_nc/ikon-192.png?v=…  image/png, PNG-signatur, immutable ved rett v, ETag; utan v no-cache
+#        /_nc/offline           HTML med data-nc-offline, standard-CSP (utan 'wasm-unsafe-eval')
+#        /                      head-taggane (manifest, theme-color, ikon)
+#   3. Fail-closed: ein klientmodul som importerer sw_lytt, og ei SW-kjelde som brukar DOM-en,
+#      blir avviste med exit 1 og ei melding.
+bruk std.wasm_pwa som pwa
+bruk examples.wasm_deltakarar.app som app
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+bruk tests.fixtures.wasm_serve_hjelp som sh
+
+funksjon rot() -> tekst { returner "build/wasm/test_w8_serve" }
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool { returner builtin.index_of(t, nål) >= 0 }
+
+funksjon har(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Linja som byrjar med `prefiks` i utdata frå CLI-en.
+funksjon linje(ut: tekst, prefiks: tekst) -> tekst {
+    la p = builtin.index_of(ut, prefiks)
+    assert(p >= 0)
+    la l = builtin.slice(ut, p, lengde(ut))
+    la nl = builtin.index_of(l, "\n")
+    la bs = builtin.index_of(l, "\\")
+    hvis bs >= 0 og (nl < 0 eller bs < nl) { nl = bs }
+    hvis nl >= 0 { l = builtin.slice(l, 0, nl) }
+    returner l
+}
+
+# tools/nc_wasm.no utan krav om exit 0. Gjev {"exit", "ut"}.
+funksjon bygg_rå(kjelde: tekst, utmappe: tekst, sw: tekst, sw_kjelde: tekst) -> ordbok {
+    hjelp.mkdir(utmappe)
+    la rot = hjelp.root()
+    la m = hjelp.grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = rot + "/tools/nc_wasm.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_KJELDE"] = kjelde
+    m["NC_WASM_NCB"] = ""
+    m["NC_WASM_UT"] = utmappe
+    m["NC_WASM_APP"] = ""
+    m["NC_WASM_RT_CACHE"] = ""
+    m["NC_WASM_RT_CACHE_MAPPE"] = ""
+    m["NC_WASM_TESTBYGG"] = ""
+    m["NC_WASM_PREFIKS"] = ""
+    m["NC_WASM_SW"] = sw
+    m["NC_WASM_SW_KJELDE"] = sw_kjelde
+    la r = hjelp.køyr_nc(m, 300000)
+    returner {"exit": r["exit"], "ut": r["stdout"] + r["stderr"]}
+}
+
+funksjon krev_avvist(namn: tekst, r: ordbok, melding: tekst) -> heltall {
+    hvis r["exit"] != 1 eller ikkje inneheld(r["ut"], melding) {
+        skriv(namn + ": venta exit 1 og «" + melding + "», fekk exit " + tekst(r["exit"]) + ":\n" + r["ut"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon krev_header(s: ordbok, namn: tekst, venta: tekst) -> heltall {
+    hvis sh.hdr(s, namn) != venta {
+        skriv("header " + namn + ": venta «" + venta + "», fekk «" + sh.hdr(s, namn) + "»\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir(rot())
+    # ── 1. Bygg ──
+    la ut = hjelp.bygg_sw_app("examples/wasm_deltakarar/klient.no", rot() + "/prod", usann, "examples/wasm_deltakarar/app.no")
+    la w = linje(ut, "WASM: ")
+    la s = linje(ut, "SW: ")
+    skriv("bygg: " + builtin.slice(s, 0, builtin.index_of(s, " importar=")) + "\n")
+    la simp = hjelp.liste_felt(s, "importar")
+    la tillatne = ["sw_lytt", "sw_inn", "sw_ut", "logg", "flyt_tekst", "tekst_flyt", "nå_ms"]
+    la i = 0
+    mens i < lengde(simp) {
+        assert(har(tillatne, simp[i]))
+        i = i + 1
+    }
+    assert(har(simp, "sw_lytt") og har(simp, "sw_inn") og har(simp, "sw_ut"))
+    la seksp = hjelp.liste_felt(s, "eksportar")
+    assert(har(seksp, "_sw_install") og har(seksp, "_sw_rydd") og har(seksp, "_sw_melding") og har(seksp, "_sw_hent") og har(seksp, "_sw_lagre"))
+    la wimp = hjelp.liste_felt(w, "importar")
+    assert(har(wimp, "sw_registrer") og har(wimp, "sw_status") og har(wimp, "sw_send"))
+    assert(ikkje har(wimp, "sw_lytt") og ikkje har(wimp, "sw_inn") og ikkje har(wimp, "sw_ut"))
+    assert(har(hjelp.liste_felt(w, "eksportar"), "__sw_endra"))
+    la r0 = hjelp.root() + "/" + rot() + "/prod/"
+    la swl = fil_les(r0 + "sw_lastar.js")
+    skriv("SW-lastaren: " + tekst(lengde(swl)) + " B (tak 1792)\n")
+    assert(lengde(swl) <= 1792)
+    la sw_v = hjelp.felt(s, "v")
+    assert(inneheld(swl, "W=\"/_nc/sw.wasm?v=" + sw_v + "\""))
+
+    # ── 2. Rutene ──
+    la k = app.pwa_konfig()
+    la v192 = pwa.ikon_versjon(k, "192")
+    la res = sh.serve_med(rot() + "/prod/serve.no", [sh.førespurnad("/sw.js"), sh.førespurnad("/_nc/sw.wasm?v=" + sw_v),
+        sh.førespurnad("/manifest.webmanifest"), sh.førespurnad("/_nc/ikon-192.png?v=" + v192), sh.førespurnad("/_nc/ikon-192.png"),
+        sh.førespurnad("/_nc/offline"), sh.førespurnad("/")], "1")
+    la svar = res["svar"]
+    # /sw.js
+    la sj = svar[0]
+    assert_eq(sj["status"], "200")
+    krev_header(sj, "content-type", "text/javascript; charset=utf-8")
+    krev_header(sj, "cache-control", "no-cache")
+    krev_header(sj, "service-worker-allowed", "/")
+    assert(inneheld(sh.hdr(sj, "content-security-policy"), "script-src 'self' 'wasm-unsafe-eval'"))
+    assert(builtin.starts_with(sj["body"], "let C=\"{\\\"v\\\":\\\""))
+    assert(builtin.ends_with(sj["body"], "\";" + swl))
+    assert(inneheld(sj["body"], "\\\"c\\\":\\\"nc-"))
+    assert(inneheld(sj["body"], "\\\"/_nc/sw.wasm?v=" + sw_v + "\\\""))
+    assert(inneheld(sj["body"], "\\\"x\\\":[\\\"/api/\\\"]"))
+    # /_nc/sw.wasm
+    la sm = svar[1]
+    krev_header(sm, "content-type", "application/wasm")
+    assert(inneheld(sh.hdr(sm, "cache-control"), "immutable"))
+    assert(sm["body"] == fil_les(r0 + "sw.wasm"))
+    # manifestet
+    la mf = svar[2]
+    krev_header(mf, "content-type", "application/manifest+json")
+    la m = builtin.json_parse_raw(mf["body"])
+    assert_eq(m["display"], "standalone")
+    assert_eq(mf["body"], pwa.manifest_json(k))
+    # ikonet
+    la ik = svar[3]
+    krev_header(ik, "content-type", "image/png")
+    assert(inneheld(sh.hdr(ik, "cache-control"), "immutable"))
+    krev_header(ik, "etag", "\"" + v192 + "\"")
+    assert(builtin.starts_with(ik["body"], builtin.chr(137) + "PNG"))
+    assert_eq(lengde(ik["body"]), 4886)
+    krev_header(svar[4], "cache-control", "no-cache")
+    # offline-sida
+    la of = svar[5]
+    krev_header(of, "content-type", "text/html; charset=utf-8")
+    assert(inneheld(of["body"], "<body data-nc-offline=\"1\">"))
+    assert(ikkje inneheld(sh.hdr(of, "content-security-policy"), "wasm-unsafe-eval"))
+    # sida
+    la sd = svar[6]
+    assert(inneheld(sd["body"], pwa.head_tags(app.pwa_grunn())))
+    skriv("ruter: /sw.js (" + tekst(lengde(sj["body"])) + " B), sw.wasm (" + tekst(lengde(sm["body"])) + " B), manifest, ikon, offline-side og head-taggar OK (" + tekst(res["ms"]) + " ms)\n")
+
+    # ── 3. Fail-closed ──
+    krev_avvist("sida med sw_lytt", bygg_rå("tests/fixtures/wasm_w8_side_med_sw.no", rot() + "/side_med_sw", "", ""),
+        "klientmodulen importerer sw_lytt, som berre finst i service workeren")
+    krev_avvist("workeren med DOM", bygg_rå("examples/wasm_teljar/klient.no", rot() + "/sw_med_dom", "1", "tests/fixtures/wasm_w8_sw_med_dom.no"),
+        "service workeren importerer finn, som ikkje finst i ein service worker")
+    skriv("fail-closed: SW-funksjonar på sida og DOM i workeren blir avviste\n")
+    skriv("test_wasm_w8_serve OK\n")
+    returner 0
+}

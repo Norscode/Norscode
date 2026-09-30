@@ -1,0 +1,768 @@
+# std/wasm_rt.no — runtime-bibliotek for klientmodular kompilerte til WebAssembly (W3).
+#
+# Funksjonane her er VANLEG Norscode. WASM-backenden (std/wasm_lowring.no) kompilerer dei
+# med same lowring som klientkoden, og byter ut builtin-kall med kall hit etter tabellen
+# `rt_tabell()` i lowringa (t.d. builtin.split → splitt, builtin.json_parse_raw →
+# json_parse). Berre funksjonane klientprogrammet faktisk når, kjem med i modulen.
+#
+# Semantikken er VM-en sin (målt på macOS-arm64-seeden og Linux-x86-64-stage0):
+#   - Tekst er UTF-8-bytar. Indeksar og lengder er i bytar, som `lengde` og `slice`.
+#   - splitt(s, "") deler per byte; tom tekst gjev [""]; tomme felt blir behaldne.
+#   - erstatt(s, "", x) gjev s; treffa er ikkje-overlappande frå venstre.
+#   - trim fjernar mellomrom, \t, \n, \v, \f og \r i begge endar.
+#   - til_små/til_store endrar berre ASCII A–Z/a–z. æøå og alt anna er uendra, som i VM-en.
+#   - starter_med/slutter_med med tom tekst gjev sann (macOS-VM-en; Linux-VM-en gjev usann
+#     når teksten ikkje er tom, så det er ikkje med i paritetskorpuset).
+#   - json_skriv er selfhost/json.no sin json_skriv: kompakt, nøklar i innsetjingsrekkjefølgje,
+#     berre " \ \n \r \t blir escapa, heiltalsverdige desimaltal får «.0», inf/nan blir null.
+#   - json_parse gjev typa verdiar som builtin.json_parse_raw for gyldig JSON (heiltal utan
+#     brøk/eksponent med wrap ved overflyt, desimaltall elles, \uXXXX og surrogatpar som
+#     UTF-8). Ugyldig JSON KASTAR (fangbart) med tekstar i stilen til selfhost/json.no:
+#     «JSON: uavslutta streng», «JSON: uventa teikn: X» og «JSON: uventa slutt». VM-en sin
+#     json_parse_raw kastar ikkje, men gjev ein delvis verdi.
+#
+# Funksjonar utan builtin i VM-en (klientkoden skriv `bruk std.wasm_rt som rt`, og same
+# kode køyrer då i VM-en og i nettlesaren):
+#   sorter(l, samanlikn)   stabil flettesortering; samanlikn(a, b) < 0 set a før b
+#   sortert(l)             stabil sortering med `<` (tal mot tal, tekst bytevis)
+#   tekst_til_liste(s)     UTF-8-teikna i s som ei liste av tekstar
+#
+# Berre VM-builtins som WASM-backenden har som atom, blir brukte her (lengde, slice,
+# char_code, chr, legg_til, tekst, heltall, desimaltall, type, nøkler), så modulen kan
+# ikkje kalle seg sjølv via tabellen.
+
+bruk std.sha256 som sha
+
+# ─── Hjelparar ───────────────────────────────────────────────────────────────
+
+# Byte i ved posisjon i (0 utanfor).
+funksjon _b(s: tekst, i: heltall) -> heltall {
+    returner builtin.char_code(builtin.slice(s, i, i + 1))
+}
+
+# Set saman tekstdelar parvis (O(n log n) bytar kopierte, ikkje O(n²)).
+funksjon _saman_alle(delar: liste) -> tekst {
+    hvis lengde(delar) == 0 {
+        returner ""
+    }
+    la d = delar
+    mens lengde(d) > 1 {
+        la ny = []
+        la i = 0
+        mens i + 1 < lengde(d) {
+            legg_til(ny, d[i] + d[i + 1])
+            i = i + 2
+        }
+        hvis i < lengde(d) {
+            legg_til(ny, d[i])
+        }
+        d = ny
+    }
+    returner tekst(d[0])
+}
+
+funksjon _er_ws(c: heltall) -> bool {
+    returner c == 32 eller (c >= 9 og c <= 13)
+}
+
+# ─── Tekst ───────────────────────────────────────────────────────────────────
+
+# builtin.split / tekst_splitt
+funksjon splitt(s: tekst, skil: tekst) -> liste {
+    la ut = []
+    la n = lengde(s)
+    la m = lengde(skil)
+    hvis m == 0 {
+        la j = 0
+        mens j < n {
+            legg_til(ut, builtin.slice(s, j, j + 1))
+            j = j + 1
+        }
+        returner ut
+    }
+    la start = 0
+    la i = 0
+    mens i + m <= n {
+        hvis builtin.slice(s, i, i + m) == skil {
+            legg_til(ut, builtin.slice(s, start, i))
+            i = i + m
+            start = i
+        } ellers {
+            i = i + 1
+        }
+    }
+    legg_til(ut, builtin.slice(s, start, n))
+    returner ut
+}
+
+# builtin.join / tekst_join
+funksjon saman(l: liste, skil: tekst) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(l) {
+        hvis i > 0 og lengde(skil) > 0 {
+            legg_til(delar, skil)
+        }
+        legg_til(delar, tekst(l[i]))
+        i = i + 1
+    }
+    returner _saman_alle(delar)
+}
+
+# builtin.trim / tekst_trim
+funksjon trim_tekst(s: tekst) -> tekst {
+    la a = 0
+    la b = lengde(s)
+    mens a < b og _er_ws(_b(s, a)) {
+        a = a + 1
+    }
+    mens b > a og _er_ws(_b(s, b - 1)) {
+        b = b - 1
+    }
+    returner builtin.slice(s, a, b)
+}
+
+# builtin.index_of / tekst_indeks: første byteindeks, eller −1.
+funksjon finn_indeks(s: tekst, del: tekst) -> heltall {
+    la n = lengde(s)
+    la m = lengde(del)
+    la i = 0
+    mens i + m <= n {
+        hvis builtin.slice(s, i, i + m) == del {
+            returner i
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+# builtin.contains / tekst_inneholder
+funksjon inneheld(s: tekst, del: tekst) -> bool {
+    returner finn_indeks(s, del) >= 0
+}
+
+# builtin.starts_with / tekst_starter_med
+funksjon starter_med(s: tekst, prefiks: tekst) -> bool {
+    la m = lengde(prefiks)
+    hvis m > lengde(s) {
+        returner usann
+    }
+    returner builtin.slice(s, 0, m) == prefiks
+}
+
+# builtin.ends_with / tekst_slutter_med
+funksjon slutter_med(s: tekst, suffiks: tekst) -> bool {
+    la n = lengde(s)
+    la m = lengde(suffiks)
+    hvis m > n {
+        returner usann
+    }
+    returner builtin.slice(s, n - m, n) == suffiks
+}
+
+# builtin.replace / tekst_erstatt
+funksjon erstatt(s: tekst, gammal: tekst, ny: tekst) -> tekst {
+    la m = lengde(gammal)
+    hvis m == 0 {
+        returner s
+    }
+    la n = lengde(s)
+    la delar = []
+    la start = 0
+    la i = 0
+    mens i + m <= n {
+        hvis builtin.slice(s, i, i + m) == gammal {
+            legg_til(delar, builtin.slice(s, start, i))
+            legg_til(delar, ny)
+            i = i + m
+            start = i
+        } ellers {
+            i = i + 1
+        }
+    }
+    legg_til(delar, builtin.slice(s, start, n))
+    returner _saman_alle(delar)
+}
+
+# ASCII-bokstavar i [lo, hi] får `skift` lagt til; alt anna er uendra (som VM-en).
+funksjon _ascii_skift(s: tekst, lo: heltall, hi: heltall, skift: heltall) -> tekst {
+    la n = lengde(s)
+    la delar = []
+    la start = 0
+    la i = 0
+    mens i < n {
+        la c = _b(s, i)
+        hvis c >= lo og c <= hi {
+            hvis i > start {
+                legg_til(delar, builtin.slice(s, start, i))
+            }
+            legg_til(delar, builtin.chr(c + skift))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    hvis start == 0 {
+        returner s
+    }
+    legg_til(delar, builtin.slice(s, start, n))
+    returner _saman_alle(delar)
+}
+
+# builtin.lower / tekst_sma / tekst_til_liten
+funksjon til_små(s: tekst) -> tekst {
+    returner _ascii_skift(s, 65, 90, 32)
+}
+
+# builtin.upper / tekst_store / tekst_til_store
+funksjon til_store(s: tekst) -> tekst {
+    returner _ascii_skift(s, 97, 122, 0 - 32)
+}
+
+# UTF-8-teikna i s. Ein ugyldig byte blir eitt teikn for seg.
+funksjon tekst_til_liste(s: tekst) -> liste {
+    la ut = []
+    la n = lengde(s)
+    la i = 0
+    mens i < n {
+        la c = _b(s, i)
+        la l = 1
+        hvis c >= 240 og c <= 247 {
+            l = 4
+        } ellers hvis c >= 224 og c <= 239 {
+            l = 3
+        } ellers hvis c >= 192 og c <= 223 {
+            l = 2
+        }
+        hvis i + l > n {
+            l = 1
+        }
+        legg_til(ut, builtin.slice(s, i, i + l))
+        i = i + l
+    }
+    returner ut
+}
+
+# ─── Ordbøker og lister ──────────────────────────────────────────────────────
+
+# builtin.verdier: verdiane i nøkkelrekkjefølgja.
+funksjon verdiar(d: ordbok) -> liste {
+    la ut = []
+    la k = nøkler(d)
+    la i = 0
+    mens i < lengde(k) {
+        legg_til(ut, d[k[i]])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _min(a: heltall, b: heltall) -> heltall {
+    hvis a < b {
+        returner a
+    }
+    returner b
+}
+
+# Stabil flettesortering nedanfrå og opp. samanlikn(a, b) < 0 set a før b; like element
+# held rekkjefølgja si. Gjev ei ny liste.
+funksjon sorter(l: liste, samanlikn) -> liste {
+    la n = lengde(l)
+    la a = []
+    la i = 0
+    mens i < n {
+        legg_til(a, l[i])
+        i = i + 1
+    }
+    la bredd = 1
+    mens bredd < n {
+        la b = []
+        la v = 0
+        mens v < n {
+            la m = _min(v + bredd, n)
+            la h = _min(v + 2 * bredd, n)
+            la x = v
+            la y = m
+            mens x < m og y < h {
+                hvis samanlikn(a[y], a[x]) < 0 {
+                    legg_til(b, a[y])
+                    y = y + 1
+                } ellers {
+                    legg_til(b, a[x])
+                    x = x + 1
+                }
+            }
+            mens x < m {
+                legg_til(b, a[x])
+                x = x + 1
+            }
+            mens y < h {
+                legg_til(b, a[y])
+                y = y + 1
+            }
+            v = h
+        }
+        a = b
+        bredd = bredd * 2
+    }
+    returner a
+}
+
+funksjon _naturleg(a, b) -> heltall {
+    hvis a < b {
+        returner -1
+    }
+    hvis b < a {
+        returner 1
+    }
+    returner 0
+}
+
+# Stabil sortering etter `<`.
+funksjon sortert(l: liste) -> liste {
+    returner sorter(l, fun(a, b) -> _naturleg(a, b))
+}
+
+# ─── SHA-256 ─────────────────────────────────────────────────────────────────
+
+# builtin.sha256: hex over UTF-8-bytane (std/sha256.no, kompilert som han er).
+funksjon sha256_hex(s: tekst) -> tekst {
+    returner sha.hash(s)
+}
+
+# ─── JSON: skriving (selfhost/json.no sin json_skriv) ────────────────────────
+
+funksjon _j_escape(s: tekst, delar: liste) -> heltall {
+    legg_til(delar, "\"")
+    la n = lengde(s)
+    la start = 0
+    la i = 0
+    mens i < n {
+        la c = _b(s, i)
+        la e = ""
+        hvis c == 34 {
+            e = "\\\""
+        } ellers hvis c == 92 {
+            e = "\\\\"
+        } ellers hvis c == 10 {
+            e = "\\n"
+        } ellers hvis c == 13 {
+            e = "\\r"
+        } ellers hvis c == 9 {
+            e = "\\t"
+        }
+        hvis e != "" {
+            hvis i > start {
+                legg_til(delar, builtin.slice(s, start, i))
+            }
+            legg_til(delar, e)
+            start = i + 1
+        }
+        i = i + 1
+    }
+    hvis n > start {
+        legg_til(delar, builtin.slice(s, start, n))
+    }
+    legg_til(delar, "\"")
+    returner 0
+}
+
+# tekst(v), men heiltalsverdige desimaltal får «.0»; inf og nan blir null.
+funksjon _j_desimal(v) -> tekst {
+    la t = tekst(v)
+    la n = lengde(t)
+    hvis n == 0 {
+        returner t
+    }
+    la i = 0
+    hvis _b(t, 0) == 45 {
+        i = 1
+    }
+    hvis i >= n {
+        returner t
+    }
+    la c0 = _b(t, i)
+    hvis c0 < 48 eller c0 > 57 {
+        returner "null"
+    }
+    mens i < n {
+        la c = _b(t, i)
+        hvis c < 48 eller c > 57 {
+            returner t
+        }
+        i = i + 1
+    }
+    returner t + ".0"
+}
+
+funksjon _j_skriv(v, delar: liste) -> heltall {
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        legg_til(delar, "[")
+        la i = 0
+        mens i < lengde(v) {
+            hvis i > 0 {
+                legg_til(delar, ",")
+            }
+            _j_skriv(v[i], delar)
+            i = i + 1
+        }
+        legg_til(delar, "]")
+    } ellers hvis t == "ordbok" {
+        legg_til(delar, "{")
+        la k = nøkler(v)
+        la j = 0
+        mens j < lengde(k) {
+            hvis j > 0 {
+                legg_til(delar, ",")
+            }
+            la nk = tekst(k[j])
+            _j_escape(nk, delar)
+            legg_til(delar, ":")
+            _j_skriv(v[nk], delar)
+            j = j + 1
+        }
+        legg_til(delar, "}")
+    } ellers hvis t == "ingenting" {
+        legg_til(delar, "null")
+    } ellers hvis t == "boolsk" {
+        hvis v {
+            legg_til(delar, "true")
+        } ellers {
+            legg_til(delar, "false")
+        }
+    } ellers hvis t == "heltall" {
+        legg_til(delar, tekst(v))
+    } ellers hvis t == "desimaltall" {
+        legg_til(delar, _j_desimal(v))
+    } ellers hvis t == "tekst" {
+        _j_escape(v, delar)
+    } ellers {
+        _j_escape(tekst(v), delar)
+    }
+    returner 0
+}
+
+# builtin.json_stringify
+funksjon json_skriv(v) -> tekst {
+    la delar = []
+    _j_skriv(v, delar)
+    returner _saman_alle(delar)
+}
+
+# ─── JSON: lesing ────────────────────────────────────────────────────────────
+
+# Tilstand: {"s": tekst, "n": lengd, "p": posisjon}.
+funksjon _j_kikk(st: ordbok) -> heltall {
+    hvis st["p"] >= st["n"] {
+        returner -1
+    }
+    returner _b(st["s"], st["p"])
+}
+
+funksjon _j_ws(st: ordbok) -> heltall {
+    la c = _j_kikk(st)
+    mens c == 32 eller c == 9 eller c == 10 eller c == 13 {
+        st["p"] = st["p"] + 1
+        c = _j_kikk(st)
+    }
+    returner 0
+}
+
+# Teiknet (heile UTF-8-sekvensen) ved posisjonen, for feilmeldingar.
+funksjon _j_teikn(st: ordbok) -> tekst {
+    la s = st["s"]
+    la p = st["p"]
+    la c = _b(s, p)
+    la l = 1
+    hvis c >= 240 og c <= 247 {
+        l = 4
+    } ellers hvis c >= 224 og c <= 239 {
+        l = 3
+    } ellers hvis c >= 192 og c <= 223 {
+        l = 2
+    }
+    returner builtin.slice(s, p, p + l)
+}
+
+funksjon _j_feil(st: ordbok) -> heltall {
+    hvis st["p"] >= st["n"] {
+        kast "JSON: uventa slutt"
+    }
+    kast "JSON: uventa teikn: " + _j_teikn(st)
+}
+
+funksjon _j_ord(st: ordbok, ord: tekst) -> heltall {
+    la m = lengde(ord)
+    la i = 0
+    mens i < m {
+        hvis _j_kikk(st) != _b(ord, i) {
+            _j_feil(st)
+        }
+        st["p"] = st["p"] + 1
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _hexsiffer(c: heltall) -> heltall {
+    hvis c >= 48 og c <= 57 {
+        returner c - 48
+    }
+    hvis c >= 97 og c <= 102 {
+        returner c - 87
+    }
+    hvis c >= 65 og c <= 70 {
+        returner c - 55
+    }
+    returner -1
+}
+
+# Fire hexsiffer frå posisjon p (etter «\u»).
+funksjon _j_u16(s: tekst, p: heltall, n: heltall) -> heltall {
+    hvis p + 4 > n {
+        kast "JSON: uavslutta streng"
+    }
+    la v = 0
+    la i = 0
+    mens i < 4 {
+        la h = _hexsiffer(_b(s, p + i))
+        hvis h < 0 {
+            kast "JSON: ugyldig \\u-escape"
+        }
+        v = v * 16 + h
+        i = i + 1
+    }
+    returner v
+}
+
+# Kodepunkt → UTF-8 (einslege surrogatar blir tre bytar, som VM-en).
+funksjon _utf8(cp: heltall) -> tekst {
+    hvis cp < 128 {
+        returner builtin.chr(cp)
+    }
+    hvis cp < 2048 {
+        returner builtin.chr(192 | (cp >> 6)) + builtin.chr(128 | (cp & 63))
+    }
+    hvis cp < 65536 {
+        returner builtin.chr(224 | (cp >> 12)) + builtin.chr(128 | ((cp >> 6) & 63)) + builtin.chr(128 | (cp & 63))
+    }
+    returner builtin.chr(240 | (cp >> 18)) + builtin.chr(128 | ((cp >> 12) & 63)) +
+             builtin.chr(128 | ((cp >> 6) & 63)) + builtin.chr(128 | (cp & 63))
+}
+
+# Streng frå opningsteiknet «"». Bytar under 32 blir godtekne som dei er (json_skriv
+# escapar dei ikkje, så rundturen må gå).
+funksjon _j_streng(st: ordbok) -> tekst {
+    la s = st["s"]
+    la n = st["n"]
+    la p = st["p"] + 1
+    la delar = []
+    la start = p
+    mens p < n {
+        la c = _b(s, p)
+        hvis c == 34 {
+            hvis p > start {
+                legg_til(delar, builtin.slice(s, start, p))
+            }
+            st["p"] = p + 1
+            returner _saman_alle(delar)
+        }
+        hvis c == 92 {
+            hvis p > start {
+                legg_til(delar, builtin.slice(s, start, p))
+            }
+            hvis p + 1 >= n {
+                kast "JSON: uavslutta streng"
+            }
+            la e = _b(s, p + 1)
+            p = p + 2
+            hvis e == 34 {
+                legg_til(delar, "\"")
+            } ellers hvis e == 92 {
+                legg_til(delar, "\\")
+            } ellers hvis e == 47 {
+                legg_til(delar, "/")
+            } ellers hvis e == 98 {
+                legg_til(delar, builtin.chr(8))
+            } ellers hvis e == 102 {
+                legg_til(delar, builtin.chr(12))
+            } ellers hvis e == 110 {
+                legg_til(delar, "\n")
+            } ellers hvis e == 114 {
+                legg_til(delar, "\r")
+            } ellers hvis e == 116 {
+                legg_til(delar, "\t")
+            } ellers hvis e == 117 {
+                la u = _j_u16(s, p, n)
+                p = p + 4
+                hvis u >= 55296 og u <= 56319 og p + 6 <= n og _b(s, p) == 92 og _b(s, p + 1) == 117 {
+                    la u2 = _j_u16(s, p + 2, n)
+                    hvis u2 >= 56320 og u2 <= 57343 {
+                        u = 65536 + ((u - 55296) << 10) + (u2 - 56320)
+                        p = p + 6
+                    }
+                }
+                legg_til(delar, _utf8(u))
+            } ellers {
+                kast "JSON: ugyldig escape: \\" + builtin.slice(s, p - 1, p)
+            }
+            start = p
+        } ellers {
+            p = p + 1
+        }
+    }
+    kast "JSON: uavslutta streng"
+}
+
+funksjon _siffer_ved(s: tekst, p: heltall, n: heltall) -> bool {
+    hvis p >= n {
+        returner usann
+    }
+    la c = _b(s, p)
+    returner c >= 48 og c <= 57
+}
+
+# Tal etter JSON-grammatikken. Utan brøk og eksponent: heltall (wrap ved overflyt, som
+# VM-en); elles desimaltall (korrekt avrunda).
+funksjon _j_tal(st: ordbok) {
+    la s = st["s"]
+    la n = st["n"]
+    la p0 = st["p"]
+    la p = p0
+    hvis _b(s, p) == 45 {
+        p = p + 1
+    }
+    hvis ikkje _siffer_ved(s, p, n) {
+        st["p"] = p
+        _j_feil(st)
+    }
+    hvis _b(s, p) == 48 {
+        p = p + 1
+    } ellers {
+        mens _siffer_ved(s, p, n) {
+            p = p + 1
+        }
+    }
+    la desimal = usann
+    hvis p < n og _b(s, p) == 46 {
+        desimal = sann
+        p = p + 1
+        hvis ikkje _siffer_ved(s, p, n) {
+            st["p"] = p
+            _j_feil(st)
+        }
+        mens _siffer_ved(s, p, n) {
+            p = p + 1
+        }
+    }
+    hvis p < n og (_b(s, p) == 101 eller _b(s, p) == 69) {
+        desimal = sann
+        p = p + 1
+        hvis p < n og (_b(s, p) == 43 eller _b(s, p) == 45) {
+            p = p + 1
+        }
+        hvis ikkje _siffer_ved(s, p, n) {
+            st["p"] = p
+            _j_feil(st)
+        }
+        mens _siffer_ved(s, p, n) {
+            p = p + 1
+        }
+    }
+    st["p"] = p
+    la t = builtin.slice(s, p0, p)
+    hvis desimal {
+        returner builtin.desimaltall(t)
+    }
+    returner heltall(t)
+}
+
+funksjon _j_verdi(st: ordbok) {
+    _j_ws(st)
+    la c = _j_kikk(st)
+    hvis c == 34 {
+        returner _j_streng(st)
+    }
+    hvis c == 123 {
+        st["p"] = st["p"] + 1
+        la d = {}
+        _j_ws(st)
+        hvis _j_kikk(st) == 125 {
+            st["p"] = st["p"] + 1
+            returner d
+        }
+        mens sann {
+            _j_ws(st)
+            hvis _j_kikk(st) != 34 {
+                _j_feil(st)
+            }
+            la nk = _j_streng(st)
+            _j_ws(st)
+            hvis _j_kikk(st) != 58 {
+                _j_feil(st)
+            }
+            st["p"] = st["p"] + 1
+            d[nk] = _j_verdi(st)
+            _j_ws(st)
+            la c2 = _j_kikk(st)
+            hvis c2 == 125 {
+                st["p"] = st["p"] + 1
+                returner d
+            }
+            hvis c2 != 44 {
+                _j_feil(st)
+            }
+            st["p"] = st["p"] + 1
+        }
+    }
+    hvis c == 91 {
+        st["p"] = st["p"] + 1
+        la l = []
+        _j_ws(st)
+        hvis _j_kikk(st) == 93 {
+            st["p"] = st["p"] + 1
+            returner l
+        }
+        mens sann {
+            legg_til(l, _j_verdi(st))
+            _j_ws(st)
+            la c3 = _j_kikk(st)
+            hvis c3 == 93 {
+                st["p"] = st["p"] + 1
+                returner l
+            }
+            hvis c3 != 44 {
+                _j_feil(st)
+            }
+            st["p"] = st["p"] + 1
+        }
+    }
+    hvis c == 116 {
+        _j_ord(st, "true")
+        returner sann
+    }
+    hvis c == 102 {
+        _j_ord(st, "false")
+        returner usann
+    }
+    hvis c == 110 {
+        _j_ord(st, "null")
+        returner null
+    }
+    hvis c == 45 eller (c >= 48 og c <= 57) {
+        returner _j_tal(st)
+    }
+    _j_feil(st)
+    returner null
+}
+
+# builtin.json_parse_raw. Kastar ved ugyldig JSON (også tekst etter verdien).
+funksjon json_parse(s: tekst) {
+    la st = {"s": s, "n": lengde(s), "p": 0}
+    la v = _j_verdi(st)
+    _j_ws(st)
+    hvis st["p"] < st["n"] {
+        _j_feil(st)
+    }
+    returner v
+}

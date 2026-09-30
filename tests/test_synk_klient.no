@@ -1,0 +1,87 @@
+# W9: synk-klienten (std/synk_klient.no) mot den ekte NSP/1-tenaren (std/synk.no) utan nettlesar.
+# Sjekkane står i tests/fixtures/synk_klient_sjekk.no og køyrer i ein barneprosess i VM-fastmodus
+# (17 scenario: optimistisk skriving, hugs og omlasting (dokument og køpost i éin transaksjon),
+# offline → gjenoppkopling → konvergens, konflikt per felt, 409, 410, 401, 403 csrf og klient_eigar,
+# avvist op, to faner med leiarskifte (fylgjaren pushar og pullar aldri), versionchange, logg_ut,
+# brukarbyte, ETag/304, SSE-brot med polling og gjenoppkopling med backoff, og sletting), og at alle
+# svara frå /_synk/ har Cache-Control: no-store (aldri i HTTP-cachen eller cachen til service workeren).
+# Del 2 av fixturen (klokkeskeiv, kvittering, «hugs» av, brukarbyte i minnet, hallo-feil, klemming)
+# køyrer i tests/test_synk_klient_del2.no. Her i tillegg: dei reine funksjonane i klienten og
+# minnelageret (same op-ar som std/wasm_lager.no).
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+bruk std.synk_klient som sk
+bruk std.wasm_lager som lager
+
+funksjon reine() -> heltall {
+    # Backoff: 1, 2, 4 … 60 s
+    assert_eq(sk.backoff_ms(1), 1000)
+    assert_eq(sk.backoff_ms(3), 4000)
+    assert_eq(sk.backoff_ms(6), 32000)
+    assert_eq(sk.backoff_ms(7), 60000)
+    assert_eq(sk.backoff_ms(40), 60000)
+    # Klassifisering av svar etter status og feil-feltet
+    assert_eq(sk.klassifiser({"art": "status", "status": 409, "kropp": "{\"p\":1,\"feil\":\"hol\"}"}), "hol")
+    assert_eq(sk.klassifiser({"art": "status", "status": 410, "kropp": ""}), "resync")
+    assert_eq(sk.klassifiser({"art": "status", "status": 401, "kropp": ""}), "innlogging")
+    assert_eq(sk.klassifiser({"art": "status", "status": 403, "kropp": "{\"p\":1,\"feil\":\"csrf\"}"}), "csrf")
+    assert_eq(sk.klassifiser({"art": "status", "status": 403, "kropp": "{\"p\":1,\"feil\":\"klient_eigar\"}"}), "klient_eigar")
+    assert_eq(sk.klassifiser({"art": "status", "status": 413, "kropp": ""}), "for_stor")
+    assert_eq(sk.klassifiser({"art": "status", "status": 304, "kropp": ""}), "304")
+    assert_eq(sk.klassifiser({"art": "status", "status": 503, "kropp": ""}), "nett")
+    assert_eq(sk.klassifiser({"art": "status", "status": 400, "kropp": "{\"p\":1,\"feil\":\"ops\"}"}), "stopp")
+    assert_eq(sk.klassifiser({"art": "nettverk", "status": 0, "kropp": ""}), "nett")
+    assert_eq(sk.klassifiser({"art": "tidsavbrot", "status": 0, "kropp": ""}), "nett")
+    assert(sk.er_fråkopla({"art": "nettverk"}))
+    assert(ikkje sk.er_fråkopla({"art": "status"}))
+    # seq = nøkkel − base
+    la o = sk.push_op({"k": 12, "op": "put", "s": "oppg", "id": "x", "hlc": "h", "felt": {"a": 1}}, 10)
+    assert_eq(o["seq"], 2)
+    assert_eq(builtin.json_stringify(o), "{\"seq\":2,\"op\":\"put\",\"s\":\"oppg\",\"id\":\"x\",\"hlc\":\"h\",\"felt\":{\"a\":1}}")
+    assert(ikkje har_nokkel(sk.push_op({"k": 3, "op": "del", "s": "oppg", "id": "x", "hlc": "h"}, 0), "felt"))
+    # Minnelageret: auto-nøkkel, nøkkelen sett inn ved lesing, område og éin batch
+    la m = sk.minne_lager()
+    la r = sk.minne_køyr(m, [lager.op_put("ko", {"n": "a/1", "op": "put"}), lager.op_put("ko", {"n": "a/2", "op": "put"}),
+                             lager.op_put("meta", {"n": "meta", "base": 0})])
+    assert_eq(r[0], 1)
+    assert_eq(r[1], 2)
+    la l = sk.minne_køyr(m, [lager.op_liste("ko", null, 0)])[0]
+    assert_eq(l[1]["k"], 2)
+    sk.minne_køyr(m, [lager.op_slett("ko", lager.opp_til(1, usann))])
+    assert_eq(lengde(sk.minne_køyr(m, [lager.op_liste("ko", null, 0)])[0]), 1)
+    # Auto-nøkkelen held fram etter sletting (som IndexedDB)
+    assert_eq(sk.minne_køyr(m, [lager.op_put("ko", {"n": "a/3", "op": "put"})])[0], 3)
+    # Ugyldige op-ar blir avviste av same validering som std/wasm_lager.no, og ingenting blir endra
+    la kasta = usann
+    prøv {
+        sk.minne_køyr(m, [lager.op_put("ko", {"n": "a/4", "op": "put"}), lager.op_put("finst_ikkje", {"n": "x"})])
+    } fang (e) {
+        kasta = sann
+    }
+    assert(kasta)
+    assert_eq(lengde(sk.minne_køyr(m, [lager.op_liste("ko", null, 0)])[0]), 2)
+    # Den synlege kopien: snap ⊕ ventande op-ar (LWW per felt)
+    la snap = {"data": {"tittel": "gammal", "pri": 1}, "hlc": {"tittel": "000000000000100:00000:s", "pri": "000000000000100:00000:s"}, "del": ""}
+    la v = sk.utlei(snap, [{"op": "put", "hlc": "000000000000200:00000:k", "felt": {"tittel": "ny"}},
+                           {"op": "put", "hlc": "000000000000050:00000:k", "felt": {"pri": 9}}])
+    assert_eq(v["data"]["tittel"], "ny")
+    assert_eq(v["data"]["pri"], 1)
+    assert_eq(sk.høgaste_hlc([{"del": "000000000000300:00000:a", "hlc": {"x": "000000000000200:00000:b"}}]), "000000000000300:00000:a")
+    skriv("reine funksjonar: backoff, klassifisering, seq, minnelager og kopien OK\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    reine()
+    la rot = hjelp.root()
+    la m = hjelp.grunnmiljø(rot)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = rot + "/tests/fixtures/synk_klient_sjekk.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    la r = hjelp.køyr_nc(m, 300000)
+    skriv(r["stdout"])
+    hjelp.krev_ok("synk_klient_sjekk", r)
+    assert(builtin.index_of(r["stdout"], "synk_klient_sjekk OK") >= 0)
+    assert(builtin.index_of(r["stdout"], "ERROR") < 0)
+    skriv("test_synk_klient OK\n")
+    returner 0
+}

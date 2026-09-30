@@ -1,0 +1,220 @@
+# W1 (WASM-sporet): GC-emitteren, validatoren og lowringa utan nettlesar.
+#
+#   1. Emitteren (std/wasm_atom.no) er byte-eksakt: GC-fasitmodulen frå W0-proben
+#      (struct.new/struct.get på {mut i64}, ref.i31/i31.get_s, array.new_default/array.len,
+#      validert i Chromium) blir bygd på nytt med assembleren og er lik fasiten, og
+#      enkeltkodingar (GC-typane, f64.const, array.new_data/copy/new_fixed, ref.test/cast,
+#      LEB128) er lik spesifikasjonen.
+#   2. Validatoren (W1-utvidinga) godtek ein modul med array.new_data og datacount, og
+#      avviser éin feil om gongen: manglande datacount, dataindeks utanfor, array-
+#      instruksjon på ein struct-type, datacount ulik dataseksjonen, datacount utan
+#      dataseksjon.
+#   3. Lowringa (bygd med CLI-en i barneprosessar) tek med berre det modulen treng: minimal.no har nøyaktig atoma for +,
+#      skriv av heiltal importerer berre logg, desimaltall legg til flyt_tekst, konstant
+#      divisor ≠ 0 gjev ingen feilveg (mod_k, ingen import), variabel divisor gjev
+#      nullsjekk og logg. Alle modulane blir godtekne av validatoren.
+bruk std.wasm_atom som a
+bruk std.wasm_binary som w
+bruk std.wasm_les som les
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon la_til(m: liste, k: liste) -> heltall {
+    la i = 0
+    mens i < lengde(k) {
+        legg_til(m, k[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon like_lister(x: liste, y: liste) -> bool {
+    hvis lengde(x) != lengde(y) { returner usann }
+    la i = 0
+    mens i < lengde(x) {
+        hvis tekst(x[i]) != tekst(y[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon krev_bytar(namn: tekst, fekk: liste, venta: liste) -> heltall {
+    hvis ikkje like_lister(fekk, venta) {
+        skriv(namn + ": fekk " + les.til_hex(fekk) + ", venta " + les.til_hex(venta) + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon inneheld(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Kropp med lokalteljar og avsluttande end.
+funksjon kropp(instr: liste) -> liste {
+    la b = a.flat([a.lokale([]), instr, 11])
+    la ut = w.leb_u(lengde(b))
+    la_til(ut, b)
+    returner ut
+}
+
+# Modul: type 0 = array (mut i8), 1 = struct {i32}, 2 = () -> eqref; éin funksjon av type 2
+# med kroppen `instr`. dc < 0: ingen datacount-seksjon. n_seg < 0: ingen dataseksjon,
+# elles n_seg passive segment med éin byte.
+funksjon datamodul(instr: liste, dc: heltall, n_seg: heltall) -> liste {
+    la m = [0, 97, 115, 109, 1, 0, 0, 0]
+    la_til(m, w.seksjon(1, [3, 94, 120, 1, 95, 1, 127, 0, 96, 0, 1, 109]))
+    la_til(m, w.seksjon(3, [1, 2]))
+    hvis dc >= 0 { la_til(m, w.seksjon(12, [dc])) }
+    la kode = [1]
+    la_til(kode, kropp(instr))
+    la_til(m, w.seksjon(10, kode))
+    hvis n_seg >= 0 {
+        la d = [n_seg]
+        la i = 0
+        mens i < n_seg {
+            la_til(d, [1, 1, 65])
+            i = i + 1
+        }
+        la_til(m, w.seksjon(11, d))
+    }
+    returner m
+}
+
+funksjon ny_data(t: heltall, seg: heltall) -> liste {
+    returner [a.i32c(0), a.i32c(1), a.anew_data(t, seg)]
+}
+
+funksjon krev_ok(namn: tekst, bytar: liste) -> ordbok {
+    la r = les.valider(bytar)
+    hvis ikkje r["ok"] {
+        skriv(namn + ": validatoren avviste: " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner r["info"]
+}
+
+funksjon krev_avvist(namn: tekst, bytar: liste, forventa: tekst) -> heltall {
+    la r = les.valider(bytar)
+    hvis r["ok"] {
+        skriv(namn + ": validatoren godtok (skulle avvise)\n")
+        assert(usann)
+    }
+    hvis builtin.index_of(r["feil"], forventa) < 0 {
+        skriv(namn + ": venta «" + forventa + "», fekk: " + r["feil"] + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+# Skriv kjelda til build/wasm/test_w1/<namn>.no og bygg ho med tools/nc_wasm.no (barneprosess
+# i VM-fastmodus; lowringa i standard-VM-en tek sekund per atom). CLI-en validerer modulen
+# før han skriv han. Gjev importane, eksportane (frå validatoren) og atoma.
+funksjon bygg_kjelde(namn: tekst, src: tekst, testbygg: bool) -> ordbok {
+    la sti = "build/wasm/test_w1/" + namn + ".no"
+    fil_skriv(hjelp.root() + "/" + sti, src)
+    la linje = hjelp.bygg_klient(sti, "build/wasm/test_w1/" + namn, testbygg)
+    returner {"importar": hjelp.liste_felt(linje, "importar"), "eksportar": hjelp.liste_felt(linje, "eksportar"),
+              "atom": hjelp.liste_felt(linje, "atom")}
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir("build/wasm/test_w1")
+
+    # ── 1. Emitteren ──
+    la gc_fasit = "0061736d010000000110045f017e015e78016000017e6000017f030403020303071d030767635f626f6b7300000369333100010974656b73745f6c656e00020a23030e004229fb0000fb02000042017c0b08004179fb1cfb1d0b09004105fb0701fb0f0b"
+    la k1 = kropp([a.i64c(41), a.sny(0), a.sget(0, 0), a.i64c(1), 124])
+    la k2 = kropp([a.i32c(-7), a.I31NY(), 251, 29])
+    la k3 = kropp([a.i32c(5), a.anew_def(1), a.ALEN()])
+    krev_bytar("struct-kropp", k1, les.frå_hex("0e004229fb0000fb02000042017c0b"))
+    krev_bytar("i31-kropp", k2, les.frå_hex("08004179fb1cfb1d0b"))
+    krev_bytar("array-kropp", k3, les.frå_hex("09004105fb0701fb0f0b"))
+    la gm = [0, 97, 115, 109, 1, 0, 0, 0]
+    la_til(gm, w.seksjon(1, [4, 95, 1, 126, 1, 94, 120, 1, 96, 0, 1, 126, 96, 0, 1, 127]))
+    la_til(gm, w.seksjon(3, [3, 2, 3, 3]))
+    la ep = [3]
+    la_til(ep, w.namn_bytar("gc_boks"))
+    la_til(ep, [0, 0])
+    la_til(ep, w.namn_bytar("i31"))
+    la_til(ep, [0, 1])
+    la_til(ep, w.namn_bytar("tekst_len"))
+    la_til(ep, [0, 2])
+    la_til(gm, w.seksjon(7, ep))
+    la kp = [3]
+    la_til(kp, k1)
+    la_til(kp, k2)
+    la_til(kp, k3)
+    la_til(gm, w.seksjon(10, kp))
+    assert_eq(les.til_hex(gm), gc_fasit)
+    # GC-typane til verdimodellen
+    la gt = a.gc_typar()
+    assert_eq(lengde(gt), 7)
+    krev_bytar("$boks", gt[a.T_BOKS()], [95, 1, 126, 0])
+    krev_bytar("$flyt", gt[a.T_FLYT()], [95, 1, 124, 0])
+    krev_bytar("$tekst", gt[a.T_TEKST()], [94, 120, 1])
+    krev_bytar("$arr", gt[a.T_ARR()], [94, 109, 1])
+    krev_bytar("$liste", gt[a.T_LISTE()], [95, 2, 127, 1, 99, 4, 1])
+    krev_bytar("$ordbok", gt[a.T_ORDBOK()], [95, 3, 127, 1, 99, 4, 1, 99, 4, 1])
+    # Enkeltkodingar
+    krev_bytar("f64.const 2.5", a.flat(a.f64c(builtin.desimal_til_bits(2.5))), [68, 0, 0, 0, 0, 0, 0, 4, 64])
+    krev_bytar("f64.const -0.1", a.flat(a.f64c(builtin.desimal_til_bits(-0.1))), [68, 154, 153, 153, 153, 153, 153, 185, 191])
+    krev_bytar("array.new_data", a.flat(a.anew_data(3, 0)), [251, 9, 3, 0])
+    krev_bytar("array.copy", a.flat(a.acopy(3, 3)), [251, 17, 3, 3])
+    krev_bytar("array.new_fixed 200", a.flat(a.anew_fixed(4, 200)), [251, 8, 4, 200, 1])
+    krev_bytar("ref.test i31", a.flat(a.rtest(a.HT_I31())), [251, 20, 108])
+    krev_bytar("ref.cast $flyt", a.flat(a.rcast(a.T_FLYT())), [251, 22, 2])
+    krev_bytar("if (ref null $tekst)", a.flat(a.iff(a.VT_TEKST())), [4, 99, 3])
+    krev_bytar("block void", a.flat(a.blk([])), [2, 64])
+    krev_bytar("leb_s -1", a.leb_s(-1), [127])
+    krev_bytar("leb_s 64", a.leb_s(64), [192, 0])
+    krev_bytar("leb_s -65", a.leb_s(-65), [191, 127])
+    krev_bytar("leb_s i31-min", a.leb_s(a.I31_MIN()), [128, 128, 128, 128, 124])
+    krev_bytar("leb_u 624485", a.leb_u(624485), [229, 142, 38])
+    krev_bytar("lokale", a.flat(a.lokale([[2, a.VT_I32()], [1, a.VT_TEKST()]])), [2, 2, 127, 1, 99, 3])
+
+    # ── 2. Validatoren (W1) ──
+    la gyldig = datamodul(ny_data(0, 0), 1, 1)
+    la gi = krev_ok("array.new_data med datacount", gyldig)
+    assert_eq(gi["n_data_meldt"], 1)
+    krev_avvist("utan datacount", datamodul(ny_data(0, 0), -1, 1), "array.new_data utan datacount-seksjon")
+    krev_avvist("dataindeks utanfor", datamodul(ny_data(0, 1), 1, 1), "array.new_data: dataindeks 1 utanfor")
+    krev_avvist("array.new_data på struct", datamodul(ny_data(1, 0), 1, 1), "array.new_data på ikkje-array 1")
+    krev_avvist("datacount ulik", datamodul(ny_data(0, 0), 2, 1), "dataseksjonen har 1 segment, datacount seier 2")
+    krev_avvist("datacount utan data", datamodul(ny_data(0, 0), 1, -1), "dataseksjonen manglar")
+    krev_avvist("array.copy på struct", datamodul([a.acopy(0, 1), a.NULL()], 1, 1), "array.copy på ikkje-array 1")
+    krev_avvist("array.new_fixed på struct", datamodul([a.anew_fixed(1, 0)], 1, 1), "array.new_fixed på ikkje-array 1")
+    krev_ok("array.copy og new_fixed på array", datamodul([a.anew_fixed(0, 0), a.anew_fixed(0, 0), 26, 26, a.NULL()], 1, 1))
+
+    # ── 3. Lowringa ──
+    la min_linje = hjelp.bygg_klient("tests/wasm_korpus/minimal.no", "build/wasm/test_w1/minimal", usann)
+    la min_res = {"atom": hjelp.liste_felt(min_linje, "atom"), "importar": hjelp.liste_felt(min_linje, "importar")}
+    assert(like_lister(min_res["atom"], ["til_i64", "frå_i64", "er_tal", "er_num", "til_f64", "konkat", "fmt_i64", "tekst_av", "add"]))
+    assert_eq(lengde(min_res["importar"]), 0)
+    la skriv_int = bygg_kjelde("skriv_int", "funksjon start() -> heltall {\n    skriv(1 + 2)\n    returner 0\n}\n", usann)
+    assert(like_lister(skriv_int["importar"], ["logg"]))
+    assert(like_lister(skriv_int["eksportar"], ["m", "i"]))
+    assert(inneheld(skriv_int["atom"], "skriv"))
+    assert(ikkje inneheld(skriv_int["atom"], "fmt_f64"))
+    la skriv_flyt = bygg_kjelde("skriv_flyt", "funksjon start() -> heltall {\n    skriv(1.5)\n    returner 0\n}\n", usann)
+    assert(like_lister(skriv_flyt["importar"], ["logg", "flyt_tekst"]))
+    assert(inneheld(skriv_flyt["atom"], "fmt_f64"))
+    la mod_k = bygg_kjelde("mod_k", "funksjon start() -> heltall {\n    la x = 7\n    returner x % 2\n}\n", usann)
+    assert(inneheld(mod_k["atom"], "mod_k"))
+    assert(ikkje inneheld(mod_k["atom"], "mod"))
+    assert(ikkje inneheld(mod_k["atom"], "kast"))
+    assert_eq(lengde(mod_k["importar"]), 0)
+    la mod_v = bygg_kjelde("mod_v", "funksjon start() -> heltall {\n    la x = 7\n    la y = 2\n    returner x % y\n}\n", usann)
+    assert(inneheld(mod_v["atom"], "mod"))
+    assert(inneheld(mod_v["atom"], "kast"))
+    assert(like_lister(mod_v["importar"], ["logg"]))
+    # Testbygg: feilvegen skriv til #nc-logg
+    la mod_t = bygg_kjelde("mod_t", "funksjon start() -> heltall {\n    la x = 7\n    la y = 2\n    returner x % y\n}\n", sann)
+    assert(like_lister(mod_t["importar"], ["logg_test"]))
+
+    skriv("test_wasm_w1 OK\n")
+    returner 0
+}

@@ -1,0 +1,419 @@
+# synk.no — NSP/1-tenaren (A7): hallo, push, pull og hendingar (SSE) under
+# std/apptenar.no. Tenaren er autoritativ; eit dokument er (samling, id) innanfor
+# brukaren sitt scope; kvar klient har ein monoton seq; konfliktar blir løyste per felt
+# med HLC (std/synk_kjerne.no, same kode som WASM-klienten).
+#
+#   GET  /_synk/hallo      → {p, epoke, hlc, csrf, brukar, samlingar, tak}
+#   POST /_synk/push       {p, epoke, klient, kvittert, ops:[{seq, op:"put"|"del", s, id, hlc, felt}]}
+#                          → 200 {p, siste_seq, hlc, v, res:[...]} | 409 {feil:"hol"} |
+#                            410 {feil:"resync", epoke} | 403 {feil:"klient_eigar"|"csrf"}
+#   GET  /_synk/pull?sidan=N&grense=M → {p, epoke, v, meir, endringar:[{v, s, id, dok|null, hlc, del}]}
+#                          med brukarscopa ETag og 304
+#   GET  /_synk/hendingar  → SSE, hendinga "v" med brukaren sin høgaste versjon
+#
+# Autentisering skjer i handlarane (ikkje med vakter, så ein app-funksjon med same namn
+# ikkje kan skugge ho): konfig["brukar_fn"] (fullt kvalifisert, t.d.
+# "__main__.synk_brukar") får ctx og gjev {"uid": ..., "sesjon": ...} for ein innlogga
+# brukar, og alt anna for ingen. 401 {feil:"ikkje_innlogga"}.
+# CSRF på push: Content-Type application/json, Origin (om han finst) må vere opphavet,
+# Sec-Fetch-Site må ikkje vere cross-site, og headeren x-nc-csrf må ha eit maskert
+# token bunde til sesjonen (frå /_synk/hallo). 403 {feil:"csrf"}.
+#
+# Bruk:
+#   bruk std.synk som synk
+#   bruk std.apptenar som app
+#   funksjon start() -> heltall {
+#       synk.sett_opp({"datamappe": "/var/lib/app", "brukar_fn": "__main__.synk_brukar",
+#                      "samlingar": {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool"}, "maks_byte": 4096}}})
+#       returner app.lytt({"port": 8080})
+#   }
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.synk_kjerne som k
+bruk std.synk_lager som lager
+
+la _s: ordbok = {"klar": usann}
+
+# ─── Oppsett ─────────────────────────────────────────────────────────────────
+
+funksjon konfig_standard() -> ordbok {
+    returner {
+        "datamappe": "",
+        "brukar_fn": "",
+        "samlingar": {},
+        "opphav": [],
+        "hemmeleg": "",
+        "maks_dok_per_brukar": 10000,
+        "maks_ops_per_push": 500,
+        "hlc_grense_ms": 60000,
+        "pull_grense": 500,
+        "sjekkpunkt_byte": 1048576
+    }
+}
+
+funksjon sett_opp(konf: ordbok) -> heltall {
+    la c = konfig_standard()
+    la ks = nøkler(konf)
+    la i = 0
+    mens i < lengde(ks) {
+        c[ks[i]] = konf[ks[i]]
+        i = i + 1
+    }
+    hvis c["datamappe"] == "" eller ikkje builtin.starts_with(c["datamappe"], "/") { kast "synk: datamappe må vere ein absolutt sti" }
+    hvis c["brukar_fn"] == "" { kast "synk: brukar_fn manglar" }
+    la sk = nøkler(c["samlingar"])
+    i = 0
+    mens i < lengde(sk) {
+        hvis ikkje k.trygt_namn(sk[i], 64) { kast "synk: ugyldig samlingsnamn " + sk[i] }
+        i = i + 1
+    }
+    la l = lager.opne(c["datamappe"])
+    la h = tekst(c["hemmeleg"])
+    hvis h == "" {
+        la hs = c["datamappe"] + "/synk.hemmeleg"
+        hvis fil_finnes(hs) {
+            h = builtin.trim(fil_les(hs))
+        } ellers {
+            h = builtin.random_hex(32)
+            fil_skriv(hs, h)
+        }
+    }
+    hvis lengde(h) < 32 { kast "synk: hemmeleg må ha minst 32 teikn" }
+    _s["konf"] = c
+    _s["lager"] = l
+    _s["hemmeleg"] = h
+    _s["klar"] = sann
+    returner 0
+}
+
+funksjon _konf(namn: tekst) {
+    returner _s["konf"][namn]
+}
+
+funksjon _lager() -> ordbok {
+    hvis ikkje _s["klar"] { kast "synk: sett_opp er ikkje kalla" }
+    returner _s["lager"]
+}
+
+funksjon status() -> ordbok {
+    returner lager.status(_lager())
+}
+
+funksjon sjekkpunkt() -> heltall {
+    returner lager.sjekkpunkt(_lager())
+}
+
+# GDPR: slett alle dokument og klientar for brukaren, også frå filene.
+funksjon slett_brukar(uid: tekst) -> heltall {
+    la n = lager.slett_brukar(_lager(), uid)
+    app.send_hending("synk:" + uid, "v", "0")
+    returner n
+}
+
+# Etter restore frå backup: ny epoke, alle klientar får 410 og synkroniserer på nytt.
+funksjon ny_epoke() -> tekst {
+    returner lager.ny_epoke(_lager())
+}
+
+# ─── Svar ────────────────────────────────────────────────────────────────────
+
+funksjon _svar(status: heltall, body: tekst) -> ordbok {
+    returner {"status": status, "content_type": "application/json; charset=utf-8", "body": body,
+              "headers": {"cache-control": "no-store", "x-content-type-options": "nosniff"}}
+}
+
+funksjon _feil(status: heltall, feil: tekst) -> ordbok {
+    returner _svar(status, "{\"p\":1,\"feil\":" + k.json_tekst(feil) + "}")
+}
+
+# ─── Autentisering og CSRF ───────────────────────────────────────────────────
+
+# {"uid", "sesjon"} eller {} (ikkje innlogga). Unntak i brukar_fn gjev òg {} og ei
+# loggline (fail-closed).
+funksjon _brukar(ctx: ordbok) -> ordbok {
+    la r = null
+    prøv {
+        r = builtin.ncb_call_fn(_konf("brukar_fn"), ctx)
+    } fang (e) {
+        skriv("SYNK feil brukar_fn kasta: " + tekst(e) + "\n")
+        returner {}
+    }
+    hvis r == null eller builtin.type(r) != "ordbok" { returner {} }
+    hvis ikkje har_nokkel(r, "uid") eller builtin.type(r["uid"]) != "tekst" eller r["uid"] == "" { returner {} }
+    la ses = ""
+    hvis har_nokkel(r, "sesjon") og builtin.type(r["sesjon"]) == "tekst" { ses = r["sesjon"] }
+    returner {"uid": r["uid"], "sesjon": ses}
+}
+
+funksjon _hex_verdi(c: tekst) -> heltall {
+    returner builtin.index_of("0123456789abcdef", c)
+}
+
+funksjon _xor_hex(a: tekst, b: tekst) -> tekst {
+    la hx = "0123456789abcdef"
+    la ut = ""
+    la i = 0
+    mens i < lengde(a) {
+        la x = _hex_verdi(builtin.slice(a, i, i + 1)) ^ _hex_verdi(builtin.slice(b, i, i + 1))
+        ut = ut + builtin.slice(hx, x, x + 1)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _er_hex(t: tekst) -> bool {
+    la i = 0
+    mens i < lengde(t) {
+        hvis _hex_verdi(builtin.slice(t, i, i + 1)) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# Tokenet for sesjonen (ikkje maskert): sha256 over løyndom, sesjon og løyndom.
+funksjon _csrf_grunn(sesjon: tekst) -> tekst {
+    la h = _s["hemmeleg"]
+    returner builtin.sha256(h + "|nsp1-csrf|" + sesjon + "|" + h)
+}
+
+# Maskert per svar: tilfeldig pad + (pad XOR token). To svar gjev ulike tekstar som
+# begge blir godtekne (trygt med komprimering, BREACH).
+funksjon csrf_token(sesjon: tekst) -> tekst {
+    la pad = builtin.random_hex(32)
+    returner pad + _xor_hex(pad, _csrf_grunn(sesjon))
+}
+
+funksjon csrf_gyldig(sesjon: tekst, maskert: tekst) -> bool {
+    hvis lengde(maskert) != 128 eller ikkje _er_hex(maskert) { returner usann }
+    la tok = _xor_hex(builtin.slice(maskert, 0, 64), builtin.slice(maskert, 64, 128))
+    la venta = _csrf_grunn(sesjon)
+    # Konstant tid over heile lengda
+    la ulik = 0
+    la i = 0
+    mens i < 64 {
+        hvis builtin.slice(tok, i, i + 1) != builtin.slice(venta, i, i + 1) { ulik = ulik + 1 }
+        i = i + 1
+    }
+    returner ulik == 0
+}
+
+funksjon _opphav_ok(ctx: ordbok) -> bool {
+    la sfs = app.header(ctx, "sec-fetch-site")
+    hvis sfs == "cross-site" { returner usann }
+    la o = app.header(ctx, "origin")
+    hvis o == "" { returner sann }
+    la tillatne = _konf("opphav")
+    hvis lengde(tillatne) > 0 {
+        la i = 0
+        mens i < lengde(tillatne) {
+            hvis tillatne[i] == o { returner sann }
+            i = i + 1
+        }
+        returner usann
+    }
+    la vert = app.header(ctx, "host")
+    returner vert != "" og (o == "http://" + vert eller o == "https://" + vert)
+}
+
+# Same opphavssjekk som push, for tilstandsendrande ruter i appen (t.d. utlogging). Strengare enn
+# push: utan både Origin og Sec-Fetch-Site blir førespurnaden avvist.
+funksjon opphav_ok(ctx: ordbok_tekst) -> bool {
+    hvis app.header(ctx, "origin") == "" og app.header(ctx, "sec-fetch-site") == "" { returner usann }
+    hvis app.header(ctx, "sec-fetch-site") == "same-site" { returner usann }
+    returner _opphav_ok(ctx)
+}
+
+funksjon _brukar_hash(uid: tekst) -> tekst {
+    returner builtin.slice(builtin.sha256("nsp1-brukar|" + uid), 0, 12)
+}
+
+# ─── Endepunkt ───────────────────────────────────────────────────────────────
+
+funksjon hallo(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_synk/hallo")
+    la b = _brukar(ctx)
+    hvis ikkje har_nokkel(b, "uid") { returner _feil(401, "ikkje_innlogga") }
+    la l = _lager()
+    la sam = nøkler(_konf("samlingar"))
+    la sj = []
+    la i = 0
+    mens i < lengde(sam) {
+        legg_til(sj, k.json_tekst(sam[i]))
+        i = i + 1
+    }
+    returner _svar(200, "{\"p\":1,\"epoke\":" + k.json_tekst(l["epoke"]) + ",\"hlc\":" + k.json_tekst(l["hlc"]) +
+        ",\"csrf\":" + k.json_tekst(csrf_token(b["sesjon"])) + ",\"brukar\":" + k.json_tekst(_brukar_hash(b["uid"])) +
+        ",\"v\":" + tekst(lager.brukar_hw(l, b["uid"])) +
+        ",\"samlingar\":[" + builtin.join(sj, ",") + "],\"tak\":{\"dok\":" + tekst(_konf("maks_dok_per_brukar")) +
+        ",\"ops\":" + tekst(_konf("maks_ops_per_push")) + ",\"kropp\":262144}}")
+}
+
+funksjon _res(seq: heltall, resten: tekst) -> tekst {
+    returner "{\"seq\":" + tekst(seq) + "," + resten + "}"
+}
+
+funksjon push(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /_synk/push")
+    la b = _brukar(ctx)
+    hvis ikkje har_nokkel(b, "uid") { returner _feil(401, "ikkje_innlogga") }
+    hvis ikkje builtin.starts_with(builtin.lower(builtin.slice(app.header(ctx, "content-type"), 0, 32)), "application/json") {
+        returner _feil(415, "content_type")
+    }
+    hvis ikkje _opphav_ok(ctx) { returner _feil(403, "csrf") }
+    hvis ikkje csrf_gyldig(b["sesjon"], app.header(ctx, "x-nc-csrf")) { returner _feil(403, "csrf") }
+    la uid = b["uid"]
+    la kropp = tekst(ctx["__body__"])
+    hvis ikkje k.kontrollteikn_ok(kropp) { returner _feil(400, "kontrollteikn") }
+    la body = builtin.json_parse_raw(kropp)
+    hvis body == null eller builtin.type(body) != "ordbok" { returner _feil(400, "ugyldig") }
+    hvis ikkje har_nokkel(body, "p") eller body["p"] != 1 { returner _feil(400, "protokoll") }
+    hvis ikkje har_nokkel(body, "klient") eller builtin.type(body["klient"]) != "tekst" eller ikkje k.trygt_namn(body["klient"], 64) {
+        returner _feil(400, "klient")
+    }
+    hvis ikkje har_nokkel(body, "ops") eller builtin.type(body["ops"]) != "liste" { returner _feil(400, "ops") }
+    la ops = body["ops"]
+    hvis lengde(ops) > _konf("maks_ops_per_push") { returner _feil(413, "for_stor_batch") }
+    la kvittert = 0
+    hvis har_nokkel(body, "kvittert") {
+        hvis builtin.type(body["kvittert"]) != "heltall" eller body["kvittert"] < 0 { returner _feil(400, "kvittert") }
+        kvittert = body["kvittert"]
+    }
+    la l = _lager()
+    la epoke = ""
+    hvis har_nokkel(body, "epoke") og builtin.type(body["epoke"]) == "tekst" { epoke = body["epoke"] }
+    hvis epoke != l["epoke"] {
+        returner _svar(410, "{\"p\":1,\"feil\":\"resync\",\"epoke\":" + k.json_tekst(l["epoke"]) + "}")
+    }
+    la klient = body["klient"]
+    la kr = lager.klient(l, klient)
+    la siste = 0
+    hvis kr != null {
+        hvis kr["e"] != uid { returner _feil(403, "klient_eigar") }
+        siste = kr["q"]
+    }
+    # Klienten har fått kvittering for meir enn tenaren kjenner: tenaren er sett attende
+    # (restore). Klienten må starte på nytt med ny klient-id og sende heile køa.
+    hvis kvittert > siste {
+        returner _svar(410, "{\"p\":1,\"feil\":\"resync\",\"epoke\":" + k.json_tekst(l["epoke"]) + "}")
+    }
+    la no = builtin.tid_ms()
+    la grense = _konf("hlc_grense_ms")
+    la reg = _konf("samlingar")
+    la maks_dok = _konf("maks_dok_per_brukar")
+    la res = []
+    la linjer = []
+    la endra = 0
+    la hol = usann
+    # HLC-en tenaren gav den førre op-en i denne pushen (klemming held rekkjefølgja)
+    la førre_hlc = ""
+    la i = 0
+    mens i < lengde(ops) {
+        la op = ops[i]
+        hvis builtin.type(op) != "ordbok" eller ikkje har_nokkel(op, "seq") eller builtin.type(op["seq"]) != "heltall" {
+            returner _feil(400, "seq")
+        }
+        la seq = op["seq"]
+        hvis seq <= siste {
+            legg_til(res, _res(seq, "\"ok\":true,\"dup\":true"))
+        } ellers hvis seq != siste + 1 {
+            hol = sann
+            bryt
+        } ellers {
+            la feil = k.valider_op(op, reg)
+            hvis feil != "" {
+                legg_til(res, _res(seq, "\"ok\":false,\"feil\":" + k.json_tekst(feil)))
+            } ellers {
+                la hlc = k.hlc_klem_etter(op["hlc"], no, grense, førre_hlc)
+                førre_hlc = hlc
+                la rec = lager.hent_dok(l, op["s"], op["id"], uid)
+                hvis rec == null og lager.brukar_tal(l, uid) >= maks_dok {
+                    legg_til(res, _res(seq, "\"ok\":false,\"feil\":\"kvote\""))
+                } ellers {
+                    la gammal = null
+                    hvis rec != null { gammal = rec["d"] }
+                    la r = k.bruk_op(gammal, op, hlc)
+                    l["hlc"] = k.hlc_maks(l["hlc"], hlc)
+                    hvis ikkje r["endra"] {
+                        legg_til(res, _res(seq, "\"ok\":true,\"endra\":false"))
+                    } ellers {
+                        la maks_byte = 4096
+                        hvis har_nokkel(reg[op["s"]], "maks_byte") { maks_byte = reg[op["s"]]["maks_byte"] }
+                        la jd = k.json(r["dok"]["data"])
+                        hvis lengde(jd) > maks_byte {
+                            legg_til(res, _res(seq, "\"ok\":false,\"feil\":\"for_stor\""))
+                        } ellers {
+                            la sd = lager.sett_dok(l, op["s"], op["id"], uid, r["dok"], jd)
+                            legg_til(linjer, sd["linje"])
+                            legg_til(res, _res(seq, "\"ok\":true,\"v\":" + tekst(sd["v"])))
+                            endra = endra + 1
+                        }
+                    }
+                }
+            }
+            siste = seq
+        }
+        i = i + 1
+    }
+    hvis kr == null og siste == 0 og lengde(ops) == 0 {
+        # Tom push frå ukjend klient: ingenting å lagre.
+        returner _svar(200, "{\"p\":1,\"siste_seq\":0,\"hlc\":" + k.json_tekst(l["hlc"]) + ",\"v\":" + tekst(lager.brukar_hw(l, uid)) + ",\"res\":[]}")
+    }
+    hvis kr == null eller kr["q"] != siste {
+        legg_til(linjer, lager.sett_klient(l, klient, uid, siste))
+    }
+    hvis endra > 0 { legg_til(linjer, lager.meta_linje(l)) }
+    lager.skriv_linjer(l, linjer)
+    hvis l["journal_byte"] > _konf("sjekkpunkt_byte") { lager.sjekkpunkt(l) }
+    la bhw = lager.brukar_hw(l, uid)
+    hvis endra > 0 { app.send_hending("synk:" + uid, "v", tekst(bhw)) }
+    la body_ut = "{\"p\":1,\"siste_seq\":" + tekst(siste) + ",\"hlc\":" + k.json_tekst(l["hlc"]) + ",\"v\":" + tekst(bhw) +
+        ",\"res\":[" + builtin.join(res, ",") + "]"
+    hvis hol {
+        returner _svar(409, body_ut + ",\"feil\":\"hol\"}")
+    }
+    returner _svar(200, body_ut + "}")
+}
+
+funksjon _tal_param(ctx: ordbok, namn: tekst, standard: heltall, maks: heltall) -> heltall {
+    la q = ctx["__query__"]
+    hvis q == null eller ikkje har_nokkel(q, namn) { returner standard }
+    la v = tekst(q[namn])
+    hvis ikkje k.trygt_namn(v, 15) { returner -1 }
+    la i = 0
+    mens i < lengde(v) {
+        la c = builtin.char_code(builtin.slice(v, i, i + 1))
+        hvis c < 48 eller c > 57 { returner -1 }
+        i = i + 1
+    }
+    la n = heltall_fra_tekst(v)
+    hvis n > maks { returner maks }
+    returner n
+}
+
+funksjon pull(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_synk/pull")
+    la b = _brukar(ctx)
+    hvis ikkje har_nokkel(b, "uid") { returner _feil(401, "ikkje_innlogga") }
+    la sidan = _tal_param(ctx, "sidan", 0, 999999999999)
+    la grense = _tal_param(ctx, "grense", _konf("pull_grense"), _konf("pull_grense"))
+    hvis sidan < 0 eller grense < 1 { returner _feil(400, "parameter") }
+    la l = _lager()
+    la uid = b["uid"]
+    la bhw = lager.brukar_hw(l, uid)
+    la e = lager.endringar(l, uid, sidan, grense)
+    la meir = "false"
+    hvis e["meir"] { meir = "true" }
+    la svar = _svar(200, "{\"p\":1,\"epoke\":" + k.json_tekst(l["epoke"]) +
+        ",\"v\":" + tekst(e["v"]) + ",\"meir\":" + meir + ",\"endringar\":[" + builtin.join(e["endringar"], ",") + "]}")
+    svar["etag"] = k.pull_etag(l["epoke"], _brukar_hash(uid), bhw, sidan, grense)
+    svar["headers"] = {"cache-control": "no-store", "vary": "Cookie", "x-content-type-options": "nosniff"}
+    returner svar
+}
+
+funksjon hendingar(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_synk/hendingar")
+    la b = _brukar(ctx)
+    hvis ikkje har_nokkel(b, "uid") { returner _feil(401, "ikkje_innlogga") }
+    la bhw = lager.brukar_hw(_lager(), b["uid"])
+    returner app.sse("synk:" + b["uid"], app.sse_hending("v", tekst(bhw)))
+}

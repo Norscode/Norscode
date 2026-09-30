@@ -1,0 +1,144 @@
+# W3 (WASM-sporet): lenking og tree-shaking av runtime-biblioteket std/wasm_rt.no.
+#
+#   1. lowring.lenk_rt fører funksjonane, globalnamna og modulinitialiseringane til rt-
+#      modulane (ikkje __main__ frå rt-NCB-en) inn i klient-NCB-en, utan å overskrive det
+#      klienten alt har, og utan å endre inndata.
+#   2. Utan lenking er builtin.split ein kompileringsfeil som peikar på runtime-biblioteket
+#      (ingen stille fallback).
+#   3. Tree-shaking (CLI-en): eit program som berre brukar split, får berre rt-funksjonen
+#      splitt og ingen vertsimport for desimaltal; sha256 gjev berre sha256_hex (std/sha256.no)
+#      og desimaltall(tekst) den interne importen tekst_flyt. Ein tom app som brukar heile
+#      biblioteket, får alle dei offentlege rt-funksjonane og held seg under storleikstaket.
+#   4. Fail-closed: ukjende builtins er framleis kompileringsfeil med samla rapport, også
+#      med biblioteket lenka inn (tekst_til_liste og json_parse har hint, split med feil
+#      aritet blir avvist), og CLI-en skriv ingen app.wasm.
+bruk std.wasm_lowring som lowring
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+
+funksjon rot() -> tekst { returner "build/wasm/test_w3" }
+
+# Tak for ein tom app + heile runtime-biblioteket (målt 20 198 byte i W3; planbudsjettet er
+# 60 KB). Taket har om lag 20 % margin.
+funksjon tak_alle_rt() -> heltall { returner 24576 }
+
+funksjon like_lister(a: liste, b: liste) -> bool {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) {
+        hvis tekst(a[i]) != tekst(b[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon inneheld(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Talet på byte i «WASM: app.wasm <n> byte, …».
+funksjon storleik(linje: tekst) -> heltall {
+    la p = builtin.index_of(linje, "app.wasm ")
+    assert(p >= 0)
+    la rest = builtin.slice(linje, p + 9, lengde(linje))
+    returner heltall_fra_tekst(builtin.slice(rest, 0, builtin.index_of(rest, " ")))
+}
+
+funksjon fd(modul: tekst, merke: tekst) -> ordbok {
+    returner {"name": merke, "module": modul, "params": [], "code": [["PUSH_CONST", merke], ["RETURN"]]}
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir(rot())
+
+    # ── 1. lenk_rt ──
+    la klient = {"entry": "__main__.start", "functions": {"__main__.start": fd("__main__", "klient"), "std.wasm_rt.splitt": fd("std.wasm_rt", "klient_eigen")},
+                 "global_names": {"__main__": ["g"]}, "module_initializers": ["__main__.__init__"]}
+    la rt = {"functions": {"__main__.start": fd("__main__", "rt_drivar"), "__main__.drivar_hjelp": fd("__main__", "rt_drivar"),
+                           "__main__.__drivar_init__": fd("__main__", "rt_drivar"),
+                           "std.wasm_rt.splitt": fd("std.wasm_rt", "rt"),
+                           "std.wasm_rt.saman": fd("std.wasm_rt", "rt"), "std.x.__init__": fd("std.x", "rt_init")},
+             "global_names": {"__main__": ["q"], "std.wasm_rt": [], "std.x": ["z"]},
+             "module_initializers": ["std.x.__init__", "__main__.__drivar_init__", "__main__.__init__"]}
+    la l = lowring.lenk_rt(klient, rt)
+    assert_eq(l["entry"], "__main__.start")
+    assert_eq(l["functions"]["__main__.start"]["name"], "klient")
+    assert_eq(l["functions"]["std.wasm_rt.splitt"]["name"], "klient_eigen")
+    assert_eq(l["functions"]["std.wasm_rt.saman"]["name"], "rt")
+    assert_eq(l["functions"]["std.x.__init__"]["name"], "rt_init")
+    # Drivaren (__main__ i rt-NCB-en) kjem ikkje med
+    assert(ikkje finnes_nøkkel(l["functions"], "__main__.drivar_hjelp"))
+    assert(ikkje finnes_nøkkel(l["functions"], "__main__.__drivar_init__"))
+    assert_eq(lengde(l["functions"]), 4)
+    assert(like_lister(l["global_names"]["__main__"], ["g"]))
+    assert(like_lister(l["global_names"]["std.x"], ["z"]))
+    assert(like_lister(l["module_initializers"], ["__main__.__init__", "std.x.__init__"]))
+    # Inndata er urørte
+    assert_eq(lengde(klient["functions"]), 2)
+    assert_eq(lengde(klient["module_initializers"]), 1)
+    assert(ikkje finnes_nøkkel(klient["global_names"], "std.x"))
+    skriv("lenk_rt: rt-modulane lenka inn, klienten og inndata urørte\n")
+
+    # ── 2. Utan lenking ──
+    hjelp.kompiler_ncb("tests/fixtures/wasm_w3_split.no", rot() + "/split.ncb.json")
+    la utan = lowring.kompiler(hjelp.les_ncb(rot() + "/split.ncb.json"), {"testbygg": usann})
+    assert(ikkje utan["ok"])
+    assert_eq(lengde(utan["feil"]), 1)
+    assert(builtin.index_of(tekst(utan["feil"][0]), "builtin.split krev runtime-biblioteket std.wasm_rt") >= 0)
+
+    # ── 3. Tree-shaking ──
+    la ls = hjelp.bygg_klient("tests/fixtures/wasm_w3_split.no", rot() + "/split", usann)
+    assert(like_lister(hjelp.liste_felt(ls, "rt"), ["splitt"]))
+    assert(like_lister(hjelp.liste_felt(ls, "importar"), ["logg"]))
+    la lh = hjelp.bygg_klient("tests/fixtures/wasm_w3_sha.no", rot() + "/sha", usann)
+    assert(like_lister(hjelp.liste_felt(lh, "rt"), ["sha256_hex"]))
+    assert(inneheld(hjelp.liste_felt(lh, "importar"), "tekst_flyt"))
+    assert(inneheld(hjelp.liste_felt(lh, "atom"), "desimal_av"))
+    assert(ikkje inneheld(hjelp.liste_felt(ls, "atom"), "desimal_av"))
+    la la_ = hjelp.bygg_klient("tests/fixtures/wasm_w3_alle.no", rot() + "/alle", usann)
+    la rt_alle = hjelp.liste_felt(la_, "rt")
+    la offentlege = ["splitt", "saman", "trim_tekst", "erstatt", "til_små", "til_store", "starter_med", "slutter_med",
+                     "inneheld", "finn_indeks", "json_parse", "json_skriv", "sha256_hex", "verdiar", "sorter", "sortert",
+                     "tekst_til_liste"]
+    la oi = 0
+    mens oi < lengde(offentlege) {
+        hvis ikkje inneheld(rt_alle, offentlege[oi]) {
+            skriv("alle: rt-funksjonen " + offentlege[oi] + " manglar i " + builtin.join(rt_alle, ",") + "\n")
+            assert(usann)
+        }
+        oi = oi + 1
+    }
+    la n_split = storleik(ls)
+    la n_alle = storleik(la_)
+    skriv("storleik: berre split " + tekst(n_split) + " B, heile rt " + tekst(n_alle) + " B (tak " + tekst(tak_alle_rt()) + ")\n")
+    assert(n_alle <= tak_alle_rt())
+    assert(n_split > 0)
+    assert(n_alle > 4 * n_split)
+
+    # ── 4. Fail-closed ──
+    hjelp.mkdir(rot() + "/ustotta")
+    hvis builtin.fil_finnes(hjelp.root() + "/" + rot() + "/ustotta/app.wasm") { builtin.fil_slett(hjelp.root() + "/" + rot() + "/ustotta/app.wasm") }
+    hjelp.kompiler_ncb("tests/fixtures/wasm_w3_ustotta.no", rot() + "/ustotta/klient.ncb.json")
+    la m = hjelp.grunnmiljø(hjelp.root())
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = hjelp.root() + "/tools/nc_wasm.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NC_WASM_NCB"] = rot() + "/ustotta/klient.ncb.json"
+    m["NC_WASM_UT"] = rot() + "/ustotta"
+    la r = hjelp.køyr_nc(m, 300000)
+    la o = r["stdout"]
+    assert(r["exit"] != 0)
+    assert(builtin.index_of(o, "WASM-kompilering feila (4 feil)") >= 0)
+    assert(builtin.index_of(o, "ustøtta builtin: tekst_til_liste (finst som std.wasm_rt.tekst_til_liste") >= 0)
+    assert(builtin.index_of(o, "ustøtta builtin: json_parse (VM-en sin json_parse gjev tekstverdiar; bruk json_parse_raw") >= 0)
+    assert(builtin.index_of(o, "ustøtta builtin: rt_finst_ikkje") >= 0)
+    assert(builtin.index_of(o, "builtin.split tek 2 argument, fekk 3") >= 0)
+    assert(ikkje builtin.fil_finnes(hjelp.root() + "/" + rot() + "/ustotta/app.wasm"))
+
+    skriv("test_wasm_w3 OK\n")
+    returner 0
+}

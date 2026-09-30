@@ -1,0 +1,346 @@
+# examples/wasm_synk/klient.no — synka oppgåveliste (W9): klientlogikk i Norscode, kompilert til
+# WebAssembly av tools/nc_wasm.no (sjå app.no). Synken er std/synk_klient.no (NSP/1).
+#
+#   - Ei ny oppgåve, ferdig/ikkje ferdig og sletting blir viste med ein gong (optimistisk); rader
+#     som ikkje er stadfesta av tenaren, har «ventar». Statuslinja seier om alt er synka, kor
+#     mange endringar som ventar, om eininga er utan nett, eller om brukaren ikkje er innlogga.
+#   - «Hugs denne eininga» (aria-pressed): oppgåvene og utboksa blir lagra i IndexedDB (éin
+#     database per brukar), så dei overlever omlasting og fråkopling. Utan valet blir ingenting
+#     lagra på eininga. Eit nytt trykk slettar databasen (utboksa i minnet blir verande).
+#   - «Logg ut»: utboksa blir send først. Ventar det endringar som ikkje kan sendast, åtvarar
+#     sida med talet; eit nytt trykk loggar ut likevel. Så blir databasen sletta, tenaren avsluttar
+#     sesjonen (Clear-Site-Data), og sida går til /.
+#   - Fleire faner held seg samde; ei endring i éi fane blir synleg i dei andre med ein gong.
+#   - Avviste endringar (tenaren sin validering) blir viste med årsak, og kopien går tilbake.
+
+bruk std.wasm_vert som vert
+bruk std.wasm_nett som nett
+bruk std.wasm_rt som rt
+bruk std.synk_klient som synk
+bruk std.wasm_pwa_klient som pwa
+
+la oppg: ordbok = {}
+la liste_h: heltall = 0
+la status_h: heltall = 0
+la feil_h: heltall = 0
+la tittel_h: heltall = 0
+la hugs_h: heltall = 0
+la lokal_h: heltall = 0
+la resultat_h: heltall = 0
+la sist: ordbok = {}
+la utlogging_åtvara: bool = usann
+# Testkrokar: ekstra konfigurasjon til synk.start, ein closure som får kvar statushending, og
+# om sida skal lastast på nytt etter utlogging (headless Chrome dumpar ikkje etter ein navigasjon).
+la konf_ekstra: ordbok = {}
+la ved_status_ekstra = null
+la last_på_nytt: bool = sann
+# Utlogginga er ferdig hjå tenaren (POST /logg_ut er svara), for testklientar.
+la utlogging_sendt: bool = usann
+# Service worker (W8, når appen er bygd med NC_WASM_SW=1): ny versjon ventar på brukaren
+la oppdatering_h: heltall = 0
+la ny_versjon_h: heltall = 0
+la oppdater_h: heltall = 0
+la oppdater_klikka: bool = usann
+la registrer_sw: bool = sann
+
+# ─── Reine funksjonar (same resultat i VM-en og i WASM) ──────────────────────
+
+funksjon samlingar() -> ordbok {
+    returner {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool", "laga": "heltall"}, "maks_byte": 1024}}
+}
+
+funksjon ny_oppgåve(tittel: tekst, no_ms: heltall) -> ordbok {
+    returner {"tittel": builtin.trim(tittel), "ferdig": usann, "laga": no_ms}
+}
+
+# "" når tittelen er gyldig, elles meldinga.
+funksjon valider_tittel(t: tekst) -> tekst {
+    la s = builtin.trim(t)
+    hvis s == "" { returner "Skriv ein tittel." }
+    hvis lengde(s) > 200 { returner "Tittelen kan ha høgst 200 teikn." }
+    returner ""
+}
+
+funksjon _n(n: heltall, eintal: tekst, fleirtal: tekst) -> tekst {
+    hvis n == 1 { returner "1 " + eintal }
+    returner tekst(n) + " " + fleirtal
+}
+
+funksjon status_tekst(s: ordbok) -> tekst {
+    la t = s["tilstand"]
+    la n = s["ventar"]
+    la endr = _n(n, "endring", "endringar")
+    hvis t == "startar" { returner "Koplar til …" }
+    hvis t == "synka" {
+        hvis s["hugs"] { returner "Alt er synka og lagra på eininga." }
+        returner "Alt er synka."
+    }
+    hvis t == "ventar" { returner endr + " ventar på tenaren." }
+    hvis t == "offline" {
+        hvis n == 0 { returner "Utan nett." }
+        returner "Utan nett: " + endr + " ventar og blir sende når nettet er tilbake."
+    }
+    hvis t == "ikkje_innlogga" {
+        hvis n == 0 { returner "Du er ikkje innlogga." }
+        returner "Du er ikkje innlogga. " + endr + " ventar på eininga."
+    }
+    hvis t == "db_endra" { returner "Oppgåvene vart endra i ei anna fane. Last sida på nytt." }
+    hvis t == "logga_ut" { returner "Du er logga ut." }
+    returner "Synk-feil: " + tekst(s["melding"])
+}
+
+# Meldinga for ei hending frå synk-klienten, eller "".
+funksjon hending_tekst(s: ordbok) -> tekst {
+    la h = s["hending"]
+    hvis h == "avvist" og lengde(s["avvist"]) > 0 {
+        la a = s["avvist"][lengde(s["avvist"]) - 1]
+        returner "Tenaren avviste ei endring (" + tekst(a["feil"]) + ")."
+    }
+    hvis h == "brukarbyte" {
+        returner "Ein annan brukar var innlogga på denne eininga. Oppgåvene hans blir ikkje viste."
+    }
+    hvis h == "lagring" { returner "Kunne ikkje lagre på eininga: " + tekst(s["melding"]) }
+    returner ""
+}
+
+funksjon lokal_tekst(hugs: bool) -> tekst {
+    hvis hugs { returner "Oppgåvene er lagra på eininga." }
+    returner "Oppgåvene blir ikkje lagra på eininga."
+}
+
+funksjon usynka_tekst(n: heltall) -> tekst {
+    returner _n(n, "endring", "endringar") + " er ikkje sende til tenaren. Trykk «Logg ut» ein gong til for å logge ut likevel (dei blir då sletta frå eininga)."
+}
+
+# Oppgåvene i rekkjefølgja dei vart laga (så id).
+funksjon sortert(l: liste) -> liste {
+    returner rt.sorter(l, fun(a, b) -> _før(a, b))
+}
+
+funksjon _før(a: ordbok, b: ordbok) -> heltall {
+    la ta = a["data"]["laga"]
+    la tb = b["data"]["laga"]
+    hvis ta == null { ta = 0 }
+    hvis tb == null { tb = 0 }
+    hvis ta < tb { returner -1 }
+    hvis ta > tb { returner 1 }
+    la xa = tekst(a["data"]["tittel"])
+    la xb = tekst(b["data"]["tittel"])
+    hvis xa < xb { returner -1 }
+    hvis xa > xb { returner 1 }
+    hvis a["id"] < b["id"] { returner -1 }
+    hvis a["id"] > b["id"] { returner 1 }
+    returner 0
+}
+
+# ─── Sida ────────────────────────────────────────────────────────────────────
+
+funksjon er_utlogga_hjå_tenaren() -> bool {
+    returner utlogging_sendt
+}
+
+# Samlinga (for testklientar).
+funksjon oppgåver() -> ordbok {
+    returner oppg
+}
+
+funksjon teikn() -> heltall {
+    la l = sortert(synk.liste(oppg))
+    vert.tøm(liste_h)
+    la i = 0
+    mens i < lengde(l) {
+        la e = l[i]
+        la li = vert.lag("li")
+        la klasse = ""
+        hvis e["data"]["ferdig"] == sann { klasse = "ferdig" }
+        hvis e["ventar"] { klasse = klasse + " ventar" }
+        vert.sett_attr(li, "class", builtin.trim(klasse))
+        vert.sett_attr(li, "data-id", e["id"])
+        la b = vert.lag("button")
+        vert.sett_attr(b, "type", "button")
+        vert.sett_attr(b, "aria-pressed", tekst(e["data"]["ferdig"] == sann))
+        vert.sett_attr(b, "data-id", e["id"])
+        vert.sett_handlar(b, "klikk", "veksle")
+        hvis e["data"]["ferdig"] == sann { vert.sett_tekst(b, "Ferdig") } ellers { vert.sett_tekst(b, "Ikkje ferdig") }
+        vert.legg_inn(li, b)
+        la s = vert.lag("span")
+        vert.sett_tekst(s, " " + tekst(e["data"]["tittel"]) + " ")
+        vert.legg_inn(li, s)
+        hvis e["ventar"] {
+            la v = vert.lag("small")
+            vert.sett_tekst(v, "(ventar) ")
+            vert.legg_inn(li, v)
+            vert.slepp(v)
+        }
+        la f = vert.lag("button")
+        vert.sett_attr(f, "type", "button")
+        vert.sett_attr(f, "data-id", e["id"])
+        vert.sett_handlar(f, "klikk", "fjern")
+        vert.sett_tekst(f, "Fjern")
+        vert.legg_inn(li, f)
+        vert.legg_inn(liste_h, li)
+        vert.slepp(b)
+        vert.slepp(s)
+        vert.slepp(f)
+        vert.slepp(li)
+        i = i + 1
+    }
+    vert.sett_tekst(resultat_h, _n(lengde(l), "oppgåve", "oppgåver"))
+    returner 0
+}
+
+funksjon vis_feil(melding: tekst) -> heltall {
+    vert.sett_tekst(feil_h, melding)
+    vert.vis(feil_h, melding != "")
+    returner 0
+}
+
+funksjon ved_status(s: ordbok) -> heltall {
+    sist = s
+    vert.sett_tekst(status_h, status_tekst(s))
+    vert.sett_attr(hugs_h, "aria-pressed", tekst(s["hugs"]))
+    vert.sett_tekst(lokal_h, lokal_tekst(s["hugs"]))
+    la m = hending_tekst(s)
+    hvis m != "" { vis_feil(m) }
+    hvis s["tilstand"] == "logga_ut" og s["hending"] == "" { teikn() }
+    hvis ved_status_ekstra != null { builtin.ncb_call_fn(ved_status_ekstra, s) }
+    returner 0
+}
+
+funksjon legg_til() -> heltall {
+    la t = vert.hent_verdi(tittel_h)
+    la m = valider_tittel(t)
+    hvis m != "" {
+        vis_feil(m)
+        returner 0
+    }
+    vis_feil("")
+    prøv {
+        synk.put(oppg, synk.ny_id(), ny_oppgåve(t, builtin.tid_ms()))
+        vert.sett_verdi(tittel_h, "")
+    } fang (e) {
+        vis_feil("Kunne ikkje lagre oppgåva: " + tekst(e))
+    }
+    returner 0
+}
+
+funksjon veksle() -> heltall {
+    la id = vert.hending_data("id")
+    la d = synk.hent(oppg, id)
+    hvis d == null { returner 0 }
+    synk.put(oppg, id, {"ferdig": ikkje (d["ferdig"] == sann)})
+    returner 0
+}
+
+funksjon fjern() -> heltall {
+    synk.del(oppg, vert.hending_data("id"))
+    returner 0
+}
+
+funksjon hugs_klikk() -> heltall {
+    synk.sett_hugs(ikkje synk.status()["hugs"], fun(r) -> 0)
+    returner 0
+}
+
+funksjon logg_ut_klikk() -> heltall {
+    synk.logg_ut(utlogging_åtvara, fun(r) -> utlogga(r))
+    returner 0
+}
+
+funksjon utlogga(r: ordbok) -> heltall {
+    hvis ikkje r["ok"] {
+        utlogging_åtvara = sann
+        vis_feil(usynka_tekst(r["usynka"]))
+        returner 0
+    }
+    utlogging_åtvara = usann
+    vis_feil("")
+    nett.send(nett.førespurnad("POST", "/logg_ut"), fun(s) -> til_start(), fun(f) -> til_start())
+    returner 0
+}
+
+funksjon til_start() -> heltall {
+    utlogging_sendt = sann
+    hvis last_på_nytt { vert.gå_til("/") }
+    returner 0
+}
+
+# Testklientar gjev val: "konf" (ekstra til synk.start), "ved_status" (closure som får kvar
+# statushending) og "last_på_nytt" (usann: ingen navigasjon etter utlogging).
+funksjon start_med_val(val: ordbok) -> heltall {
+    hvis har_nokkel(val, "konf") { konf_ekstra = val["konf"] }
+    hvis har_nokkel(val, "ved_status") { ved_status_ekstra = val["ved_status"] }
+    hvis har_nokkel(val, "last_på_nytt") { last_på_nytt = val["last_på_nytt"] }
+    hvis har_nokkel(val, "sw") { registrer_sw = val["sw"] }
+    returner start()
+}
+
+funksjon start() -> heltall {
+    liste_h = vert.finn("#liste")
+    status_h = vert.finn("#status")
+    feil_h = vert.finn("#feil")
+    tittel_h = vert.finn("#tittel")
+    hugs_h = vert.finn("#hugs")
+    lokal_h = vert.finn("#lokal")
+    resultat_h = vert.finn("#nc-resultat")
+    la konf = {"samlingar": samlingar()}
+    la ks = nøkler(konf_ekstra)
+    la i = 0
+    mens i < lengde(ks) {
+        konf[ks[i]] = konf_ekstra[ks[i]]
+        i = i + 1
+    }
+    synk.start(konf, fun(s) -> ved_status(s))
+    oppg = synk.samling("oppg")
+    synk.lytt(oppg, fun(h) -> teikn())
+    vert.lytt(vert.finn("#skjema"), "send", "legg_til")
+    vert.deleger("klikk", "veksle")
+    vert.deleger("klikk", "fjern")
+    vert.lytt(hugs_h, "klikk", "hugs_klikk")
+    vert.lytt(vert.finn("#logg-ut"), "klikk", "logg_ut_klikk")
+    # W8: service workeren (sida startar frå cachen utan nett) og oppdateringsflyten
+    oppdatering_h = vert.finn("#oppdatering")
+    ny_versjon_h = vert.finn("#ny-versjon")
+    oppdater_h = vert.finn("#oppdater")
+    vert.lytt(oppdater_h, "klikk", "oppdater_klikk")
+    hvis registrer_sw { pwa.registrer(fun(s) -> sw_endra(s)) }
+    returner 0
+}
+
+# ─── Service worker (W8) ─────────────────────────────────────────────────────
+
+# Kva sida gjer ved ei hending frå service workeren (rein, same som i deltakar-demoen): ny versjon
+# ventar på eit klikk; når han har teke over etter klikket, blir sida lasta på nytt.
+funksjon sw_handling(hending: tekst, klikka: bool) -> ordbok {
+    la ut = {"melding": "", "knapp": usann, "last_på_nytt": usann}
+    hvis hending == "ventar" og ikkje klikka {
+        ut["melding"] = "Ein ny versjon er klar."
+        ut["knapp"] = sann
+    }
+    hvis hending == "aktivert" {
+        hvis klikka {
+            ut["last_på_nytt"] = sann
+        } ellers {
+            ut["melding"] = "Ein ny versjon er teken i bruk. Han blir lasta neste gong du opnar sida."
+        }
+    }
+    returner ut
+}
+
+funksjon sw_endra(s: ordbok) -> heltall {
+    la a = sw_handling(s["hending"], oppdater_klikka)
+    hvis a["melding"] != "" {
+        vert.sett_tekst(ny_versjon_h, a["melding"])
+        vert.vis(oppdatering_h, sann)
+        vert.vis(oppdater_h, a["knapp"])
+    }
+    hvis a["last_på_nytt"] og last_på_nytt { vert.gå_til(vert.hent_sti()) }
+    returner 0
+}
+
+funksjon oppdater_klikk() -> heltall {
+    oppdater_klikka = sann
+    vert.sett_attr(oppdater_h, "disabled", "disabled")
+    pwa.aktiver_ny()
+    returner 0
+}

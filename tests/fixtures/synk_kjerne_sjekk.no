@@ -1,0 +1,204 @@
+# Sjekkane for tests/test_synk_kjerne.no (A7): eigenskapar ved std/synk_kjerne.no, køyrde
+# i ein barneprosess i VM-fastmodus (standard-VM-en brukar over 100 s på dei 600
+# samanflettingane). HLC er strengt monoton og klemt, samanflettinga er deterministisk,
+# kommutativ og idempotent, tombstones har ingen data, og valideringa avviser det ho skal.
+bruk std.synk_kjerne som k
+
+funksjon lcg(x: heltall) -> heltall {
+    returner (x * 1103515245 + 12345) % 2147483648
+}
+
+funksjon test_hlc() -> heltall {
+    # Strengt monoton over lokale hendingar, sjølv når klokka går bakover
+    la l = ""
+    la x = 7
+    la i = 0
+    mens i < 200 {
+        x = lcg(x)
+        la no = 1790000000000 + (x % 2000) - 1000
+        la n = k.hlc_send(l, no, "a")
+        assert(k.hlc_samanlikn(n, l) > 0)
+        assert(k.hlc_gyldig(n))
+        l = n
+        i = i + 1
+    }
+    # Mottak gjev noko større enn både lokal og fjern
+    la f = k.hlc_lag(1790000900000, 5, "b")
+    la m = k.hlc_motta(l, f, 1790000000000, "a")
+    assert(k.hlc_samanlikn(m, l) > 0)
+    assert(k.hlc_samanlikn(m, f) > 0)
+    # Klemme: 10 min fram blir no + 60 s; innafor grensa blir urørt
+    la fram = k.hlc_lag(1790000600000, 3, "c")
+    la klemt = k.hlc_klem(fram, 1790000000000, 60000)
+    assert_eq(k.hlc_les(klemt)["ms"], 1790000060000)
+    assert_eq(k.hlc_les(klemt)["c"], 3)
+    assert_eq(k.hlc_klem(k.hlc_lag(1790000059999, 0, "c"), 1790000000000, 60000), k.hlc_lag(1790000059999, 0, "c"))
+    assert_eq(k.hlc_klem("tull", 1, 1), "")
+    assert_eq(k.hlc_les(k.hlc_klem(k.hlc_lag(1790000090000, 0, "c"), 1790000000000, 60000))["ms"], 1790000060000)
+    # To op-ar i éin push som begge blir klemde: rekkjefølgja blir halden (teljaren aukar)
+    la k1 = k.hlc_klem_etter(k.hlc_lag(1790003600000, 0, "c"), 1790000000000, 60000, "")
+    la k2 = k.hlc_klem_etter(k.hlc_lag(1790003600005, 0, "c"), 1790000000000, 60000, k1)
+    assert_eq(k1, k.hlc_lag(1790000060000, 0, "c"))
+    assert_eq(k2, k.hlc_lag(1790000060000, 1, "c"))
+    assert(k.hlc_samanlikn(k2, k1) > 0)
+    # Utan klemming blir HLC-en urørt, òg etter ein førre
+    assert_eq(k.hlc_klem_etter(k.hlc_lag(1790000000010, 0, "c"), 1790000000000, 60000, k1), k.hlc_lag(1790000000010, 0, "c"))
+    assert_eq(k.dok_maks_hlc({"data": {}, "hlc": {"a": k.hlc_lag(5, 0, "x"), "b": k.hlc_lag(9, 0, "x")}, "del": k.hlc_lag(7, 0, "y")}), k.hlc_lag(9, 0, "x"))
+    assert_eq(k.dok_maks_hlc(null), "")
+    # Klokke 5 min bak som har sett ein nyare verdi, vinn med neste redigering
+    la tenar = k.hlc_lag(1790000300000, 0, "srv")
+    la klient = k.hlc_motta("", tenar, 1790000000000, "treg")
+    assert(k.hlc_samanlikn(k.hlc_send(klient, 1790000000001, "treg"), tenar) > 0)
+    # Kanonisk form er påkravd
+    assert(ikkje k.hlc_gyldig("1790000000000:00000:a"))
+    assert(ikkje k.hlc_gyldig("001790000000000:0:a"))
+    assert(ikkje k.hlc_gyldig("001790000000000:00000:"))
+    assert(ikkje k.hlc_gyldig("001790000000000:00000:a:b"))
+    assert(ikkje k.hlc_gyldig("00179000000000x:00000:a"))
+    skriv("HLC: 200 lokale hendingar strengt monotone, mottak større enn begge, klemme på +60 s\n")
+    returner 0
+}
+
+funksjon lag_ops(frø: heltall, n: heltall) -> liste {
+    la ops = []
+    la x = frø
+    la felt = ["a", "b", "c", "d"]
+    la i = 0
+    mens i < n {
+        x = lcg(x)
+        la ms = 1000 + (x % 40)
+        x = lcg(x)
+        la hl = k.hlc_lag(ms, x % 4, "n" + tekst(x % 3))
+        x = lcg(x)
+        hvis x % 6 == 0 {
+            legg_til(ops, {"op": "del", "hlc": hl})
+        } ellers {
+            la f = {}
+            f[felt[x % 4]] = "v" + tekst(i)
+            x = lcg(x)
+            hvis x % 3 == 0 { f[felt[x % 4]] = i }
+            legg_til(ops, {"op": "put", "felt": f, "hlc": hl})
+        }
+        i = i + 1
+    }
+    returner ops
+}
+
+funksjon køyr(ops: liste, orden: liste) {
+    la d = null
+    la i = 0
+    mens i < lengde(orden) {
+        la op = ops[orden[i]]
+        d = k.bruk_op(d, op, op["hlc"])["dok"]
+        i = i + 1
+    }
+    returner d
+}
+
+# Samanslåing av to replikaer = bruk alle op-ane frå begge (op-basert CRDT).
+funksjon test_samanfletting() -> heltall {
+    la frø = 1
+    la like = 0
+    mens frø <= 12 {
+        la ops = lag_ops(frø * 7919, 10)
+        la fram = []
+        la bak = []
+        la hopp = []
+        la dobbel = []
+        la i = 0
+        mens i < 10 {
+            legg_til(fram, i)
+            legg_til(bak, 9 - i)
+            legg_til(hopp, (i * 3) % 10)
+            legg_til(dobbel, i)
+            legg_til(dobbel, (i * 7) % 10)
+            i = i + 1
+        }
+        la a = k.json_kanonisk(køyr(ops, fram))
+        assert_eq(k.json_kanonisk(køyr(ops, bak)), a)
+        assert_eq(k.json_kanonisk(køyr(ops, hopp)), a)
+        assert_eq(k.json_kanonisk(køyr(ops, dobbel)), a)
+        # Deterministisk: same op-ar gjev same tekst neste gong
+        assert_eq(k.json_kanonisk(køyr(ops, fram)), a)
+        like = like + 1
+        frø = frø + 1
+    }
+    # Siste skrivar vinn per felt, ikkje per dokument
+    la d = k.bruk_op(null, {"op": "put", "felt": {"tittel": "A", "ferdig": usann}}, k.hlc_lag(10, 0, "a"))["dok"]
+    d = k.bruk_op(d, {"op": "put", "felt": {"ferdig": sann}}, k.hlc_lag(20, 0, "b"))["dok"]
+    d = k.bruk_op(d, {"op": "put", "felt": {"tittel": "B", "ferdig": usann}}, k.hlc_lag(15, 0, "c"))["dok"]
+    assert_eq(d["data"]["tittel"], "B")
+    assert_eq(d["data"]["ferdig"], sann)
+    # Same op to gonger endrar ingenting (idempotens); konflikt mellom nodar blir avgjort
+    # av node-id, og lik HLC med ulik verdi (feil klient) av den største JSON-verdien
+    la r = k.bruk_op(d, {"op": "put", "felt": {"tittel": "B"}}, k.hlc_lag(15, 0, "c"))
+    assert(ikkje r["endra"])
+    assert(k.bruk_op(d, {"op": "put", "felt": {"tittel": "C"}}, k.hlc_lag(15, 0, "c"))["endra"])
+    assert(ikkje k.bruk_op(d, {"op": "put", "felt": {"tittel": "A"}}, k.hlc_lag(15, 0, "c"))["endra"])
+    la r2 = k.bruk_op(d, {"op": "put", "felt": {"tittel": "D"}}, k.hlc_lag(15, 0, "d"))
+    assert(r2["endra"])
+    assert_eq(r2["dok"]["data"]["tittel"], "D")
+    # Tombstone har ingen data; ei samtidig nyare redigering overlever slettinga
+    la t = k.bruk_op(d, {"op": "del"}, k.hlc_lag(30, 0, "a"))["dok"]
+    assert(k.dok_sletta(t))
+    assert_eq(lengde(nøkler(t["data"])), 0)
+    assert_eq(lengde(nøkler(t["hlc"])), 0)
+    assert(builtin.index_of(k.endring_json(1, "s", "i", t), "\"dok\":null") >= 0)
+    la delvis = k.bruk_op(d, {"op": "del"}, k.hlc_lag(18, 0, "a"))["dok"]
+    assert(ikkje k.dok_sletta(delvis))
+    assert_eq(builtin.json_stringify(nøkler(delvis["data"])), "[\"ferdig\"]")
+    # Put og del med same HLC: slettinga vinn uansett rekkjefølgje
+    la lik = k.hlc_lag(40, 0, "z")
+    la pd = k.bruk_op(k.bruk_op(null, {"op": "put", "felt": {"tittel": "x"}}, lik)["dok"], {"op": "del"}, lik)["dok"]
+    la dp = k.bruk_op(k.bruk_op(null, {"op": "del"}, lik)["dok"], {"op": "put", "felt": {"tittel": "x"}}, lik)["dok"]
+    assert(k.dok_sletta(pd))
+    assert_eq(k.json_kanonisk(pd), k.json_kanonisk(dp))
+    # Inndata blir ikkje endra
+    assert_eq(d["data"]["tittel"], "B")
+    skriv("samanfletting: " + tekst(like) + " tilfeldige op-sekvensar gav same dokument i fire rekkjefølgjer og med duplikat; LWW per felt; tombstone utan data\n")
+    returner 0
+}
+
+funksjon test_validering() -> heltall {
+    la reg = {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool", "pri": "heltall", "vekt": "tal", "fart": "desimaltall"}, "maks_byte": 64}}
+    la hv = k.hlc_lag(1790000000000, 0, "c1")
+    la ok = {"seq": 3, "op": "put", "s": "oppg", "id": "id.1:2-3_4", "hlc": hv, "felt": {"tittel": "x", "vekt": 2, "fart": 1.5, "ferdig": null}}
+    assert_eq(k.valider_op(ok, reg), "")
+    assert_eq(k.valider_op({"seq": 1, "op": "del", "s": "oppg", "id": "a", "hlc": hv}, reg), "")
+    assert_eq(k.valider_op(null, reg), "op")
+    assert_eq(k.valider_op({"seq": "1", "op": "put"}, reg), "seq")
+    assert_eq(k.valider_op({"seq": 1, "op": "x", "s": "oppg", "id": "a", "hlc": hv}, reg), "op")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "nei", "id": "a", "hlc": hv, "felt": {"pri": 1}}, reg), "samling")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "", "hlc": hv, "felt": {"pri": 1}}, reg), "id")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a b", "hlc": hv, "felt": {"pri": 1}}, reg), "id")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": "x", "felt": {"pri": 1}}, reg), "hlc")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": []}, reg), "felt")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"__del__": 1}}, reg), "felt_namn:__del__")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"__proto__": 1}}, reg), "felt_namn:__proto__")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"farge": 1}}, reg), "felt_ukjent:farge")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"pri": 1.5}}, reg), "felt_type:pri")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"ferdig": "ja"}}, reg), "felt_type:ferdig")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"fart": 2}}, reg), "felt_type:fart")
+    assert_eq(k.valider_op({"seq": 1, "op": "put", "s": "oppg", "id": "a", "hlc": hv, "felt": {"tittel": "0123456789012345678901234567890123456789012345678901234567890"}}, reg), "for_stor")
+    assert(k.kontrollteikn_ok("{\"a\":\"\\u00e6\\u000a\\t\"}\n"))
+    assert(ikkje k.kontrollteikn_ok("{\"a\":\"\\u0000\"}"))
+    assert(ikkje k.kontrollteikn_ok("{\"a\":\"\\u001F\"}"))
+    assert(k.kontrollteikn_ok("{\"a\":\"\\\\u0001\"}"))
+    assert(ikkje k.kontrollteikn_ok("{\"a\":\"\\\\\\u0001\"}"))
+    assert(ikkje k.kontrollteikn_ok("{\"a\":\"" + builtin.chr(27) + "\"}"))
+    # JSON: rundtur gjennom json_parse_raw gjev same verdi og typar
+    la v = {"t": "a\"b\\c\nd\r\te æ", "h": -5, "d": 2.0, "e": 1.25, "b": usann, "n": null, "l": [1, "x"]}
+    la tilbake = builtin.json_parse_raw(k.json(v))
+    assert_eq(k.json(tilbake), k.json(v))
+    assert_eq(builtin.type(tilbake["d"]), "desimaltall")
+    skriv("validering: 17 feilkodar, kontrollteikn og JSON-rundtur OK\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    test_hlc()
+    test_samanfletting()
+    test_validering()
+    skriv("synk_kjerne_sjekk OK\n")
+    returner 0
+}

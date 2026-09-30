@@ -1,0 +1,146 @@
+# Testklient for W6 (nett i WASM-klienten, testbygg) mot tests/fixtures/wasm_w6_nett_testapp.no.
+# Loggen i #nc-logg blir samanlikna med fasiten i tests/test_wasm_w6.no.
+#
+# Fase 1: seks førespurnader blir sende på ein gong (ikkje fleire enn dei seks tilkoplingane
+# Chrome opnar per opphav: ein førespurnad som blir avbroten medan han ventar på ei
+# tilkopling, kan etterlate ein open sokkel utan førespurnad, og då blir nc serve, som tek éi
+# tilkopling om gongen, ståande og vente). Svara kjem i ei anna rekkjefølgje enn dei vart
+# sende: nr. 3 blir avbroten etter 20 ms og nr. 6 får tidsavbrot etter 20 ms, medan tenaren er
+# oppteken med nr. 1 i 600 ms. Tilbakekalla skal likevel kome i sende-rekkjefølgja:
+#   1 GET /api/sakte          ok 200 «sein»
+#   2 GET /api/ok (JSON)      ok 200, JSON-verdien og headeren x-nc-svar; tilbakekallet kastar
+#                             etterpå («ERROR: …»), og 3–6 kjem likevel
+#   3 GET /api/tekst          avbrote
+#   4 POST /api/ekko (JSON)   ok 201: tenaren (VM-en) har lese kroppen og skrive han att
+#   5 GET /api/404 (JSON)     feil status 404 med kroppen, kasta og fanga som HentFeil;
+#                             feil-tilbakekallet kastar etterpå, og nr. 6 kjem likevel
+#   6 GET /api/sakte, 20 ms   feil tidsavbrot
+# Fase 2 (når fase 1 er levert; utan avbrot, sjå over om tilkoplingane):
+#   7 GET /api/tekst          ok 200 med linjeskift og æøå i kroppen
+#   8 GET /api/500 utan feil-tilbakekall: «ERROR: HentFeil: status GET /api/500: status 500»
+#   9 GET /api/ugyldig_json   feil json
+#  10 GET /api/ok             ok-tilbakekallet kastar: «ERROR: …» (fase 3 startar likevel)
+# Levering i sende-rekkjefølgje når svara kjem i vilkårleg rekkjefølgje, og at tilbakekall
+# som kastar ikkje stoppar dei neste, er òg testa deterministisk utan nettverk i
+# paritetskorpuset w6_nett_ko (VM, Chrome og jsc).
+# Fase 3 (offline): /api/stopp avsluttar nc serve, så både den og neste førespurnad får
+# nettverksfeil. Til slutt: #nc-resultat = «ferdig».
+bruk std.wasm_vert som vert
+bruk std.wasm_nett som nett
+
+la ferdige: heltall = 0
+
+funksjon logg_ok(nr: heltall, s: ordbok) -> heltall {
+    la x = ""
+    hvis finnes_nøkkel(s, "json") { x = " json=" + builtin.json_stringify(s["json"]) }
+    ellers { x = " kropp=«" + s["kropp"] + "»" }
+    la h = s["headerar"]
+    la ekstra = ""
+    hvis finnes_nøkkel(h, "x-nc-svar") { ekstra = " x-nc-svar=" + h["x-nc-svar"] }
+    skriv(tekst(nr) + ": ok " + tekst(s["status"]) + x + ekstra + "\n")
+    returner ferdig(nr)
+}
+
+funksjon logg_feil(nr: heltall, f: ordbok) -> heltall {
+    la x = ""
+    hvis f["art"] == "status" { x = " kropp=" + f["kropp"] }
+    hvis f["art"] == "json" { x = " melding=" + f["melding"] }
+    skriv(tekst(nr) + ": feil " + f["art"] + " " + tekst(f["status"]) + " " + f["metode"] + " " + f["url"] + x + "\n")
+    hvis f["art"] == "status" {
+        prøv {
+            nett.kast_feil(f)
+        } fang (e: HentFeil) {
+            skriv(tekst(nr) + ": fanga " + tekst(e) + "\n")
+        }
+    }
+    returner ferdig(nr)
+}
+
+# Loggar svaret og kastar: dei neste tilbakekalla (3–6, som alt er ferdige og ventar på
+# nr. 1) må likevel kome.
+funksjon logg_og_kast(nr: heltall, s: ordbok) -> heltall {
+    logg_ok(nr, s)
+    kast "Uventa i tilbakekallet til nr. " + tekst(nr)
+}
+
+funksjon kastar(s: ordbok) -> heltall {
+    ferdig(10)
+    kast "Uventa i tilbakekallet til " + s["kropp"]
+}
+
+# Loggar feilen og kastar (nr. 5, det siste svaret som kjem i fase 1): nr. 6, som alt er
+# ferdig (tidsavbrot), må likevel kome.
+funksjon logg_feil_og_kast(nr: heltall, f: ordbok) -> heltall {
+    logg_feil(nr, f)
+    kast "Uventa i feil-tilbakekallet til nr. " + tekst(nr)
+}
+
+# Fase 1 er ferdig når nr. 6 er levert (siste i sende-rekkjefølgja), fase 2 når nr. 10 er det.
+funksjon ferdig(nr: heltall) -> heltall {
+    ferdige = ferdige + 1
+    hvis nr == 6 { fase2() }
+    hvis nr == 10 { fase3() }
+    returner ferdige
+}
+
+funksjon fase2() -> heltall {
+    skriv("fase 2: ventande=" + tekst(nett.ventande()) + "\n")
+    nett.hent("/api/tekst", fun(s) -> logg_ok(7, s), fun(f) -> logg_feil(7, f))
+    nett.hent("/api/500", fun(s) -> logg_ok(8, s), null)
+    nett.hent_json("/api/ugyldig_json", fun(s) -> logg_ok(9, s), fun(f) -> logg_feil(9, f))
+    nett.hent("/api/ok", fun(s) -> kastar(s), fun(f) -> logg_feil(10, f))
+    returner 0
+}
+
+funksjon fase3() -> heltall {
+    skriv("fase 3: ventande=" + tekst(nett.ventande()) + "\n")
+    nett.hent("/api/stopp", fun(s) -> skriv("stopp: ok?\n"), fun(f) -> offline(f))
+    returner 0
+}
+
+funksjon offline(f: ordbok) -> heltall {
+    skriv("stopp: feil " + f["art"] + " " + tekst(f["status"]) + "\n")
+    nett.hent_json("/api/ok", fun(s) -> skriv("etter stopp: ok?\n"), fun(g) -> slutt(g))
+    returner 0
+}
+
+funksjon slutt(g: ordbok) -> heltall {
+    skriv("etter stopp: feil " + g["art"] + " " + tekst(g["status"]) + " " + nett.feil_tekst(g) + "\n")
+    vert.sett_tekst(vert.finn("#nc-resultat"), "ferdig")
+    returner 0
+}
+
+funksjon vent_ms(ms: heltall) -> heltall {
+    la t0 = builtin.tid_ms()
+    mens builtin.tid_ms() - t0 < ms { }
+    returner 0
+}
+
+funksjon start() -> heltall {
+    # Ugyldige førespurnader kastar med ein gong
+    prøv {
+        nett.hent("http://anna.no/x", fun(s) -> 0, fun(f) -> 0)
+    } fang (e: HentFeil) {
+        skriv("ugyldig: " + tekst(e) + "\n")
+    }
+    prøv {
+        nett.send(nett.med_tekst(nett.førespurnad("GET", "/api/ok"), "x", "text/plain"), fun(s) -> 0, fun(f) -> 0)
+    } fang (e: HentFeil) {
+        skriv("ugyldig: " + tekst(e) + "\n")
+    }
+    nett.hent("/api/sakte", fun(s) -> logg_ok(1, s), fun(f) -> logg_feil(1, f))
+    nett.hent_json("/api/ok", fun(s) -> logg_og_kast(2, s), fun(f) -> logg_feil(2, f))
+    la id3 = nett.hent("/api/tekst", fun(s) -> logg_ok(3, s), fun(f) -> logg_feil(3, f))
+    la f4 = nett.med_header(nett.med_json(nett.førespurnad("POST", "/api/ekko"), {"namn": "Åse \"B\"", "tal": [1, 2.5, -3], "ja": sann}), "X-NC-Test", "hei")
+    nett.send(f4, fun(s) -> logg_ok(4, s), fun(f) -> logg_feil(4, f))
+    nett.hent_json("/api/404", fun(s) -> logg_ok(5, s), fun(f) -> logg_feil_og_kast(5, f))
+    nett.send(nett.med_tidsgrense(nett.førespurnad("GET", "/api/sakte"), 20), fun(s) -> logg_ok(6, s), fun(f) -> logg_feil(6, f))
+    skriv("sende: ventande=" + tekst(nett.ventande()) + "\n")
+    # Vent 20 ms før avbrotet, så nettlesaren har skrive førespurnaden til sokkelen (sjå over).
+    vent_ms(20)
+    skriv("avbryt 3: " + tekst(nett.avbryt(id3)) + " " + tekst(nett.avbryt(id3)) + " " + tekst(nett.avbryt(99)) + "\n")
+    # Hald JavaScript oppteken i 60 ms, så tidsgrensa (20 ms) til nr. 6 går ut medan tenaren er
+    # oppteken med nr. 1 (headless Chrome med virtuell tid flyttar klokka berre når sida køyrer)
+    vent_ms(60)
+    returner 0
+}

@@ -1,0 +1,517 @@
+# synk_kjerne.no — den reine kjernen i NSP/1 (Norscode Sync Protocol, versjon 1).
+#
+# Delt mellom tenaren (std/synk.no, i VM-en) og klienten (W9, kompilert til WASM med
+# tools/nc_wasm.no). Difor: ingen I/O, ingen klokke (tida kjem inn som argument), og
+# berre builtins som både VM-en og WASM-backenden har (lengde, slice, char_code, chr,
+# tekst, type, nøkler, har_nokkel, fjern_nokkel med teksnøklar, legg_til, index_of,
+# replace, split, join, starts_with). Same inndata gjev same utdata i begge.
+#
+# Innhald:
+#   - HLC (hybrid logical clock) som tekst "ms:teljar:node" med fast breidd
+#     (15 + 5 siffer), send/motta etter Kulkarni m.fl., og klemme av framtidige tider;
+#   - samanfletting per felt, siste skrivar vinn etter HLC, med sletting som
+#     tombstone utan data (sletting fjernar alle felt med eldre HLC);
+#   - validering av op-ar mot eit samlingsregister med feltskjema og tak;
+#   - JSON-skriving (kompakt, sorterte eller innsetjingsordna nøklar) og ein
+#     kontroll av kontrollteikn i rå førespurnadskroppar;
+#   - ETag for pull.
+
+# ─── Små hjelparar ───────────────────────────────────────────────────────────
+
+# Fjern kvart teikn i `teikn` frå `t` (native replace). Gjev sann om ingenting er att.
+# Brukt for lange namn, der ei lykkje per byte kostar meir enn om lag 40 replace-kall.
+funksjon _berre(t: tekst, teikn: liste) -> bool {
+    la u = t
+    la i = 0
+    mens i < lengde(teikn) {
+        hvis builtin.index_of(u, teikn[i]) >= 0 {
+            u = builtin.replace(u, teikn[i], "")
+            hvis u == "" { returner sann }
+        }
+        i = i + 1
+    }
+    returner u == ""
+}
+
+# Namneteikn (etter lower): siffer og hex-bokstavar først, så UUID-ar blir ferdige tidleg.
+funksjon _namn_teikn() -> liste {
+    returner ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "-", "a", "b", "c", "d", "e", "f",
+              "_", ".", ":", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+              "u", "v", "w", "x", "y", "z"]
+}
+
+funksjon _siffer(t: tekst) -> bool {
+    hvis lengde(t) == 0 eller lengde(t) > 18 { returner usann }
+    la i = 0
+    mens i < lengde(t) {
+        la k = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis k < 48 eller k > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _pad(n: heltall, bredde: heltall) -> tekst {
+    la t = tekst(n)
+    mens lengde(t) < bredde { t = "0" + t }
+    returner t
+}
+
+# Tal med fast breidd (berre siffer, nullar framfor). Gjev -1 om teksten ikkje er det.
+# Rundturen gjennom _pad avviser alt heltall_fra_tekst godtek utover siffer.
+funksjon _fast_tal(t: tekst, bredde: heltall) -> heltall {
+    hvis lengde(t) != bredde { returner -1 }
+    la n = -1
+    prøv {
+        n = heltall_fra_tekst(t)
+    } fang (e) {
+        returner -1
+    }
+    hvis n < 0 eller _pad(n, bredde) != t { returner -1 }
+    returner n
+}
+
+funksjon _namn_lykkje(t: tekst, med_punktum: bool) -> bool {
+    la i = 0
+    mens i < lengde(t) {
+        la k = builtin.char_code(builtin.slice(t, i, i + 1))
+        la ok = (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 45 eller (med_punktum og (k == 46 eller k == 58))
+        hvis ikkje ok { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# [A-Za-z0-9_.:-], 1..maks teikn (høgst 128)
+funksjon trygt_namn(t: tekst, maks: heltall) -> bool {
+    la n = lengde(t)
+    hvis n == 0 eller n > maks eller n > 128 { returner usann }
+    hvis n <= 16 { returner _namn_lykkje(t, sann) }
+    returner _berre(builtin.lower(t), _namn_teikn())
+}
+
+funksjon _node_ok(t: tekst) -> bool {
+    hvis lengde(t) == 0 eller lengde(t) > 64 { returner usann }
+    hvis lengde(t) <= 16 { returner _namn_lykkje(t, usann) }
+    hvis builtin.index_of(t, ".") >= 0 eller builtin.index_of(t, ":") >= 0 { returner usann }
+    returner _berre(builtin.lower(t), _namn_teikn())
+}
+
+# ─── HLC ─────────────────────────────────────────────────────────────────────
+
+funksjon hlc_maks_teljar() -> heltall { returner 99999 }
+
+funksjon hlc_lag(ms: heltall, teljar: heltall, node: tekst) -> tekst {
+    returner _pad(ms, 15) + ":" + _pad(teljar, 5) + ":" + node
+}
+
+# {"ok": bool, "ms", "c", "node"}. Godtek berre den kanoniske forma.
+funksjon hlc_les(h: tekst) -> ordbok {
+    la d = builtin.split(h, ":")
+    hvis lengde(d) != 3 { returner {"ok": usann} }
+    la ms = _fast_tal(d[0], 15)
+    hvis ms < 0 { returner {"ok": usann} }
+    la c = _fast_tal(d[1], 5)
+    hvis c < 0 { returner {"ok": usann} }
+    hvis ikkje _node_ok(d[2]) { returner {"ok": usann} }
+    returner {"ok": sann, "ms": ms, "c": c, "node": d[2]}
+}
+
+funksjon hlc_gyldig(h: tekst) -> bool {
+    returner hlc_les(h)["ok"]
+}
+
+# Samanlikning: -1, 0 eller 1. Tom tekst er minst. Med fast breidd er tekst-
+# samanlikning det same som (ms, teljar, node) leksikografisk.
+funksjon hlc_samanlikn(a: tekst, b: tekst) -> heltall {
+    hvis a == b { returner 0 }
+    hvis a == "" { returner -1 }
+    hvis b == "" { returner 1 }
+    hvis a < b { returner -1 }
+    returner 1
+}
+
+funksjon hlc_maks(a: tekst, b: tekst) -> tekst {
+    hvis hlc_samanlikn(a, b) >= 0 { returner a }
+    returner b
+}
+
+funksjon _hlc_neste(ms: heltall, c: heltall, node: tekst) -> tekst {
+    hvis c > hlc_maks_teljar() { returner hlc_lag(ms + 1, 0, node) }
+    returner hlc_lag(ms, c, node)
+}
+
+# Lokal hending (t.d. ei redigering): l' = max(l.ms, no); teljaren aukar om ms står stille.
+funksjon hlc_send(lokal: tekst, no_ms: heltall, node: tekst) -> tekst {
+    hvis lokal == "" { returner hlc_lag(no_ms, 0, node) }
+    la l = hlc_les(lokal)
+    hvis ikkje l["ok"] { returner hlc_lag(no_ms, 0, node) }
+    hvis no_ms > l["ms"] { returner hlc_lag(no_ms, 0, node) }
+    returner _hlc_neste(l["ms"], l["c"] + 1, node)
+}
+
+# Mottak av ein HLC frå andre (svar frå tenaren, eller data frå pull).
+funksjon hlc_motta(lokal: tekst, fjern: tekst, no_ms: heltall, node: tekst) -> tekst {
+    la f = hlc_les(fjern)
+    hvis ikkje f["ok"] { returner hlc_send(lokal, no_ms, node) }
+    la lms = -1
+    la lc = 0
+    hvis lokal != "" {
+        la l = hlc_les(lokal)
+        hvis l["ok"] {
+            lms = l["ms"]
+            lc = l["c"]
+        }
+    }
+    la ms = lms
+    hvis f["ms"] > ms { ms = f["ms"] }
+    hvis no_ms > ms { ms = no_ms }
+    hvis ms == lms og ms == f["ms"] {
+        la c = lc
+        hvis f["c"] > c { c = f["c"] }
+        returner _hlc_neste(ms, c + 1, node)
+    }
+    hvis ms == lms { returner _hlc_neste(ms, lc + 1, node) }
+    hvis ms == f["ms"] { returner _hlc_neste(ms, f["c"] + 1, node) }
+    returner hlc_lag(ms, 0, node)
+}
+
+# Tenaren klemmer framtidige tider: ms over no + grense blir sett til no + grense
+# (teljar og node blir behaldne). Ugyldig HLC gjev "".
+funksjon hlc_klem(h: tekst, no_ms: heltall, grense_ms: heltall) -> tekst {
+    la p = hlc_les(h)
+    hvis ikkje p["ok"] { returner "" }
+    hvis p["ms"] > no_ms + grense_ms { returner hlc_lag(no_ms + grense_ms, p["c"], p["node"]) }
+    returner h
+}
+
+# Klemming av op-ane i éin push, i seq-rekkjefølgje: `førre` er HLC-en tenaren gav den førre
+# op-en (eller ""). HLC-ane til klienten aukar innanfor ein push, men to op-ar som begge blir
+# klemde til same grense (t.d. to redigeringar av same felt med klokka ein time for fort), kunne
+# få like HLC-ar, og då ville likskapsregelen (større JSON-verdi) avgjere i staden for
+# rekkjefølgja. Ei klemd op får difor alltid ein HLC etter den førre (teljaren aukar).
+funksjon hlc_klem_etter(h: tekst, no_ms: heltall, grense_ms: heltall, førre: tekst) -> tekst {
+    la kh = hlc_klem(h, no_ms, grense_ms)
+    hvis kh == "" eller kh == h eller førre == "" { returner kh }
+    hvis hlc_samanlikn(kh, førre) > 0 { returner kh }
+    la f = hlc_les(førre)
+    hvis ikkje f["ok"] { returner kh }
+    returner _hlc_neste(f["ms"], f["c"] + 1, hlc_les(kh)["node"])
+}
+
+# Den høgaste HLC-en i eit dokument (felta og slettinga), eller "".
+funksjon dok_maks_hlc(d) -> tekst {
+    hvis d == null { returner "" }
+    la h = ""
+    hvis har_nokkel(d, "del") og d["del"] != null { h = tekst(d["del"]) }
+    hvis har_nokkel(d, "hlc") og d["hlc"] != null {
+        la ks = nøkler(d["hlc"])
+        la i = 0
+        mens i < lengde(ks) {
+            h = hlc_maks(h, tekst(d["hlc"][ks[i]]))
+            i = i + 1
+        }
+    }
+    returner h
+}
+
+# ─── Dokument og samanfletting ───────────────────────────────────────────────
+#
+# Eit dokument er {"data": {felt: verdi}, "hlc": {felt: hlc}, "del": hlc eller ""}.
+# "del" er HLC-en til siste sletting. Eit felt som manglar, har effektiv HLC lik "del".
+# Sletta (tombstone) = ingen felt og del != "".
+
+funksjon dok_ny() -> ordbok {
+    returner {"data": {}, "hlc": {}, "del": ""}
+}
+
+funksjon dok_sletta(d: ordbok) -> bool {
+    returner lengde(nøkler(d["data"])) == 0 og d["del"] != ""
+}
+
+funksjon dok_kopi(d: ordbok) -> ordbok {
+    la ut = dok_ny()
+    la ks = nøkler(d["data"])
+    la i = 0
+    mens i < lengde(ks) {
+        ut["data"][ks[i]] = d["data"][ks[i]]
+        ut["hlc"][ks[i]] = d["hlc"][ks[i]]
+        i = i + 1
+    }
+    ut["del"] = d["del"]
+    returner ut
+}
+
+# Bruk éi op (allereie validert, med klemt HLC) på dokumentet (null = nytt).
+# Gjev {"dok": nytt dokument, "endra": bool}. Endrar ikkje inndata.
+# put: felt med høgare HLC enn den effektive (feltet sin eller "del") vinn; ved lik
+# HLC vinn den største JSON-verdien.
+# del: "del" blir høgaste HLC, og alle felt med eldre eller lik HLC blir fjerna.
+# Like HLC-ar endrar ingenting, så å bruke same op to gonger er idempotent.
+funksjon bruk_op(dok, op: ordbok, hlc: tekst) -> ordbok {
+    la d = dok_ny()
+    hvis dok != null { d = dok_kopi(dok) }
+    la endra = usann
+    hvis tekst(op["op"]) == "del" {
+        hvis hlc_samanlikn(hlc, d["del"]) > 0 {
+            d["del"] = hlc
+            endra = sann
+            la ks = nøkler(d["hlc"])
+            la i = 0
+            mens i < lengde(ks) {
+                la k = ks[i]
+                hvis hlc_samanlikn(d["hlc"][k], hlc) <= 0 {
+                    fjern_nokkel(d["data"], k)
+                    fjern_nokkel(d["hlc"], k)
+                }
+                i = i + 1
+            }
+        }
+        returner {"dok": d, "endra": endra}
+    }
+    la felt = op["felt"]
+    la fk = nøkler(felt)
+    la i = 0
+    mens i < lengde(fk) {
+        la k = fk[i]
+        la gjeld = d["del"]
+        la finst = har_nokkel(d["hlc"], k)
+        hvis finst { gjeld = d["hlc"][k] }
+        la c = hlc_samanlikn(hlc, gjeld)
+        # Lik HLC (skal ikkje skje, men ein feil klient kan sende det): den største
+        # JSON-verdien vinn, så resultatet ikkje avheng av rekkjefølgja. Mot ei
+        # sletting med lik HLC vinn slettinga.
+        hvis c > 0 eller (c == 0 og finst og json(felt[k]) > json(d["data"][k])) {
+            d["data"][k] = felt[k]
+            d["hlc"][k] = hlc
+            endra = sann
+        }
+        i = i + 1
+    }
+    returner {"dok": d, "endra": endra}
+}
+
+# ─── Validering ──────────────────────────────────────────────────────────────
+#
+# register: {samling: {"felt": {namn: type}, "maks_byte": n}}
+# type: "tekst", "heltall", "desimaltall", "tal" (heltall eller desimaltall), "bool".
+# null er lov for alle typar (tømmer feltet).
+
+funksjon _type_ok(v, typ: tekst) -> bool {
+    la t = builtin.type(v)
+    hvis t == "ingenting" { returner sann }
+    hvis typ == "tekst" { returner t == "tekst" }
+    hvis typ == "heltall" { returner t == "heltall" }
+    hvis typ == "desimaltall" { returner t == "desimaltall" }
+    hvis typ == "tal" { returner t == "heltall" eller t == "desimaltall" }
+    hvis typ == "bool" { returner t == "boolsk" }
+    returner usann
+}
+
+# Gjev "" for ei gyldig op, elles ein feilkode ("op", "samling", "id", "hlc", "seq",
+# "felt", "felt_namn:<k>", "felt_ukjent:<k>", "felt_type:<k>", "for_stor").
+funksjon valider_op(op, register: ordbok) -> tekst {
+    hvis op == null eller builtin.type(op) != "ordbok" { returner "op" }
+    hvis ikkje har_nokkel(op, "seq") eller builtin.type(op["seq"]) != "heltall" eller op["seq"] < 1 { returner "seq" }
+    hvis ikkje har_nokkel(op, "op") { returner "op" }
+    la art = op["op"]
+    hvis builtin.type(art) != "tekst" eller (art != "put" og art != "del") { returner "op" }
+    hvis ikkje har_nokkel(op, "s") eller builtin.type(op["s"]) != "tekst" { returner "samling" }
+    hvis ikkje har_nokkel(register, op["s"]) { returner "samling" }
+    hvis ikkje har_nokkel(op, "id") eller builtin.type(op["id"]) != "tekst" eller ikkje trygt_namn(op["id"], 128) { returner "id" }
+    hvis ikkje har_nokkel(op, "hlc") eller builtin.type(op["hlc"]) != "tekst" eller ikkje hlc_gyldig(op["hlc"]) { returner "hlc" }
+    hvis art == "del" { returner "" }
+    hvis ikkje har_nokkel(op, "felt") eller builtin.type(op["felt"]) != "ordbok" { returner "felt" }
+    la felt = op["felt"]
+    la fk = nøkler(felt)
+    hvis lengde(fk) == 0 { returner "felt" }
+    la skjema = register[op["s"]]["felt"]
+    la i = 0
+    mens i < lengde(fk) {
+        la k = fk[i]
+        hvis builtin.starts_with(k, "__") eller ikkje trygt_namn(k, 64) { returner "felt_namn:" + k }
+        hvis ikkje har_nokkel(skjema, k) { returner "felt_ukjent:" + k }
+        hvis ikkje _type_ok(felt[k], tekst(skjema[k])) { returner "felt_type:" + k }
+        i = i + 1
+    }
+    la maks = 4096
+    hvis har_nokkel(register[op["s"]], "maks_byte") { maks = register[op["s"]]["maks_byte"] }
+    hvis lengde(json(felt)) > maks { returner "for_stor" }
+    returner ""
+}
+
+# Etter samanfletting: er dokumentet framleis under taket?
+funksjon dok_storleik(d: ordbok) -> heltall {
+    returner lengde(json(d["data"]))
+}
+
+# ─── JSON ────────────────────────────────────────────────────────────────────
+
+funksjon json_tekst(t: tekst) -> tekst {
+    la u = t
+    hvis builtin.index_of(u, "\\") >= 0 { u = builtin.replace(u, "\\", "\\\\") }
+    hvis builtin.index_of(u, "\"") >= 0 { u = builtin.replace(u, "\"", "\\\"") }
+    hvis builtin.index_of(u, "\n") >= 0 { u = builtin.replace(u, "\n", "\\n") }
+    hvis builtin.index_of(u, "\r") >= 0 { u = builtin.replace(u, "\r", "\\r") }
+    hvis builtin.index_of(u, "\t") >= 0 { u = builtin.replace(u, "\t", "\\t") }
+    returner "\"" + u + "\""
+}
+
+funksjon _json_desimal(v) -> tekst {
+    la t = tekst(v)
+    hvis t == "nan" eller t == "inf" eller t == "-inf" eller t == "NaN" eller t == "Infinity" eller t == "-Infinity" { returner "null" }
+    hvis builtin.index_of(t, ".") < 0 og builtin.index_of(t, "e") < 0 og builtin.index_of(t, "E") < 0 { returner t + ".0" }
+    returner t
+}
+
+# Kompakt JSON med nøklane i innsetjingsrekkjefølgje. Tekst må ikkje ha andre
+# kontrollteikn enn \n, \r og \t (sjå kontrollteikn_ok).
+funksjon json(v) -> tekst {
+    la t = builtin.type(v)
+    hvis t == "tekst" { returner json_tekst(v) }
+    hvis t == "heltall" { returner tekst(v) }
+    hvis t == "desimaltall" { returner _json_desimal(v) }
+    hvis t == "boolsk" {
+        hvis v { returner "true" }
+        returner "false"
+    }
+    hvis t == "ingenting" { returner "null" }
+    hvis t == "liste" {
+        la delar = []
+        la i = 0
+        mens i < lengde(v) {
+            legg_til(delar, json(v[i]))
+            i = i + 1
+        }
+        returner "[" + builtin.join(delar, ",") + "]"
+    }
+    hvis t == "ordbok" {
+        la ks = nøkler(v)
+        la delar = []
+        la i = 0
+        mens i < lengde(ks) {
+            legg_til(delar, json_tekst(tekst(ks[i])) + ":" + json(v[ks[i]]))
+            i = i + 1
+        }
+        returner "{" + builtin.join(delar, ",") + "}"
+    }
+    returner json_tekst(tekst(v))
+}
+
+funksjon sorterte_nøklar(d: ordbok) -> liste {
+    la ks = nøkler(d)
+    la ut = []
+    la i = 0
+    mens i < lengde(ks) {
+        legg_til(ut, tekst(ks[i]))
+        la j = lengde(ut) - 1
+        mens j > 0 og ut[j] < ut[j - 1] {
+            la x = ut[j]
+            ut[j] = ut[j - 1]
+            ut[j - 1] = x
+            j = j - 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# JSON med sorterte nøklar (rekursivt): same verdi gjev same tekst uansett kva
+# rekkjefølgje felta kom i. Brukt til å samanlikne replikaer.
+funksjon json_kanonisk(v) -> tekst {
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la delar = []
+        la i = 0
+        mens i < lengde(v) {
+            legg_til(delar, json_kanonisk(v[i]))
+            i = i + 1
+        }
+        returner "[" + builtin.join(delar, ",") + "]"
+    }
+    hvis t == "ordbok" {
+        la ks = sorterte_nøklar(v)
+        la delar = []
+        la i = 0
+        mens i < lengde(ks) {
+            legg_til(delar, json_tekst(ks[i]) + ":" + json_kanonisk(v[ks[i]]))
+            i = i + 1
+        }
+        returner "{" + builtin.join(delar, ",") + "}"
+    }
+    returner json(v)
+}
+
+funksjon _er_hex(k: heltall) -> bool {
+    returner (k >= 48 og k <= 57) eller (k >= 97 og k <= 102) eller (k >= 65 og k <= 70)
+}
+
+# Rå JSON-kropp: ingen rå kontrollteikn (utanom \t, \n, \r som kvitt rom) og ingen
+# \u0000–\u001f-escapar utanom \u0009, \u000a og \u000d. Då treng json() berre fem
+# erstatningar, og JSON-en tenaren sender er alltid gyldig for JSON.parse.
+funksjon kontrollteikn_ok(kropp: tekst) -> bool {
+    la k = 0
+    mens k < 32 {
+        hvis k != 9 og k != 10 og k != 13 {
+            hvis builtin.index_of(kropp, builtin.chr(k)) >= 0 { returner usann }
+        }
+        k = k + 1
+    }
+    la pos = 0
+    la n = lengde(kropp)
+    mens pos < n {
+        la rest = builtin.slice(kropp, pos, n)
+        la p = builtin.index_of(rest, "\\u00")
+        hvis p < 0 { returner sann }
+        la abs = pos + p
+        # Tel skråstrekar framfor: eit partal tal betyr at denne er ein escape.
+        la bs = 0
+        la j = abs - 1
+        mens j >= 0 og builtin.slice(kropp, j, j + 1) == "\\" {
+            bs = bs + 1
+            j = j - 1
+        }
+        hvis bs % 2 == 0 og abs + 6 <= n {
+            la h1 = builtin.char_code(builtin.slice(kropp, abs + 4, abs + 5))
+            la h2 = builtin.char_code(builtin.slice(kropp, abs + 5, abs + 6))
+            hvis (h1 == 48 eller h1 == 49) og _er_hex(h2) {
+                la verdi = (h1 - 48) * 16
+                hvis h2 <= 57 { verdi = verdi + h2 - 48 } ellers hvis h2 <= 70 { verdi = verdi + h2 - 55 } ellers { verdi = verdi + h2 - 87 }
+                hvis verdi != 9 og verdi != 10 og verdi != 13 { returner usann }
+            }
+        }
+        pos = abs + 4
+    }
+    returner sann
+}
+
+# ─── Protokoll ───────────────────────────────────────────────────────────────
+
+funksjon protokoll() -> heltall { returner 1 }
+
+# Brukarscopa ETag for pull: epoke, brukar (hash), høgaste versjon og vindauget.
+funksjon pull_etag(epoke: tekst, brukar_hash: tekst, hw: heltall, sidan: heltall, grense: heltall) -> tekst {
+    returner "\"" + epoke + ":" + brukar_hash + ":" + tekst(hw) + ":" + tekst(sidan) + ":" + tekst(grense) + "\""
+}
+
+# Endringa slik pull sender ho: tombstones får dok: null og ingen HLC per felt.
+funksjon endring_json(v: heltall, s: tekst, id: tekst, d: ordbok) -> tekst {
+    hvis dok_sletta(d) {
+        returner "{\"v\":" + tekst(v) + ",\"s\":" + json_tekst(s) + ",\"id\":" + json_tekst(id) + ",\"dok\":null,\"del\":" + json_tekst(d["del"]) + "}"
+    }
+    returner "{\"v\":" + tekst(v) + ",\"s\":" + json_tekst(s) + ",\"id\":" + json_tekst(id) + ",\"dok\":" + json(d["data"]) + ",\"hlc\":" + json(d["hlc"]) + ",\"del\":" + json_tekst(d["del"]) + "}"
+}
+
+# Same som endring_json, men med JSON-en for data og hlc rekna ut på førehand
+# (tenaren reknar dei ut éin gong per endring og gjenbrukar dei i journal, bilete og pull).
+funksjon endring_json_frå(v: heltall, s: tekst, id: tekst, sletta: bool, jd: tekst, jh: tekst, del: tekst) -> tekst {
+    hvis sletta {
+        returner "{\"v\":" + tekst(v) + ",\"s\":" + json_tekst(s) + ",\"id\":" + json_tekst(id) + ",\"dok\":null,\"del\":" + json_tekst(del) + "}"
+    }
+    returner "{\"v\":" + tekst(v) + ",\"s\":" + json_tekst(s) + ",\"id\":" + json_tekst(id) + ",\"dok\":" + jd + ",\"hlc\":" + jh + ",\"del\":" + json_tekst(del) + "}"
+}
+
+# JSON for heile dokumentet ({"data","hlc","del"}) frå delane.
+funksjon dok_json_frå(jd: tekst, jh: tekst, del: tekst) -> tekst {
+    returner "{\"data\":" + jd + ",\"hlc\":" + jh + ",\"del\":" + json_tekst(del) + "}"
+}

@@ -1,0 +1,168 @@
+# W6 (WASM-sporet): asynk nett via tilbakekall — std/wasm_nett.no (fetch mot same opphav),
+# hjelparen Q i lastaren og deltakar-demoen examples/wasm_deltakarar/.
+#
+# Utan nettlesar (alle plattformer):
+#   1. Paritetskorpusa w6_nett og w6_nett_ko (kh.køyr_korpus): dei reine funksjonane (validering,
+#      førespurnad-JSON, konvolutten, klassifisering, HentFeil) og køa (levering i sende-
+#      rekkjefølgje, tilbakekall som kastar) gjev fasiten i VM-en, og same
+#      utskrift i Chrome når han finst.
+#   2. Stubbane kastar i VM-en; ugyldige førespurnader kastar HentFeil før noko blir sendt.
+#   3. Demo-reglane og feilmeldingane i VM-en (same kode som i WASM): prosentkoding (rundtur
+#      med æøå, øydelagd koding), validering av lista, feilmelding() for kvar feilart.
+#   4. Tenaren (nc serve utan sokkel): GET gjev standardlista; POST lagrar og set ein
+#      HttpOnly-informasjonskapsel; GET med «Cookie» (stor forbokstav, som frå nettlesaren)
+#      gjev den lagra lista; ugyldig JSON, feil form og 61 deltakarar gjev 400 med feila;
+#      ein øydelagd kapsel gjev standardlista.
+#   5. Bygg: nett-klientane importerer hent_start og hent_svar og eksporterer __hent_ferdig;
+#      demo-lastaren er under taket (W7: 2560 + lagrings-gruppa 1280).
+# Ende til ende i Chrome (testklienten, demoen i testbygg og produksjon): tests/test_wasm_w6_chrome.no.
+bruk std.wasm_nett som nett
+bruk examples.wasm_deltakarar.reglar som reglar
+bruk examples.wasm_deltakarar.klient som demo
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+bruk tests.fixtures.wasm_korpus_hjelp som kh
+bruk tests.fixtures.wasm_serve_hjelp som sh
+
+funksjon rot() -> tekst { returner "build/wasm/test_w6" }
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool { returner builtin.index_of(t, nål) >= 0 }
+
+# ── 2 ──
+funksjon stubbar_og_validering() -> heltall {
+    la stubb = ""
+    prøv {
+        nett.hent("/api/ok", fun(s) -> 0, fun(f) -> 0)
+    } fang (e) {
+        stubb = tekst(e)
+    }
+    assert(inneheld(stubb, "wasm_vert.hent_start finst berre i nettlesaren"))
+    la ugyldig = ""
+    prøv {
+        nett.send(nett.førespurnad("TRACE", "/api"), fun(s) -> 0, fun(f) -> 0)
+    } fang (e: HentFeil) {
+        ugyldig = tekst(e)
+    }
+    assert_eq(ugyldig, "HentFeil: ugyldig førespurnad: ukjend metode TRACE (GET, POST, PUT, PATCH, DELETE, HEAD)")
+    assert_eq(nett.ventande(), 0)
+    returner 0
+}
+
+# ── 3 ──
+funksjon demo_reglar() -> heltall {
+    la s = "[{\"namn\":\"Åse Berg\",\"epost\":\"a@b.no\"}] ;,=%"
+    la k = reglar.prosent_kod(s)
+    assert(ikkje inneheld(k, ";") og ikkje inneheld(k, " ") og ikkje inneheld(k, ","))
+    assert(inneheld(k, "%C3%85se%20Berg"))
+    assert_eq(reglar.prosent_dekod(k), s)
+    assert_eq(reglar.prosent_dekod("%ZZ"), "")
+    assert_eq(reglar.prosent_dekod("abc%4"), "")
+    assert_eq(lengde(reglar.valider_liste(reglar.standardliste())), 0)
+    assert_eq(reglar.valider_liste("x")[0], "Deltakarane må vere ei liste.")
+    la f = reglar.valider_liste([{"namn": "A", "epost": "x"}, {"namn": "Bo"}])
+    assert_eq(builtin.join(f, " "), "Deltakar 1: Namnet må ha minst 2 teikn. Deltakar 1: E-postadressa manglar namn før @. Deltakar 2: manglar namn eller e-post.")
+    assert_eq(builtin.json_stringify(reglar.liste_frå_kapsel(reglar.kapsel_for([{"namn": "Bo", "epost": "bo@b.no"}]))), "[{\"namn\":\"Bo\",\"epost\":\"bo@b.no\"}]")
+    assert_eq(lengde(reglar.liste_frå_kapsel("%5Bikkje")), 10)
+    # feilmelding() for kvar art (same kode køyrer i WASM)
+    la st400 = {"art": "status", "status": 400, "kropp": "{\"feil\":[\"A.\",\"B.\"]}", "melding": "status 400"}
+    assert_eq(demo.feilmelding("Kunne ikkje lagre", st400), "Kunne ikkje lagre: A. B.")
+    st400["kropp"] = "ikkje json"
+    assert_eq(demo.feilmelding("Kunne ikkje lagre", st400), "Kunne ikkje lagre: tenaren avviste førespurnaden (status 400).")
+    assert_eq(demo.feilmelding("X", {"art": "status", "status": 503, "kropp": "", "melding": ""}), "X: tenaren svara med status 503.")
+    assert_eq(demo.feilmelding("X", {"art": "nettverk", "status": 0, "melding": ""}), "X: fekk ikkje kontakt med tenaren.")
+    assert_eq(demo.feilmelding("X", {"art": "tidsavbrot", "status": 0, "melding": ""}), "X: tenaren svara ikkje i tide.")
+    assert_eq(demo.feilmelding("X", {"art": "json", "status": 200, "melding": ""}), "X: ugyldig svar frå tenaren.")
+    assert_eq(builtin.json_stringify(demo.til_tenaren([{"id": 3, "namn": "a", "epost": "b"}])), "[{\"namn\":\"a\",\"epost\":\"b\"}]")
+    skriv("demo-reglar og feilmeldingar OK (VM)\n")
+    returner 0
+}
+
+# ── 4 ──
+funksjon tenaren(app: tekst) -> heltall {
+    la json = [["Content-Type", "application/json"]]
+    la ein = "{\"deltakarar\":[{\"namn\":\" Åse Berg \",\"epost\":\"a@b.no\"}]}"
+    la kapsel = reglar.kapsel_for([{"namn": "Åse Berg", "epost": "a@b.no"}])
+    la mange = []
+    la i = 0
+    mens i < 61 {
+        legg_til(mange, {"namn": "N" + tekst(i), "epost": "n@b.no"})
+        i = i + 1
+    }
+    la reqs = [
+        sh.førespurnad("/api/deltakarar"),
+        sh.førespurnad_med("POST", "/api/deltakarar", json, ein),
+        sh.førespurnad_med("GET", "/api/deltakarar", [["Cookie", "a=1; nc_deltakarar=" + kapsel + "; b=2"]], ""),
+        sh.førespurnad_med("POST", "/api/deltakarar", json, "{ikkje"),
+        sh.førespurnad_med("POST", "/api/deltakarar", json, "{\"x\":1}"),
+        sh.førespurnad_med("POST", "/api/deltakarar", json, builtin.json_stringify({"deltakarar": mange})),
+        sh.førespurnad_med("GET", "/api/deltakarar", [["Cookie", "nc_deltakarar=%ZZ"]], "")
+    ]
+    la r = sh.serve(app, reqs)
+    la svar = r["svar"]
+    assert_eq(svar[0]["status"], "200")
+    assert(builtin.starts_with(sh.hdr(svar[0], "content-type"), "application/json"))
+    assert_eq(sh.hdr(svar[0], "cache-control"), "no-store")
+    assert_eq(svar[0]["body"], builtin.json_stringify({"deltakarar": reglar.standardliste()}))
+    assert_eq(svar[1]["status"], "200")
+    assert_eq(svar[1]["body"], "{\"lagra\":1,\"deltakarar\":[{\"namn\":\"Åse Berg\",\"epost\":\"a@b.no\"}]}")
+    la sc = sh.hdr(svar[1], "set-cookie")
+    assert(builtin.starts_with(sc, "nc_deltakarar=" + kapsel + ";"))
+    assert(inneheld(sc, "HttpOnly") og inneheld(sc, "SameSite=Strict") og inneheld(sc, "Path=/"))
+    assert_eq(svar[2]["body"], "{\"deltakarar\":[{\"namn\":\"Åse Berg\",\"epost\":\"a@b.no\"}]}")
+    assert_eq(svar[3]["status"], "400")
+    assert_eq(svar[3]["body"], "{\"feil\":[\"Ugyldig JSON: JSON: uventa teikn: i\"]}")
+    assert_eq(sh.hdr(svar[3], "set-cookie"), "")
+    assert_eq(svar[4]["status"], "400")
+    assert(inneheld(svar[4]["body"], "Venta {"))
+    assert_eq(svar[5]["status"], "400")
+    assert_eq(svar[5]["body"], "{\"feil\":[\"Høgst 60 deltakarar (fekk 61).\"]}")
+    assert_eq(svar[6]["body"], svar[0]["body"])
+    skriv("tenaren: " + tekst(lengde(reqs)) + " førespurnader OK (" + tekst(r["ms"]) + " ms)\n")
+    returner 0
+}
+
+funksjon har(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon krev_bygg_nett(linje: tekst, kva: tekst) -> heltall {
+    la imp = hjelp.liste_felt(linje, "importar")
+    la eksp = hjelp.liste_felt(linje, "eksportar")
+    la ok = har(imp, "hent_start") og har(imp, "hent_svar") og har(eksp, "__hent_ferdig") og har(imp, "slepp")
+    hvis ikkje ok {
+        skriv(kva + ": manglar nett-importane eller __hent_ferdig: " + linje + "\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir(rot())
+    # ── 1. Korpus (VM mot fasit, bygg, Chrome) ──
+    kh.køyr_korpus("test_wasm_w6", rot() + "/korpus", ["w6_nett", "w6_nett_ko"], [], "48361", {})
+    # ── 2–3 ──
+    stubbar_og_validering()
+    demo_reglar()
+    assert_eq(nett.førespurnad("GET", "/")["tidsgrense_ms"], 8000)
+    # ── 5. Bygg (serve-inngangen til demoen blir brukt i 4) ──
+    la l_nett = hjelp.bygg_klient_app("tests/fixtures/wasm_w6_nett_testklient.no", rot() + "/nett", sann, "tests/fixtures/wasm_w6_nett_testapp.no")
+    krev_bygg_nett(l_nett, "testklienten")
+    la l_prod = hjelp.bygg_klient_app("examples/wasm_deltakarar/klient.no", rot() + "/demo_prod", usann, "examples/wasm_deltakarar/app.no")
+    krev_bygg_nett(l_prod, "demoen")
+    la lastar = fil_les(hjelp.root() + "/" + rot() + "/demo_prod/nc.js")
+    skriv("demo: " + l_prod + "\n")
+    # W7: demoen brukar òg lagrings-gruppa (lokal kopi i IndexedDB), som har eige budsjett
+    # (1280 byte, tests/fixtures/wasm_lastar_sjekk.no). W8: og PWA-gruppa (736 byte), sidan demoen
+    # registrerer service workeren
+    assert(lengde(lastar) <= 2560 + 1280 + 736)
+    assert(ikkje inneheld(lastar, "test_"))
+    # ── 4. Tenaren utan sokkel ──
+    tenaren(hjelp.serve_inngang(rot() + "/demo_prod"))
+
+    skriv("test_wasm_w6 OK\n")
+    returner 0
+}

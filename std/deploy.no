@@ -490,3 +490,97 @@ funksjon produksjonsmønster(c: ordbok_tekst) -> ordbok_tekst {
         summary: "workers,health,static,env,rollback,graceful"
     }
 }
+
+# ─── Apptenar (std/apptenar.no under `nc run`) ────────────────────────────────
+#
+# Apptenaren køyrer som éin langliva `nc run`-prosess. Handlarane arvar prosessen sin
+# capability-policy, så malen avgrensar han: berre disk.read, disk.write og net.tcp
+# (env.read berre når appen ber om det), aldri process.exec, env.write, thread.spawn
+# eller jit.execute, og disk-scope er datamappa. Ein SIGSEGV i VM-en kan ikkje fangast,
+# så systemd startar prosessen på nytt (Restart=always).
+
+# Miljøet for apptenar-prosessen. `datamappe` må vere absolutt. Brukt både av
+# systemd-malen og av testane (tests/test_apptenar_integrasjon.no), så dei ikkje glir frå
+# kvarandre.
+funksjon apptenar_miljø(app_fil: tekst, datamappe: tekst, med_env: boolsk) -> ordbok_tekst {
+    la caps = "disk.read,disk.write,net.tcp"
+    hvis med_env { caps = caps + ",env.read" }
+    la m: ordbok_tekst = {}
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = app_fil
+    m["NORSCODE_VM_FAST"] = "1"
+    m["NORSCODE_VM_CAPABILITIES"] = caps
+    m["NORSCODE_VM_TARGET_CAPABILITIES"] = caps
+    m["NORSCODE_VM_DISK_ROOT"] = datamappe
+    m["NORSCODE_VM_TARGET_DISK_ROOT"] = datamappe
+    m["NORSCODE_VM_NET_SCOPE"] = "127.0.0.1,localhost"
+    m["NORSCODE_VM_TARGET_NET_SCOPE"] = "127.0.0.1,localhost"
+    returner m
+}
+
+funksjon generer_apptenar_systemd(c: ordbok_tekst, app_fil: tekst, datamappe: tekst, med_env: boolsk) -> tekst {
+    la namn: tekst = c["namn"]
+    la m = apptenar_miljø(app_fil, datamappe, med_env)
+    la miljø = ""
+    la ks = nøkler(m)
+    la i = 0
+    mens i < lengde(ks) {
+        miljø = miljø + "Environment=" + ks[i] + "=" + m[ks[i]] + "\n"
+        i = i + 1
+    }
+    returner "[Unit]\n" +
+        "Description=Norscode apptenar: " + namn + "\n" +
+        "After=network.target\n\n" +
+        "[Service]\n" +
+        "Type=simple\n" +
+        "User=" + tekst(c["brukar"]) + "\n" +
+        "Group=" + tekst(c["gruppe"]) + "\n" +
+        "WorkingDirectory=" + tekst(c["mappe"]) + "\n" +
+        miljø +
+        "ExecStart=/usr/local/bin/nc\n" +
+        "Restart=always\n" +
+        "RestartSec=1\n" +
+        "KillMode=mixed\n" +
+        "TimeoutStopSec=" + tekst(c["graceful_timeout"]) + "\n" +
+        "MemoryMax=" + tekst(c["max_minne_mb"]) + "M\n" +
+        "NoNewPrivileges=yes\n" +
+        "ProtectSystem=strict\n" +
+        "ReadWritePaths=" + datamappe + " " + tekst(c["mappe"]) + "/build\n" +
+        "PrivateTmp=yes\n" +
+        "StandardOutput=append:" + tekst(c["logg_mappe"]) + "/apptenar.log\n" +
+        "StandardError=append:" + tekst(c["logg_mappe"]) + "/apptenar.err\n\n" +
+        "[Install]\n" +
+        "WantedBy=multi-user.target\n"
+}
+
+# nginx framfor apptenaren: upstream-keepalive (proxy_http_version 1.1 og tom
+# Connection), og ein eigen location for SSE (/_synk/hendingar) utan buffering.
+funksjon generer_apptenar_nginx(c: ordbok_tekst, domene: tekst) -> tekst {
+    la namn: tekst = c["namn"]
+    la port: tekst = c["port"]
+    la proxy = "        proxy_pass http://" + namn + "_apptenar;\n" +
+        "        proxy_http_version 1.1;\n" +
+        "        proxy_set_header Connection \"\";\n" +
+        "        proxy_set_header Host $host;\n" +
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n" +
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+    returner "upstream " + namn + "_apptenar {\n" +
+        "    server 127.0.0.1:" + port + ";\n" +
+        "    keepalive 16;\n" +
+        "}\n\n" +
+        "server {\n" +
+        "    listen 80;\n" +
+        "    server_name " + domene + ";\n" +
+        "    client_max_body_size 1m;\n\n" +
+        "    location /_synk/hendingar {\n" + proxy +
+        "        proxy_buffering off;\n" +
+        "        proxy_cache off;\n" +
+        "        proxy_read_timeout 1h;\n" +
+        "    }\n\n" +
+        "    location /_synk/ {\n" + proxy +
+        "        client_max_body_size 256k;\n" +
+        "    }\n\n" +
+        "    location / {\n" + proxy +
+        "    }\n" +
+        "}\n"
+}

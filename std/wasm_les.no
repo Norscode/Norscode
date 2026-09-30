@@ -1,0 +1,1306 @@
+# std/wasm_les.no — WASM-validator i Norscode (W0, W1, W2).
+#
+# Les ein .wasm-modul (liste med bytar 0–255) og sjekkar han utan å køyre han:
+#   - magic og versjon;
+#   - seksjonar: kjende id-ar, rett rekkjefølgje, ingen duplikat, storleik innanfor fila,
+#     og at kvar seksjon blir lesen nøyaktig til enden;
+#   - LEB128-storleikar (u32 ≤ 5 bytar, s32 ≤ 5, s33 ≤ 5, s64 ≤ 10);
+#   - typar (func, struct, array, rec, sub) og verdityper, inkl. WasmGC-referansar;
+#   - teljingar: funksjonsseksjonen og kodeseksjonen har like mange oppføringar;
+#   - indeksar innanfor grensene: typar, funksjonar (importar + definerte), globalar,
+#     minne, lokale, strukturfelt, tag-ar, dataseksjonar og greinedjupner;
+#   - W1: array-instruksjonane (array.new_fixed/new_data/copy) peikar på array-typar,
+#     dataindeksar i kode (array.new_data, memory.init, data.drop) krev datacount-
+#     seksjonen og ligg under han, og datacount er lik talet på segment i dataseksjonen.
+#   - W2: STAKK- OG TYPESJEKK av kvar funksjonskropp etter valideringsalgoritmen i
+#     spesifikasjonen (operandstakk med «ukjend» botn etter unreachable/br/return/throw,
+#     kontrollrammer med inn-/uttypar, blokktypar, greinetypar, subtyping av WasmGC-
+#     referansar), for MVP-instruksjonane (kontroll, lokale/globale, minne, alle numeriske),
+#     referanse- og GC-instruksjonane (struct.*, array.*, ref.test/cast, i31) og unnatak
+#     (throw, throw_ref, try_table med catch-klausular). Globalinitialiseringar og
+#     dataoffset blir typesjekka. Elementseksjonen (passive og deklarative funksjons-
+#     segment) blir lesen, og ref.func krev at funksjonen er deklarert (elementsegment,
+#     eksport eller globalinitialisering), som i spesifikasjonen.
+#
+# Ikkje støtta av typesjekken (gjev feil i staden for å godta blindt): legacy-unnatak
+# (try/catch/delegate), br_on_cast, br_on_null, call_indirect/return_call*, tabellar,
+# ikkje-nullbare lokale, deklarerte supertypar og subtyping mellom ulike typeindeksar
+# (typar blir samanlikna på indeks; backenden dedupliserer typane sine).
+#
+# Bruk: `valider(bytar)` gjev {"ok": bool, "feil": tekst, "info": ordbok}.
+
+# ─── Lesar ───────────────────────────────────────────────────────────────────
+
+funksjon _feil(melding: tekst) -> heltall {
+    kast "wasm_les: " + melding
+}
+
+funksjon _byte(b: liste, s: ordbok) -> heltall {
+    hvis s["p"] >= s["slutt"] { _feil("uventa slutt ved byte " + tekst(s["p"])) }
+    la v = b[s["p"]]
+    s["p"] = s["p"] + 1
+    returner v
+}
+
+# Byte-lesinga er skriven ut i lykkjene (ingen hjelpekall per byte): eit funksjonskall
+# kostar mykje meir enn eit listeoppslag i VM-en.
+funksjon _leb_u(b: liste, s: ordbok, maks_bytar: heltall) -> heltall {
+    la v = 0
+    la skift = 0
+    la n = 0
+    la p = s["p"]
+    la sp = s["slutt"]
+    mens sann {
+        hvis p >= sp { _feil("uventa slutt i LEB128 ved byte " + tekst(p)) }
+        la x = b[p]
+        p = p + 1
+        n = n + 1
+        hvis n > maks_bytar { _feil("for lang LEB128 (" + tekst(n) + " bytar) ved " + tekst(p - 1)) }
+        v = v | ((x & 127) << skift)
+        skift = skift + 7
+        hvis (x & 128) == 0 {
+            s["p"] = p
+            returner v
+        }
+    }
+    returner v
+}
+
+funksjon _leb_s(b: liste, s: ordbok, maks_bytar: heltall) -> heltall {
+    la v = 0
+    la skift = 0
+    la n = 0
+    la p = s["p"]
+    la sp = s["slutt"]
+    mens sann {
+        hvis p >= sp { _feil("uventa slutt i signert LEB128 ved byte " + tekst(p)) }
+        la x = b[p]
+        p = p + 1
+        n = n + 1
+        hvis n > maks_bytar { _feil("for lang signert LEB128 ved " + tekst(p - 1)) }
+        v = v | ((x & 127) << skift)
+        skift = skift + 7
+        hvis (x & 128) == 0 {
+            hvis skift < 64 og (x & 64) != 0 { v = v | ((0 - 1) << skift) }
+            s["p"] = p
+            returner v
+        }
+    }
+    returner v
+}
+
+funksjon _u32(b: liste, s: ordbok) -> heltall { returner _leb_u(b, s, 5) }
+
+funksjon _hopp(b: liste, s: ordbok, n: heltall) -> heltall {
+    hvis n < 0 eller s["p"] + n > s["slutt"] { _feil("vektor går forbi slutten (" + tekst(n) + " bytar ved " + tekst(s["p"]) + ")") }
+    s["p"] = s["p"] + n
+    returner 0
+}
+
+funksjon _namn(b: liste, s: ordbok) -> tekst {
+    la n = _leb_u(b, s, 5)
+    hvis s["p"] + n > s["slutt"] { _feil("namn går forbi slutten") }
+    la ut = ""
+    la i = 0
+    mens i < n {
+        ut = ut + builtin.chr(b[s["p"] + i])
+        i = i + 1
+    }
+    s["p"] = s["p"] + n
+    returner ut
+}
+
+# ─── Typekodar ───────────────────────────────────────────────────────────────
+#
+# Verdityper blir representerte som heiltal i typesjekken:
+#   127 i32, 126 i64, 125 f32, 124 f64; 120 i8 og 119 i16 (berre lagringstypar);
+#   referansar: 100000 + 50000·nullbar + 1000 + h, der h er ein typeindeks (≥ 0) eller ein
+#   abstrakt heaptype som negativ byte (eq = −0x6d, i31 = −0x6c, func = −0x70, …);
+#   0 = «ukjend» (botn frå ein polymorf stakk etter unreachable/br/return/throw).
+
+funksjon _ref(nullbar: heltall, h: heltall) -> heltall { returner 100000 + nullbar * 50000 + 1000 + h }
+funksjon _er_ref(c: heltall) -> bool { returner c >= 100000 }
+funksjon _er_nullbar(c: heltall) -> bool { returner c >= 150000 }
+funksjon _heap(c: heltall) -> heltall {
+    hvis c >= 150000 { returner c - 151000 }
+    returner c - 101000
+}
+
+funksjon H_ANY() -> heltall { returner -110 }
+funksjon H_EQ() -> heltall { returner -109 }
+funksjon H_I31() -> heltall { returner -108 }
+funksjon H_STRUCT() -> heltall { returner -107 }
+funksjon H_ARRAY() -> heltall { returner -106 }
+funksjon H_EXN() -> heltall { returner -105 }
+funksjon H_FUNC() -> heltall { returner -112 }
+funksjon H_EXTERN() -> heltall { returner -111 }
+funksjon H_NONE() -> heltall { returner -113 }
+funksjon H_NOEXTERN() -> heltall { returner -114 }
+funksjon H_NOFUNC() -> heltall { returner -115 }
+funksjon H_NOEXN() -> heltall { returner -116 }
+
+funksjon _hex(x: heltall) -> tekst {
+    la hs = "0123456789abcdef"
+    returner builtin.slice(hs, (x >> 4) & 15, ((x >> 4) & 15) + 1) + builtin.slice(hs, x & 15, (x & 15) + 1)
+}
+
+funksjon _heap_namn(h: heltall) -> tekst {
+    hvis h >= 0 { returner "$" + tekst(h) }
+    hvis h == H_ANY() { returner "any" }
+    hvis h == H_EQ() { returner "eq" }
+    hvis h == H_I31() { returner "i31" }
+    hvis h == H_STRUCT() { returner "struct" }
+    hvis h == H_ARRAY() { returner "array" }
+    hvis h == H_EXN() { returner "exn" }
+    hvis h == H_FUNC() { returner "func" }
+    hvis h == H_EXTERN() { returner "extern" }
+    hvis h == H_NONE() { returner "none" }
+    hvis h == H_NOEXTERN() { returner "noextern" }
+    hvis h == H_NOFUNC() { returner "nofunc" }
+    returner "noexn"
+}
+
+# Typekode → lesbar tekst (feilmeldingar).
+funksjon type_namn(c: heltall) -> tekst {
+    hvis c == 0 { returner "ukjend" }
+    hvis c == 127 { returner "i32" }
+    hvis c == 126 { returner "i64" }
+    hvis c == 125 { returner "f32" }
+    hvis c == 124 { returner "f64" }
+    hvis c == 120 { returner "i8" }
+    hvis c == 119 { returner "i16" }
+    hvis _er_nullbar(c) { returner "(ref null " + _heap_namn(_heap(c)) + ")" }
+    returner "(ref " + _heap_namn(_heap(c)) + ")"
+}
+
+# ─── Typar ───────────────────────────────────────────────────────────────────
+
+funksjon _er_abstrakt_heap(x: heltall) -> bool {
+    # nofunc 0x73, noextern 0x72, none 0x71, func 0x70, extern 0x6f, any 0x6e, eq 0x6d,
+    # i31 0x6c, struct 0x6b, array 0x6a, exn 0x69, noexn 0x74
+    returner (x >= 105 og x <= 116)
+}
+
+# Heaptype: abstrakt byte (gjev −byte) eller typeindeks (s33, gjev indeksen). Indeksen blir
+# sjekka mot `n_typar` (for typeseksjonen: talet på typar i heile seksjonen).
+funksjon _heaptype(b: liste, s: ordbok, n_typar: heltall) -> heltall {
+    hvis s["p"] >= s["slutt"] { _feil("uventa slutt i heaptype") }
+    la x = b[s["p"]]
+    hvis _er_abstrakt_heap(x) {
+        s["p"] = s["p"] + 1
+        returner 0 - x
+    }
+    la t = _leb_s(b, s, 5)
+    hvis t < 0 eller t >= n_typar { _feil("typeindeks " + tekst(t) + " utanfor (har " + tekst(n_typar) + ")") }
+    returner t
+}
+
+# Verditype → typekode.
+funksjon _valtype(b: liste, s: ordbok, n_typar: heltall) -> heltall {
+    la x = _byte(b, s)
+    hvis x >= 124 og x <= 127 { returner x }
+    hvis x == 123 { _feil("v128 er ikkje støtta ved " + tekst(s["p"] - 1)) }
+    hvis _er_abstrakt_heap(x) { returner _ref(1, 0 - x) }
+    hvis x == 99 { returner _ref(1, _heaptype(b, s, n_typar)) }
+    hvis x == 100 { returner _ref(0, _heaptype(b, s, n_typar)) }
+    _feil("ukjend verditype 0x" + _hex(x) + " ved " + tekst(s["p"] - 1))
+    returner 0
+}
+
+funksjon _lagringstype(b: liste, s: ordbok, n_typar: heltall) -> heltall {
+    hvis s["p"] >= s["slutt"] { _feil("uventa slutt i lagringstype") }
+    la x = b[s["p"]]
+    hvis x == 120 eller x == 119 {
+        s["p"] = s["p"] + 1
+        returner x
+    }
+    returner _valtype(b, s, n_typar)
+}
+
+# Éin samansett type. Legg {"art", "param", "res", "felt", "p", "r", "f", "m"} til i typar:
+#   func:   p/r = parameter- og resultatkodar
+#   struct: f/m = feltkodar og mut-flagg
+#   array:  f/m = [elementkode] og [mut]
+funksjon _comptype(b: liste, s: ordbok, n_typar: heltall, typar: liste) -> heltall {
+    la form = _byte(b, s)
+    hvis form == 96 {
+        la np = _leb_u(b, s, 5)
+        la p = []
+        la i = 0
+        mens i < np { legg_til(p, _valtype(b, s, n_typar))  i = i + 1 }
+        la nr = _leb_u(b, s, 5)
+        la r = []
+        i = 0
+        mens i < nr { legg_til(r, _valtype(b, s, n_typar))  i = i + 1 }
+        legg_til(typar, {"art": "func", "param": np, "res": nr, "felt": 0, "p": p, "r": r, "f": [], "m": []})
+    } ellers hvis form == 95 {
+        la nf = _leb_u(b, s, 5)
+        la f = []
+        la m = []
+        la i = 0
+        mens i < nf {
+            legg_til(f, _lagringstype(b, s, n_typar))
+            la mu = _byte(b, s)
+            hvis mu > 1 { _feil("ugyldig mut-flagg " + tekst(mu)) }
+            legg_til(m, mu)
+            i = i + 1
+        }
+        legg_til(typar, {"art": "struct", "param": 0, "res": 0, "felt": nf, "p": [], "r": [], "f": f, "m": m})
+    } ellers hvis form == 94 {
+        la e = _lagringstype(b, s, n_typar)
+        la mu = _byte(b, s)
+        hvis mu > 1 { _feil("ugyldig mut-flagg " + tekst(mu)) }
+        legg_til(typar, {"art": "array", "param": 0, "res": 0, "felt": 1, "p": [], "r": [], "f": [e], "m": [mu]})
+    } ellers {
+        _feil("ukjend typeform 0x" + _hex(form))
+    }
+    returner 0
+}
+
+funksjon _subtype(b: liste, s: ordbok, n_typar: heltall, typar: liste) -> heltall {
+    la x = b[s["p"]]
+    hvis x == 80 eller x == 79 {
+        s["p"] = s["p"] + 1
+        la n = _leb_u(b, s, 5)
+        la i = 0
+        mens i < n {
+            la t = _leb_u(b, s, 5)
+            hvis t >= n_typar { _feil("supertype " + tekst(t) + " utanfor") }
+            i = i + 1
+        }
+        hvis n > 0 { _feil("deklarerte supertypar er ikkje støtta av typesjekken") }
+    }
+    returner _comptype(b, s, n_typar, typar)
+}
+
+# Tel typane i typeseksjonen (rec-grupper tel med alle medlemane) før dei blir lesne,
+# så indeksar fram i ei rec-gruppe kan sjekkast.
+funksjon _tel_typar(b: liste, s: ordbok) -> heltall {
+    la kopi = {"p": s["p"], "slutt": s["slutt"]}
+    la n = _leb_u(b, kopi, 5)
+    la total = 0
+    la i = 0
+    la dummy = []
+    mens i < n {
+        hvis b[kopi["p"]] == 78 {
+            kopi["p"] = kopi["p"] + 1
+            la m = _leb_u(b, kopi, 5)
+            la j = 0
+            mens j < m { _subtype(b, kopi, 1000000, dummy)  j = j + 1 }
+            total = total + m
+        } ellers {
+            _subtype(b, kopi, 1000000, dummy)
+            total = total + 1
+        }
+        i = i + 1
+    }
+    returner total
+}
+
+funksjon _typeseksjon(b: liste, s: ordbok, info: ordbok) -> heltall {
+    la total = _tel_typar(b, s)
+    la n = _leb_u(b, s, 5)
+    la typar = info["typar"]
+    la i = 0
+    mens i < n {
+        hvis b[s["p"]] == 78 {
+            s["p"] = s["p"] + 1
+            la m = _leb_u(b, s, 5)
+            la j = 0
+            mens j < m { _subtype(b, s, total, typar)  j = j + 1 }
+        } ellers {
+            _subtype(b, s, total, typar)
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _functype(info: ordbok, t: heltall, kva: tekst) -> ordbok {
+    hvis t < 0 eller t >= lengde(info["typar"]) { _feil(kva + ": typeindeks " + tekst(t) + " utanfor (har " + tekst(lengde(info["typar"])) + ")") }
+    la ty = info["typar"][t]
+    hvis ty["art"] != "func" { _feil(kva + ": type " + tekst(t) + " er ikkje ein funksjonstype") }
+    returner ty
+}
+
+funksjon _grenser(b: liste, s: ordbok) -> heltall {
+    la flagg = _byte(b, s)
+    hvis flagg == 0 { _leb_u(b, s, 5) }
+    ellers hvis flagg == 1 { _leb_u(b, s, 5)  _leb_u(b, s, 5) }
+    ellers { _feil("ukjende grenseflagg " + tekst(flagg)) }
+    returner 0
+}
+
+# ─── Subtyping ───────────────────────────────────────────────────────────────
+
+funksjon _art(info: ordbok, h: heltall) -> tekst {
+    hvis h >= 0 { returner info["typar"][h]["art"] }
+    returner ""
+}
+
+funksjon _heap_sub(info: ordbok, a: heltall, b: heltall) -> bool {
+    hvis a == b { returner sann }
+    la ka = _art(info, a)
+    hvis b == H_ANY() eller b == H_EQ() {
+        hvis a == H_I31() eller a == H_STRUCT() eller a == H_ARRAY() eller a == H_NONE() { returner sann }
+        hvis b == H_ANY() og a == H_EQ() { returner sann }
+        returner ka == "struct" eller ka == "array"
+    }
+    hvis b == H_STRUCT() { returner a == H_NONE() eller ka == "struct" }
+    hvis b == H_ARRAY() { returner a == H_NONE() eller ka == "array" }
+    hvis b == H_I31() { returner a == H_NONE() }
+    hvis b == H_FUNC() { returner a == H_NOFUNC() eller ka == "func" }
+    hvis b == H_EXTERN() { returner a == H_NOEXTERN() }
+    hvis b == H_EXN() { returner a == H_NOEXN() }
+    hvis b >= 0 {
+        la kb = _art(info, b)
+        hvis a == H_NONE() { returner kb == "struct" eller kb == "array" }
+        hvis a == H_NOFUNC() { returner kb == "func" }
+    }
+    returner usann
+}
+
+# Er a ein subtype av b? (0 = ukjend botn, subtype av alt.)
+funksjon _sub(info: ordbok, a: heltall, b: heltall) -> bool {
+    hvis a == b eller a == 0 eller b == 0 { returner sann }
+    hvis ikkje _er_ref(a) eller ikkje _er_ref(b) { returner usann }
+    hvis _er_nullbar(a) og ikkje _er_nullbar(b) { returner usann }
+    returner _heap_sub(info, _heap(a), _heap(b))
+}
+
+# Toppen i hierarkiet til ein heaptype (any, func, extern eller exn).
+funksjon _topp(info: ordbok, h: heltall) -> heltall {
+    hvis h == H_FUNC() eller h == H_NOFUNC() { returner H_FUNC() }
+    hvis h == H_EXTERN() eller h == H_NOEXTERN() { returner H_EXTERN() }
+    hvis h == H_EXN() eller h == H_NOEXN() { returner H_EXN() }
+    hvis h >= 0 og _art(info, h) == "func" { returner H_FUNC() }
+    returner H_ANY()
+}
+
+# Pakka lagringstypar blir i32 på stakken.
+funksjon _utpakka(c: heltall) -> heltall {
+    hvis c == 120 eller c == 119 { returner 127 }
+    returner c
+}
+
+# ─── Konstantuttrykk (globalar, data) ───────────────────────────────────────
+
+funksjon _konst_pop(info: ordbok, stakk: liste, venta: heltall) -> heltall {
+    hvis lengde(stakk) == 0 { _feil("stakkunderflyt i konstantuttrykk") }
+    la c = stakk[lengde(stakk) - 1]
+    fjern_siste(stakk)
+    hvis venta != 0 og ikkje _sub(info, c, venta) { _feil("konstantuttrykk: venta " + type_namn(venta) + ", fekk " + type_namn(c)) }
+    returner c
+}
+
+# Sjekkar konstantuttrykket og typen resultatet får mot `venta`.
+funksjon _konstuttrykk(b: liste, s: ordbok, info: ordbok, n_glob_synlege: heltall, venta: heltall) -> heltall {
+    la n_typar = lengde(info["typar"])
+    la stakk = []
+    mens sann {
+        la p0 = s["p"]
+        hvis p0 >= s["slutt"] { _feil("konstantuttrykket manglar avsluttande end") }
+        la op = b[p0]
+        s["p"] = p0 + 1
+        hvis op == 11 {
+            hvis lengde(stakk) != 1 { _feil("konstantuttrykket gjev " + tekst(lengde(stakk)) + " verdiar, venta 1") }
+            hvis ikkje _sub(info, stakk[0], venta) { _feil("konstantuttrykket har typen " + type_namn(stakk[0]) + ", venta " + type_namn(venta)) }
+            returner 0
+        }
+        ellers hvis op == 65 { _leb_s(b, s, 5)  legg_til(stakk, 127) }
+        ellers hvis op == 66 { _leb_s(b, s, 10)  legg_til(stakk, 126) }
+        ellers hvis op == 67 { _hopp(b, s, 4)  legg_til(stakk, 125) }
+        ellers hvis op == 68 { _hopp(b, s, 8)  legg_til(stakk, 124) }
+        ellers hvis op == 208 { legg_til(stakk, _ref(1, _heaptype(b, s, n_typar))) }
+        ellers hvis op == 210 {
+            la f = _leb_u(b, s, 5)
+            hvis f >= info["n_funk"] { _feil("ref.func " + tekst(f) + " utanfor") }
+            info["refs"][tekst(f)] = sann
+            legg_til(stakk, _ref(0, info["alle_funk"][f]))
+        }
+        ellers hvis op == 35 {
+            la g = _leb_u(b, s, 5)
+            hvis g >= n_glob_synlege { _feil("global.get " + tekst(g) + " utanfor i konstantuttrykk") }
+            legg_til(stakk, info["glob_t"][g])
+        }
+        ellers hvis op == 106 eller op == 107 eller op == 108 {
+            _konst_pop(info, stakk, 127)
+            _konst_pop(info, stakk, 127)
+            legg_til(stakk, 127)
+        }
+        ellers hvis op == 124 eller op == 125 eller op == 126 {
+            _konst_pop(info, stakk, 126)
+            _konst_pop(info, stakk, 126)
+            legg_til(stakk, 126)
+        }
+        ellers hvis op == 251 {
+            la sub = _leb_u(b, s, 5)
+            hvis sub == 0 {
+                la t = _typeidx(b, s, info)
+                la ty = info["typar"][t]
+                hvis ty["art"] != "struct" { _feil("struct.new på ikkje-struct " + tekst(t)) }
+                la fi = lengde(ty["f"]) - 1
+                mens fi >= 0 { _konst_pop(info, stakk, _utpakka(ty["f"][fi]))  fi = fi - 1 }
+                legg_til(stakk, _ref(0, t))
+            }
+            ellers hvis sub == 1 eller sub == 7 {
+                la t = _typeidx(b, s, info)
+                hvis sub == 7 { _konst_pop(info, stakk, 127) }
+                legg_til(stakk, _ref(0, t))
+            }
+            ellers hvis sub == 8 {
+                la t = _typeidx(b, s, info)
+                la n = _leb_u(b, s, 5)
+                la i = 0
+                mens i < n { _konst_pop(info, stakk, 0)  i = i + 1 }
+                legg_til(stakk, _ref(0, t))
+            }
+            ellers hvis sub == 28 {
+                _konst_pop(info, stakk, 127)
+                legg_til(stakk, _ref(0, H_I31()))
+            }
+            ellers { _feil("GC-opkode 0x" + _hex(sub) + " er ikkje lov i konstantuttrykk") }
+        }
+        ellers { _feil("opkode 0x" + _hex(op) + " er ikkje lov i konstantuttrykk") }
+    }
+    returner 0
+}
+
+funksjon _typeidx(b: liste, s: ordbok, info: ordbok) -> heltall {
+    la t = _leb_u(b, s, 5)
+    hvis t >= lengde(info["typar"]) { _feil("typeindeks " + tekst(t) + " utanfor (har " + tekst(lengde(info["typar"])) + ")") }
+    returner t
+}
+
+# ─── Typesjekk: operandstakk og kontrollrammer ───────────────────────────────
+#
+# v = {"stk": [kodar], "h": høgd, "fr": [rammer], "pos": byteposisjon (feilmeldingar)}
+# Ramme = {"art": «funk»/«block»/«loop»/«if»/«else»/«try», "inn": [kodar], "ut": [kodar],
+#          "h": høgda då ramma starta, "u": polymorf (etter unreachable, br, …)}
+
+funksjon _tpush(v: ordbok, c: heltall) -> heltall {
+    la h = v["h"]
+    hvis h < lengde(v["stk"]) { v["stk"][h] = c } ellers { legg_til(v["stk"], c) }
+    v["h"] = h + 1
+    returner 0
+}
+
+funksjon _tpush_alle(v: ordbok, cs: liste) -> heltall {
+    la i = 0
+    mens i < lengde(cs) { _tpush(v, cs[i])  i = i + 1 }
+    returner 0
+}
+
+funksjon _ramme(v: ordbok) -> ordbok {
+    la fr = v["fr"]
+    returner fr[lengde(fr) - 1]
+}
+
+# Pop éin verdi og sjekk at han er ein subtype av `venta` (0 = kva som helst).
+funksjon _tpop(info: ordbok, v: ordbok, venta: heltall) -> heltall {
+    la r = _ramme(v)
+    la c = 0
+    hvis v["h"] == r["h"] {
+        hvis ikkje r["u"] { _feil("stakkunderflyt ved " + tekst(v["pos"]) + " (venta " + type_namn(venta) + ")") }
+    } ellers {
+        v["h"] = v["h"] - 1
+        c = v["stk"][v["h"]]
+    }
+    hvis venta != 0 og ikkje _sub(info, c, venta) {
+        _feil("typefeil ved " + tekst(v["pos"]) + ": venta " + type_namn(venta) + ", fekk " + type_namn(c))
+    }
+    returner c
+}
+
+# Pop typane i `cs` (i omvend rekkjefølgje).
+funksjon _tpop_alle(info: ordbok, v: ordbok, cs: liste) -> heltall {
+    la i = lengde(cs) - 1
+    mens i >= 0 { _tpop(info, v, cs[i])  i = i - 1 }
+    returner 0
+}
+
+# Pop ein referanse (eller ukjend) og gjev koden.
+funksjon _tpop_ref(info: ordbok, v: ordbok) -> heltall {
+    la c = _tpop(info, v, 0)
+    hvis c != 0 og ikkje _er_ref(c) { _feil("typefeil ved " + tekst(v["pos"]) + ": venta ein referanse, fekk " + type_namn(c)) }
+    returner c
+}
+
+funksjon _unåbar(v: ordbok) -> heltall {
+    la r = _ramme(v)
+    v["h"] = r["h"]
+    r["u"] = sann
+    returner 0
+}
+
+funksjon _ny_ramme(v: ordbok, art: tekst, inn: liste, ut: liste) -> heltall {
+    legg_til(v["fr"], {"art": art, "inn": inn, "ut": ut, "h": v["h"], "u": usann})
+    _tpush_alle(v, inn)
+    returner 0
+}
+
+# Slutten av ei ramme: stakken må vere nøyaktig uttypane.
+funksjon _ramme_slutt(info: ordbok, v: ordbok) -> ordbok {
+    la r = _ramme(v)
+    _tpop_alle(info, v, r["ut"])
+    hvis v["h"] != r["h"] {
+        _feil("feil stakkhøgd ved end (" + tekst(v["h"] - r["h"]) + " verdiar for mykje) ved " + tekst(v["pos"]))
+    }
+    returner r
+}
+
+# Typane ei grein til ramma l (relativ djupn) må ha.
+funksjon _etikett_typar(v: ordbok, l: heltall) -> liste {
+    la fr = v["fr"]
+    la r = fr[lengde(fr) - 1 - l]
+    hvis r["art"] == "loop" { returner r["inn"] }
+    returner r["ut"]
+}
+
+# ─── Funksjonskroppar ────────────────────────────────────────────────────────
+
+# Blokktype → [inntypar, uttypar].
+funksjon _blocktype(b: liste, s: ordbok, info: ordbok) -> liste {
+    la x = b[s["p"]]
+    hvis x == 64 {
+        s["p"] = s["p"] + 1
+        returner [[], []]
+    }
+    hvis (x >= 123 og x <= 127) eller _er_abstrakt_heap(x) eller x == 99 eller x == 100 {
+        returner [[], [_valtype(b, s, lengde(info["typar"]))]]
+    }
+    la t = _leb_s(b, s, 5)
+    la ft = _functype(info, t, "blokktype")
+    returner [ft["p"], ft["r"]]
+}
+
+funksjon _djupn(b: liste, s: ordbok, kontroll: heltall) -> heltall {
+    la l = _leb_u(b, s, 5)
+    hvis l >= kontroll { _feil("greinedjupn " + tekst(l) + " utanfor (" + tekst(kontroll) + " opne blokker) ved " + tekst(s["p"])) }
+    returner l
+}
+
+funksjon _structfelt(b: liste, s: ordbok, info: ordbok) -> liste {
+    la t = _typeidx(b, s, info)
+    la f = _leb_u(b, s, 5)
+    la ty = info["typar"][t]
+    hvis ty["art"] != "struct" { _feil("type " + tekst(t) + " er ikkje ein struct") }
+    hvis f >= ty["felt"] { _feil("felt " + tekst(f) + " utanfor struct " + tekst(t)) }
+    returner [t, f]
+}
+
+funksjon _memarg(b: liste, s: ordbok, info: ordbok) -> heltall {
+    hvis info["n_minne"] == 0 { _feil("minneinstruksjon utan minne") }
+    _leb_u(b, s, 5)
+    _leb_u(b, s, 10)
+    returner 0
+}
+
+# Signaturen til ein numerisk instruksjon (0x45–0xc4): [inn, ut].
+funksjon _num_sig(op: heltall) -> liste {
+    la I = 127
+    la L = 126
+    la F = 125
+    la D = 124
+    hvis op == 69 { returner [[I], [I]] }
+    hvis op >= 70 og op <= 79 { returner [[I, I], [I]] }
+    hvis op == 80 { returner [[L], [I]] }
+    hvis op >= 81 og op <= 90 { returner [[L, L], [I]] }
+    hvis op >= 91 og op <= 96 { returner [[F, F], [I]] }
+    hvis op >= 97 og op <= 102 { returner [[D, D], [I]] }
+    hvis op >= 103 og op <= 105 { returner [[I], [I]] }
+    hvis op >= 106 og op <= 120 { returner [[I, I], [I]] }
+    hvis op >= 121 og op <= 123 { returner [[L], [L]] }
+    hvis op >= 124 og op <= 138 { returner [[L, L], [L]] }
+    hvis op >= 139 og op <= 145 { returner [[F], [F]] }
+    hvis op >= 146 og op <= 152 { returner [[F, F], [F]] }
+    hvis op >= 153 og op <= 159 { returner [[D], [D]] }
+    hvis op >= 160 og op <= 166 { returner [[D, D], [D]] }
+    hvis op >= 167 og op <= 191 {
+        # konverteringar 0xa7 … 0xbf
+        la inn = [L, F, F, D, D, I, I, F, F, D, D, I, I, L, L, D, I, I, L, L, F, F, D, I, L]
+        la ut = [I, I, I, I, I, L, L, L, L, L, L, F, F, F, F, F, D, D, D, D, D, I, L, F, D]
+        returner [[inn[op - 167]], [ut[op - 167]]]
+    }
+    hvis op == 192 eller op == 193 { returner [[I], [I]] }
+    returner [[L], [L]]
+}
+
+# Typen ein last (0x28–0x35) gjev, og typen ein store (0x36–0x3e) tek.
+funksjon _minne_type(op: heltall) -> heltall {
+    hvis op == 40 eller (op >= 44 og op <= 47) eller op == 54 eller op == 58 eller op == 59 { returner 127 }
+    hvis op == 41 eller (op >= 48 og op <= 53) eller op == 55 eller op >= 60 { returner 126 }
+    hvis op == 42 eller op == 56 { returner 125 }
+    returner 124
+}
+
+funksjon _kropp(b: liste, s: ordbok, info: ordbok, funk_type: ordbok) -> heltall {
+    la n_typar = lengde(info["typar"])
+    # Lokale: parametrane, så dei deklarerte gruppene
+    la lok = []
+    la pi = 0
+    mens pi < lengde(funk_type["p"]) { legg_til(lok, funk_type["p"][pi])  pi = pi + 1 }
+    la n_grupper = _leb_u(b, s, 5)
+    la g = 0
+    mens g < n_grupper {
+        la c = _leb_u(b, s, 5)
+        hvis lengde(lok) + c > 50000 { _feil("for mange lokale") }
+        la lt = _valtype(b, s, n_typar)
+        hvis _er_ref(lt) og ikkje _er_nullbar(lt) { _feil("ikkje-nullbare lokale er ikkje støtta av typesjekken") }
+        la ci = 0
+        mens ci < c { legg_til(lok, lt)  ci = ci + 1 }
+        g = g + 1
+    }
+    la n_lok = lengde(lok)
+    la v = {"stk": [], "h": 0, "fr": [], "pos": s["p"]}
+    legg_til(v["fr"], {"art": "funk", "inn": [], "ut": funk_type["r"], "h": 0, "u": usann})
+    la sp = s["slutt"]
+    mens lengde(v["fr"]) > 0 {
+        la p0 = s["p"]
+        hvis p0 >= sp { _feil("funksjonskroppen manglar avsluttande end") }
+        la op = b[p0]
+        s["p"] = p0 + 1
+        v["pos"] = p0
+        la dj = lengde(v["fr"])
+        hvis op >= 69 og op <= 196 {
+            la sig = _num_sig(op)
+            _tpop_alle(info, v, sig[0])
+            _tpush_alle(v, sig[1])
+        }
+        ellers hvis op == 32 {
+            la l = _leb_u(b, s, 5)
+            hvis l >= n_lok { _feil("lokal " + tekst(l) + " utanfor (har " + tekst(n_lok) + ") ved " + tekst(s["p"])) }
+            _tpush(v, lok[l])
+        }
+        ellers hvis op == 33 eller op == 34 {
+            la l = _leb_u(b, s, 5)
+            hvis l >= n_lok { _feil("lokal " + tekst(l) + " utanfor (har " + tekst(n_lok) + ") ved " + tekst(s["p"])) }
+            _tpop(info, v, lok[l])
+            hvis op == 34 { _tpush(v, lok[l]) }
+        }
+        ellers hvis op == 65 { _leb_s(b, s, 5)  _tpush(v, 127) }
+        ellers hvis op == 66 { _leb_s(b, s, 10)  _tpush(v, 126) }
+        ellers hvis op == 67 { _hopp(b, s, 4)  _tpush(v, 125) }
+        ellers hvis op == 68 { _hopp(b, s, 8)  _tpush(v, 124) }
+        ellers hvis op == 16 {
+            la f = _leb_u(b, s, 5)
+            hvis f >= info["n_funk"] { _feil("call " + tekst(f) + " utanfor (har " + tekst(info["n_funk"]) + " funksjonar)") }
+            la ft = info["typar"][info["alle_funk"][f]]
+            _tpop_alle(info, v, ft["p"])
+            _tpush_alle(v, ft["r"])
+        }
+        ellers hvis op == 26 { _tpop(info, v, 0) }
+        ellers hvis op == 11 {
+            la r = _ramme_slutt(info, v)
+            hvis r["art"] == "if" {
+                hvis lengde(r["inn"]) != lengde(r["ut"]) { _feil("if utan else må ha like inn- og uttypar ved " + tekst(p0)) }
+                la ii = 0
+                mens ii < lengde(r["inn"]) {
+                    hvis ikkje _sub(info, r["inn"][ii], r["ut"][ii]) { _feil("if utan else: inntypen passar ikkje med uttypen ved " + tekst(p0)) }
+                    ii = ii + 1
+                }
+            }
+            fjern_siste(v["fr"])
+            _tpush_alle(v, r["ut"])
+        }
+        ellers hvis op == 2 eller op == 3 {
+            la bt = _blocktype(b, s, info)
+            _tpop_alle(info, v, bt[0])
+            la art = "loop"
+            hvis op == 2 { art = "block" }
+            _ny_ramme(v, art, bt[0], bt[1])
+        }
+        ellers hvis op == 4 {
+            la bt = _blocktype(b, s, info)
+            _tpop(info, v, 127)
+            _tpop_alle(info, v, bt[0])
+            _ny_ramme(v, "if", bt[0], bt[1])
+        }
+        ellers hvis op == 5 {
+            la r = _ramme(v)
+            hvis r["art"] != "if" { _feil("else utan if ved " + tekst(s["p"] - 1)) }
+            _ramme_slutt(info, v)
+            r["art"] = "else"
+            r["u"] = usann
+            _tpush_alle(v, r["inn"])
+        }
+        ellers hvis op == 12 {
+            la l = _djupn(b, s, dj)
+            _tpop_alle(info, v, _etikett_typar(v, l))
+            _unåbar(v)
+        }
+        ellers hvis op == 13 {
+            la l = _djupn(b, s, dj)
+            _tpop(info, v, 127)
+            la lt = _etikett_typar(v, l)
+            _tpop_alle(info, v, lt)
+            _tpush_alle(v, lt)
+        }
+        ellers hvis op == 14 {
+            la n = _leb_u(b, s, 5)
+            _tpop(info, v, 127)
+            la mål = []
+            la i = 0
+            mens i <= n { legg_til(mål, _djupn(b, s, dj))  i = i + 1 }
+            la lt0 = _etikett_typar(v, mål[n])
+            la ti = 0
+            mens ti <= n {
+                la lt = _etikett_typar(v, mål[ti])
+                hvis lengde(lt) != lengde(lt0) { _feil("br_table: etikettane har ulik aritet ved " + tekst(p0)) }
+                # Sjekk verdiane mot kvar etikett utan å ta dei bort
+                la h0 = v["h"]
+                la u0 = _ramme(v)["u"]
+                _tpop_alle(info, v, lt)
+                v["h"] = h0
+                _ramme(v)["u"] = u0
+                ti = ti + 1
+            }
+            _unåbar(v)
+        }
+        ellers hvis op == 15 {
+            _tpop_alle(info, v, funk_type["r"])
+            _unåbar(v)
+        }
+        ellers hvis op == 0 { _unåbar(v) }
+        ellers hvis op == 1 { }
+        ellers hvis op == 27 {
+            _tpop(info, v, 127)
+            la t1 = _tpop(info, v, 0)
+            la t2 = _tpop(info, v, 0)
+            hvis _er_ref(t1) eller _er_ref(t2) { _feil("select utan type på referansar ved " + tekst(p0)) }
+            hvis t1 != 0 og t2 != 0 og t1 != t2 { _feil("select: ulike typar " + type_namn(t2) + " og " + type_namn(t1) + " ved " + tekst(p0)) }
+            hvis t1 == 0 { _tpush(v, t2) } ellers { _tpush(v, t1) }
+        }
+        ellers hvis op == 28 {
+            la n = _leb_u(b, s, 5)
+            hvis n != 1 { _feil("select med " + tekst(n) + " typar") }
+            la t = _valtype(b, s, n_typar)
+            _tpop(info, v, 127)
+            _tpop(info, v, t)
+            _tpop(info, v, t)
+            _tpush(v, t)
+        }
+        ellers hvis op == 35 eller op == 36 {
+            la gl = _leb_u(b, s, 5)
+            hvis gl >= info["n_glob"] { _feil("global " + tekst(gl) + " utanfor (har " + tekst(info["n_glob"]) + ")") }
+            hvis op == 35 {
+                _tpush(v, info["glob_t"][gl])
+            } ellers {
+                hvis info["glob_mut"][gl] != 1 { _feil("global.set på uforanderleg global " + tekst(gl)) }
+                _tpop(info, v, info["glob_t"][gl])
+            }
+        }
+        ellers hvis op >= 40 og op <= 53 {
+            _memarg(b, s, info)
+            _tpop(info, v, 127)
+            _tpush(v, _minne_type(op))
+        }
+        ellers hvis op >= 54 og op <= 62 {
+            _memarg(b, s, info)
+            _tpop(info, v, _minne_type(op))
+            _tpop(info, v, 127)
+        }
+        ellers hvis op == 63 eller op == 64 {
+            hvis info["n_minne"] == 0 { _feil("memory.size/grow utan minne") }
+            _byte(b, s)
+            hvis op == 64 { _tpop(info, v, 127) }
+            _tpush(v, 127)
+        }
+        ellers hvis op == 20 {
+            la t = _leb_u(b, s, 5)
+            la ft = _functype(info, t, "call_ref")
+            _tpop(info, v, _ref(1, t))
+            _tpop_alle(info, v, ft["p"])
+            _tpush_alle(v, ft["r"])
+        }
+        ellers hvis op == 8 {
+            la tg = _leb_u(b, s, 5)
+            hvis tg >= info["n_tag"] { _feil("throw: tag " + tekst(tg) + " utanfor") }
+            _tpop_alle(info, v, info["typar"][info["tag_t"][tg]]["p"])
+            _unåbar(v)
+        }
+        ellers hvis op == 10 {
+            _tpop(info, v, _ref(1, H_EXN()))
+            _unåbar(v)
+        }
+        ellers hvis op == 31 {
+            la bt = _blocktype(b, s, info)
+            la nc = _leb_u(b, s, 5)
+            la i = 0
+            mens i < nc {
+                la art = _byte(b, s)
+                la gir = []
+                hvis art == 0 eller art == 1 {
+                    la tg = _leb_u(b, s, 5)
+                    hvis tg >= info["n_tag"] { _feil("catch: tag " + tekst(tg) + " utanfor") }
+                    la tp = info["typar"][info["tag_t"][tg]]["p"]
+                    la ti = 0
+                    mens ti < lengde(tp) { legg_til(gir, tp[ti])  ti = ti + 1 }
+                } ellers hvis art > 3 { _feil("ukjend catch-art " + tekst(art)) }
+                hvis art == 1 eller art == 3 { legg_til(gir, _ref(0, H_EXN())) }
+                # Etiketten blir rekna utanfor try_table-ramma
+                la l = _djupn(b, s, dj)
+                la lt = _etikett_typar(v, l)
+                hvis lengde(lt) != lengde(gir) { _feil("catch: etiketten ventar " + tekst(lengde(lt)) + " verdiar, taggen gjev " + tekst(lengde(gir)) + " ved " + tekst(p0)) }
+                la gi = 0
+                mens gi < lengde(gir) {
+                    hvis ikkje _sub(info, gir[gi], lt[gi]) { _feil("catch: taggen gjev " + type_namn(gir[gi]) + ", etiketten ventar " + type_namn(lt[gi]) + " ved " + tekst(p0)) }
+                    gi = gi + 1
+                }
+                i = i + 1
+            }
+            _tpop_alle(info, v, bt[0])
+            _ny_ramme(v, "try", bt[0], bt[1])
+        }
+        ellers hvis op == 208 {
+            _tpush(v, _ref(1, _heaptype(b, s, n_typar)))
+        }
+        ellers hvis op == 209 {
+            _tpop_ref(info, v)
+            _tpush(v, 127)
+        }
+        ellers hvis op == 210 {
+            la f = _leb_u(b, s, 5)
+            hvis f >= info["n_funk"] { _feil("ref.func " + tekst(f) + " utanfor") }
+            hvis ikkje finnes_nøkkel(info["refs"], tekst(f)) {
+                _feil("ref.func " + tekst(f) + ": funksjonen er ikkje deklarert (elementsegment, eksport eller global) ved " + tekst(p0))
+            }
+            _tpush(v, _ref(0, info["alle_funk"][f]))
+        }
+        ellers hvis op == 211 {
+            _tpop(info, v, _ref(1, H_EQ()))
+            _tpop(info, v, _ref(1, H_EQ()))
+            _tpush(v, 127)
+        }
+        ellers hvis op == 212 {
+            la c = _tpop_ref(info, v)
+            hvis c == 0 { _tpush(v, 0) } ellers { _tpush(v, _ref(0, _heap(c))) }
+        }
+        ellers hvis op == 251 { _gc_op(b, s, info, v) }
+        ellers hvis op == 252 { _fc_op(b, s, info, v) }
+        ellers { _feil("ukjend eller ustøtta opkode 0x" + _hex(op) + " ved " + tekst(s["p"] - 1)) }
+    }
+    hvis s["p"] != s["slutt"] { _feil("funksjonskroppen held fram etter siste end (" + tekst(s["slutt"] - s["p"]) + " bytar att)") }
+    returner 0
+}
+
+# W1: dataindeksar i kode krev datacount-seksjonen (12), og indeksen må vere under han.
+funksjon _dataidx(b: liste, s: ordbok, info: ordbok, kva: tekst) -> heltall {
+    la d = _leb_u(b, s, 5)
+    hvis info["n_data_meldt"] < 0 { _feil(kva + " utan datacount-seksjon") }
+    hvis d >= info["n_data_meldt"] { _feil(kva + ": dataindeks " + tekst(d) + " utanfor (datacount " + tekst(info["n_data_meldt"]) + ")") }
+    returner d
+}
+
+funksjon _arraytype(b: liste, s: ordbok, info: ordbok, kva: tekst) -> heltall {
+    la t = _typeidx(b, s, info)
+    hvis info["typar"][t]["art"] != "array" { _feil(kva + " på ikkje-array " + tekst(t)) }
+    returner t
+}
+
+funksjon _gc_op(b: liste, s: ordbok, info: ordbok, v: ordbok) -> heltall {
+    la n_typar = lengde(info["typar"])
+    la sub = _leb_u(b, s, 5)
+    hvis sub == 0 eller sub == 1 {
+        la t = _typeidx(b, s, info)
+        la ty = info["typar"][t]
+        hvis ty["art"] != "struct" { _feil("struct.new på ikkje-struct " + tekst(t)) }
+        hvis sub == 0 {
+            la fi = lengde(ty["f"]) - 1
+            mens fi >= 0 { _tpop(info, v, _utpakka(ty["f"][fi]))  fi = fi - 1 }
+        }
+        _tpush(v, _ref(0, t))
+    }
+    ellers hvis sub >= 2 og sub <= 4 {
+        la tf = _structfelt(b, s, info)
+        la ft = info["typar"][tf[0]]["f"][tf[1]]
+        la pakka = ft == 120 eller ft == 119
+        hvis sub == 2 og pakka { _feil("struct.get på pakka felt (bruk get_s/get_u)") }
+        hvis sub != 2 og ikkje pakka { _feil("struct.get_s/u på upakka felt") }
+        _tpop(info, v, _ref(1, tf[0]))
+        _tpush(v, _utpakka(ft))
+    }
+    ellers hvis sub == 5 {
+        la tf = _structfelt(b, s, info)
+        la ty = info["typar"][tf[0]]
+        hvis ty["m"][tf[1]] != 1 { _feil("struct.set på uforanderleg felt " + tekst(tf[1]) + " i struct " + tekst(tf[0])) }
+        _tpop(info, v, _utpakka(ty["f"][tf[1]]))
+        _tpop(info, v, _ref(1, tf[0]))
+    }
+    ellers hvis sub == 6 eller sub == 7 eller (sub >= 11 og sub <= 14) eller sub == 16 {
+        la t = _typeidx(b, s, info)
+        la ty = info["typar"][t]
+        hvis ty["art"] != "array" { _feil("array-instruksjon på ikkje-array " + tekst(t)) }
+        la et = ty["f"][0]
+        la pakka = et == 120 eller et == 119
+        hvis sub == 6 {
+            _tpop(info, v, 127)
+            _tpop(info, v, _utpakka(et))
+            _tpush(v, _ref(0, t))
+        } ellers hvis sub == 7 {
+            _tpop(info, v, 127)
+            _tpush(v, _ref(0, t))
+        } ellers hvis sub >= 11 og sub <= 13 {
+            hvis sub == 11 og pakka { _feil("array.get på pakka array (bruk get_s/get_u)") }
+            hvis sub != 11 og ikkje pakka { _feil("array.get_s/u på upakka array") }
+            _tpop(info, v, 127)
+            _tpop(info, v, _ref(1, t))
+            _tpush(v, _utpakka(et))
+        } ellers {
+            hvis ty["m"][0] != 1 { _feil("array.set/fill på uforanderleg array " + tekst(t)) }
+            hvis sub == 16 { _tpop(info, v, 127) }
+            _tpop(info, v, _utpakka(et))
+            _tpop(info, v, 127)
+            _tpop(info, v, _ref(1, t))
+        }
+    }
+    ellers hvis sub == 8 {
+        la t = _arraytype(b, s, info, "array.new_fixed")
+        la n = _leb_u(b, s, 5)
+        la et = _utpakka(info["typar"][t]["f"][0])
+        la i = 0
+        mens i < n { _tpop(info, v, et)  i = i + 1 }
+        _tpush(v, _ref(0, t))
+    }
+    ellers hvis sub == 9 eller sub == 18 {
+        la t = _arraytype(b, s, info, "array.new_data")
+        _dataidx(b, s, info, "array.new_data")
+        hvis _er_ref(info["typar"][t]["f"][0]) { _feil("array.new_data på array med referansar") }
+        hvis sub == 18 {
+            _tpop(info, v, 127)
+            _tpop(info, v, 127)
+            _tpop(info, v, 127)
+            _tpop(info, v, _ref(1, t))
+        } ellers {
+            _tpop(info, v, 127)
+            _tpop(info, v, 127)
+            _tpush(v, _ref(0, t))
+        }
+    }
+    ellers hvis sub == 10 eller sub == 19 { _feil("array.new_elem/init_elem er ikkje støtta") }
+    ellers hvis sub == 15 {
+        _tpop(info, v, _ref(1, H_ARRAY()))
+        _tpush(v, 127)
+    }
+    ellers hvis sub == 17 {
+        la t1 = _arraytype(b, s, info, "array.copy")
+        la t2 = _arraytype(b, s, info, "array.copy")
+        hvis info["typar"][t1]["m"][0] != 1 { _feil("array.copy til uforanderleg array " + tekst(t1)) }
+        la e1 = info["typar"][t1]["f"][0]
+        la e2 = info["typar"][t2]["f"][0]
+        hvis e1 != e2 og ikkje (_er_ref(e1) og _er_ref(e2) og _sub(info, e2, e1)) { _feil("array.copy: elementtypane passar ikkje") }
+        _tpop(info, v, 127)
+        _tpop(info, v, 127)
+        _tpop(info, v, _ref(1, t2))
+        _tpop(info, v, 127)
+        _tpop(info, v, _ref(1, t1))
+    }
+    ellers hvis sub >= 20 og sub <= 23 {
+        la h = _heaptype(b, s, n_typar)
+        la c = _tpop_ref(info, v)
+        hvis c != 0 og _topp(info, _heap(c)) != _topp(info, h) {
+            _feil("ref.test/ref.cast til " + _heap_namn(h) + " frå eit anna hierarki (" + type_namn(c) + ") ved " + tekst(v["pos"]))
+        }
+        hvis sub == 20 eller sub == 21 { _tpush(v, 127) }
+        ellers hvis sub == 22 { _tpush(v, _ref(0, h)) }
+        ellers { _tpush(v, _ref(1, h)) }
+    }
+    ellers hvis sub == 24 eller sub == 25 { _feil("br_on_cast er ikkje støtta av typesjekken") }
+    ellers hvis sub == 26 eller sub == 27 { _feil("any.convert_extern/extern.convert_any er ikkje støtta av typesjekken") }
+    ellers hvis sub == 28 {
+        _tpop(info, v, 127)
+        _tpush(v, _ref(0, H_I31()))
+    }
+    ellers hvis sub == 29 eller sub == 30 {
+        _tpop(info, v, _ref(1, H_I31()))
+        _tpush(v, 127)
+    }
+    ellers { _feil("ukjend GC-opkode 0xfb " + tekst(sub)) }
+    returner 0
+}
+
+funksjon _fc_op(b: liste, s: ordbok, info: ordbok, v: ordbok) -> heltall {
+    la sub = _leb_u(b, s, 5)
+    hvis sub <= 7 {
+        la inn = [125, 125, 124, 124, 125, 125, 124, 124]
+        la ut = [127, 127, 127, 127, 126, 126, 126, 126]
+        _tpop(info, v, inn[sub])
+        _tpush(v, ut[sub])
+    }
+    ellers hvis sub == 8 {
+        _dataidx(b, s, info, "memory.init")
+        _byte(b, s)
+        hvis info["n_minne"] == 0 { _feil("memory.init utan minne") }
+        _tpop(info, v, 127)
+        _tpop(info, v, 127)
+        _tpop(info, v, 127)
+    }
+    ellers hvis sub == 9 { _dataidx(b, s, info, "data.drop") }
+    ellers hvis sub == 10 eller sub == 11 {
+        _byte(b, s)
+        hvis sub == 10 { _byte(b, s) }
+        hvis info["n_minne"] == 0 { _feil("memory.copy/fill utan minne") }
+        _tpop(info, v, 127)
+        _tpop(info, v, 127)
+        _tpop(info, v, 127)
+    }
+    ellers { _feil("ukjend 0xfc-opkode " + tekst(sub)) }
+    returner 0
+}
+
+# ─── Modul ───────────────────────────────────────────────────────────────────
+
+# Rekkjefølgja til seksjonane (id → rang). Tag (13) ligg mellom minne og global,
+# datacount (12) mellom elem og kode.
+funksjon _rang(id: heltall) -> heltall {
+    la rang = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 11, 6]
+    hvis id < 0 eller id >= lengde(rang) { returner -1 }
+    returner rang[id]
+}
+
+funksjon _les_modul(b: liste, info: ordbok) -> heltall {
+    hvis lengde(b) < 8 { _feil("for kort til å vere ein modul (" + tekst(lengde(b)) + " bytar)") }
+    hvis b[0] != 0 eller b[1] != 97 eller b[2] != 115 eller b[3] != 109 { _feil("feil magic") }
+    hvis b[4] != 1 eller b[5] != 0 eller b[6] != 0 eller b[7] != 0 { _feil("ukjend versjon") }
+    la s = {"p": 8, "slutt": lengde(b)}
+    la førre_rang = 0
+    la n_funk_def = -1
+    la n_kode = -1
+    mens s["p"] < lengde(b) {
+        la id = _byte(b, s)
+        la storleik = _leb_u(b, s, 5)
+        la start = s["p"]
+        la s_slutt = start + storleik
+        hvis s_slutt > lengde(b) { _feil("seksjon " + tekst(id) + " går forbi slutten av fila") }
+        la r = _rang(id)
+        hvis r < 0 { _feil("ukjend seksjons-id " + tekst(id)) }
+        hvis id != 0 {
+            hvis r <= førre_rang { _feil("seksjon " + tekst(id) + " i feil rekkjefølgje eller duplisert") }
+            førre_rang = r
+        }
+        la ss = {"p": start, "slutt": s_slutt}
+        legg_til(info["seksjonar"], id)
+        hvis id == 0 {
+            _namn(b, ss)
+            ss["p"] = s_slutt
+        } ellers hvis id == 1 {
+            _typeseksjon(b, ss, info)
+        } ellers hvis id == 2 {
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n {
+                la modul = _namn(b, ss)
+                la felt = _namn(b, ss)
+                la art = _byte(b, ss)
+                hvis art == 0 {
+                    la t = _leb_u(b, ss, 5)
+                    _functype(info, t, "import " + modul + "." + felt)
+                    legg_til(info["alle_funk"], t)
+                    info["n_funk"] = info["n_funk"] + 1
+                    info["n_funk_import"] = info["n_funk_import"] + 1
+                    legg_til(info["importar"], felt)
+                } ellers hvis art == 1 {
+                    _valtype(b, ss, lengde(info["typar"]))
+                    _grenser(b, ss)
+                } ellers hvis art == 2 {
+                    _grenser(b, ss)
+                    info["n_minne"] = info["n_minne"] + 1
+                } ellers hvis art == 3 {
+                    legg_til(info["glob_t"], _valtype(b, ss, lengde(info["typar"])))
+                    legg_til(info["glob_mut"], _byte(b, ss))
+                    info["n_glob"] = info["n_glob"] + 1
+                } ellers hvis art == 4 {
+                    _byte(b, ss)
+                    la tt = _leb_u(b, ss, 5)
+                    la tft = _functype(info, tt, "import-tag")
+                    hvis lengde(tft["r"]) != 0 { _feil("tag-typen kan ikkje ha resultat") }
+                    legg_til(info["tag_t"], tt)
+                    info["n_tag"] = info["n_tag"] + 1
+                } ellers { _feil("ukjend importart " + tekst(art)) }
+                i = i + 1
+            }
+        } ellers hvis id == 3 {
+            la n = _leb_u(b, ss, 5)
+            n_funk_def = n
+            la i = 0
+            mens i < n {
+                la t = _leb_u(b, ss, 5)
+                _functype(info, t, "funksjon " + tekst(i))
+                legg_til(info["funk_typar"], t)
+                legg_til(info["alle_funk"], t)
+                i = i + 1
+            }
+            info["n_funk"] = info["n_funk"] + n
+        } ellers hvis id == 4 {
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n { _valtype(b, ss, lengde(info["typar"]))  _grenser(b, ss)  i = i + 1 }
+        } ellers hvis id == 5 {
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n { _grenser(b, ss)  i = i + 1 }
+            info["n_minne"] = info["n_minne"] + n
+        } ellers hvis id == 13 {
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n {
+                la attr = _byte(b, ss)
+                hvis attr != 0 { _feil("ukjend tag-attributt " + tekst(attr)) }
+                la tt = _leb_u(b, ss, 5)
+                la tft = _functype(info, tt, "tag")
+                hvis lengde(tft["r"]) != 0 { _feil("tag-typen kan ikkje ha resultat") }
+                legg_til(info["tag_t"], tt)
+                i = i + 1
+            }
+            info["n_tag"] = info["n_tag"] + n
+        } ellers hvis id == 6 {
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n {
+                la gt = _valtype(b, ss, lengde(info["typar"]))
+                la m = _byte(b, ss)
+                hvis m > 1 { _feil("ugyldig mut-flagg på global") }
+                _konstuttrykk(b, ss, info, info["n_glob"], gt)
+                legg_til(info["glob_t"], gt)
+                legg_til(info["glob_mut"], m)
+                info["n_glob"] = info["n_glob"] + 1
+                i = i + 1
+            }
+        } ellers hvis id == 7 {
+            la n = _leb_u(b, ss, 5)
+            la sett = {}
+            la i = 0
+            mens i < n {
+                la namn = _namn(b, ss)
+                hvis finnes_nøkkel(sett, namn) { _feil("eksportnamnet " + namn + " er duplisert") }
+                sett[namn] = sann
+                la art = _byte(b, ss)
+                la idx = _leb_u(b, ss, 5)
+                hvis art == 0 og idx >= info["n_funk"] { _feil("eksport " + namn + ": funksjon " + tekst(idx) + " utanfor") }
+                hvis art == 0 { info["refs"][tekst(idx)] = sann }
+                hvis art == 2 og idx >= info["n_minne"] { _feil("eksport " + namn + ": minne " + tekst(idx) + " utanfor") }
+                hvis art == 3 og idx >= info["n_glob"] { _feil("eksport " + namn + ": global " + tekst(idx) + " utanfor") }
+                hvis art == 4 og idx >= info["n_tag"] { _feil("eksport " + namn + ": tag " + tekst(idx) + " utanfor") }
+                hvis art > 4 { _feil("ukjend eksportart " + tekst(art)) }
+                legg_til(info["eksportar"], namn)
+                i = i + 1
+            }
+        } ellers hvis id == 8 {
+            la f = _leb_u(b, ss, 5)
+            hvis f >= info["n_funk"] { _feil("startfunksjon " + tekst(f) + " utanfor") }
+        } ellers hvis id == 9 {
+            # Elementsegment: berre passive (1) og deklarative (3) med funksjonsindeksar
+            la n = _leb_u(b, ss, 5)
+            la i = 0
+            mens i < n {
+                la flagg = _leb_u(b, ss, 5)
+                hvis flagg != 1 og flagg != 3 { _feil("elementsegment med flagg " + tekst(flagg) + " er ikkje støtta") }
+                la ek = _byte(b, ss)
+                hvis ek != 0 { _feil("ukjend elementart " + tekst(ek)) }
+                la m = _leb_u(b, ss, 5)
+                la j = 0
+                mens j < m {
+                    la f = _leb_u(b, ss, 5)
+                    hvis f >= info["n_funk"] { _feil("elementsegment: funksjon " + tekst(f) + " utanfor") }
+                    info["refs"][tekst(f)] = sann
+                    j = j + 1
+                }
+                i = i + 1
+            }
+            info["n_elem"] = n
+        } ellers hvis id == 12 {
+            info["n_data_meldt"] = _leb_u(b, ss, 5)
+        } ellers hvis id == 10 {
+            la n = _leb_u(b, ss, 5)
+            n_kode = n
+            hvis n != lengde(info["funk_typar"]) { _feil("kodeseksjonen har " + tekst(n) + " kroppar, funksjonsseksjonen " + tekst(lengde(info["funk_typar"]))) }
+            la i = 0
+            mens i < n {
+                la ks = _leb_u(b, ss, 5)
+                hvis ss["p"] + ks > s_slutt { _feil("funksjonskropp " + tekst(i) + " går forbi seksjonen") }
+                la ks_s = {"p": ss["p"], "slutt": ss["p"] + ks}
+                la ft = info["typar"][info["funk_typar"][i]]
+                prøv {
+                    _kropp(b, ks_s, info, ft)
+                } fang (e) {
+                    kast tekst(e) + " (i funksjon " + tekst(info["n_funk_import"] + i) + ")"
+                }
+                ss["p"] = ss["p"] + ks
+                i = i + 1
+            }
+        } ellers hvis id == 11 {
+            la n = _leb_u(b, ss, 5)
+            info["n_data"] = n
+            hvis info["n_data_meldt"] >= 0 og n != info["n_data_meldt"] {
+                _feil("dataseksjonen har " + tekst(n) + " segment, datacount seier " + tekst(info["n_data_meldt"]))
+            }
+            la i = 0
+            mens i < n {
+                la flagg = _leb_u(b, ss, 5)
+                hvis flagg == 0 {
+                    hvis info["n_minne"] == 0 { _feil("aktivt datasegment utan minne") }
+                    _konstuttrykk(b, ss, info, info["n_glob"], 127)
+                } ellers hvis flagg == 2 {
+                    la mi = _leb_u(b, ss, 5)
+                    hvis mi >= info["n_minne"] { _feil("datasegment: minne " + tekst(mi) + " utanfor") }
+                    _konstuttrykk(b, ss, info, info["n_glob"], 127)
+                } ellers hvis flagg != 1 { _feil("ukjend dataflagg " + tekst(flagg)) }
+                la dn = _leb_u(b, ss, 5)
+                _hopp(b, ss, dn)
+                i = i + 1
+            }
+        }
+        hvis ss["p"] != s_slutt { _feil("seksjon " + tekst(id) + " har " + tekst(s_slutt - ss["p"]) + " ulesne bytar") }
+        s["p"] = s_slutt
+    }
+    hvis n_funk_def > 0 og n_kode < 0 { _feil("funksjonsseksjon utan kodeseksjon") }
+    hvis n_kode > 0 og n_funk_def < 0 { _feil("kodeseksjon utan funksjonsseksjon") }
+    hvis info["n_data_meldt"] > 0 og info["n_data"] < 0 { _feil("datacount seier " + tekst(info["n_data_meldt"]) + " segment, men dataseksjonen manglar") }
+    returner 0
+}
+
+funksjon ny_info() -> ordbok {
+    returner {"typar": [], "funk_typar": [], "alle_funk": [], "n_funk": 0, "n_funk_import": 0, "n_glob": 0,
+              "glob_t": [], "glob_mut": [], "n_minne": 0, "n_tag": 0, "tag_t": [], "n_elem": 0, "refs": {},
+              "n_data_meldt": -1, "n_data": -1, "importar": [], "eksportar": [], "seksjonar": []}
+}
+
+funksjon valider(bytar: liste) -> ordbok {
+    la info = ny_info()
+    prøv {
+        _les_modul(bytar, info)
+    } fang (e) {
+        returner {"ok": usann, "feil": tekst(e), "info": info}
+    }
+    returner {"ok": sann, "feil": "", "info": info}
+}
+
+# Hex-tekst → byteliste (for fasitar i testar).
+funksjon frå_hex(h: tekst) -> liste {
+    la hs = "0123456789abcdef"
+    la ut = []
+    la i = 0
+    mens i + 1 < lengde(h) {
+        la a = builtin.index_of(hs, builtin.slice(h, i, i + 1))
+        la c = builtin.index_of(hs, builtin.slice(h, i + 1, i + 2))
+        hvis a < 0 eller c < 0 { kast "wasm_les: ugyldig hex ved " + tekst(i) }
+        legg_til(ut, a * 16 + c)
+        i = i + 2
+    }
+    returner ut
+}
+
+# Utan hjelpekall per byte (eit funksjonskall kostar millisekund i standard-VM-en).
+funksjon til_hex(b: liste) -> tekst {
+    la hs = "0123456789abcdef"
+    la ut = ""
+    la i = 0
+    mens i < lengde(b) {
+        la x = b[i]
+        la h = (x >> 4) & 15
+        la l = x & 15
+        ut = ut + builtin.slice(hs, h, h + 1) + builtin.slice(hs, l, l + 1)
+        i = i + 1
+    }
+    returner ut
+}

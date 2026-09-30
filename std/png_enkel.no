@@ -1,0 +1,406 @@
+# std/png_enkel.no — små PNG-bilete laga i Norscode (W8: ikon til web-app-manifestet).
+#
+# `nc serve` kan ikkje lese disk, og repoet skal ikkje ha binære ikon (ein PNG på 512 px frå
+# ein teikneprogram er 80–300 KB). Ikona blir difor laga her, som tekst med rå bytar:
+#
+#   - indeksert farge med 1 bit per piksel og ein palett på to fargar (fargetype 3);
+#   - zlib med «lagra» deflate-blokker (BTYPE=00, utan komprimering) og Adler-32;
+#   - CRC-32 per chunk (IHDR, PLTE, IDAT, IEND).
+#
+# Eit ikon på 512 × 512 er 65 byte per rad (filterbyte + 64) × 512 rader + om lag 100 byte
+# overhead = om lag 33 KB. Motivet (`ikon`) er ein ring på bakgrunnsfargen, heilt innanfor
+# den tryggleikssona «maskable»-ikon krev (ein sirkel med radius 40 % av sida), så det same
+# biletet kan brukast både som vanleg og som maskable ikon.
+#
+# `sjekk(png)` er ein validator for det same formatet: signatur, chunk-rekkjefølgje og CRC,
+# IHDR, PLTE, zlib-hovud, lagra blokker (LEN/NLEN), Adler-32, talet på rader og filterbytar.
+# Han godtek berre lagra blokker (ikkje komprimerte PNG-ar frå andre verktøy).
+#
+# Alle funksjonane er reine og har ingen modulglobalar (dei verkar under `nc serve`).
+
+funksjon _byte(n: heltall) -> tekst {
+    returner builtin.chr(n & 255)
+}
+
+# 32-bits heiltal, stor ende først.
+funksjon u32(n: heltall) -> tekst {
+    returner _byte(n >> 24) + _byte(n >> 16) + _byte(n >> 8) + _byte(n)
+}
+
+funksjon les_u32(t: tekst, p: heltall) -> heltall {
+    returner (_kode(t, p) << 24) + (_kode(t, p + 1) << 16) + (_kode(t, p + 2) << 8) + _kode(t, p + 3)
+}
+
+funksjon _kode(t: tekst, p: heltall) -> heltall {
+    returner builtin.char_code(builtin.slice(t, p, p + 1))
+}
+
+# ─── Sjekksummar ─────────────────────────────────────────────────────────────
+
+# Tabellen for CRC-32 (polynomet 0xEDB88320, som i PNG og zlib).
+funksjon crc_tabell() -> liste {
+    la t = []
+    la n = 0
+    mens n < 256 {
+        la c = n
+        la k = 0
+        mens k < 8 {
+            hvis (c & 1) == 1 { c = 3988292384 ^ (c >> 1) } ellers { c = c >> 1 }
+            k = k + 1
+        }
+        legg_til(t, c)
+        n = n + 1
+    }
+    returner t
+}
+
+# Oppdater ein CRC-tilstand (før sluttinverteringa) med bytane i `data`.
+funksjon crc_oppdater(tab: liste, tilstand: heltall, data: tekst) -> heltall {
+    la c = tilstand
+    la i = 0
+    la n = lengde(data)
+    mens i < n {
+        c = tab[(c ^ builtin.char_code(builtin.slice(data, i, i + 1))) & 255] ^ (c >> 8)
+        i = i + 1
+    }
+    returner c
+}
+
+funksjon crc32(data: tekst) -> heltall {
+    returner crc_oppdater(crc_tabell(), 4294967295, data) ^ 4294967295
+}
+
+funksjon adler32(data: tekst) -> heltall {
+    la a = 1
+    la b = 0
+    la i = 0
+    la n = lengde(data)
+    mens i < n {
+        a = a + builtin.char_code(builtin.slice(data, i, i + 1))
+        hvis a >= 65521 { a = a - 65521 }
+        b = b + a
+        hvis b >= 65521 { b = b - 65521 }
+        i = i + 1
+    }
+    returner (b << 16) + a
+}
+
+# ─── Zlib med lagra blokker ──────────────────────────────────────────────────
+
+# zlib-straum (RFC 1950) med deflate-blokker utan komprimering (RFC 1951, BTYPE=00), kvar på
+# høgst 65 535 byte.
+funksjon zlib_lagra(data: tekst) -> tekst {
+    # CMF 0x78 (deflate, 32 KB vindauge), FLG 0x01 (sjekk: 0x7801 % 31 == 0, ingen ordbok)
+    la ut = builtin.chr(120) + builtin.chr(1)
+    la n = lengde(data)
+    la p = 0
+    mens p < n eller (p == 0 og n == 0) {
+        la l = n - p
+        hvis l > 65535 { l = 65535 }
+        la siste = 0
+        hvis p + l >= n { siste = 1 }
+        la nl = 65535 - l
+        ut = ut + builtin.chr(siste) + _byte(l) + _byte(l >> 8) + _byte(nl) + _byte(nl >> 8) + builtin.slice(data, p, p + l)
+        p = p + l
+        hvis n == 0 { bryt }
+    }
+    returner ut + u32(adler32(data))
+}
+
+# ─── Chunks og bilete ────────────────────────────────────────────────────────
+
+funksjon chunk(tab: liste, type: tekst, data: tekst) -> tekst {
+    la crc = crc_oppdater(tab, crc_oppdater(tab, 4294967295, type), data) ^ 4294967295
+    returner u32(lengde(data)) + type + data + u32(crc)
+}
+
+funksjon signatur() -> tekst {
+    returner builtin.chr(137) + "PNG" + builtin.chr(13) + builtin.chr(10) + builtin.chr(26) + builtin.chr(10)
+}
+
+# «#rrggbb» → [r, g, b]. Kastar for alt anna.
+funksjon farge(hex: tekst) -> liste {
+    hvis lengde(hex) != 7 eller builtin.slice(hex, 0, 1) != "#" { kast "PngFeil: ugyldig farge «" + hex + "» (venta #rrggbb)" }
+    la ut = []
+    la i = 1
+    mens i < 7 {
+        legg_til(ut, _hex_siffer(builtin.slice(hex, i, i + 1), hex) * 16 + _hex_siffer(builtin.slice(hex, i + 1, i + 2), hex))
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _hex_siffer(c: tekst, heile: tekst) -> heltall {
+    la k = builtin.char_code(c)
+    hvis k >= 48 og k <= 57 { returner k - 48 }
+    hvis k >= 97 og k <= 102 { returner k - 87 }
+    hvis k >= 65 og k <= 70 { returner k - 55 }
+    kast "PngFeil: ugyldig farge «" + heile + "» (venta #rrggbb)"
+}
+
+# PNG med indeksert farge, 1 bit per piksel. `palett` er to [r, g, b]; `rader` er dei pakka
+# radene utan filterbyte (kvar ceil(bredde / 8) byte, første piksel i den høgaste biten).
+funksjon png_1bit(bredde: heltall, høgd: heltall, palett: liste, rader: liste) -> tekst {
+    hvis lengde(rader) != høgd { kast "PngFeil: " + tekst(lengde(rader)) + " rader, venta " + tekst(høgd) }
+    la tab = crc_tabell()
+    la ihdr = u32(bredde) + u32(høgd) + builtin.chr(1) + builtin.chr(3) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0)
+    la plte = ""
+    la i = 0
+    mens i < lengde(palett) {
+        plte = plte + _byte(palett[i][0]) + _byte(palett[i][1]) + _byte(palett[i][2])
+        i = i + 1
+    }
+    la rå = ""
+    la r = 0
+    mens r < høgd {
+        # filtertype 0 (ingen) per rad
+        rå = rå + builtin.chr(0) + rader[r]
+        r = r + 1
+    }
+    returner signatur() + chunk(tab, "IHDR", ihdr) + chunk(tab, "PLTE", plte) + chunk(tab, "IDAT", zlib_lagra(rå)) + chunk(tab, "IEND", "")
+}
+
+# Heiltalsrot: største x med x*x <= n.
+funksjon isqrt(n: heltall) -> heltall {
+    hvis n < 2 { returner n }
+    la x = n
+    la y = (x + 1) / 2
+    mens y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    returner x
+}
+
+# Pikslane [x0, x1) i rad y som ligg i sirkelen med sentrum midt i biletet og radius r2/2
+# (alt i dobla koordinatar: pikselsentrum er 2x+1, sentrum er storleik). [0, 0] når rada
+# ikkje treffer sirkelen.
+funksjon sirkel_spenn(storleik: heltall, r2: heltall, y: heltall) -> liste {
+    la dy = 2 * y + 1 - storleik
+    hvis dy * dy > r2 * r2 { returner [0, 0] }
+    la d = isqrt(r2 * r2 - dy * dy)
+    # 2x+1 >= storleik-d  og  2x+1 <= storleik+d
+    la lo = storleik - d - 1
+    la x0 = lo / 2
+    hvis x0 * 2 < lo { x0 = x0 + 1 }
+    la x1 = (storleik + d - 1) / 2 + 1
+    hvis x0 < 0 { x0 = 0 }
+    hvis x1 > storleik { x1 = storleik }
+    hvis x1 < x0 { returner [0, 0] }
+    returner [x0, x1]
+}
+
+# Éi pakka rad (1 bit per piksel) med verdien 1 i spenna ([[a, b], …], sorterte og utan
+# overlapp). `nullar` og `einarar` er ferdige byteløp som er minst like lange som rada.
+funksjon rad_frå_spenn(bredde: heltall, spenn: liste, nullar: tekst, einarar: tekst) -> tekst {
+    la ut = ""
+    la acc = 0
+    la nbit = 0
+    la pos = 0
+    la i = 0
+    # Løpa: [start, slutt, verdi], med nullar mellom spenna og til slutt
+    la løp = []
+    mens i < lengde(spenn) {
+        la a = spenn[i][0]
+        la b = spenn[i][1]
+        hvis a > pos { legg_til(løp, [pos, a, 0]) }
+        hvis b > a { legg_til(løp, [a, b, 1]) }
+        pos = b
+        i = i + 1
+    }
+    hvis pos < bredde { legg_til(løp, [pos, bredde, 0]) }
+    la j = 0
+    mens j < lengde(løp) {
+        la v = løp[j][2]
+        la l = løp[j][1] - løp[j][0]
+        # fyll den påbyrja byten
+        mens l > 0 og nbit > 0 {
+            acc = (acc << 1) | v
+            nbit = nbit + 1
+            l = l - 1
+            hvis nbit == 8 {
+                ut = ut + _byte(acc)
+                acc = 0
+                nbit = 0
+            }
+        }
+        la heile = l / 8
+        hvis heile > 0 {
+            hvis v == 1 { ut = ut + builtin.slice(einarar, 0, heile) } ellers { ut = ut + builtin.slice(nullar, 0, heile) }
+            l = l - heile * 8
+        }
+        mens l > 0 {
+            acc = (acc << 1) | v
+            nbit = nbit + 1
+            l = l - 1
+        }
+        j = j + 1
+    }
+    hvis nbit > 0 { ut = ut + _byte(acc << (8 - nbit)) }
+    returner ut
+}
+
+funksjon _løp(b: heltall, n: heltall) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < n {
+        ut = ut + _byte(b)
+        i = i + 1
+    }
+    returner ut
+}
+
+# Ikonet: ein ring i forgrunnsfargen på bakgrunnsfargen, storleik × storleik piksel. Ringen
+# har ytre radius 34 % og indre radius 20 % av sida, så han ligg innanfor tryggleikssona til
+# maskable-ikon (40 %). `bakgrunn` og `forgrunn` er «#rrggbb».
+funksjon ikon(storleik: heltall, bakgrunn: tekst, forgrunn: tekst) -> tekst {
+    hvis storleik < 8 eller storleik > 2048 { kast "PngFeil: ikonstorleik " + tekst(storleik) + " er utanfor 8–2048" }
+    la palett = [farge(bakgrunn), farge(forgrunn)]
+    la ytre = storleik * 68 / 100
+    la indre = storleik * 40 / 100
+    la nb = (storleik + 7) / 8
+    la nullar = _løp(0, nb)
+    la einarar = _løp(255, nb)
+    la rader = []
+    la y = 0
+    mens y < storleik {
+        la o = sirkel_spenn(storleik, ytre, y)
+        la inn = sirkel_spenn(storleik, indre, y)
+        la spenn = []
+        hvis o[1] > o[0] {
+            hvis inn[1] > inn[0] {
+                legg_til(spenn, [o[0], inn[0]])
+                legg_til(spenn, [inn[1], o[1]])
+            } ellers {
+                legg_til(spenn, o)
+            }
+        }
+        legg_til(rader, rad_frå_spenn(storleik, spenn, nullar, einarar))
+        y = y + 1
+    }
+    returner png_1bit(storleik, storleik, palett, rader)
+}
+
+# ─── Validator ───────────────────────────────────────────────────────────────
+
+# Sjekk ein PNG laga av denne modulen (eller ein annan PNG med lagra deflate-blokker).
+# Gjev {"ok", "feil": [tekst], "bredde", "høgd", "bitdjupn", "fargetype", "palett" (tal
+# fargar), "chunks": [type], "rader"}.
+funksjon sjekk(png: tekst) -> ordbok {
+    la ut = {"ok": usann, "feil": [], "bredde": 0, "høgd": 0, "bitdjupn": 0, "fargetype": -1, "palett": 0, "chunks": [], "rader": 0}
+    la feil = ut["feil"]
+    hvis lengde(png) < 8 eller builtin.slice(png, 0, 8) != signatur() {
+        legg_til(feil, "signaturen manglar")
+        returner ut
+    }
+    la tab = crc_tabell()
+    la p = 8
+    la idat = ""
+    la såg_iend = usann
+    mens p < lengde(png) og ikkje såg_iend {
+        hvis p + 12 > lengde(png) {
+            legg_til(feil, "avkorta chunk ved " + tekst(p))
+            returner ut
+        }
+        la l = les_u32(png, p)
+        la type = builtin.slice(png, p + 4, p + 8)
+        hvis p + 12 + l > lengde(png) {
+            legg_til(feil, "chunken " + type + " er lengre enn fila")
+            returner ut
+        }
+        la data = builtin.slice(png, p + 8, p + 8 + l)
+        la crc = les_u32(png, p + 8 + l)
+        la rett = crc_oppdater(tab, crc_oppdater(tab, 4294967295, type), data) ^ 4294967295
+        hvis crc != rett { legg_til(feil, "feil CRC i " + type) }
+        legg_til(ut["chunks"], type)
+        hvis type == "IHDR" {
+            hvis lengde(ut["chunks"]) != 1 { legg_til(feil, "IHDR er ikkje først") }
+            hvis l != 13 { legg_til(feil, "IHDR har lengd " + tekst(l)) } ellers {
+                ut["bredde"] = les_u32(data, 0)
+                ut["høgd"] = les_u32(data, 4)
+                ut["bitdjupn"] = _kode(data, 8)
+                ut["fargetype"] = _kode(data, 9)
+                hvis _kode(data, 10) != 0 eller _kode(data, 11) != 0 eller _kode(data, 12) != 0 {
+                    legg_til(feil, "ukjend komprimering, filter eller interlace i IHDR")
+                }
+            }
+        } ellers hvis type == "PLTE" {
+            hvis l % 3 != 0 eller l == 0 { legg_til(feil, "PLTE har lengd " + tekst(l)) }
+            ut["palett"] = l / 3
+        } ellers hvis type == "IDAT" {
+            idat = idat + data
+        } ellers hvis type == "IEND" {
+            såg_iend = sann
+        }
+        p = p + 12 + l
+    }
+    hvis ikkje såg_iend { legg_til(feil, "IEND manglar") }
+    hvis p != lengde(png) { legg_til(feil, "bytar etter IEND") }
+    hvis ut["bredde"] <= 0 eller ut["høgd"] <= 0 { legg_til(feil, "bredde eller høgd er 0") }
+    hvis ut["fargetype"] == 3 og ut["palett"] == 0 { legg_til(feil, "indeksert farge utan PLTE") }
+    la rå = _pakk_ut_lagra(idat, feil)
+    hvis lengde(feil) == 0 {
+        la bpp = ut["bitdjupn"]
+        hvis ut["fargetype"] == 2 { bpp = bpp * 3 }
+        hvis ut["fargetype"] == 6 { bpp = bpp * 4 }
+        la radlengd = 1 + (ut["bredde"] * bpp + 7) / 8
+        hvis lengde(rå) != radlengd * ut["høgd"] {
+            legg_til(feil, "biletdata har " + tekst(lengde(rå)) + " byte, venta " + tekst(radlengd * ut["høgd"]))
+        } ellers {
+            la r = 0
+            mens r < ut["høgd"] {
+                hvis _kode(rå, r * radlengd) > 4 {
+                    legg_til(feil, "ukjend filtertype i rad " + tekst(r))
+                    bryt
+                }
+                r = r + 1
+            }
+            ut["rader"] = ut["høgd"]
+        }
+    }
+    ut["ok"] = lengde(feil) == 0
+    returner ut
+}
+
+# Innhaldet i ein zlib-straum med lagra blokker; feil blir lagde i `feil`.
+funksjon _pakk_ut_lagra(z: tekst, feil: liste) -> tekst {
+    hvis lengde(z) < 6 {
+        legg_til(feil, "zlib-straumen er for kort")
+        returner ""
+    }
+    la cmf = _kode(z, 0)
+    la flg = _kode(z, 1)
+    hvis (cmf & 15) != 8 eller (cmf * 256 + flg) % 31 != 0 eller (flg & 32) != 0 {
+        legg_til(feil, "ugyldig zlib-hovud")
+        returner ""
+    }
+    la ut = ""
+    la p = 2
+    la siste = usann
+    mens ikkje siste {
+        hvis p + 5 > lengde(z) - 4 {
+            legg_til(feil, "avkorta deflate-blokk")
+            returner ""
+        }
+        la h = _kode(z, p)
+        siste = (h & 1) == 1
+        hvis ((h >> 1) & 3) != 0 {
+            legg_til(feil, "komprimert deflate-blokk (berre lagra blokker er støtta)")
+            returner ""
+        }
+        la l = _kode(z, p + 1) + (_kode(z, p + 2) << 8)
+        la nl = _kode(z, p + 3) + (_kode(z, p + 4) << 8)
+        hvis (l ^ 65535) != nl {
+            legg_til(feil, "LEN og NLEN passar ikkje saman")
+            returner ""
+        }
+        ut = ut + builtin.slice(z, p + 5, p + 5 + l)
+        p = p + 5 + l
+    }
+    hvis p + 4 != lengde(z) {
+        legg_til(feil, "bytar etter siste deflate-blokk")
+        returner ""
+    }
+    hvis les_u32(z, p) != adler32(ut) { legg_til(feil, "feil Adler-32") }
+    returner ut
+}

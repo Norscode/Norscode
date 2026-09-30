@@ -1,0 +1,257 @@
+# examples/wasm_skjema/klient.no — interaktiv side med klientlogikk i Norscode (W4).
+#
+# Kompilert til WebAssembly av tools/nc_wasm.no og servert av nc serve (sjå app.no):
+#
+#   - Skjema med live validering: namn og e-post blir sjekka for kvart tastetrykk
+#     (input-hendingar). Feilmeldinga, aria-invalid og klassen «ugyldig» blir oppdaterte,
+#     og lagre-knappen er berre aktiv når begge felta er gyldige.
+#   - Send (submit, utan sidelasting): ei ny oppføring kjem i lista, felta blir tømde, og
+#     ein statusmelding forsvinn etter 1,5 s (tidtakar).
+#   - Liste med filtrering medan ein skriv: #filter filtrerer på namn (små/store bokstavar
+#     i ASCII), #nc-resultat viser talet på treff, og Escape tømer filteret. ?q=… på
+#     adressa fyller filteret ved start.
+#   - Fjern: kvar rad har ein knapp med data-nc-klikk="fjern" og data-id. Éin delegert
+#     lyttar på document handterer alle radene (ingen lyttar per rad).
+#   - Lista blir lagra i localStorage (lagre_lokalt), og element-handtaka for radene blir
+#     sleppte etter kvar gjengjeving (slepp), så handtakstabellen ikkje veks.
+#
+# Same kode kan køyrast i VM-en for funksjonane som ikkje rører DOM-en (gyldig_namn,
+# gyldig_epost, treff), og tests/test_wasm_w4.no samanliknar dei med WASM i Chrome.
+
+bruk std.wasm_vert som vert
+
+la oppføringar: liste = []
+la neste_id: heltall = 1
+la liste_h: heltall = 0
+la filter_h: heltall = 0
+la treff_h: heltall = 0
+la namn_h: heltall = 0
+la epost_h: heltall = 0
+la namn_feil_h: heltall = 0
+la epost_feil_h: heltall = 0
+la lagre_h: heltall = 0
+la status_h: heltall = 0
+la status_tidtakar: heltall = -1
+
+# 50 startoppføringar. Sju namn inneheld «ber» (Berit, Bernt, Albert, Robert, Herbert,
+# Gilbert og Bergljot).
+funksjon startnamn() -> liste {
+    returner ["Aksel", "Anna", "Berit", "Bjørn", "Camilla", "Dag", "Eirik", "Elin", "Frida", "Geir",
+              "Hanne", "Ivar", "Jonas", "Kari", "Lars", "Mari", "Nils", "Ola", "Pia", "Rune",
+              "Siri", "Tor", "Unni", "Vegard", "Wenche", "Yngve", "Åse", "Bernt", "Albert", "Robert",
+              "Herbert", "Gilbert", "Bergljot", "Cato", "Dina", "Emil", "Fredrik", "Guro", "Hilde", "Idun",
+              "Johan", "Kjersti", "Liv", "Magnus", "Nora", "Oda", "Petter", "Ragnhild", "Sander", "Tone"]
+}
+
+funksjon lag_oppføring(namn: tekst, epost: tekst) -> ordbok {
+    la o = {"id": neste_id, "namn": namn, "epost": epost}
+    neste_id = neste_id + 1
+    returner o
+}
+
+# ─── Reglar (reine funksjonar, same resultat i VM-en og i WASM) ───────────────
+
+funksjon gyldig_namn(namn: tekst) -> tekst {
+    la t = builtin.trim(namn)
+    hvis lengde(t) == 0 { returner "Skriv inn namnet." }
+    hvis lengde(t) < 2 { returner "Namnet må ha minst 2 teikn." }
+    returner ""
+}
+
+funksjon gyldig_epost(epost: tekst) -> tekst {
+    la t = builtin.trim(epost)
+    hvis lengde(t) == 0 { returner "Skriv inn e-postadressa." }
+    la kr = builtin.index_of(t, "@")
+    hvis kr < 1 { returner "E-postadressa manglar namn før @." }
+    la domene = builtin.slice(t, kr + 1, lengde(t))
+    la pkt = builtin.index_of(domene, ".")
+    hvis pkt < 1 eller pkt == lengde(domene) - 1 { returner "E-postadressa manglar eit domene som eksempel.no." }
+    hvis builtin.contains(t, " ") { returner "E-postadressa kan ikkje ha mellomrom." }
+    returner ""
+}
+
+funksjon treff(namn: tekst, filter: tekst) -> bool {
+    hvis filter == "" { returner sann }
+    returner builtin.contains(tekst_til_liten(namn), tekst_til_liten(builtin.trim(filter)))
+}
+
+# ─── Visning ─────────────────────────────────────────────────────────────────
+
+# Eitt felt: feilmelding, aria-invalid og klassen «ugyldig». Tomt felt som ikkje er rørt
+# enno (vis_tomt = usann) får ingen melding.
+funksjon vis_felt(felt_h: heltall, feil_h: heltall, melding: tekst, vis_tomt: bool) -> bool {
+    la ok = melding == ""
+    la tom = builtin.trim(vert.hent_verdi(felt_h)) == ""
+    hvis ok eller (tom og ikkje vis_tomt) {
+        vert.sett_tekst(feil_h, "")
+        vert.sett_attr(felt_h, "aria-invalid", "false")
+        vert.sett_klasse(felt_h, "ugyldig", usann)
+    } ellers {
+        vert.sett_tekst(feil_h, melding)
+        vert.sett_attr(felt_h, "aria-invalid", "true")
+        vert.sett_klasse(felt_h, "ugyldig", sann)
+    }
+    returner ok
+}
+
+funksjon valider(vis_tomt: bool) -> bool {
+    la n_ok = vis_felt(namn_h, namn_feil_h, gyldig_namn(vert.hent_verdi(namn_h)), vis_tomt)
+    la e_ok = vis_felt(epost_h, epost_feil_h, gyldig_epost(vert.hent_verdi(epost_h)), vis_tomt)
+    hvis n_ok og e_ok {
+        vert.fjern_attr(lagre_h, "disabled")
+    } ellers {
+        vert.sett_attr(lagre_h, "disabled", "disabled")
+    }
+    returner n_ok og e_ok
+}
+
+funksjon lag_rad(o: ordbok) -> heltall {
+    la li = vert.lag("li")
+    la namn = vert.lag("strong")
+    vert.sett_tekst(namn, o["namn"])
+    la epost = vert.lag("small")
+    vert.sett_tekst(epost, " " + o["epost"] + " ")
+    la knapp = vert.lag("button")
+    vert.sett_attr(knapp, "type", "button")
+    vert.sett_attr(knapp, "data-id", o["id"])
+    vert.sett_attr(knapp, "aria-label", "Fjern " + o["namn"])
+    vert.sett_handlar(knapp, "klikk", "fjern")
+    vert.sett_tekst(knapp, "Fjern")
+    vert.legg_inn(li, namn)
+    vert.legg_inn(li, epost)
+    vert.legg_inn(li, knapp)
+    vert.legg_inn(liste_h, li)
+    vert.slepp(namn)
+    vert.slepp(epost)
+    vert.slepp(knapp)
+    vert.slepp(li)
+    returner 0
+}
+
+funksjon gjengje() -> heltall {
+    la t0 = builtin.tid_ms()
+    la f = vert.hent_verdi(filter_h)
+    vert.tøm(liste_h)
+    la n = 0
+    la i = 0
+    mens i < lengde(oppføringar) {
+        la o = oppføringar[i]
+        hvis treff(o["namn"], f) {
+            lag_rad(o)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    hvis n == 1 { vert.sett_tekst(treff_h, "1 treff") } ellers { vert.sett_tekst(treff_h, tekst(n) + " treff") }
+    vert.sett_attr(treff_h, "data-ms", builtin.tid_ms() - t0)
+    returner n
+}
+
+funksjon lagre() -> heltall {
+    la delar = []
+    la i = 0
+    mens i < lengde(oppføringar) {
+        legg_til(delar, oppføringar[i]["namn"])
+        i = i + 1
+    }
+    vert.lagre_lokalt("wasm_skjema.namn", builtin.join(delar, ","))
+    returner lengde(delar)
+}
+
+funksjon vis_status(melding: tekst) -> heltall {
+    vert.sett_tekst(status_h, melding)
+    hvis status_tidtakar >= 0 { vert.slepp(status_tidtakar) }
+    status_tidtakar = vert.etter(1500, "tøm_status")
+    returner 0
+}
+
+# ─── Hendingar (tilbakekall utan parametrar) ─────────────────────────────────
+
+funksjon endra_felt() -> heltall {
+    valider(usann)
+    returner 0
+}
+
+funksjon send() -> heltall {
+    hvis ikkje valider(sann) {
+        vis_status("Rett feila i skjemaet først.")
+        returner 0
+    }
+    la namn = builtin.trim(vert.hent_verdi(namn_h))
+    legg_til(oppføringar, lag_oppføring(namn, builtin.trim(vert.hent_verdi(epost_h))))
+    vert.sett_verdi(namn_h, "")
+    vert.sett_verdi(epost_h, "")
+    valider(usann)
+    gjengje()
+    lagre()
+    vis_status("La til " + namn + ".")
+    vert.fokus(namn_h)
+    returner 0
+}
+
+funksjon filtrer() -> heltall {
+    gjengje()
+    returner 0
+}
+
+funksjon filter_tast() -> heltall {
+    hvis vert.hending_tast() == "Escape" {
+        vert.sett_verdi(filter_h, "")
+        gjengje()
+    }
+    returner 0
+}
+
+funksjon fjern() -> heltall {
+    la id = heltall(vert.hending_data("id"))
+    la ny = []
+    la fjerna = ""
+    la i = 0
+    mens i < lengde(oppføringar) {
+        hvis oppføringar[i]["id"] == id {
+            fjerna = oppføringar[i]["namn"]
+        } ellers {
+            legg_til(ny, oppføringar[i])
+        }
+        i = i + 1
+    }
+    oppføringar = ny
+    gjengje()
+    lagre()
+    hvis fjerna != "" { vis_status("Fjerna " + fjerna + ".") }
+    returner 0
+}
+
+funksjon tøm_status() -> heltall {
+    vert.sett_tekst(status_h, "")
+    status_tidtakar = -1
+    returner 0
+}
+
+funksjon start() -> heltall {
+    la namn = startnamn()
+    la i = 0
+    mens i < lengde(namn) {
+        legg_til(oppføringar, lag_oppføring(namn[i], tekst_til_liten(namn[i]) + "@eksempel.no"))
+        i = i + 1
+    }
+    liste_h = vert.finn("#liste")
+    filter_h = vert.finn("#filter")
+    treff_h = vert.finn("#nc-resultat")
+    namn_h = vert.finn("#namn")
+    epost_h = vert.finn("#epost")
+    namn_feil_h = vert.finn("#namn-feil")
+    epost_feil_h = vert.finn("#epost-feil")
+    lagre_h = vert.finn("#lagre")
+    status_h = vert.finn("#status")
+    vert.lytt(namn_h, "input", "endra_felt")
+    vert.lytt(epost_h, "input", "endra_felt")
+    vert.lytt(vert.finn("#skjema"), "send", "send")
+    vert.lytt(filter_h, "input", "filtrer")
+    vert.lytt(filter_h, "tast", "filter_tast")
+    vert.deleger("klikk", "fjern")
+    vert.sett_verdi(filter_h, vert.hent_parameter("q"))
+    valider(usann)
+    gjengje()
+    returner 0
+}

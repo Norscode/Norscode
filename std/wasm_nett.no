@@ -1,0 +1,325 @@
+# std/wasm_nett.no — nett for Norscode-klientmodular i WebAssembly: fetch mot same opphav med
+# tilbakekall (W6).
+#
+#   bruk std.wasm_nett som nett
+#
+#   nett.hent_json("/api/liste", fun(svar) -> vis(svar["json"]), fun(feil) -> vis_feil(feil))
+#   nett.send_json("POST", "/api/liste", liste, fun(svar) -> lagra(svar), fun(feil) -> vis_feil(feil))
+#   la id = nett.send(nett.med_tidsgrense(nett.førespurnad("GET", "/api/treg"), 2000), ok, feil)
+#   nett.avbryt(id)
+#
+# Tilbakekalla er closures (`fun(x) -> …`) med éin parameter. Alle førespurnader er asynkrone:
+# send() returnerer id-en med ein gong, og nøyaktig eitt av tilbakekalla blir kalla seinare.
+#
+# Garantiar (all logikk her, i Norscode; lastaren gjer berre fetch):
+#   - Same opphav: URL-en må vere ein absolutt sti («/…», ikkje «//…»). fetch får alltid
+#     mode og credentials «same-origin» (sett i lastaren, kan ikkje overstyrast herfrå).
+#   - Rekkjefølgje: tilbakekalla blir kalla i den rekkjefølgja førespurnadene vart sende,
+#     same kva rekkjefølgje svara kjem i. Eit svar som kjem før eit tidlegare, ventar.
+#   - Nøyaktig eitt tilbakekall per førespurnad: ok (2xx) eller feil (alt anna).
+#   - Eit tilbakekall som kastar, gjev «ERROR: <tekst>» (som eit uhandtert unnatak), og dei
+#     neste tilbakekalla blir framleis kalla. Ingenting når JavaScript («Uncaught»).
+#   - Tidsgrense: standard 8000 ms (A2). Avbryting med avbryt(id).
+#   - Feil argument (URL, metode, tidsgrense, kropp på GET, header med linjeskift) kastar
+#     «HentFeil: ugyldig førespurnad: …» med ein gong, før noko blir sendt.
+#
+# Svaret til ok: {"id", "status", "ok": sann, "kropp": tekst, "headerar": ordbok (namn med
+# små bokstavar)} og, for hent_json/send_json/forvent_json, "json": verdien (rt.json_parse,
+# same verdiar som i VM-en).
+# Feilen til feil: {"type": "HentFeil", "art", "id", "metode", "url", "status", "melding",
+# "kropp", "headerar"}, der art er
+#   "status"     svar utanfor 2xx (status og kropp er med, t.d. 404 og feilmeldinga frå tenaren)
+#   "nettverk"   ingen kontakt (tenaren er nede, offline, avvist av nettlesaren); status 0
+#   "tidsavbrot" tidsgrensa gjekk ut; status 0
+#   "avbrote"    avbryt(id); status 0
+#   "json"       2xx, men kroppen var ikkje gyldig JSON (melding frå rt.json_parse)
+# `type` gjer at `kast feil` kan fangast med `fang (e: HentFeil)`. Utan feil-tilbakekall
+# (null) blir feilen skriven som «ERROR: HentFeil: <art> <metode> <url>: <melding>».
+#
+# Funksjonane som ikkje rører nettet (valider, førespurnad_json, tolk_konvolutt, resultat,
+# feil_tekst), er reine og køyrer likt i VM-en og i WASM (paritetskorpuset w6_nett).
+bruk std.wasm_vert som vert
+bruk std.wasm_rt som rt
+
+la _neste_id: heltall = 1
+la _ventar: ordbok = {}
+la _kø: liste = []
+la _kø_start: heltall = 0
+
+funksjon standard_tidsgrense() -> heltall {
+    returner 8000
+}
+
+funksjon metodar() -> liste {
+    returner ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
+}
+
+# ─── Førespurnader (reine) ───────────────────────────────────────────────────
+
+funksjon førespurnad(metode: tekst, url: tekst) -> ordbok {
+    returner {"metode": metode, "url": url, "headerar": {}, "kropp": null, "tidsgrense_ms": standard_tidsgrense(), "json": usann}
+}
+
+funksjon med_header(f: ordbok, namn: tekst, verdi) -> ordbok {
+    f["headerar"][tekst_til_liten(namn)] = tekst(verdi)
+    returner f
+}
+
+funksjon med_tekst(f: ordbok, kropp: tekst, innhaldstype: tekst) -> ordbok {
+    f["kropp"] = kropp
+    returner med_header(f, "content-type", innhaldstype)
+}
+
+# JSON-kropp (json_stringify, same tekst som i VM-en) og forventa JSON-svar.
+funksjon med_json(f: ordbok, verdi) -> ordbok {
+    med_tekst(f, builtin.json_stringify(verdi), "application/json")
+    returner forvent_json(f)
+}
+
+funksjon forvent_json(f: ordbok) -> ordbok {
+    f["json"] = sann
+    med_header(f, "accept", "application/json")
+    returner f
+}
+
+funksjon med_tidsgrense(f: ordbok, ms: heltall) -> ordbok {
+    f["tidsgrense_ms"] = ms
+    returner f
+}
+
+funksjon _har_linjeskift(t: tekst) -> bool {
+    returner builtin.contains(t, "\n") eller builtin.contains(t, builtin.chr(13))
+}
+
+# "" når førespurnaden er gyldig, elles grunnen.
+funksjon valider(f: ordbok) -> tekst {
+    la url = tekst(f["url"])
+    hvis ikkje builtin.starts_with(url, "/") eller builtin.starts_with(url, "//") eller builtin.contains(url, "\\") {
+        returner "URL-en må vere ein sti på same opphav («/…»): " + url
+    }
+    hvis _har_linjeskift(url) eller builtin.contains(url, " ") { returner "URL-en har mellomrom eller linjeskift" }
+    la m = tekst(f["metode"])
+    la ok_m = usann
+    la ms = metodar()
+    la i = 0
+    mens i < lengde(ms) {
+        hvis ms[i] == m { ok_m = sann }
+        i = i + 1
+    }
+    hvis ikkje ok_m { returner "ukjend metode " + m + " (" + builtin.join(ms, ", ") + ")" }
+    hvis (m == "GET" eller m == "HEAD") og f["kropp"] != null { returner m + " kan ikkje ha kropp" }
+    la t = f["tidsgrense_ms"]
+    hvis builtin.type(t) != "heltall" eller t < 1 eller t > 600000 { returner "tidsgrensa må vere 1–600000 ms" }
+    la h = nøkler(f["headerar"])
+    la j = 0
+    mens j < lengde(h) {
+        la namn = tekst(h[j])
+        hvis namn == "" eller _har_linjeskift(namn) eller builtin.contains(namn, ":") eller builtin.contains(namn, " ") {
+            returner "ugyldig headernamn «" + namn + "»"
+        }
+        hvis _har_linjeskift(tekst(f["headerar"][h[j]])) { returner "headeren " + namn + " har linjeskift" }
+        j = j + 1
+    }
+    returner ""
+}
+
+# Førespurnaden som JSON til lastaren: {i, u, method, headers, body, t}. Lastaren legg til
+# signal, mode og credentials.
+funksjon førespurnad_json(id: heltall, f: ordbok) -> tekst {
+    la o = {"i": id, "u": f["url"], "method": f["metode"], "headers": f["headerar"], "body": f["kropp"], "t": f["tidsgrense_ms"]}
+    returner builtin.json_stringify(o)
+}
+
+# Konvolutten frå lastaren: «id\nstatus\nheaderar-JSON (eller feilnamn når status er 0)\nkropp».
+# Gjev {"id", "status", "headerar", "feilnamn", "kropp"}.
+funksjon tolk_konvolutt(k: tekst) -> ordbok {
+    la p1 = builtin.index_of(k, "\n")
+    la rest1 = builtin.slice(k, p1 + 1, lengde(k))
+    la p2 = builtin.index_of(rest1, "\n")
+    la rest2 = builtin.slice(rest1, p2 + 1, lengde(rest1))
+    la p3 = builtin.index_of(rest2, "\n")
+    la status = heltall(builtin.slice(rest1, 0, p2))
+    la tredje = builtin.slice(rest2, 0, p3)
+    la ut = {"id": heltall(builtin.slice(k, 0, p1)), "status": status, "headerar": {}, "feilnamn": "", "kropp": builtin.slice(rest2, p3 + 1, lengde(rest2))}
+    hvis status == 0 {
+        ut["feilnamn"] = tredje
+    } ellers {
+        ut["headerar"] = rt.json_parse(tredje)
+    }
+    returner ut
+}
+
+funksjon _feil(f: ordbok, id: heltall, art: tekst, status: heltall, melding: tekst, kropp: tekst, headerar: ordbok) -> ordbok {
+    returner {"type": "HentFeil", "art": art, "id": id, "metode": f["metode"], "url": f["url"], "status": status,
+              "melding": melding, "kropp": kropp, "headerar": headerar}
+}
+
+# Klassifiser ein konvolutt (tolk_konvolutt) for førespurnaden f. Gjev {"ok": bool, "verdi":
+# svar eller feil}.
+funksjon resultat(f: ordbok, k: ordbok) -> ordbok {
+    la id = k["id"]
+    la st = k["status"]
+    hvis st == 0 {
+        la fn = k["feilnamn"]
+        hvis fn == "TimeoutError" {
+            returner {"ok": usann, "verdi": _feil(f, id, "tidsavbrot", 0, "ingen svar innan " + tekst(f["tidsgrense_ms"]) + " ms", "", {})}
+        }
+        hvis fn == "AbortError" {
+            returner {"ok": usann, "verdi": _feil(f, id, "avbrote", 0, "avbrote", "", {})}
+        }
+        returner {"ok": usann, "verdi": _feil(f, id, "nettverk", 0, "nettverksfeil (" + fn + ")", "", {})}
+    }
+    hvis st < 200 eller st > 299 {
+        returner {"ok": usann, "verdi": _feil(f, id, "status", st, "status " + tekst(st), k["kropp"], k["headerar"])}
+    }
+    la svar = {"id": id, "status": st, "ok": sann, "kropp": k["kropp"], "headerar": k["headerar"]}
+    hvis f["json"] {
+        la feilmelding = ""
+        prøv {
+            svar["json"] = rt.json_parse(k["kropp"])
+        } fang (e) {
+            feilmelding = tekst(e)
+        }
+        hvis feilmelding != "" {
+            returner {"ok": usann, "verdi": _feil(f, id, "json", st, feilmelding, k["kropp"], k["headerar"])}
+        }
+    }
+    returner {"ok": sann, "verdi": svar}
+}
+
+# «HentFeil: <art> <metode> <url>: <melding>» (for ERROR-linja og for `kast`).
+funksjon feil_tekst(feil: ordbok) -> tekst {
+    returner "HentFeil: " + tekst(feil["art"]) + " " + tekst(feil["metode"]) + " " + tekst(feil["url"]) + ": " + tekst(feil["melding"])
+}
+
+# Kast feilen som eit fangbart unnatak (fang (e: HentFeil)); teksten er feil_tekst.
+funksjon kast_feil(feil: ordbok) -> heltall {
+    kast feil_tekst(feil)
+}
+
+# ─── Sending og levering (i nettlesaren) ─────────────────────────────────────
+
+# Send førespurnaden. Gjev id-en. ok/feil er closures med éin parameter (feil kan vere null).
+funksjon send(f: ordbok, ok, feil) -> heltall {
+    la grunn = valider(f)
+    hvis grunn != "" { kast "HentFeil: ugyldig førespurnad: " + grunn }
+    la id = _neste_id
+    _neste_id = _neste_id + 1
+    # Registrer først når fetch er starta (svaret kjem alltid seinare, i ei ny oppgåve), så ein
+    # feil i starten ikkje etterlèt ein førespurnad som aldri blir levert.
+    la h = vert.hent_start(førespurnad_json(id, f), "_hent_ferdig")
+    returner _registrer(id, f, ok, feil, h)
+}
+
+# Legg ein starta førespurnad i køa (handtak h, eller -1 utan nettlesar).
+funksjon _registrer(id: heltall, f: ordbok, ok, feil, h: heltall) -> heltall {
+    la nøkkel = tekst(id)
+    _ventar[nøkkel] = {"f": f, "ok": ok, "feil": feil, "handtak": h, "sleppt": usann, "ferdig": usann, "resultat": null}
+    legg_til(_kø, nøkkel)
+    returner id
+}
+
+# Berre for testar utan nettlesar (tests/wasm_korpus/w6_nett_ko.no): registrer ein
+# førespurnad som om han var sendt (utan nettverk og handtak), og lever ein konvolutt som om
+# lastaren gav han. Køa, rekkjefølgja og tilbakekalla er dei same som ved ekte sending, så
+# leveringa kan testast deterministisk i VM-en og i WASM. Gjev id-en / talet på leverte.
+funksjon test_registrer(f: ordbok, ok, feil) -> heltall {
+    la grunn = valider(f)
+    hvis grunn != "" { kast "HentFeil: ugyldig førespurnad: " + grunn }
+    la id = _neste_id
+    _neste_id = _neste_id + 1
+    returner _registrer(id, f, ok, feil, -1)
+}
+
+funksjon test_motta(konvolutt: tekst) -> heltall {
+    returner _motta(konvolutt)
+}
+
+funksjon hent(url: tekst, ok, feil) -> heltall {
+    returner send(førespurnad("GET", url), ok, feil)
+}
+
+funksjon hent_json(url: tekst, ok, feil) -> heltall {
+    returner send(forvent_json(førespurnad("GET", url)), ok, feil)
+}
+
+funksjon send_json(metode: tekst, url: tekst, verdi, ok, feil) -> heltall {
+    returner send(med_json(førespurnad(metode, url), verdi), ok, feil)
+}
+
+# Avbryt ein førespurnad som ikkje er ferdig. Feil-tilbakekallet får art «avbrote» (på sin
+# plass i rekkjefølgja). Gjev usann når id-en er ukjend eller alt ferdig.
+funksjon avbryt(id: heltall) -> bool {
+    la nøkkel = tekst(id)
+    hvis ikkje finnes_nøkkel(_ventar, nøkkel) { returner usann }
+    la v = _ventar[nøkkel]
+    hvis v["ferdig"] eller v["sleppt"] { returner usann }
+    v["sleppt"] = sann
+    hvis v["handtak"] >= 0 { vert.slepp(v["handtak"]) }
+    returner sann
+}
+
+# Talet på førespurnader som ikkje er leverte enno.
+funksjon ventande() -> heltall {
+    returner lengde(_kø) - _kø_start
+}
+
+funksjon _kall(v: ordbok, r: ordbok) -> heltall {
+    hvis r["ok"] {
+        prøv {
+            builtin.ncb_call_fn(v["ok"], r["verdi"])
+        } fang (e) {
+            skriv("ERROR: " + tekst(e) + "\n")
+        }
+    } ellers hvis v["feil"] == null {
+        skriv("ERROR: " + feil_tekst(r["verdi"]) + "\n")
+    } ellers {
+        prøv {
+            builtin.ncb_call_fn(v["feil"], r["verdi"])
+        } fang (e) {
+            skriv("ERROR: " + tekst(e) + "\n")
+        }
+    }
+    returner 0
+}
+
+# Lever alle ferdige svar frå fronten av køa, i sende-rekkjefølgje.
+funksjon _lever() -> heltall {
+    la n = 0
+    mens _kø_start < lengde(_kø) {
+        la nøkkel = _kø[_kø_start]
+        la v = _ventar[nøkkel]
+        hvis ikkje v["ferdig"] { bryt }
+        _kø_start = _kø_start + 1
+        fjern_nokkel(_ventar, nøkkel)
+        _kall(v, v["resultat"])
+        n = n + 1
+    }
+    hvis _kø_start == lengde(_kø) {
+        _kø = []
+        _kø_start = 0
+    }
+    returner n
+}
+
+# Ein konvolutt er komen: merk førespurnaden ferdig og lever det som kan leverast.
+funksjon _motta(konvolutt: tekst) -> heltall {
+    la k = tolk_konvolutt(konvolutt)
+    la nøkkel = tekst(k["id"])
+    hvis finnes_nøkkel(_ventar, nøkkel) {
+        la v = _ventar[nøkkel]
+        hvis ikkje v["sleppt"] {
+            v["sleppt"] = sann
+            hvis v["handtak"] >= 0 { vert.slepp(v["handtak"]) }
+        }
+        v["resultat"] = resultat(v["f"], k)
+        v["ferdig"] = sann
+    }
+    returner _lever()
+}
+
+# Tilbakekallet lastaren kallar når eit svar eller ein feil er klar (konvolutten i hent_svar).
+funksjon _hent_ferdig() -> heltall {
+    _motta(vert.hent_svar())
+    returner 0
+}

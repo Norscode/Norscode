@@ -1,0 +1,1106 @@
+# std/wasm_js.no — Norscode→JS-emitter for WASM-lastaren (W0).
+#
+# Nettlesaren kan ikkje starte WebAssembly utan eit lite JS-lim. Dette limet blir IKKJE
+# skrive for hand: emitteren byggjer JS token for token frå Norscode-data, same prinsipp
+# som x86-backenden emitterer maskinkode frå instruksjonsdata.
+#
+#   - Kva vertsfunksjonane gjer (DOM-operasjonane), kjem frå std.wasm_vert.vertsfunksjonar().
+#   - Kva hjelparar lastaren har (handtakstabell, UTF-8-dekodar, HTML-escape), kjem frå
+#     `hjelparar()` her, som JS-uttrykkstre. Escape-hjelparen blir bygd frå
+#     std.wasm_vert.escape_tabell().
+#   - Lastarprogrammet (instansiering, importobjekt, init-kall) kjem frå `lastar_program()`.
+#
+# Berre vertsfunksjonar modulen faktisk importerer, kjem med (tree-shaking), og berre
+# hjelparane dei brukar. Strengliteralane i denne fila er enkelttoken (identifikatorar og
+# teiknsetjing); tests/test_wasm_lastar.no sjekkar det.
+#
+# JS-nodar: ["namn", id]  ["global", id]  ["tal", n]  ["streng", s]  ["felt", e, id]
+#   ["indeks", e, i]  ["kall", f, [args]]  ["ny", f, [args]]  ["tildel", mål, e]
+#   ["binær", op, a, b]  ["vent", e]  ["pil", [param], e]  ["objekt", [[nøkkel, e], ...]]
+#   ["tabell", [e, ...]]  ["regex_klasse", [teikn, ...], flagg]
+# Setningar: ["la", [[namn, e eller null], ...]]  ["uttrykk", e]
+# Program:   ["asynk_iife", [setningar]]
+# Vertsnodane («arg», «element», «nytt_handtak», «eksport», «escape», «skriv_tekst») i std/wasm_vert.no
+# blir løyste til JS-nodar av `løys_vert` før emittering.
+
+bruk std.wasm_vert som vert
+
+# ─── Token-nivå ──────────────────────────────────────────────────────────────
+
+funksjon _er_id_teikn(c: tekst) -> bool {
+    hvis c == "" { returner usann }
+    la k = builtin.char_code(c)
+    returner (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 eller k == 36
+}
+
+# Set saman token. Mellomrom berre der to identifikatorteikn møtest (let x, new T, await f).
+funksjon token_til_tekst(tokens: liste) -> tekst {
+    la ut = ""
+    la førre = ""
+    la i = 0
+    mens i < lengde(tokens) {
+        la t = tekst(tokens[i])
+        hvis lengde(t) > 0 {
+            hvis _er_id_teikn(førre) og _er_id_teikn(builtin.slice(t, 0, 1)) { ut = ut + " " }
+            ut = ut + t
+            førre = builtin.slice(t, lengde(t) - 1, lengde(t))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _hex2(n: heltall) -> tekst {
+    la hs = "0123456789abcdef"
+    returner builtin.slice(hs, (n >> 4) & 15, ((n >> 4) & 15) + 1) + builtin.slice(hs, n & 15, (n & 15) + 1)
+}
+
+# JS-strengliteral som eitt token. Bytar over 127 går uendra (UTF-8, charset=utf-8).
+funksjon js_streng(s: tekst) -> tekst {
+    la q = "\""
+    la bs = "\\"
+    la ut = q
+    la i = 0
+    mens i < lengde(s) {
+        la c = builtin.slice(s, i, i + 1)
+        la k = builtin.char_code(c)
+        hvis c == q eller c == bs { ut = ut + bs + c }
+        ellers hvis k == 10 { ut = ut + bs + "n" }
+        ellers hvis k < 32 { ut = ut + bs + "u00" + _hex2(k) }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut + q
+}
+
+funksjon _regex_klasse(teikn: liste, flagg: tekst) -> tekst {
+    la bs = "\\"
+    la ut = "/" + "["
+    la i = 0
+    mens i < lengde(teikn) {
+        la c = tekst(teikn[i])
+        hvis c == bs eller c == "]" eller c == "^" eller c == "-" eller c == "/" eller c == "[" { ut = ut + bs }
+        ut = ut + c
+        i = i + 1
+    }
+    returner ut + "]" + "/" + flagg
+}
+
+# JS-identifikator: ASCII-bokstavar, siffer (ikkje først), _ og $, og (W4) æ ø å Æ Ø Å,
+# som er bokstavar i JS (ID_Start). Anna UTF-8 gjev usann (namnet blir ein streng).
+funksjon er_identifikator(s: tekst) -> bool {
+    hvis lengde(s) == 0 { returner usann }
+    la k0 = builtin.char_code(builtin.slice(s, 0, 1))
+    hvis k0 >= 48 og k0 <= 57 { returner usann }
+    la i = 0
+    mens i < lengde(s) {
+        la c = builtin.slice(s, i, i + 1)
+        hvis builtin.char_code(c) == 195 og i + 1 < lengde(s) {
+            la k2 = builtin.char_code(builtin.slice(s, i + 1, i + 2))
+            hvis ikkje (k2 == 166 eller k2 == 184 eller k2 == 165 eller k2 == 134 eller k2 == 152 eller k2 == 133) { returner usann }
+            i = i + 2
+        } ellers {
+            hvis ikkje _er_id_teikn(c) { returner usann }
+            i = i + 1
+        }
+    }
+    returner sann
+}
+
+# ─── JS-tre → token ──────────────────────────────────────────────────────────
+
+funksjon _treng_parentes(e: liste) -> bool {
+    la k = tekst(e[0])
+    returner k == "vent" eller k == "binær" eller k == "tildel" eller k == "pil" eller k == "objekt" eller k == "vilkår"
+}
+
+# Presedens for binære operatorar (W4), som i JavaScript: høgare bind sterkare.
+funksjon _prio(op: tekst) -> heltall {
+    hvis op == "??" { returner 2 }
+    hvis op == "||" { returner 3 }
+    hvis op == "&&" { returner 4 }
+    hvis op == "==" eller op == "!=" { returner 8 }
+    hvis op == "<" eller op == ">" eller op == "<=" eller op == ">=" { returner 9 }
+    hvis op == "<<" eller op == ">>" { returner 10 }
+    hvis op == "+" eller op == "-" { returner 11 }
+    hvis op == "*" eller op == "/" eller op == "%" { returner 12 }
+    kast "wasm_js: ukjend operator " + op
+}
+
+# Operand til ein binær operator (eller til ?:): parentes berre når presedensen krev det
+# (lågare, lik på høgre side, eller ?? blanda med || og &&, som JS ikkje tillèt utan).
+funksjon _operand(e: liste, prio: heltall, høgre: bool, op: tekst, ut: liste) -> heltall {
+    la k = tekst(e[0])
+    la treng = usann
+    hvis k == "binær" {
+        la cop = tekst(e[1])
+        la cp = _prio(cop)
+        treng = cp < prio eller (cp == prio og høgre)
+        hvis (cop == "??") != (op == "??") og (cp == 2 eller cp == 3 eller cp == 4) og (prio == 2 eller prio == 3 eller prio == 4) {
+            treng = sann
+        }
+    } ellers hvis k == "vilkår" {
+        treng = prio > 1 eller høgre
+    } ellers hvis op == "?" og prio == 1 {
+        # greinene i c?a:b er AssignmentExpression: tildeling og pil treng ingen parentes
+        treng = k == "objekt"
+    } ellers {
+        treng = _treng_parentes(e)
+    }
+    hvis treng {
+        legg_til(ut, "(")
+        emit(e, ut)
+        legg_til(ut, ")")
+    } ellers {
+        emit(e, ut)
+    }
+    returner 0
+}
+
+funksjon _mottakar(e: liste, ut: liste) -> heltall {
+    hvis _treng_parentes(e) {
+        legg_til(ut, "(")
+        emit(e, ut)
+        legg_til(ut, ")")
+    } ellers {
+        emit(e, ut)
+    }
+    returner 0
+}
+
+funksjon _liste(elem: liste, ut: liste) -> heltall {
+    la i = 0
+    mens i < lengde(elem) {
+        hvis i > 0 { legg_til(ut, ",") }
+        emit(elem[i], ut)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon emit(e: liste, ut: liste) -> heltall {
+    la k = tekst(e[0])
+    hvis k == "namn" eller k == "global" eller k == "tal" {
+        legg_til(ut, tekst(e[1]))
+    } ellers hvis k == "streng" {
+        legg_til(ut, js_streng(tekst(e[1])))
+    } ellers hvis k == "felt" {
+        _mottakar(e[1], ut)
+        legg_til(ut, ".")
+        legg_til(ut, tekst(e[2]))
+    } ellers hvis k == "indeks" {
+        _mottakar(e[1], ut)
+        legg_til(ut, "[")
+        emit(e[2], ut)
+        legg_til(ut, "]")
+    } ellers hvis k == "kall" eller k == "ny" {
+        hvis k == "ny" { legg_til(ut, "new") }
+        _mottakar(e[1], ut)
+        legg_til(ut, "(")
+        _liste(e[2], ut)
+        legg_til(ut, ")")
+    } ellers hvis k == "tildel" {
+        emit(e[1], ut)
+        legg_til(ut, "=")
+        emit(e[2], ut)
+    } ellers hvis k == "binær" {
+        la p = _prio(tekst(e[1]))
+        _operand(e[2], p, usann, tekst(e[1]), ut)
+        legg_til(ut, tekst(e[1]))
+        _operand(e[3], p, sann, tekst(e[1]), ut)
+    } ellers hvis k == "vent" {
+        legg_til(ut, "await")
+        _mottakar(e[1], ut)
+    } ellers hvis k == "pil" {
+        la ps = e[1]
+        hvis lengde(ps) == 1 {
+            legg_til(ut, tekst(ps[0]))
+        } ellers {
+            legg_til(ut, "(")
+            la i = 0
+            mens i < lengde(ps) {
+                hvis i > 0 { legg_til(ut, ",") }
+                legg_til(ut, tekst(ps[i]))
+                i = i + 1
+            }
+            legg_til(ut, ")")
+        }
+        legg_til(ut, "=>")
+        # Ein objektliteral som kropp må ha parentes (elles blir han lesen som blokk).
+        hvis tekst(e[2][0]) == "objekt" { _mottakar(e[2], ut) } ellers { emit(e[2], ut) }
+    } ellers hvis k == "objekt" {
+        legg_til(ut, "{")
+        la par = e[1]
+        la i = 0
+        mens i < lengde(par) {
+            hvis i > 0 { legg_til(ut, ",") }
+            la nøkkel = tekst(par[i][0])
+            hvis er_identifikator(nøkkel) { legg_til(ut, nøkkel) } ellers { legg_til(ut, js_streng(nøkkel)) }
+            legg_til(ut, ":")
+            emit(par[i][1], ut)
+            i = i + 1
+        }
+        legg_til(ut, "}")
+    } ellers hvis k == "tabell" {
+        legg_til(ut, "[")
+        _liste(e[1], ut)
+        legg_til(ut, "]")
+    } ellers hvis k == "regex_klasse" {
+        legg_til(ut, _regex_klasse(e[1], tekst(e[2])))
+    } ellers hvis k == "vilkår" {
+        _operand(e[1], 2, usann, "?", ut)
+        legg_til(ut, "?")
+        _operand(e[2], 1, usann, "?", ut)
+        legg_til(ut, ":")
+        _operand(e[3], 1, usann, "?", ut)
+    } ellers hvis k == "ikkje" {
+        legg_til(ut, "!")
+        _mottakar(e[1], ut)
+    } ellers hvis k == "sekvens" {
+        # (a,b,…) — alltid i parentes, så han kan stå som argument og som pilkropp
+        legg_til(ut, "(")
+        _liste(e[1], ut)
+        legg_til(ut, ")")
+    } ellers hvis k == "emittert" {
+        # W5: JS som denne emitteren alt har skrive (t.d. nc.js frå tools/nc_wasm.no), som
+        # eitt uttrykk. Aldri handskriven tekst.
+        legg_til(ut, tekst(e[1]))
+    } ellers hvis k == "asynk_iife" {
+        # W5: eit lastarprogram som uttrykk (t.d. med .catch etter, i jsc-skriptet til benken)
+        la pt = emit_program(e)
+        la pi = 0
+        mens pi < lengde(pt) {
+            legg_til(ut, pt[pi])
+            pi = pi + 1
+        }
+    } ellers {
+        kast "wasm_js: ukjend JS-node " + k
+    }
+    returner 0
+}
+
+funksjon emit_setning(s: liste, ut: liste) -> heltall {
+    la k = tekst(s[0])
+    hvis k == "la" {
+        legg_til(ut, "let")
+        la i = 0
+        mens i < lengde(s[1]) {
+            hvis i > 0 { legg_til(ut, ",") }
+            la par = s[1][i]
+            legg_til(ut, tekst(par[0]))
+            hvis par[1] != null {
+                legg_til(ut, "=")
+                emit(par[1], ut)
+            }
+            i = i + 1
+        }
+    } ellers hvis k == "uttrykk" {
+        emit(s[1], ut)
+    } ellers {
+        kast "wasm_js: ukjend JS-setning " + k
+    }
+    returner 0
+}
+
+# W5: setningar skilde med «;» (skriptet benken køyrer i jsc -e: shim + lastar).
+funksjon emit_skript(setningar: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(setningar) {
+        hvis i > 0 { legg_til(ut, ";") }
+        emit_setning(setningar[i], ut)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon emit_program(p: liste) -> liste {
+    hvis tekst(p[0]) != "asynk_iife" { kast "wasm_js: ukjend programform " + tekst(p[0]) }
+    la ut = []
+    # (async()=>{ … })()
+    legg_til(ut, "(")
+    legg_til(ut, "async")
+    legg_til(ut, "(")
+    legg_til(ut, ")")
+    legg_til(ut, "=>")
+    legg_til(ut, "{")
+    la i = 0
+    mens i < lengde(p[1]) {
+        hvis i > 0 { legg_til(ut, ";") }
+        emit_setning(p[1][i], ut)
+        i = i + 1
+    }
+    legg_til(ut, "}")
+    legg_til(ut, ")")
+    legg_til(ut, "(")
+    legg_til(ut, ")")
+    returner ut
+}
+
+# ─── Vertsnodar → JS-nodar ───────────────────────────────────────────────────
+
+# JS-parameternamn for importfunksjonane i lastaren.
+funksjon param_namn() -> liste {
+    returner ["a", "b", "c", "d", "e", "f", "g", "h", "j", "k", "l", "n"]
+}
+
+# Parameternamn for ein vertsfunksjon: tekstparametrar tek to WASM-verdiar (peikar, lengd).
+# W4: resultattypen «tekst» gjev ein ekstra, siste parameter: adressa til postkassa, der
+# lastaren skriv svaret (hjelparen U). Gjev {"param": [[namn, ...] per Norscode-parameter],
+# "flat": [namn, ...], "postkasse": namn eller ""}.
+funksjon import_param(vf: ordbok) -> ordbok {
+    la pn = param_namn()
+    la param = []
+    la flat = []
+    la n = 0
+    la i = 0
+    mens i < lengde(vf["param"]) {
+        la t = tekst(vf["param"][i])
+        hvis vert.tekst_parameter(t) {
+            legg_til(param, [pn[n], pn[n + 1]])
+            legg_til(flat, pn[n])
+            legg_til(flat, pn[n + 1])
+            n = n + 2
+        } ellers {
+            legg_til(param, [pn[n]])
+            legg_til(flat, pn[n])
+            n = n + 1
+        }
+        i = i + 1
+    }
+    la pk = ""
+    hvis vf["resultat"] == "tekst" {
+        pk = pn[n]
+        legg_til(flat, pk)
+    }
+    returner {"param": param, "flat": flat, "postkasse": pk}
+}
+
+# Løys vertsnodane i eit operasjonstre til reine JS-nodar. `brukt` får nøklane til
+# hjelparane (E, S, H, W, U, L, V, T) som treet treng.
+funksjon løys_vert(e, param: liste, typar: liste, brukt: ordbok) {
+    hvis builtin.type(e) != "liste" { returner e }
+    hvis lengde(e) == 0 { returner e }
+    hvis builtin.type(e[0]) == "tekst" {
+        la k = tekst(e[0])
+        hvis k == "arg" {
+            la i = e[1]
+            la t = tekst(typar[i])
+            hvis vert.tekst_parameter(t) {
+                brukt["S"] = sann
+                returner ["kall", ["namn", "S"], [["namn", param[i][0]], ["namn", param[i][1]]]]
+            }
+            returner ["namn", param[i][0]]
+        }
+        hvis k == "lokal" {
+            returner ["namn", param[e[1]][0]]
+        }
+        hvis k == "hjelpar" {
+            brukt[tekst(e[1])] = sann
+            returner ["namn", tekst(e[1])]
+        }
+        hvis k == "element" {
+            brukt["E"] = sann
+            returner ["indeks", ["namn", "E"], løys_vert(["arg", e[1]], param, typar, brukt)]
+        }
+        hvis k == "nytt_handtak" {
+            brukt["E"] = sann
+            # W4: med slepp i modulen blir plassar frå frilista gjenbrukte (P)
+            hvis finnes_nøkkel(brukt, "_gjenbruk") {
+                brukt["P"] = sann
+                returner ["kall", ["namn", "P"], [løys_vert(e[1], param, typar, brukt)]]
+            }
+            returner ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [løys_vert(e[1], param, typar, brukt)]], ["tal", 1]]
+        }
+        hvis k == "escape" {
+            brukt["H"] = sann
+            returner ["kall", ["namn", "H"], [løys_vert(e[1], param, typar, brukt)]]
+        }
+        hvis k == "skriv_tekst" {
+            brukt["U"] = sann
+            returner ["kall", ["namn", "U"], [løys_vert(e[1], param, typar, brukt), løys_vert(e[2], param, typar, brukt)]]
+        }
+        hvis k == "eksport" {
+            returner ["indeks", ["namn", "x"], løys_vert(e[1], param, typar, brukt)]
+        }
+        hvis k == "streng" eller k == "namn" eller k == "global" eller k == "tal" {
+            returner e
+        }
+    }
+    la ut = []
+    la i = 0
+    mens i < lengde(e) {
+        legg_til(ut, løys_vert(e[i], param, typar, brukt))
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Hjelparar og lastarprogram (Norscode-data) ─────────────────────────────
+
+# ─── I (W7): IndexedDB ───────────────────────────────────────────────────────
+
+funksjon _n(namn: tekst) -> liste {
+    returner ["namn", namn]
+}
+
+funksjon _f(e: liste, felt: tekst) -> liste {
+    returner ["felt", e, felt]
+}
+
+# e.metode(args)
+funksjon _k(e: liste, metode: tekst, args: liste) -> liste {
+    returner ["kall", ["felt", e, metode], args]
+}
+
+funksjon _t(mål: liste, e: liste) -> liste {
+    returner ["tildel", mål, e]
+}
+
+# r(args): konvolutten til I
+funksjon _i_svar(args: liste) -> liste {
+    returner ["kall", _n("r"), args]
+}
+
+# t.objectStoreNames.contains(n)
+funksjon _i_har_lager(n: liste) -> liste {
+    returner _k(_f(_n("t"), "objectStoreNames"), "contains", [n])
+}
+
+# onupgradeneeded: a.u = gamal versjon; fjern lagera i a.f; lag lagera i a.s og indeksane
+# deira når dei manglar, og fjern indeksar som ikkje er i skjemaet.
+funksjon _i_oppgrader() -> liste {
+    la a = _n("a")
+    la t = _n("t")
+    la n = _n("n")
+    la o = _n("o")
+    la u = _n("u")
+    la x = _n("x")
+    la fjern = _k(_f(a, "f"), "map", [["pil", ["n"], ["binær", "&&", _i_har_lager(n), _k(t, "deleteObjectStore", [n])]]])
+    la spec = ["indeks", _f(a, "s"), n]
+    la ny_lager = _k(t, "createObjectStore", [n, ["objekt", [["keyPath", ["streng", "k"]], ["autoIncrement", _f(spec, "a")]]]])
+    la finn_lager = _k(_f(_n("d"), "transaction"), "objectStore", [n])
+    la fjern_ix = _k(_k(["global", "Array"], "from", [_f(o, "indexNames")]), "map",
+        [["pil", ["x"], ["binær", "||", ["binær", "!=", ["indeks", u, x], ["global", "null"]], _k(o, "deleteIndex", [x])]]])
+    la ny_ix = _k(o, "createIndex", [x, ["binær", "+", ["streng", "i."], x], ["objekt", [["unique", ["indeks", u, x]]]]])
+    la lag_ix = _k(_k(["global", "Object"], "keys", [u]), "map",
+        [["pil", ["x"], ["binær", "||", _k(_f(o, "indexNames"), "contains", [x]), ny_ix]]])
+    la per_lager = ["pil", ["n", "l", "u", "o"], ["sekvens", [
+        _t(o, ["vilkår", _i_har_lager(n), finn_lager, ny_lager]),
+        _t(u, _f(spec, "x")),
+        fjern_ix,
+        lag_ix]]]
+    returner ["pil", ["e"], ["sekvens", [
+        _t(_f(a, "u"), _f(_n("e"), "oldVersion")),
+        _t(t, _f(_n("d"), "result")),
+        fjern,
+        _k(_k(["global", "Object"], "keys", [_f(a, "s")]), "map", [per_lager])]]]
+}
+
+# {n, v, s, f}: opne (v > 0) eller slett (v = 0) databasen.
+funksjon _i_opne() -> liste {
+    la a = _n("a")
+    la d = _n("d")
+    la t = _n("t")
+    la idb = ["global", "indexedDB"]
+    la handtak = ["sekvens", [
+        _t(_f(t, "onversionchange"), ["pil", [], _k(t, "close", [])]),
+        ["tabell", [["binær", "-", _k(_n("E"), "push", [t]), ["tal", 1]], _f(a, "u")]]]]
+    returner ["sekvens", [
+        _t(d, ["vilkår", _f(a, "v"), _k(idb, "open", [_f(a, "n"), _f(a, "v")]), _k(idb, "deleteDatabase", [_f(a, "n")])]),
+        _t(_f(d, "onupgradeneeded"), _i_oppgrader()),
+        _t(_f(d, "onsuccess"), ["pil", [], _i_svar([["tal", 0], ["vilkår", _t(t, _f(d, "result")), handtak, ["tal", 0]]])]),
+        _t(_f(d, "onerror"), ["pil", [], _i_svar([_f(d, "error")])]),
+        _t(_f(d, "onblocked"), ["pil", ["e"], _i_svar([["objekt", [["name", _f(_n("e"), "type")]]]])])]]
+}
+
+# {h, s, m, o}: éin transaksjon med alle op-ane.
+funksjon _i_batch() -> liste {
+    la a = _n("a")
+    la t = _n("t")
+    la d = _n("d")
+    la o = _n("o")
+    la x = _n("x")
+    la kr = ["global", "IDBKeyRange"]
+    la område = _t(["indeks", _f(o, "a"), ["tal", 0]],
+        _k(["indeks", kr, ["indeks", _f(o, "q"), ["tal", 0]]], "apply", [kr, _k(_f(o, "q"), "slice", [["tal", 1]])]))
+    la kall_op = _k(["indeks", x, _f(o, "m")], "apply", [x, _f(o, "a")])
+    la per_op = ["pil", ["o", "n", "l", "x"], ["sekvens", [
+        _t(x, _k(t, "objectStore", [_f(o, "s")])),
+        ["binær", "&&", _f(o, "x"), _t(x, _k(x, "index", [_f(o, "x")]))],
+        ["binær", "&&", _f(o, "q"), område],
+        _t(x, kall_op),
+        _t(_f(x, "onsuccess"), ["pil", ["e"], _t(["indeks", d, _n("n")], _f(_f(_n("e"), "target"), "result"))])]]]
+    returner ["sekvens", [
+        _t(t, _k(["indeks", _n("E"), _f(a, "h")], "transaction", [_f(a, "s"), _f(a, "m")])),
+        _t(d, ["tabell", []]),
+        _k(_f(a, "o"), "map", [per_op]),
+        _t(_f(t, "oncomplete"), ["pil", [], _i_svar([["tal", 0], d])]),
+        _t(_f(t, "onabort"), ["pil", [], _i_svar([_f(t, "error")])])]]
+}
+
+# {h}: lukk tilkoplinga (h < 0: berre eit asynkront svar).
+funksjon _i_lukk() -> liste {
+    la a = _n("a")
+    returner ["sekvens", [
+        ["binær", "||", ["binær", "<", _f(a, "h"), ["tal", 0]], _k(["indeks", _n("E"), _f(a, "h")], "close", [])],
+        _i_svar([["tal", 0]])]]
+}
+
+# I = (i, a, c, t, d, r) => (r = konvolutt-og-kall, Promise.resolve().then(arbeid).catch(…))
+funksjon _i_def() -> liste {
+    la a = _n("a")
+    la e = _n("e")
+    la t = _n("t")
+    la arbeid = ["pil", [], ["sekvens", [
+        _t(a, _k(["global", "JSON"], "parse", [a])),
+        ["vilkår", ["binær", "!=", _f(a, "n"), ["global", "null"]], _i_opne(),
+            ["vilkår", _f(a, "o"), _i_batch(), _i_lukk()]]]]]
+    la svar = ["pil", ["e", "b"], ["sekvens", [
+        _t(_n("J"), _k(["global", "JSON"], "stringify",
+            [["tabell", [_n("i"), ["binær", "&&", e, _f(e, "name")], ["binær", "&&", e, _f(e, "message")], _n("b")]]])),
+        ["kall", _n("c"), []]]]]
+    # catch: fjern onabort og avbryt transaksjonen (om han finst), så feilen berre blir svara
+    # éin gong (her, med det eigentlege unnataket)
+    la ved_feil = ["pil", ["e"], ["sekvens", [
+        ["binær", "&&", t, ["sekvens", [_t(_f(t, "onabort"), ["global", "null"]), _k(t, "abort", [])]]],
+        _i_svar([e])]]]
+    returner ["pil", ["i", "a", "c", "t", "d", "r"], ["sekvens", [
+        _t(_n("r"), svar),
+        _k(_k(_k(["global", "Promise"], "resolve", []), "then", [arbeid]), "catch", [ved_feil])]]]
+}
+
+# Lastarhjelparar i den rekkjefølgja dei blir deklarerte.
+#   E: handtakstabell (indeks → DOM-element)
+#   S: UTF-8-tekst frå WASM-minnet «m» (peikar, lengd)
+#   H: HTML-escape, bygd frå std.wasm_vert.escape_tabell()
+#   U: skriv ein JS-streng som UTF-8 i WASM-minnet «m» ved ein adresse (postkassa), veks
+#      minnet ved behov og gjev talet på bytar (W4: erstattar W frå W1, som ikkje voks)
+#   F, P: frilista og plassering av handtak (W4, berre når modulen importerer slepp)
+#   N, L, V, T: hendingsnamn, lyttar, gjeldande hending og elementet ho gjeld (W4)
+funksjon hjelparar() -> liste {
+    returner hjelparar_med(usann)
+}
+
+# gjenbruk (W4): modulen importerer slepp, så nye handtak (også lyttarhandtaka frå L) blir
+# plasserte med P.
+funksjon hjelparar_med(gjenbruk: bool) -> liste {
+    la tab = vert.escape_tabell()
+    la teikn = []
+    la par = []
+    la i = 0
+    mens i < lengde(tab) {
+        legg_til(teikn, tab[i][0])
+        legg_til(par, [tab[i][0], ["streng", tab[i][1]]])
+        i = i + 1
+    }
+    la e_def = ["tabell", []]
+    la s_def = ["pil", ["a", "b"],
+        ["kall", ["felt", ["ny", ["global", "TextDecoder"], []], "decode"],
+            [["ny", ["global", "Uint8Array"], [["felt", ["felt", ["namn", "x"], "m"], "buffer"], ["namn", "a"], ["namn", "b"]]]]]]
+    la h_def = ["pil", ["a"],
+        ["kall", ["felt", ["binær", "+", ["streng", ""], ["namn", "a"]], "replace"],
+            [["regex_klasse", teikn, "g"], ["pil", ["b"], ["indeks", ["objekt", par], ["namn", "b"]]]]]]
+    la xm = ["felt", ["namn", "x"], "m"]
+    la ende = ["binær", "+", ["namn", "b"], ["felt", ["namn", "a"], "length"]]
+    # U (W4): tekst av vilkårleg lengd til WASM (DOM → WASM, og sifra til tekst(desimaltal)):
+    # kodar strengen, veks minnet når han ikkje får plass, kopierer bytane til b og gjev talet
+    # på bytar.
+    la u_def = ["pil", ["a", "b"], ["sekvens", [
+        ["tildel", ["namn", "a"], ["kall", ["felt", ["ny", ["global", "TextEncoder"], []], "encode"], [["namn", "a"]]]],
+        ["binær", "&&", ["binær", ">", ende, ["felt", ["felt", xm, "buffer"], "byteLength"]],
+            # b ligg alltid inne i minnet, så (lengd >> 16) + 1 sider er nok
+            ["kall", ["felt", xm, "grow"],
+                [["binær", "+", ["binær", ">>", ["felt", ["namn", "a"], "length"], ["tal", 16]], ["tal", 1]]]]],
+        ["kall", ["felt", ["ny", ["global", "Uint8Array"], [["felt", xm, "buffer"]]], "set"], [["namn", "a"], ["namn", "b"]]],
+        ["felt", ["namn", "a"], "length"]]]]
+    # N (W4): norsk hendingsnamn → DOM-hending, frå std.wasm_vert.hendingar()
+    la hend = vert.hendingar()
+    la n_par = []
+    la hindre = []
+    la hi = 0
+    mens hi < lengde(hend) {
+        legg_til(n_par, [hend[hi][0], ["streng", hend[hi][1]]])
+        hvis hend[hi][2] {
+            legg_til(hindre, ["binær", "&&", ["binær", "==", ["namn", "b"], ["streng", hend[hi][0]]],
+                ["kall", ["felt", ["namn", "e"], "preventDefault"], []]])
+        }
+        hi = hi + 1
+    }
+    la n_def = ["objekt", n_par]
+    # L (W4): lyttar. L(mål, hending, eksport, namn): utan namn (lytt) er T elementet med
+    # lyttaren; med namn (deleger) er T det næraste elementet med data-nc-<hending>, og
+    # eksporten blir berre kalla når attributtet er namnet. V er hendinga. send (submit)
+    # får preventDefault. Handtaket er ein AbortController (slepp fjernar lyttaren).
+    la attr = ["binær", "+", ["streng", vert.delegering_prefiks()], ["namn", "b"]]
+    la sel = ["binær", "+", ["binær", "+", ["streng", "[" + vert.delegering_prefiks()], ["namn", "b"]], ["streng", "]"]]
+    la etter_treff = [["tildel", ["namn", "V"], ["namn", "e"]]]
+    la hj = 0
+    mens hj < lengde(hindre) {
+        legg_til(etter_treff, hindre[hj])
+        hj = hj + 1
+    }
+    legg_til(etter_treff, ["kall", ["namn", "c"], []])
+    la l_kropp = ["binær", "&&",
+        ["binær", "&&",
+            ["tildel", ["namn", "T"], ["vilkår", ["namn", "d"],
+                ["kall", ["felt", ["felt", ["namn", "e"], "target"], "closest"], [sel]],
+                ["namn", "a"]]],
+            ["binær", "||", ["ikkje", ["namn", "d"]],
+                ["binær", "==", ["kall", ["felt", ["namn", "T"], "getAttribute"], [attr]], ["namn", "d"]]]],
+        ["sekvens", etter_treff]]
+    la l_handtak = ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [["namn", "f"]]], ["tal", 1]]
+    la l_dep = ["E", "N", "V", "T"]
+    hvis gjenbruk {
+        l_handtak = ["kall", ["namn", "P"], [["namn", "f"]]]
+        l_dep = ["E", "P", "N", "V", "T"]
+    }
+    la l_def = ["pil", ["a", "b", "c", "d", "f"], ["sekvens", [
+        ["tildel", ["namn", "f"], ["ny", ["global", "AbortController"], []]],
+        ["kall", ["felt", ["namn", "a"], "addEventListener"],
+            [["indeks", ["namn", "N"], ["namn", "b"]], ["pil", ["e"], l_kropp],
+             ["objekt", [["signal", ["felt", ["namn", "f"], "signal"]]]]]],
+        l_handtak]]]
+    # F og P (W4): frilista for handtak og plassering av eit nytt handtak (gjenbruk frå F)
+    la f_def = ["tabell", []]
+    la p_def = ["pil", ["a", "b"], ["sekvens", [
+        ["vilkår", ["felt", ["namn", "F"], "length"],
+            ["tildel", ["indeks", ["namn", "E"], ["tildel", ["namn", "b"], ["kall", ["felt", ["namn", "F"], "pop"], []]]], ["namn", "a"]],
+            ["tildel", ["namn", "b"], ["binær", "-", ["kall", ["felt", ["namn", "E"], "push"], [["namn", "a"]]], ["tal", 1]]]],
+        ["namn", "b"]]]]
+    # Q og R (W6): nett. Q(førespurnad-JSON, tilbakekall) parsar førespurnaden frå
+    # std/wasm_nett.no ({i, u, method, headers, body, t}) og kallar fetch(u, …) med signal =
+    # AbortSignal.any([k.signal, AbortSignal.timeout(t)]), og med mode og credentials
+    # same-origin, som blir sette her og ikkje kan overstyrast frå Norscode-sida. Svaret blir
+    # konvolutten R = [i, status, JSON.stringify(Object.fromEntries(headers)), kropp].join("\n");
+    # ein feil (nettverk, tidsavbrot, avbrote) blir [i, 0, e.name, ""]. Så blir tilbakekallet
+    # kalla. Q gjev AbortController-en k, som blir eit handtak (slepp avbryt).
+    la aq = ["namn", "a"]
+    la hent = ["kall", ["global", "fetch"], [["felt", aq, "u"],
+        ["kall", ["felt", ["global", "Object"], "assign"], [aq, ["objekt", [
+            ["signal", ["kall", ["felt", ["global", "AbortSignal"], "any"], [["tabell", [
+                ["felt", ["namn", "k"], "signal"],
+                ["kall", ["felt", ["global", "AbortSignal"], "timeout"], [["felt", aq, "t"]]]]]]]],
+            ["mode", ["streng", "same-origin"]],
+            ["credentials", ["streng", "same-origin"]]]]]]]]
+    la svar_konv = ["pil", ["r"], ["kall", ["felt", ["kall", ["felt", ["namn", "r"], "text"], []], "then"],
+        [["pil", ["b"], ["tabell", [["felt", aq, "i"], ["felt", ["namn", "r"], "status"],
+            ["kall", ["felt", ["global", "JSON"], "stringify"],
+                [["kall", ["felt", ["global", "Object"], "fromEntries"], [["felt", ["namn", "r"], "headers"]]]]],
+            ["namn", "b"]]]]]]]
+    la feil_konv = ["pil", ["e"], ["tabell", [["felt", aq, "i"], ["tal", 0], ["felt", ["namn", "e"], "name"], ["streng", ""]]]]
+    la lever = ["pil", ["b"], ["sekvens", [
+        ["tildel", ["namn", "R"], ["kall", ["felt", ["namn", "b"], "join"], [["streng", "\n"]]]],
+        ["kall", ["namn", "c"], []]]]]
+    la kjede = ["kall", ["felt", ["kall", ["felt", ["kall", ["felt", hent, "then"], [svar_konv]], "catch"], [feil_konv]], "then"], [lever]]
+    la q_def = ["pil", ["a", "c", "k"], ["sekvens", [
+        ["tildel", aq, ["kall", ["felt", ["global", "JSON"], "parse"], [aq]]],
+        ["tildel", ["namn", "k"], ["ny", ["global", "AbortController"], []]],
+        kjede,
+        ["namn", "k"]]]]
+    # I og J (W7): lokal lagring i IndexedDB. I(id, førespurnad-JSON, tilbakekall) gjer éin
+    # førespurnad frå std/wasm_lager.no og kallar tilbakekallet med konvolutten J =
+    # JSON.stringify([id, feilnamn, melding, data]) når IndexedDB har svara. All logikk
+    # (skjema, nøklar, verdiar som JSON-tekst, kø og rekkjefølgje, feilklassar) er i Norscode;
+    # I er berre IndexedDB-kalla, styrte av data i førespurnaden:
+    #   {n, v, s, f}  v > 0: indexedDB.open(n, v); ved oppgradering blir lagera i f fjerna, og
+    #                 lagera i s ({lager: {a: autoIncrement, x: {indeks: unik}}}) og indeksane
+    #                 deira laga når dei manglar (keyPath "k" og "i.<indeks>"), og indeksar som
+    #                 ikkje er i s, fjerna. Svaret er [handtak, gamal versjon]. Tilkoplinga
+    #                 lukkar seg sjølv ved versionchange (ein annan fane oppgraderer eller
+    #                 slettar). v = 0: indexedDB.deleteDatabase(n).
+    #   {h, s, m, o}  éin transaksjon over lagera s med modus m ("readonly"/"readwrite"); kvar
+    #                 op {s, x, m, a, q} kallar metoden m (put, get, getAll, getAllKeys, count,
+    #                 delete, clear) på lageret s eller indeksen x med argumenta a, der a[0] blir
+    #                 IDBKeyRange[q[0]](…q[1..]) når q finst. Svaret (oncomplete) er resultata.
+    #                 Feilar ein op, blir transaksjonen avbroten (alt rulla tilbake), og feilen
+    #                 er t.error (onabort) eller unnataket (catch, som avbryt transaksjonen utan
+    #                 at onabort svarar ein gong til).
+    #   {h}           lukk tilkoplinga h (h < 0: ingenting, berre eit asynkront svar).
+    # Svaret er alltid asynkront (Promise.then), og nøyaktig eitt per førespurnad frå
+    # Norscode-sida (eit seint svar etter «blocked» blir handtert der).
+    la i_def = _i_def()
+    # G, B, O (W8): service worker på sida (std/wasm_pwa_klient.no); M (W8): svaret frå
+    # testkrokane test_cachar og test_bilete.
+    la g_def = _g_def()
+    # K, W, X (W9): synk (std/synk_klient.no). K er den siste meldinga (synk_melding).
+    la w_def = _w_def()
+    la x_def = _x_def()
+    # [namn, definisjon (null: berre deklarert), hjelparar han treng]
+    returner [["E", e_def, []], ["F", f_def, []], ["P", p_def, ["E", "F"]], ["S", s_def, []], ["H", h_def, []],
+              ["U", u_def, []], ["N", n_def, []], ["V", null, []], ["T", null, []], ["L", l_def, l_dep],
+              ["R", null, []], ["Q", q_def, ["R"]], ["J", null, []], ["I", i_def, ["E", "J"]],
+              ["B", null, []], ["O", ["streng", "ingen"], []], ["M", null, []], ["G", g_def, ["B", "O"]],
+              ["K", null, []], ["W", w_def, ["K"]], ["X", x_def, []]]
+}
+
+# ─── W og X (W9): synk ───────────────────────────────────────────────────────
+
+# W = (a, n, c, f) => (a.addEventListener(n, e => (K = e[f], c())), a)
+# Lyttar på hendinga n på objektet a (EventSource, BroadcastChannel, IDBDatabase): K blir feltet f
+# i hendinga (data eller newVersion; for «error» på EventSource finst ikkje data, så K blir tom
+# tekst), og tilbakekallet c blir kalla. Gjev a, så han kan bli eit handtak. Kva meldinga betyr,
+# avgjer Norscode-sida (std/synk_klient.no).
+funksjon _w_def() -> liste {
+    la lyttar = ["pil", ["e"], ["sekvens", [_t(_n("K"), ["indeks", _n("e"), _n("f")]), ["kall", _n("c"), []]]]]
+    returner ["pil", ["a", "n", "c", "f"], ["sekvens", [_k(_n("a"), "addEventListener", [_n("n"), lyttar]), _n("a")]]]
+}
+
+# X = (a, c, k, n) => (k = new AbortController, (n = navigator.locks)
+#       ? n.request(a, {signal: k.signal}, () => (c(), new Promise(r => k.signal.addEventListener("abort", r)))).catch(e => 0)
+#       : c(), k)
+# Web Locks: c blir kalla når fana har låsen a, og låsen blir halden til k blir avbroten (slepp på
+# handtaket); ein førespurnad som ventar, blir avbroten same vegen. Utan navigator.locks (utanfor
+# sikker kontekst) blir c kalla med ein gong.
+funksjon _x_def() -> liste {
+    la k = _n("k")
+    la n = _n("n")
+    la c = ["kall", _n("c"), []]
+    la hald = ["ny", ["global", "Promise"], [["pil", ["r"], _k(_f(k, "signal"), "addEventListener", [["streng", "abort"], _n("r")])]]]
+    la førespurnad = _k(_k(n, "request", [_n("a"), ["objekt", [["signal", _f(k, "signal")]]], ["pil", [], ["sekvens", [c, hald]]]]),
+        "catch", [["pil", ["e"], ["tal", 0]]])
+    returner ["pil", ["a", "c", "k", "n"], ["sekvens", [
+        _t(k, ["ny", ["global", "AbortController"], []]),
+        ["vilkår", _t(n, _f(["global", "navigator"], "locks")), førespurnad, c],
+        k]]]
+}
+
+# ─── G (W8): service worker på sida ──────────────────────────────────────────
+
+# G = (a, c, n) => (n = navigator.serviceWorker) ? n.register(a).then(r => (B = r, …), feil) : ustøtta
+# Registrerer workeren med URL-en a, ber nettlesaren sjå etter ein ny versjon (update(); feilar
+# stille utan nett), og kallar tilbakekallet c med hendinga i O: «registrert»
+# (registreringa er ferdig), «klar» (det finst ein aktiv worker; «ventar» om ein ny ventar
+# alt), «ventar» (ein ny worker er installert medan sida er kontrollert), «aktivert»
+# (controllerchange: ein ny worker har teke over), «feil <namn>» (register feila) og
+# «ustøtta» (ingen navigator.serviceWorker, t.d. utan HTTPS). Kva hendingane skal føre til
+# (vise ein knapp, sende skip-meldinga, laste sida på nytt), avgjer Norscode-klienten.
+funksjon _g_def() -> liste {
+    la n = _n("n")
+    la r = _n("r")
+    la c = ["kall", _n("c"), []]
+    la o = _n("O")
+    la meld = ["pil", [], ["sekvens", [_t(o, ["streng", "aktivert"]), c]]]
+    la installert = ["pil", ["e"], ["binær", "&&", ["binær", "&&",
+        ["binær", "==", _f(_f(_n("e"), "target"), "state"), ["streng", "installed"]], _f(n, "controller")],
+        ["sekvens", [_t(o, ["streng", "ventar"]), c]]]]
+    la ved_ny = ["pil", [], _k(_f(r, "installing"), "addEventListener", [["streng", "statechange"], installert])]
+    la klar = ["pil", [], ["sekvens", [
+        _t(o, ["vilkår", ["binær", "&&", _f(r, "waiting"), _f(n, "controller")], ["streng", "ventar"], ["streng", "klar"]]), c]]]
+    la ok = ["pil", ["r"], ["sekvens", [
+        _t(_n("B"), r),
+        # Sjekk om det finst ein ny versjon med ein gong (nettlesaren gjer det elles berre ved
+        # navigasjonar, og ikkje straks); utan nett feilar sjekken stille
+        _k(_k(r, "update", []), "catch", [["pil", ["e"], ["tal", 0]]]),
+        _k(n, "addEventListener", [["streng", "controllerchange"], meld]),
+        _k(r, "addEventListener", [["streng", "updatefound"], ved_ny]),
+        _k(_f(n, "ready"), "then", [klar]),
+        _t(o, ["streng", "registrert"]),
+        c]]]
+    la feil = ["pil", ["e"], ["sekvens", [_t(o, ["binær", "+", ["streng", "feil "], _f(_n("e"), "name")]), c]]]
+    returner ["pil", ["a", "c", "n"], ["vilkår", _t(n, _f(["global", "navigator"], "serviceWorker")),
+        _k(_k(n, "register", [_n("a")]), "then", [ok, feil]),
+        ["sekvens", [_t(o, ["streng", "ustøtta"]), c]]]]
+}
+
+# ─── SW-lastaren (W8) ────────────────────────────────────────────────────────
+#
+# sw.js er ein eigen lastar: han køyrer i ServiceWorkerGlobalScope, registrerer install,
+# activate, message og fetch SYNKRONT når skriptet blir evaluert (eit krav i spesifikasjonen),
+# og kvar hending ventar på K (modulen er instansiert og init har køyrt). All logikk ligg i
+# Norscode-modulen (std/wasm_sw.no): lastaren kallar handteraren for hendinga (Z) med dataa
+# som JSON og utfører planen han får attende. Tenaren skriv konfigurasjonen først i sw.js
+# (`let C="…"`, std/wasm_pwa.no), så sw.js endrar seg når versjonen endrar seg.
+#
+#   K  modulen: frå Cache Storage om han er der (sw.wasm er versjonert og precacha, så
+#      workeren kan starte utan nett), elles frå nettet
+#   Z  Z(hending, data) → plan: D = JSON(data), A[hending](), JSON.parse(Y)
+#   B  metadata om eit svar til «lagre»: {s: status, t: type, r: redirected, c: Cache-Control}
+#   N  nett: fetch, og lagre svaret under p.n når planen seier l og «lagre» seier ja
+#   O  offline-fallback: p.o frå cachen (offline-sida), elles ein nettverksfeil
+#   H  planen for fetch: «cache» (cache først), «nett» (nett først, cache som fallback, så
+#      offline-sida), og elles nett utan lagring («berre» og «forbi»; feilar nettet, får
+#      navigasjonar offline-sida, sidan berre dei har p.o, og alt anna ein nettverksfeil)
+funksjon _sw_z() -> liste {
+    returner ["pil", ["n", "d"], ["sekvens", [
+        _t(_n("D"), _k(["global", "JSON"], "stringify", [_n("d")])),
+        ["kall", ["indeks", _n("A"), _n("n")], []],
+        _k(["global", "JSON"], "parse", [_n("Y")])]]]
+}
+
+funksjon _sw_kall(hending: tekst, data: liste) -> liste {
+    returner ["kall", _n("Z"), [["streng", hending], data]]
+}
+
+funksjon _sw_b() -> liste {
+    la r = _n("r")
+    returner ["pil", ["r"], ["objekt", [["s", _f(r, "status")], ["t", _f(r, "type")], ["r", _f(r, "redirected")],
+        ["c", _k(_f(r, "headers"), "get", [["streng", "cache-control"]])]]]]
+}
+
+funksjon _sw_n() -> liste {
+    la p = _n("p")
+    la s = _n("s")
+    # Kopien (q) må lagast med ein gong: svaret s går til respondWith og blir lese der.
+    # q er ein ekstra parameter til pilfunksjonen (then gjev berre éin), så han er lokal.
+    la q = _n("q")
+    la lagre = ["binær", "&&", ["binær", "&&", _f(p, "l"), _f(_sw_kall("lagre", ["kall", _n("B"), [s]]), "l")],
+        ["sekvens", [_t(q, _k(s, "clone", [])),
+            _k(_k(["global", "caches"], "open", [_f(p, "c")]), "then",
+                [["pil", ["c"], _k(_n("c"), "put", [_f(p, "n"), q])]])]]]
+    returner ["pil", ["p", "r"], _k(["kall", ["global", "fetch"], [_n("r")]], "then", [["pil", ["s", "q"], ["sekvens", [lagre, s]]]])]
+}
+
+funksjon _sw_feil() -> liste {
+    returner _k(["global", "Response"], "error", [])
+}
+
+funksjon _sw_o() -> liste {
+    # p.o er "" utanom navigasjonar: caches.match("") finn ingenting, og svaret blir ein
+    # nettverksfeil (som når fetch feilar)
+    returner ["pil", ["p"], _k(_k(["global", "caches"], "match", [_f(_n("p"), "o")]), "then", [["pil", ["t"], ["binær", "||", _n("t"), _sw_feil()]]])]
+}
+
+funksjon _sw_h() -> liste {
+    la p = _n("p")
+    la r = _n("r")
+    la frå_cache = _k(["global", "caches"], "match", [_f(p, "n")])
+    la nett = ["kall", _n("N"), [p, r]]
+    la off = ["kall", _n("O"), [p]]
+    la hent = ["kall", ["global", "fetch"], [r]]
+    # H(p, r): utfør planen p for førespurnaden r
+    returner ["pil", ["p", "r"],
+        ["vilkår", ["binær", "==", _f(p, "k"), ["streng", "cache"]],
+            _k(frå_cache, "then", [["pil", ["t"], ["binær", "||", _n("t"), nett]]]),
+            ["vilkår", ["binær", "==", _f(p, "k"), ["streng", "nett"]],
+                _k(nett, "catch", [["pil", [], _k(frå_cache, "then", [["pil", ["t"], ["binær", "||", _n("t"), off]]])]]),
+                # berre og forbi: nett; feilar det, offline-sida (berre navigasjonar har p.o)
+                _k(hent, "catch", [["pil", [], off]])]]]
+}
+
+# Q(r): planen frå Norscode for førespurnaden r
+funksjon _sw_q() -> liste {
+    la r = _n("r")
+    returner ["pil", ["r"], _sw_kall("hent", ["objekt", [["m", _f(r, "method")], ["u", _f(r, "url")], ["n", _f(r, "mode")], ["o", _f(["global", "location"], "origin")]]])]
+}
+
+# addEventListener(namn, e => e.metode(K.then(...)…))
+funksjon _sw_lytt(namn: tekst, kropp: liste) -> liste {
+    returner ["uttrykk", ["kall", ["global", "addEventListener"], [["streng", namn], ["pil", ["e"], kropp]]]]
+}
+
+# Hendingane: install (precache, eventuelt skipWaiting), activate (rydd gamle cachar), message
+# (skipWaiting når Norscode seier ja) og fetch (planen). Namna Norscode-sida registrerer, er
+# std.wasm_vert.sw_hendingar().
+funksjon _sw_hendingar() -> liste {
+    la e = _n("e")
+    la k = _n("K")
+    la p = _n("P")
+    la cn = ["global", "caches"]
+    # install: K → plan P {c, u} → hent kvar u (utan HTTP-cache), lagre når «lagre» seier ja,
+    # elles feilar installasjonen. (skipWaiting under install gjorde ikkje at Chrome aktiverte
+    # workeren når han var installert, målt: det skjer difor berre via meldingar, sjå under.)
+    la hent_u = ["pil", ["u"], _k(["kall", ["global", "fetch"], [_n("u"), ["objekt", [["cache", ["streng", "reload"]]]]]], "then",
+        [["pil", ["r"], ["vilkår", _f(_sw_kall("lagre", ["kall", _n("B"), [_n("r")]]), "l"),
+            _k(_n("c"), "put", [_n("u"), _n("r")]),
+            _k(["global", "Promise"], "reject", [_n("u")])]]])]
+    la install = _k(_k(k, "then", [["pil", [], ["sekvens", [_t(p, _sw_kall("install", ["tal", 0])), _k(cn, "open", [_f(p, "c")])]]]]),
+        "then", [["pil", ["c"], _k(["global", "Promise"], "all", [_k(_f(p, "u"), "map", [hent_u])])]])
+    la rydd = _k(_k(k, "then", [["pil", [], _k(cn, "keys", [])]]), "then",
+        [["pil", ["k"], _k(["global", "Promise"], "all", [_k(_sw_kall("rydd", _n("k")), "map", [["pil", ["n"], _k(cn, "delete", [_n("n")])]])])]])
+    # message: K → klientane (også dei workeren ikkje kontrollerer) → planen for meldinga og talet
+    # på faner → skipWaiting når Norscode seier ja
+    la melding = _k(_k(k, "then", [["pil", [], _k(["global", "clients"], "matchAll", [["objekt", [["includeUncontrolled", ["global", "true"]]]]])]]),
+        "then", [["pil", ["k"], ["binær", "&&", _f(_sw_kall("melding", ["objekt", [["m", _f(e, "data")], ["k", _f(_n("k"), "length")]]]), "s"),
+            ["kall", ["global", "skipWaiting"], []]]]])
+    la q = _f(e, "request")
+    # Når modulen er klar (x), blir planen rekna ut synkront, og «forbi» blir ikkje handtert i
+    # det heile (ingen respondWith: førespurnaden går rett til nettet, og workeren har ingenting
+    # i gang, så ein ny versjon kan aktiverast). Elles ventar førespurnaden på K; feilar modulen
+    # (t.d. CSP utan 'wasm-unsafe-eval'), går han rett til nettet.
+    la plan = ["kall", _n("Q"), [q]]
+    la synk = ["binær", "&&", ["binær", "!=", _f(_t(_n("J"), plan), "k"), ["streng", "forbi"]],
+        _k(e, "respondWith", [["kall", _n("H"), [_n("J"), q]]])]
+    la asynk = _k(e, "respondWith", [_k(k, "then", [["pil", [], ["kall", _n("H"), [plan, q]]], ["pil", [], ["kall", ["global", "fetch"], [q]]]])])
+    returner [_sw_lytt("install", _k(e, "waitUntil", [install])),
+              _sw_lytt("activate", _k(e, "waitUntil", [rydd])),
+              _sw_lytt("message", _k(e, "waitUntil", [melding])),
+              _sw_lytt("fetch", ["vilkår", _n("x"), synk, asynk])]
+}
+
+# Hjelparane til SW-lastaren: S og U (som på sida) når importane treng dei, A (handterarane),
+# D og Y (data inn og plan ut).
+funksjon sw_hjelparar() -> liste {
+    la alle = hjelparar_med(usann)
+    la ut = []
+    la i = 0
+    mens i < lengde(alle) {
+        hvis alle[i][0] == "S" eller alle[i][0] == "U" { legg_til(ut, alle[i]) }
+        i = i + 1
+    }
+    legg_til(ut, ["A", ["objekt", []], []])
+    # D startar som konfigurasjonen C (std/wasm_sw.no les han med sw_inn i start())
+    legg_til(ut, ["D", ["global", "C"], []])
+    legg_til(ut, ["Y", null, []])
+    returner ut
+}
+
+# Bygg SW-lastaren for importane til SW-modulen. Gjev {"js", "program", "hjelparar"}. `tabell`
+# er vertstabellen (testar kan sende ein annan). Kastar når modulen importerer noko som ikkje
+# finst i ein service worker (std.wasm_vert.sw_tillatne).
+funksjon bygg_sw_lastar_frå_tabell(tabell: liste, importar: liste, wasm_url: tekst) -> ordbok {
+    la brukt = {"A": sann, "D": sann, "Y": sann}
+    la imp = []
+    la tillatne = vert.sw_tillatne()
+    la i = 0
+    mens i < lengde(importar) {
+        la namn = tekst(importar[i])
+        hvis ikkje vert.er_i(tillatne, namn) { kast "wasm_js: " + namn + " finst ikkje i ein service worker" }
+        la vf = _finn_vf(tabell, namn)
+        la ip = import_param(vf)
+        la kropp = løys_vert(vf["op"], ip["param"], vf["param"], brukt)
+        hvis ip["postkasse"] != "" {
+            brukt["U"] = sann
+            kropp = ["kall", ["namn", "U"], [kropp, ["namn", ip["postkasse"]]]]
+        }
+        legg_til(imp, [namn, ["pil", ip["flat"], kropp]])
+        i = i + 1
+    }
+    la deklar = []
+    la hjelp_namn = []
+    la alle_h = sw_hjelparar()
+    la hi = 0
+    mens hi < lengde(alle_h) {
+        la hn = tekst(alle_h[hi][0])
+        hvis finnes_nøkkel(brukt, hn) {
+            legg_til(deklar, [hn, alle_h[hi][1]])
+            legg_til(hjelp_namn, hn)
+        }
+        hi = hi + 1
+    }
+    la w = _n("W")
+    la x = _n("x")
+    la r = _n("r")
+    la instansier = ["kall", ["felt", ["global", "WebAssembly"], "instantiateStreaming"], [r, ["objekt", [["nc", ["objekt", imp]]]]]]
+    la k_def = _k(_k(_k(_k(["global", "caches"], "match", [w]), "then", [["pil", ["r"], ["binær", "||", r, ["kall", ["global", "fetch"], [w]]]]]),
+        "then", [["pil", ["r"], instansier]]),
+        "then", [["pil", ["r"], ["sekvens", [_t(x, _f(_f(r, "instance"), "exports")), _k(x, "i", [])]]]])
+    legg_til(deklar, ["x", null])
+    legg_til(deklar, ["P", null])
+    legg_til(deklar, ["J", null])
+    legg_til(deklar, ["W", ["streng", wasm_url]])
+    legg_til(deklar, ["K", k_def])
+    legg_til(deklar, ["Z", _sw_z()])
+    legg_til(deklar, ["B", _sw_b()])
+    legg_til(deklar, ["N", _sw_n()])
+    legg_til(deklar, ["O", _sw_o()])
+    legg_til(deklar, ["H", _sw_h()])
+    legg_til(deklar, ["Q", _sw_q()])
+    la setningar = [["la", deklar]]
+    la hs = _sw_hendingar()
+    la j = 0
+    mens j < lengde(hs) {
+        legg_til(setningar, hs[j])
+        j = j + 1
+    }
+    la prog = ["skript", setningar]
+    returner {"js": token_til_tekst(emit_skript(setningar)), "program": prog, "hjelparar": hjelp_namn}
+}
+
+funksjon bygg_sw_lastar(importar: liste, wasm_url: tekst) -> ordbok {
+    returner bygg_sw_lastar_frå_tabell(vert.vertsfunksjonar(), importar, wasm_url)
+}
+
+# Førebuinga tenaren skriv først i sw.js (W8, std/wasm_pwa.no): `let C="<konfig-JSON>"`, emittert
+# her som resten av lastaren. Gjev teksten (utan «;»).
+funksjon sw_konfig_setning(konfig_json: tekst) -> tekst {
+    returner token_til_tekst(emit_skript([["la", [["C", ["streng", konfig_json]]]]]))
+}
+
+# Lastarprogrammet: instansier modulen med importobjektet, lagre eksportane i x og kall
+# init-eksporten «i» viss modulen har ein.
+funksjon lastar_program(deklarasjonar: liste, importobjekt: liste, wasm_url: tekst, har_init: bool) -> liste {
+    la la_par = []
+    la i = 0
+    mens i < lengde(deklarasjonar) {
+        legg_til(la_par, deklarasjonar[i])
+        i = i + 1
+    }
+    legg_til(la_par, ["x", null])
+    la instansier = ["kall", ["felt", ["global", "WebAssembly"], "instantiateStreaming"],
+        [["kall", ["global", "fetch"], [["streng", wasm_url]]], ["objekt", [["nc", ["objekt", importobjekt]]]]]]
+    la setningar = [
+        ["la", la_par],
+        ["uttrykk", ["tildel", ["namn", "x"], ["felt", ["felt", ["vent", instansier], "instance"], "exports"]]]
+    ]
+    hvis har_init {
+        legg_til(setningar, ["uttrykk", ["kall", ["felt", ["namn", "x"], "i"], []]])
+    }
+    returner ["asynk_iife", setningar]
+}
+
+funksjon _finn_vf(tabell: liste, namn: tekst) -> ordbok {
+    la j = 0
+    mens j < lengde(tabell) {
+        hvis tabell[j]["namn"] == namn { returner tabell[j] }
+        j = j + 1
+    }
+    kast "wasm_js: ukjend vertsfunksjon " + namn
+}
+
+# Bygg lastaren for dei importerte vertsfunksjonane (i importrekkjefølgja til modulen).
+# tabell: vertstabellen (vanlegvis vert.vertsfunksjonar(); testar kan sende ein annan).
+# Gjev {"js": tekst, "program": JS-tre, "hjelparar": [namn]}.
+funksjon bygg_lastar_frå_tabell(tabell: liste, importar: liste, wasm_url: tekst, har_init: bool) -> ordbok {
+    la brukt = {}
+    la imp = []
+    la i = 0
+    mens i < lengde(importar) {
+        hvis tekst(importar[i]) == "slepp" { brukt["_gjenbruk"] = sann }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(importar) {
+        la namn = tekst(importar[i])
+        la vf = _finn_vf(tabell, namn)
+        la ip = import_param(vf)
+        la kropp = løys_vert(vf["op"], ip["param"], vf["param"], brukt)
+        hvis ip["postkasse"] != "" {
+            brukt["U"] = sann
+            kropp = ["kall", ["namn", "U"], [kropp, ["namn", ip["postkasse"]]]]
+        }
+        legg_til(imp, [namn, ["pil", ip["flat"], kropp]])
+        i = i + 1
+    }
+    la deklar = []
+    la hjelp_namn = []
+    la alle_h = hjelparar_med(finnes_nøkkel(brukt, "_gjenbruk"))
+    # Hjelparane ein brukt hjelpar treng (L → E, N, V, T)
+    la hi0 = lengde(alle_h) - 1
+    mens hi0 >= 0 {
+        hvis finnes_nøkkel(brukt, tekst(alle_h[hi0][0])) {
+            la dep = alle_h[hi0][2]
+            la di = 0
+            mens di < lengde(dep) {
+                brukt[tekst(dep[di])] = sann
+                di = di + 1
+            }
+        }
+        hi0 = hi0 - 1
+    }
+    la hi = 0
+    mens hi < lengde(alle_h) {
+        la hn = tekst(alle_h[hi][0])
+        hvis finnes_nøkkel(brukt, hn) {
+            legg_til(deklar, [hn, alle_h[hi][1]])
+            legg_til(hjelp_namn, hn)
+        }
+        hi = hi + 1
+    }
+    la prog = lastar_program(deklar, imp, wasm_url, har_init)
+    returner {"js": token_til_tekst(emit_program(prog)), "program": prog, "hjelparar": hjelp_namn}
+}
+
+funksjon bygg_lastar(importar: liste, wasm_url: tekst, har_init: bool) -> ordbok {
+    returner bygg_lastar_frå_tabell(vert.vertsfunksjonar(), importar, wasm_url, har_init)
+}

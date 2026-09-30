@@ -1,0 +1,379 @@
+# Paritetsprogram (W9): synk-klienten (std/synk_klient.no) i testmodus mot ein liten NSP/1-tenar
+# i Norscode (same reglar som std/synk.no: hallo, push med dup/hol/validering/HLC-klemme, pull
+# med ETag og 304, 401, 403 csrf, 410, klient_eigar). Deterministisk: klokka er simulert, og
+# IndexedDB er ei eining i minnet. Same utskrift i VM-en og som WebAssembly i Chrome.
+bruk std.synk_klient som sk
+bruk std.synk_kjerne som kj
+bruk tests.fixtures.synk_klient_hjelp som h
+
+la T: ordbok = {}
+
+funksjon t_ny() -> heltall {
+    T = {"epoke": "e1", "hlc": "", "v": 0, "klientar": {}, "dok": {}, "sesjonar": {"s1": "u1", "s2": "u2"},
+         "csrf_gen": 1, "hol": usann, "førespurnader": [], "etag_304": [],
+         "register": {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool", "pri": "heltall"}, "maks_byte": 256}}}
+    returner 0
+}
+
+funksjon _svar(status: heltall, kropp: tekst, etag: tekst) -> tekst {
+    la hd = {"content-type": "application/json; charset=utf-8", "cache-control": "no-store"}
+    hvis etag != "" { hd["etag"] = etag }
+    returner h.konvolutt(status, hd, kropp)
+}
+
+funksjon _feil(status: heltall, feil: tekst) -> tekst {
+    returner _svar(status, "{\"p\":1,\"feil\":" + kj.json_tekst(feil) + "}", "")
+}
+
+funksjon _hw(uid: tekst) -> heltall {
+    la hw = 0
+    hvis har_nokkel(T["dok"], uid) {
+        la d = T["dok"][uid]
+        la ks = nøkler(d)
+        la i = 0
+        mens i < lengde(ks) {
+            hvis d[ks[i]]["v"] > hw { hw = d[ks[i]]["v"] }
+            i = i + 1
+        }
+    }
+    returner hw
+}
+
+funksjon _param(url: tekst, namn: tekst) -> heltall {
+    la p = builtin.index_of(url, namn + "=")
+    hvis p < 0 { returner 0 }
+    la rest = builtin.slice(url, p + lengde(namn) + 1, lengde(url))
+    la e = builtin.index_of(rest, "&")
+    hvis e >= 0 { rest = builtin.slice(rest, 0, e) }
+    returner heltall(rest)
+}
+
+funksjon tenar(f: ordbok, fane: ordbok) -> tekst {
+    la url = tekst(f["url"])
+    legg_til(T["førespurnader"], fane["namn"] + " " + tekst(f["metode"]) + " " + url)
+    hvis ikkje har_nokkel(T["sesjonar"], fane["sesjon"]) { returner _feil(401, "ikkje_innlogga") }
+    la uid = T["sesjonar"][fane["sesjon"]]
+    la csrf = "c-" + uid + "-" + tekst(T["csrf_gen"])
+    hvis builtin.starts_with(url, "/_synk/hallo") {
+        returner _svar(200, "{\"p\":1,\"epoke\":" + kj.json_tekst(T["epoke"]) + ",\"hlc\":" + kj.json_tekst(T["hlc"]) +
+            ",\"csrf\":" + kj.json_tekst(csrf) + ",\"brukar\":" + kj.json_tekst("b" + uid) + ",\"v\":" + tekst(_hw(uid)) +
+            ",\"samlingar\":[\"oppg\"],\"tak\":{\"dok\":100,\"ops\":100,\"kropp\":262144}}", "")
+    }
+    hvis builtin.starts_with(url, "/_synk/push") { returner _push(f, uid, csrf) }
+    hvis builtin.starts_with(url, "/_synk/pull") { returner _pull(f, uid) }
+    returner _feil(404, "ukjend")
+}
+
+funksjon _push(f: ordbok, uid: tekst, csrf: tekst) -> tekst {
+    la hk = f["headerar"]
+    hvis ikkje har_nokkel(hk, "x-nc-csrf") eller hk["x-nc-csrf"] != csrf { returner _feil(403, "csrf") }
+    la b = builtin.json_parse_raw(tekst(f["kropp"]))
+    hvis b["epoke"] != T["epoke"] { returner _svar(410, "{\"p\":1,\"feil\":\"resync\",\"epoke\":" + kj.json_tekst(T["epoke"]) + "}", "") }
+    la klient = b["klient"]
+    la siste = 0
+    hvis har_nokkel(T["klientar"], klient) {
+        la kr = T["klientar"][klient]
+        hvis kr["e"] != uid { returner _feil(403, "klient_eigar") }
+        siste = kr["q"]
+    }
+    hvis b["kvittert"] > siste { returner _svar(410, "{\"p\":1,\"feil\":\"resync\",\"epoke\":" + kj.json_tekst(T["epoke"]) + "}", "") }
+    la ops = b["ops"]
+    hvis T["hol"] {
+        T["hol"] = usann
+        la ny = []
+        la i0 = 1
+        mens i0 < lengde(ops) {
+            legg_til(ny, ops[i0])
+            i0 = i0 + 1
+        }
+        ops = ny
+    }
+    hvis ikkje har_nokkel(T["dok"], uid) { T["dok"][uid] = {} }
+    la mine = T["dok"][uid]
+    la res = []
+    la hol = usann
+    la i = 0
+    mens i < lengde(ops) og ikkje hol {
+        la op = ops[i]
+        la seq = op["seq"]
+        hvis seq <= siste {
+            legg_til(res, "{\"seq\":" + tekst(seq) + ",\"ok\":true,\"dup\":true}")
+        } ellers hvis seq != siste + 1 {
+            hol = sann
+        } ellers {
+            la fk = kj.valider_op(op, T["register"])
+            hvis fk != "" {
+                legg_til(res, "{\"seq\":" + tekst(seq) + ",\"ok\":false,\"feil\":" + kj.json_tekst(fk) + "}")
+            } ellers {
+                la n = op["s"] + "/" + op["id"]
+                la gammal = null
+                hvis har_nokkel(mine, n) { gammal = mine[n]["d"] }
+                la r = kj.bruk_op(gammal, op, op["hlc"])
+                T["hlc"] = kj.hlc_maks(T["hlc"], op["hlc"])
+                hvis r["endra"] {
+                    T["v"] = T["v"] + 1
+                    mine[n] = {"d": r["dok"], "v": T["v"], "s": op["s"], "id": op["id"]}
+                    legg_til(res, "{\"seq\":" + tekst(seq) + ",\"ok\":true,\"v\":" + tekst(T["v"]) + "}")
+                } ellers {
+                    legg_til(res, "{\"seq\":" + tekst(seq) + ",\"ok\":true,\"endra\":false}")
+                }
+            }
+            siste = seq
+        }
+        i = i + 1
+    }
+    T["klientar"][klient] = {"e": uid, "q": siste}
+    la kropp = "{\"p\":1,\"siste_seq\":" + tekst(siste) + ",\"hlc\":" + kj.json_tekst(T["hlc"]) + ",\"v\":" + tekst(_hw(uid)) + ",\"res\":[" + builtin.join(res, ",") + "]"
+    hvis hol { returner _svar(409, kropp + ",\"feil\":\"hol\"}", "") }
+    returner _svar(200, kropp + "}", "")
+}
+
+funksjon _pull(f: ordbok, uid: tekst) -> tekst {
+    la url = tekst(f["url"])
+    la sidan = _param(url, "sidan")
+    la grense = _param(url, "grense")
+    la hw = _hw(uid)
+    la etag = "\"" + T["epoke"] + ":" + uid + ":" + tekst(hw) + ":" + tekst(sidan) + ":" + tekst(grense) + "\""
+    hvis har_nokkel(f["headerar"], "if-none-match") og f["headerar"]["if-none-match"] == etag {
+        legg_til(T["etag_304"], uid)
+        returner h.konvolutt(304, {"etag": etag}, "")
+    }
+    la ut = []
+    hvis har_nokkel(T["dok"], uid) {
+        la d = T["dok"][uid]
+        la ks = nøkler(d)
+        la i = 0
+        mens i < lengde(ks) {
+            la e = d[ks[i]]
+            hvis e["v"] > sidan {
+                legg_til(ut, e)
+                la j = lengde(ut) - 1
+                mens j > 0 og ut[j]["v"] < ut[j - 1]["v"] {
+                    la x = ut[j]
+                    ut[j] = ut[j - 1]
+                    ut[j - 1] = x
+                    j = j - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    la delar = []
+    la v = sidan
+    la i2 = 0
+    mens i2 < lengde(ut) og i2 < grense {
+        legg_til(delar, kj.endring_json(ut[i2]["v"], ut[i2]["s"], ut[i2]["id"], ut[i2]["d"]))
+        v = ut[i2]["v"]
+        i2 = i2 + 1
+    }
+    la meir = "false"
+    hvis lengde(ut) > grense { meir = "true" }
+    returner _svar(200, "{\"p\":1,\"epoke\":" + kj.json_tekst(T["epoke"]) + ",\"v\":" + tekst(v) + ",\"meir\":" + meir + ",\"endringar\":[" + builtin.join(delar, ",") + "]}", etag)
+}
+
+funksjon tal(prefiks: tekst) -> heltall {
+    la n = 0
+    la i = 0
+    mens i < lengde(T["førespurnader"]) {
+        hvis builtin.index_of(T["førespurnader"][i], prefiks) >= 0 { n = n + 1 }
+        i = i + 1
+    }
+    T["førespurnader"] = []
+    returner n
+}
+
+funksjon linje(namn: tekst, fane: ordbok) -> heltall {
+    skriv(namn + ": " + h.tilstand(fane) + " " + h.vis(fane, "oppg") + "\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    t_ny()
+    la verd = h.ny_verd(fun(f, fane) -> tenar(f, fane))
+    la e1 = sk.test_eining()
+    la a = h.ny_fane(verd, "a", e1, "s1", {"pull_grense": 2})
+    h.start_fane(verd, a)
+    h.køyr(verd, 1000)
+    linje("start", a)
+    sk.k_put(a["kl"], "oppg", "x1", {"tittel": "Kjøp mjølk", "ferdig": usann})
+    linje("optimistisk", a)
+    h.køyr(verd, 1000)
+    linje("push", a)
+    sk.k_sett_hugs(a["kl"], sann, null)
+    h.køyr(verd, 1000)
+    skriv("hugs: " + h.dbar(e1) + " lokal=" + e1["lokal"]["nc-synk-brukar"] + "\n")
+
+    # Ei anna eining for same brukar, sidevis pull (grense 2)
+    la b = h.ny_fane(verd, "b", sk.test_eining(), "s1", {"pull_grense": 2})
+    sk.k_put(a["kl"], "oppg", "x2", {"tittel": "Ring Åse", "pri": 2})
+    sk.k_put(a["kl"], "oppg", "x3", {"tittel": "Tredje"})
+    h.køyr(verd, 1000)
+    h.start_fane(verd, b)
+    h.køyr(verd, 1000)
+    linje("b", b)
+    skriv("pull-sider for b: " + tekst(tal("b GET /_synk/pull")) + "\n")
+
+    # Offline → backoff → tilbake
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    sk.k_put(a["kl"], "oppg", "x4", {"tittel": "Offline"})
+    h.køyr(verd, 7500)
+    linje("offline", a)
+    skriv("førespurnader så langt: " + tekst(verd["førespurnader"]) + "\n")
+    verd["offline"] = usann
+    h.køyr(verd, 70000)
+    linje("tilbake", a)
+    linje("b etter", b)
+
+    # Konflikt: ulike felt blir begge verande, same felt: nyaste
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    sk.k_put(a["kl"], "oppg", "x1", {"tittel": "Frå a"})
+    h.vent(verd, 3)
+    sk.k_put(b["kl"], "oppg", "x1", {"ferdig": sann})
+    h.vent(verd, 3)
+    sk.k_put(a["kl"], "oppg", "x2", {"pri": 5})
+    h.vent(verd, 3)
+    sk.k_put(b["kl"], "oppg", "x2", {"pri": 7})
+    verd["offline"] = usann
+    h.køyr(verd, 70000)
+    linje("konflikt a", a)
+    linje("konflikt b", b)
+
+    # 409 og 410
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    sk.k_put(a["kl"], "oppg", "h1", {"tittel": "Hol 1"})
+    sk.k_put(a["kl"], "oppg", "h2", {"tittel": "Hol 2"})
+    h.køyr(verd, 1000)
+    verd["offline"] = usann
+    T["hol"] = sann
+    h.køyr(verd, 70000)
+    skriv("409: " + h.hendingar(a) + " | " + h.tilstand(a) + "\n")
+    T["epoke"] = "e2"
+    T["klientar"] = {}
+    sk.k_put(a["kl"], "oppg", "r1", {"tittel": "Etter restore"})
+    h.køyr(verd, 70000)
+    skriv("410: " + h.hendingar(a) + " | kvittert=" + tekst(sk.k_intern(a["kl"])["meta"]["kvittert"]) + " | " + h.tilstand(a) + "\n")
+
+    # 401 og 403 csrf
+    fjern_nokkel(T["sesjonar"], "s1")
+    sk.k_put(a["kl"], "oppg", "i1", {"tittel": "Utan sesjon"})
+    h.køyr(verd, 70000)
+    skriv("401: " + h.hendingar(a) + " | " + h.tilstand(a) + " | " + h.dbar(e1) + "\n")
+    T["sesjonar"]["s1"] = "u1"
+    T["csrf_gen"] = 2
+    sk.k_prøv_igjen(a["kl"])
+    h.køyr(verd, 70000)
+    linje("innlogga att", a)
+    T["csrf_gen"] = 3
+    sk.k_put(a["kl"], "oppg", "c1", {"tittel": "CSRF"})
+    h.køyr(verd, 70000)
+    skriv("csrf: " + h.tilstand(a) + "\n")
+
+    # Avvist op (ukjent felt) og klient_eigar
+    la d = h.ny_fane(verd, "d", sk.test_eining(), "s2", {"samlingar": {"oppg": {"felt": {"tittel": "tekst", "farge": "tekst"}}}})
+    h.start_fane(verd, d)
+    h.køyr(verd, 1000)
+    sk.k_put(d["kl"], "oppg", "y1", {"tittel": "Brukar 2", "farge": "raud"})
+    linje("d optimistisk", d)
+    h.køyr(verd, 70000)
+    skriv("avvist: " + h.hendingar(d) + " " + sk.k_status(d["kl"])["avvist"][0]["feil"] + "\n")
+    linje("d", d)
+    sk.k_intern(d["kl"])["meta"]["klient"] = sk.k_intern(a["kl"])["meta"]["klient"]
+    sk.k_put(d["kl"], "oppg", "y2", {"tittel": "Eigar"})
+    h.køyr(verd, 70000)
+    linje("klient_eigar", d)
+
+    # To faner på eining 1: leiar og fylgjar, så leiarskifte
+    la f2 = h.ny_fane(verd, "f2", e1, "s1", {})
+    h.start_fane(verd, f2)
+    h.køyr(verd, 1000)
+    skriv("f2: " + h.tilstand(f2) + "\n")
+    sk.k_put(f2["kl"], "oppg", "t1", {"tittel": "Frå fane 2"})
+    skriv("f2 straks: " + h.vis(f2, "oppg") + "\n")
+    h.køyr(verd, 1000)
+    linje("a (leiar)", a)
+    linje("f2", f2)
+    h.lukk_fane(a)
+    h.gje_las(f2)
+    sk.k_put(f2["kl"], "oppg", "t2", {"tittel": "Ny leiar"})
+    h.køyr(verd, 70000)
+    linje("f2 leiar", f2)
+    linje("b", b)
+
+    # Polling med ETag
+    la p = h.ny_fane(verd, "p", sk.test_eining(), "s1", {"varsling": "poll", "poll_ms": 5000})
+    h.start_fane(verd, p)
+    h.køyr(verd, 1000)
+    tal("")
+    T["etag_304"] = []
+    h.køyr(verd, 21000)
+    skriv("polling: " + tekst(tal("p GET /_synk/pull")) + " × pull, " + tekst(lengde(T["etag_304"])) + " × 304\n")
+
+    # logg_ut og brukarbyte
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    sk.k_put(f2["kl"], "oppg", "l1", {"tittel": "Før utlogging"})
+    h.køyr(verd, 3000)
+    la svar = {"r": null}
+    sk.k_logg_ut(f2["kl"], usann, fun(r) -> _set(svar, r))
+    skriv("logg_ut utan nett: usynka=" + tekst(svar["r"]["usynka"]) + " " + h.dbar(e1) + "\n")
+    verd["offline"] = usann
+    h.køyr(verd, 70000)
+    sk.k_logg_ut(f2["kl"], usann, fun(r) -> _set(svar, r))
+    h.køyr(verd, 1000)
+    skriv("logg_ut: ok=" + tekst(svar["r"]["ok"]) + " " + h.dbar(e1) + " " + h.tilstand(f2) + " " + h.vis(f2, "oppg") + "\n")
+    la e5 = sk.test_eining()
+    la q = h.ny_fane(verd, "q", e5, "s1", {})
+    h.start_fane(verd, q)
+    h.køyr(verd, 1000)
+    sk.k_sett_hugs(q["kl"], sann, null)
+    h.køyr(verd, 1000)
+    h.lukk_fane(q)
+    la r2 = h.ny_fane(verd, "r2", e5, "s2", {})
+    h.start_fane(verd, r2)
+    h.køyr(verd, 1000)
+    skriv("brukarbyte: " + h.hendingar(r2) + " " + h.dbar(e5) + " " + h.vis(r2, "oppg") + "\n")
+    skriv("ferdig\n")
+    returner 0
+}
+
+funksjon _set(d: ordbok, r) -> heltall {
+    d["r"] = r
+    returner 0
+}
+
+# Fasit (VM-en og Chrome):
+#= start: synka ventar=0 leiar=sann hugs=usann []
+#= optimistisk: ventar ventar=1 leiar=sann hugs=usann [x1{ferdig=usann,tittel=Kjøp mjølk}*]
+#= push: synka ventar=0 leiar=sann hugs=usann [x1{ferdig=usann,tittel=Kjøp mjølk}]
+#= hugs: 1 db(ko=0) lokal=bu1
+#= b: synka ventar=0 leiar=sann hugs=usann [x1{ferdig=usann,tittel=Kjøp mjølk} x2{pri=2,tittel=Ring Åse} x3{tittel=Tredje}]
+#= pull-sider for b: 2
+#= offline: offline ventar=1 leiar=sann hugs=sann [x1{ferdig=usann,tittel=Kjøp mjølk} x2{pri=2,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}*]
+#= førespurnader så langt: 18
+#= tilbake: synka ventar=0 leiar=sann hugs=sann [x1{ferdig=usann,tittel=Kjøp mjølk} x2{pri=2,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= b etter: synka ventar=0 leiar=sann hugs=usann [x1{ferdig=usann,tittel=Kjøp mjølk} x2{pri=2,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= konflikt a: synka ventar=0 leiar=sann hugs=sann [x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= konflikt b: synka ventar=0 leiar=sann hugs=usann [x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= 409: hol | synka ventar=0 leiar=sann hugs=sann
+#= 410: resync | kvittert=1 | synka ventar=0 leiar=sann hugs=sann
+#= 401: ikkje_innlogga | ikkje_innlogga ventar=1 leiar=sann hugs=sann | 1 db(ko=1)
+#= innlogga att: synka ventar=0 leiar=sann hugs=sann [h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= csrf: synka ventar=0 leiar=sann hugs=sann
+#= d optimistisk: ventar ventar=1 leiar=sann hugs=usann [y1{farge=raud,tittel=Brukar 2}*]
+#= avvist: avvist felt_ukjent:farge
+#= d: synka ventar=0 leiar=sann hugs=usann []
+#= klient_eigar: synka ventar=0 leiar=sann hugs=usann [y2{tittel=Eigar}]
+#= f2: synka ventar=0 leiar=usann hugs=sann
+#= f2 straks: [c1{tittel=CSRF} h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} t1{tittel=Frå fane 2}* x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= a (leiar): synka ventar=0 leiar=sann hugs=sann [c1{tittel=CSRF} h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} t1{tittel=Frå fane 2} x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= f2: synka ventar=0 leiar=usann hugs=sann [c1{tittel=CSRF} h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} t1{tittel=Frå fane 2} x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= f2 leiar: synka ventar=0 leiar=sann hugs=sann [c1{tittel=CSRF} h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} t1{tittel=Frå fane 2} t2{tittel=Ny leiar} x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= b: synka ventar=0 leiar=sann hugs=usann [c1{tittel=CSRF} h1{tittel=Hol 1} h2{tittel=Hol 2} i1{tittel=Utan sesjon} r1{tittel=Etter restore} t1{tittel=Frå fane 2} t2{tittel=Ny leiar} x1{ferdig=sann,tittel=Frå a} x2{pri=7,tittel=Ring Åse} x3{tittel=Tredje} x4{tittel=Offline}]
+#= polling: 4 × pull, 3 × 304
+#= logg_ut utan nett: usynka=1 1 db(ko=1)
+#= logg_ut: ok=sann 0  logga_ut ventar=0 leiar=usann hugs=usann []
+#= brukarbyte: brukarbyte 0  [y2{tittel=Eigar}]
+#= ferdig
