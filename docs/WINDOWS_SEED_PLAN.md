@@ -140,6 +140,27 @@ Windows i CI.
 Estimat: W0–W2 er éi–to økter kvar; W3/W4 to–tre; W5 éi; W6 er den største (tre–fem);
 W7 éi. Kring 8 milepælar / 12–18 økter til promoterbar seed.
 
+## 3e. Status (2026-10-01) — ALLE syscalls ruta; Windows-nc fullstendig kompilator
+
+* **0 rå Linux-syscall att i Windows-PE-en.** Alle ~55 syscall-stader i native_codegen_v2
+  rutar gjennom OSTAB→kernel32/advapi32/shell32 når `NC_TARGET=windows-x86_64`. OS-rutinar i
+  win64_os: write/read/exit/getrandom/mprotect/clock_gettime/setup_argv/access/open/close/
+  lseek/stat/unlink/rmdir/mkdir/chmod/uname/nanosleep/getcwd/readlink/rename(MoveFileExW).
+  getdents(217)/futex(202)/clone(56) → os_enosys (grøne trådar + katalog-listing = W4/dir,
+  treng ekte Windows for verifikasjon).
+* **Teknikkar:** `emit_sys_clean7` (replace_all for clean7, lengdenøytral); split-drop-mov-eax
+  (lengdenøytral); dynamisk `call [OSTAB+VAR*8]` for u_nr(unlink/rmdir)/r_nr(rename/symlink);
+  register-indeksert `FF 14 C5` (sys6 med runtime-nr i rax); length-neutral call+2×nop for
+  movabs-nanosleep. fil_les read-staden (§5): 4 spennande handkoda hopp justerte ±3.
+* **Windows-nc er ein fullstendig, 100 % Norscode-bygd kompilator.** Verifisert (Docker cg1 +
+  wine, byte-identisk Linux↔Windows): `nc version`/`nc`(bruk)/`nc compile` (BYTE-IDENTISK NCB);
+  fil_finnes/fil_les/fil_skriv; mkdir/fil_slett (dir=1/sletta=1); system_info (system=Windows);
+  6/6 språk-fikstur (streng/unnatak/GC/dict/tid/random) LINID+WIN-OK.
+* **Att:** batch-vegen `ncval_x86_link_with` sin `_start` er ikkje Windows-tilpassa (les Linux-
+  stakk-argv) — nc brukar `kompiler_v2`-vegen som ER komplett, so ikkje eit problem for nc;
+  ekte getdents/futex/clone-backend (W4/dir); W5 seed-promotering + W6-attestasjon (IOCP/
+  SChannel/AppContainer) på EKTE Windows-CI + W7 promotering — ikkje lokalt køyrbare.
+
 ## 3d. Status (2026-10-01) — W1 fullført (argv) + W2 fil-I/O; nc compile på Windows
 
 * **Full argv** (commit 5f8dd2f): `os_setup_argv` (OSTAB-slot 500) synteserer argv frå
