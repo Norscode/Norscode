@@ -10,6 +10,7 @@ bruk std.web som web
 bruk std.apptenar som app
 bruk std.synk som synk
 bruk std.synk_klient som sk
+bruk std.synk_kjerne som kj
 bruk tests.fixtures.synk_klient_hjelp som h
 bruk std.wasm_sw som sw
 
@@ -19,8 +20,11 @@ la _sesjonar: ordbok = {}
 la _hol_neste: ordbok = {"på": usann}
 # Førespurnadene tenaren fekk: «METODE sti status»
 la _logg: liste = []
-# Svar frå /_synk/ som er sjekka mot regelen i service workeren (W8): aldri lagringsbare
+# Svar frå /_synk/ som er sjekka mot regelen i service workeren (W8) og HTTP-cachen: no-store
 la _cc: ordbok = {"n": 0}
+# Feilinjeksjon: «pull_503» (pull svarar 503), «hallo» ("" = ekte svar, "503", "html" (200 med ei
+# innloggingsside), "tidsavbrot")
+la _flagg: ordbok = {"pull_503": usann, "hallo": ""}
 
 funksjon synk_brukar(ctx: ordbok_tekst) -> ordbok_tekst {
     la t = app.cookie(ctx, "nc_sesjon")
@@ -81,6 +85,16 @@ funksjon tenar(f: ordbok, fane: ordbok) -> tekst {
         hd["origin"] = "http://127.0.0.1:1"
         hd["sec-fetch-site"] = "same-origin"
     }
+    hvis sti == "/_synk/hallo" og _flagg["hallo"] != "" {
+        legg_til(_logg, fane["namn"] + " " + m + " " + sti + " " + _flagg["hallo"])
+        hvis _flagg["hallo"] == "503" { returner h.konvolutt(503, {"content-type": "text/plain"}, "Overbelasta") }
+        hvis _flagg["hallo"] == "html" { returner h.konvolutt(200, {"content-type": "text/html"}, "<!doctype html><title>Logg inn</title>") }
+        returner "1\n0\nTimeoutError\n"
+    }
+    hvis sti == "/_synk/pull" og _flagg["pull_503"] {
+        legg_til(_logg, fane["namn"] + " " + m + " " + sti + " 503")
+        returner h.konvolutt(503, {}, "")
+    }
     la kropp = ""
     hvis f["kropp"] != null { kropp = tekst(f["kropp"]) }
     la ctx = {"method": m, "__method__": builtin.lower(m), "__path__": sti, "__query__": query, "__headers__": hd,
@@ -103,6 +117,11 @@ funksjon tenar(f: ordbok, fane: ordbok) -> tekst {
         hvis har_nokkel(ut, "cache-control") { cc = ut["cache-control"] }
         hvis ikkje sw.cache_control_forbyr(cc) {
             skriv("FEIL " + m + " " + sti + " " + tekst(d["status"]) + ": Cache-Control " + tekst(cc) + " tillèt lagring\n")
+            assert(usann)
+        }
+        # Òg HTTP-cachen i nettlesaren: «private, no-cache» lèt han lagre svaret på disk
+        hvis cc == null eller builtin.index_of(builtin.lower(tekst(cc)), "no-store") < 0 {
+            skriv("FEIL " + m + " " + sti + " " + tekst(d["status"]) + ": Cache-Control " + tekst(cc) + " utan no-store\n")
             assert(usann)
         }
         _cc["n"] = _cc["n"] + 1
@@ -145,6 +164,18 @@ funksjon start() -> heltall {
     })
     app.nullstill({"forespurnad_mw": ["__main__.hol_mw"], "logg": "ingen"})
     la verd = h.ny_verd(fun(f, fane) -> tenar(f, fane))
+    la del = ""
+    prøv {
+        del = tekst(builtin.miljo_hent("NC_SYNK_SJEKK_DEL"))
+    } fang (e) {
+        del = ""
+    }
+    hvis del == "2" {
+        del_2(verd)
+        skriv("cache: alle " + tekst(_cc["n"]) + " svara frå /_synk/ hadde Cache-Control: no-store\n")
+        skriv("synk_klient_sjekk del 2 OK\n")
+        returner 0
+    }
     la e1 = sk.test_eining()
 
     # ── 1. Optimistisk skriving, push og status ──
@@ -292,6 +323,7 @@ funksjon start() -> heltall {
     krev("etter klient_eigar", h.tilstand(c), "synka ventar=0 leiar=sann hugs=usann")
     krev("u2 ser berre sitt", h.vis(c, "oppg"), "[u2a{tittel=Brukar 2}]")
     skriv("403 klient_eigar: ny klient-id; u2 ser berre sine eigne dokument\n")
+    h.lukk_fane(c)
 
     # ── 10. Avvist op: tenaren kjenner ikkje feltet → hendinga «avvist» og kopien tilbake ──
     la d = h.ny_fane(verd, "d", sk.test_eining(), "t-u1",
@@ -306,6 +338,7 @@ funksjon start() -> heltall {
     krev("farge borte att", inneheld(h.vis(d, "oppg"), "farge"), usann)
     krev("avvist: køa tom", h.tilstand(d), "synka ventar=0 leiar=sann hugs=usann")
     skriv("avvist: farge var ukjent for tenaren (felt_ukjent:farge); kopien gjekk tilbake, køa er tom\n")
+    h.lukk_fane(d)
 
     # ── 11. To faner på same eining: éin leiar, endringar via kanalen, leiarskifte ──
     la f1 = h.ny_fane(verd, "f1", e1, "t-u1", {})
@@ -367,6 +400,7 @@ funksjon start() -> heltall {
     krev("logg_ut: tilstand", sk.k_status(g["kl"])["tilstand"], "logga_ut")
     krev("logg_ut: ingenting synleg", h.vis(g, "oppg"), "[]")
     skriv("logg_ut: utan nett {ok: usann, usynka: 1} og ingenting sletta; på nett vart l1 send, så databasen sletta\n")
+    h.lukk_fane(g)
 
     # ── 14. Brukarbyte på same eining ──
     la e4 = sk.test_eining()
@@ -380,6 +414,8 @@ funksjon start() -> heltall {
     # Sesjonen til u1 går ut; u2 loggar inn i same nettlesar
     la q2 = h.ny_fane(verd, "q", e4, "t-u2", {})
     h.start_fane(verd, q2)
+    # Hallo har ikkje svara enno: ingenting frå eininga er vist
+    krev("u2 ser ingenting før hallo", h.vis(q2, "oppg"), "[]")
     h.køyr(verd, 1000)
     krev("brukarbyte-hending", inneheld(h.hendingar(q2), "brukarbyte"), sann)
     krev("u2 ser ikkje u1", h.vis(q2, "oppg"), "[u2a{tittel=Brukar 2}]")
@@ -405,6 +441,8 @@ funksjon start() -> heltall {
     krev("u2 ser ikkje x1", h.vis(s2, "oppg"), "[u2a{tittel=Brukar 2}]")
     krev("databasen til u1 halden", h.dbar(e5), "1 db(ko=1)")
     skriv("brukarbyte: u2 såg aldri u1 sine dokument; databasen til u1 vart sletta, eller halden (lukka) med 1 usynka endring\n")
+    h.lukk_fane(q2)
+    h.lukk_fane(s2)
 
     # ── 15. ETag: polling utan endringar gjev 304 ──
     la pf = h.ny_fane(verd, "pf", sk.test_eining(), "t-u1", {"varsling": "poll", "poll_ms": 5000})
@@ -439,14 +477,38 @@ funksjon start() -> heltall {
     verd["offline"] = usann
     h.køyr(verd, 5000)
     krev("sse open att", sk.k_intern(s["kl"])["sse_open"], sann)
-    krev("backoff nullstilt ved hending", sk.k_intern(s["kl"])["sse_feil_n"] >= 0, sann)
+    krev("teljaren står til straumen har vore oppe ei stund", sk.k_intern(s["kl"])["sse_feil_n"], 2)
     _logg = []
     sk.k_put(b["kl"], "oppg", "sse1", {"tittel": "Via SSE"})
     h.køyr(verd, 100)
     krev("hendinga gav pull", inneheld(h.vis(s, "oppg"), "sse1{tittel=Via SSE}"), sann)
     krev("pull frå s", tal_logg("s GET /_synk/pull 200") >= 1, sann)
-    krev("sse nullstilt", sk.k_intern(s["kl"])["sse_feil_n"], 0)
-    skriv("SSE: brot gav polling og gjenoppkopling etter 1 s og så 2 s (backoff); ei hending frå ei anna eining gav pull med ein gong\n")
+    krev("ei hending nullstiller ikkje backoff", sk.k_intern(s["kl"])["sse_feil_n"], 2)
+    # Ein proxy som godtek straumen og bryt han rett etter den første hendinga («v» kjem straks):
+    # ventetida veks likevel (1 s kvar gong i det uendelege før)
+    la tider = []
+    la r2 = 0
+    mens r2 < 6 {
+        sk.k_sse(s["kl"], tekst(sk.k_intern(s["kl"])["meta"]["cursor"]))
+        h.køyr(verd, 10)
+        sk.k_sse(s["kl"], "")
+        la ms = sk.k_intern(s["kl"])["sse_neste"] - verd["no"]
+        legg_til(tider, tekst(ms))
+        h.vent(verd, ms)
+        h.køyr(verd, 10)
+        r2 = r2 + 1
+    }
+    krev("backoff veks trass i «v» ved kvar oppkopling", builtin.join(tider, ","), "4000,8000,16000,32000,60000,60000")
+    krev("sse open att etter backoff", sk.k_intern(s["kl"])["sse_open"], sann)
+    # Har straumen vore oppe i 30 s, er eit brot det første att
+    h.vent(verd, 31000)
+    h.køyr(verd, 10)
+    sk.k_sse(s["kl"], "")
+    krev("stabil straum: 1 s att", sk.k_intern(s["kl"])["sse_neste"] - verd["no"], 1000)
+    h.vent(verd, 1000)
+    h.køyr(verd, 10)
+    skriv("SSE: brot gav polling og gjenoppkopling etter 1 s og så 2 s (backoff); ei hending frå ei anna eining gav pull med ein gong; brot rett etter «v» gav 4, 8, 16, 32, 60 s, og etter 30 s oppe 1 s att\n")
+    h.lukk_fane(s)
 
     # ── 16. Sletting (tombstone) når fram ──
     sk.k_del(b["kl"], "oppg", "h1")
@@ -455,6 +517,7 @@ funksjon start() -> heltall {
     krev("sletta hjå pf", inneheld(h.vis(pf, "oppg"), "h1{"), usann)
     krev("h2 framleis", inneheld(h.vis(pf, "oppg"), "h2{"), sann)
     skriv("sletting: h1 borte hjå b straks og hjå pf etter neste polling\n")
+    h.lukk_fane(pf)
 
     # ── 18. «Hugs» medan endringar ventar: køa blir med til eininga og overlever omlasting ──
     la e6 = sk.test_eining()
@@ -481,9 +544,224 @@ funksjon start() -> heltall {
     krev("synka etter hugs og omlasting", h.tilstand(hq2), "synka ventar=0 leiar=sann hugs=sann")
     krev("hq1 hjå b", inneheld(h.vis(b, "oppg"), "hq1{tittel=Før hugs}"), sann)
     skriv("hugs medan 1 endring venta: køa vart skriven til eininga, overlevde omlastinga og vart send\n")
+    h.lukk_fane(hq2)
 
-    skriv("cache: alle " + tekst(_cc["n"]) + " svara frå /_synk/ hadde Cache-Control som service workeren aldri lagrar (no-store eller private)\n")
+    skriv("cache: alle " + tekst(_cc["n"]) + " svara frå /_synk/ hadde Cache-Control: no-store (aldri i HTTP-cachen eller cachen til service workeren)\n")
     skriv("synk_klient_sjekk OK\n")
+    returner 0
+}
+
+# Del 2 (tests/test_synk_klient_del2.no, eigen prosess med fersk tenar): HLC med klokkeskeiv,
+# kvittering når pullen feilar, «hugs» av med ei skriving på kanalen, brukarbyte i minnemodus,
+# hallo som feilar med nett, og klemming i rekkjefølgje.
+funksjon del_2(verd: ordbok) -> heltall {
+    # Eining 2 med u1 (a1) og u2 (u2a) på tenaren
+    la b = h.ny_fane(verd, "b", sk.test_eining(), "t-u1", {})
+    h.start_fane(verd, b)
+    h.køyr(verd, 1000)
+    sk.k_put(b["kl"], "oppg", "a1", {"tittel": "Kjøp mjølk", "ferdig": usann})
+    la c = h.ny_fane(verd, "c", sk.test_eining(), "t-u2", {})
+    h.start_fane(verd, c)
+    h.køyr(verd, 1000)
+    sk.k_put(c["kl"], "oppg", "u2a", {"tittel": "Brukar 2"})
+    h.køyr(verd, 1000)
+    h.lukk_fane(c)
+
+    # ── 19. Klokka på ei eining går 5 min for seint: HLC-en til tenaren (hallo, push, pull) og til
+    #        leiarfana (kanalen) gjer at ei redigering etter det brukaren såg, vinn ──
+    sk.k_put(b["kl"], "oppg", "k1", {"tittel": "Frå b"})
+    h.køyr(verd, 1000)
+    la H1 = sk.k_intern(b["kl"])["vis"]["oppg/k1"]["hlc"]["tittel"]
+    _flagg["pull_503"] = sann
+    la e7 = sk.test_eining()
+    la t1 = h.ny_fane(verd, "t1", e7, "t-u1", {})
+    h.sett_skeiv(verd, t1, -300000)
+    h.start_fane(verd, t1)
+    h.køyr(verd, 1000)
+    krev("hallo: HLC-en til tenaren", kj.hlc_samanlikn(sk.k_intern(t1["kl"])["hlc"], H1) > 0, sann)
+    h.vent(verd, 10000)
+    sk.k_put(b["kl"], "oppg", "k2", {"tittel": "Frå b 2"})
+    h.køyr(verd, 1000)
+    la H2 = sk.k_intern(b["kl"])["vis"]["oppg/k2"]["hlc"]["tittel"]
+    sk.k_put(t1["kl"], "oppg", "k3", {"tittel": "Frå t1"})
+    h.køyr(verd, 3000)
+    krev("push: HLC-en til tenaren", kj.hlc_samanlikn(sk.k_intern(t1["kl"])["hlc"], H2) > 0, sann)
+    _flagg["pull_503"] = usann
+    h.vent(verd, 10000)
+    sk.k_put(b["kl"], "oppg", "k4", {"tittel": "Frå b 3"})
+    h.køyr(verd, 70000)
+    la H3 = sk.k_intern(b["kl"])["vis"]["oppg/k4"]["hlc"]["tittel"]
+    krev("pull: k4 hjå t1", h.vis_éin(t1, "oppg", "k4"), "k4{tittel=Frå b 3}")
+    krev("pull: HLC-en til tenaren", kj.hlc_samanlikn(sk.k_intern(t1["kl"])["hlc"], H3) > 0, sann)
+    sk.k_sett_hugs(t1["kl"], sann, null)
+    h.køyr(verd, 1000)
+    la t2 = h.ny_fane(verd, "t2", e7, "t-u1", {})
+    h.sett_skeiv(verd, t2, -300000)
+    h.start_fane(verd, t2)
+    h.køyr(verd, 1000)
+    krev("t2 er fylgjar", h.tilstand(t2), "synka ventar=0 leiar=usann hugs=sann")
+    h.vent(verd, 10000)
+    sk.k_put(b["kl"], "oppg", "k1", {"tittel": "Frå b 4"})
+    h.køyr(verd, 1000)
+    la H4 = sk.k_intern(b["kl"])["vis"]["oppg/k1"]["hlc"]["tittel"]
+    krev("t2 såg det via leiaren", h.vis_éin(t2, "oppg", "k1"), "k1{tittel=Frå b 4}")
+    krev("kanalen: HLC-en til leiaren", kj.hlc_samanlikn(sk.k_intern(t2["kl"])["hlc"], H4) > 0, sann)
+    sk.k_put(t2["kl"], "oppg", "k1", {"tittel": "Frå t2"})
+    h.køyr(verd, 70000)
+    krev("redigeringa i fylgjarfana vann hjå b", h.vis_éin(b, "oppg", "k1"), "k1{tittel=Frå t2}")
+    krev("og i leiarfana", h.vis_éin(t1, "oppg", "k1"), "k1{tittel=Frå t2}")
+    krev("ingen avvist", inneheld(h.hendingar(t2), "avvist"), usann)
+    h.lukk_fane(t1)
+    h.lukk_fane(t2)
+    skriv("HLC: eininga 5 min bak tok imot HLC-en til tenaren i hallo, push og pull og til leiaren på kanalen; redigeringa i fylgjarfana etter «Frå b 4» vann\n")
+
+    # ── 20. Ei kvittert skriving blir verande i kopien når pullen etter push feilar ──
+    la e8 = sk.test_eining()
+    la v1 = h.ny_fane(verd, "v1", e8, "t-u1", {})
+    h.start_fane(verd, v1)
+    h.køyr(verd, 1000)
+    sk.k_sett_hugs(v1["kl"], sann, null)
+    h.køyr(verd, 1000)
+    la v2 = h.ny_fane(verd, "v2", e8, "t-u1", {})
+    h.start_fane(verd, v2)
+    h.køyr(verd, 1000)
+    sk.k_put(v1["kl"], "oppg", "kv", {"tittel": "gammal"})
+    h.køyr(verd, 1000)
+    _flagg["pull_503"] = sann
+    sk.k_put(v2["kl"], "oppg", "kv", {"tittel": "ny"})
+    h.køyr(verd, 1500)
+    krev("kvittert: leiaren", h.vis_éin(v1, "oppg", "kv"), "kv{tittel=ny}")
+    krev("kvittert: fana som skreiv", h.vis_éin(v2, "oppg", "kv"), "kv{tittel=ny}")
+    krev("kvittert: køa tom", sk.k_ventar(v1["kl"]), 0)
+    krev("kvittert: kopien på eininga", h.dok_på_eininga(e8, "oppg/kv"), "{\"tittel\":\"ny\"}")
+    sk.k_put(v1["kl"], "oppg", "kv", {"pri": 3})
+    krev("neste skriving byggjer på det kvitterte", h.vis_éin(v1, "oppg", "kv"), "kv{pri=3,tittel=ny}*")
+    h.lukk_fane(v1)
+    h.lukk_fane(v2)
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    la v3 = h.ny_fane(verd, "v3", e8, "t-u1", {})
+    h.start_fane(verd, v3)
+    h.gje_las(v3)
+    h.køyr(verd, 500)
+    krev("omlasta utan nett", h.vis_éin(v3, "oppg", "kv"), "kv{pri=3,tittel=ny}*")
+    verd["offline"] = usann
+    _flagg["pull_503"] = usann
+    h.køyr(verd, 70000)
+    krev("synka etterpå", h.vis_éin(v3, "oppg", "kv"), "kv{pri=3,tittel=ny}")
+    h.lukk_fane(v3)
+    skriv("kvittering: «ny» vart verande i begge fanene og på eininga då pullen feila (snap fekk op-en), òg etter omlasting utan nett\n")
+
+    # ── 21. «Hugs» av i ei fane medan ei anna fane si skriving er på veg på kanalen ──
+    la e9 = sk.test_eining()
+    la ha = h.ny_fane(verd, "ha", e9, "t-u1", {})
+    h.start_fane(verd, ha)
+    h.køyr(verd, 1000)
+    sk.k_sett_hugs(ha["kl"], sann, null)
+    h.køyr(verd, 1000)
+    la hf = h.ny_fane(verd, "hf", e9, "t-u1", {})
+    h.start_fane(verd, hf)
+    h.køyr(verd, 1000)
+    krev("hf er fylgjar", h.tilstand(hf), "synka ventar=0 leiar=usann hugs=sann")
+    sk.k_put(hf["kl"], "oppg", "hf1", {"tittel": "Frå fylgjaren"})
+    sk.k_sett_hugs(ha["kl"], usann, null)
+    h.køyr(verd, 1000)
+    krev("ha i minnet", h.tilstand(ha), "synka ventar=0 leiar=sann hugs=usann")
+    krev("hf held fram i minnet (ikkje logga ut)", h.tilstand(hf), "synka ventar=0 leiar=sann hugs=usann")
+    krev("hf fekk hugs_av", inneheld(h.hendingar(hf), "hugs_av"), sann)
+    krev("ingen database på eininga", h.dbar(e9), "0 ")
+    krev("ulike klient-id-ar", sk.k_intern(ha["kl"])["meta"]["klient"] != sk.k_intern(hf["kl"])["meta"]["klient"], sann)
+    sk.k_put(ha["kl"], "oppg", "ha1", {"tittel": "Frå leiaren"})
+    h.køyr(verd, 70000)
+    krev("ha: synka", h.tilstand(ha), "synka ventar=0 leiar=sann hugs=usann")
+    krev("ha1 hjå b", h.vis_éin(b, "oppg", "ha1"), "ha1{tittel=Frå leiaren}")
+    krev("hf1 hjå b", h.vis_éin(b, "oppg", "hf1"), "hf1{tittel=Frå fylgjaren}")
+    krev("hf1 hjå ha", h.vis_éin(ha, "oppg", "hf1"), "hf1{tittel=Frå fylgjaren}")
+    h.lukk_fane(ha)
+    h.lukk_fane(hf)
+    skriv("hugs av: fylgjaren heldt fram i minnet med eigen klient-id og sende hf1; leiaren sende ha1; ingenting gjekk tapt\n")
+
+    # ── 22. Brukarbyte i minnemodus med usynka endringar: parkerte, aldri sende som u2 ──
+    _sesjonar["t-u1m"] = {"uid": "u1", "sesjon": "s-u1m"}
+    la mu = h.ny_fane(verd, "mu", sk.test_eining(), "t-u1m", {})
+    h.start_fane(verd, mu)
+    h.køyr(verd, 1000)
+    fjern_nokkel(_sesjonar, "t-u1m")
+    sk.k_put(mu["kl"], "oppg", "m1", {"tittel": "Usynka i minnet"})
+    h.køyr(verd, 5000)
+    krev("401 i minnet", h.tilstand(mu), "ikkje_innlogga ventar=1 leiar=sann hugs=usann")
+    h.hendingar(mu)
+    mu["sesjon"] = "t-u2"
+    sk.k_prøv_igjen(mu["kl"])
+    h.køyr(verd, 5000)
+    krev("brukarbyte-hending i minnet", inneheld(h.hendingar(mu), "brukarbyte"), sann)
+    krev("talet på usynka", sk.k_intern(mu["kl"])["brukarbyte_usynka"], 1)
+    krev("parkert", sk.k_parkert(mu["kl"]), 1)
+    krev("u2 ser ikkje m1 (og han vart ikkje send som u2)", h.vis(mu, "oppg"), "[u2a{tittel=Brukar 2}]")
+    _sesjonar["t-u1m"] = {"uid": "u1", "sesjon": "s-u1m"}
+    mu["sesjon"] = "t-u1m"
+    sk.k_prøv_igjen(mu["kl"])
+    h.køyr(verd, 5000)
+    krev("m1 synka som u1", h.vis_éin(mu, "oppg", "m1"), "m1{tittel=Usynka i minnet}")
+    krev("synka som u1", h.tilstand(mu), "synka ventar=0 leiar=sann hugs=usann")
+    krev("ingenting parkert", sk.k_parkert(mu["kl"]), 0)
+    h.lukk_fane(mu)
+    skriv("brukarbyte i minnet: m1 vart parkert (hendinga brukarbyte, 1), u2 såg han aldri, og han vart send då u1 kom att\n")
+
+    # ── 23. Hallo feilar med nett (503, innloggingsside, tidsavbrot): kopien til u1 blir ikkje vist ──
+    la e10 = sk.test_eining()
+    la hp = h.ny_fane(verd, "hp", e10, "t-u1", {})
+    h.start_fane(verd, hp)
+    h.køyr(verd, 1000)
+    sk.k_sett_hugs(hp["kl"], sann, null)
+    h.køyr(verd, 1000)
+    krev("u1 har kopi på e10", inneheld(h.vis(hp, "oppg"), "a1{"), sann)
+    h.lukk_fane(hp)
+    la arter = ["503", "html", "tidsavbrot"]
+    la ai = 0
+    mens ai < lengde(arter) {
+        _flagg["hallo"] = arter[ai]
+        la hq = h.ny_fane(verd, "hq" + tekst(ai), e10, "t-u2", {})
+        h.start_fane(verd, hq)
+        h.køyr(verd, 1000)
+        krev("hallo " + arter[ai] + ": ingenting vist", h.vis(hq, "oppg"), "[]")
+        krev("hallo " + arter[ai] + ": ingen database opna", sk.k_status(hq["kl"])["hugs"], usann)
+        h.lukk_fane(hq)
+        ai = ai + 1
+    }
+    _flagg["hallo"] = ""
+    # Positiv kontroll: utan nett (fetch får ikkje kontakt) blir kopien til u1 vist, ikkje stadfesta
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    la hn = h.ny_fane(verd, "hn", e10, "t-u2", {})
+    h.start_fane(verd, hn)
+    h.køyr(verd, 1000)
+    krev("utan nett: kopien til den som valde hugs", inneheld(h.vis(hn, "oppg"), "a1{"), sann)
+    krev("utan nett: ikkje stadfesta", sk.k_status(hn["kl"])["stadfesta"], usann)
+    verd["offline"] = usann
+    h.køyr(verd, 70000)
+    krev("hallo som u2: kopien til u1 borte", h.vis(hn, "oppg"), "[u2a{tittel=Brukar 2}]")
+    krev("hallo som u2: brukarbyte", inneheld(h.hendingar(hn), "brukarbyte"), sann)
+    h.lukk_fane(hn)
+    skriv("hallo-feil: 503, ei innloggingsside og tidsavbrot viste ingenting; berre utan nett vart kopien til u1 vist (ikkje stadfesta), og han forsvann då hallo svara u2\n")
+
+    # ── 24. Klokka 1 t for fort: to redigeringar av same felt i éin push blir klemde i rekkjefølgje ──
+    la kk = h.ny_fane(verd, "kk", sk.test_eining(), "t-u1", {})
+    h.start_fane(verd, kk)
+    h.køyr(verd, 1000)
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    h.sett_skeiv(verd, kk, builtin.tid_ms() + 3600000 - verd["no"])
+    sk.k_put(kk["kl"], "oppg", "kl1", {"tittel": "b-første"})
+    h.sett_skeiv(verd, kk, builtin.tid_ms() + 3600005 - verd["no"])
+    sk.k_put(kk["kl"], "oppg", "kl1", {"tittel": "a-siste"})
+    krev("klemming: lokalt", h.vis_éin(kk, "oppg", "kl1"), "kl1{tittel=a-siste}*")
+    verd["offline"] = usann
+    h.køyr(verd, 70000)
+    krev("klemming: tenaren heldt rekkjefølgja", h.vis_éin(kk, "oppg", "kl1"), "kl1{tittel=a-siste}")
+    krev("klemming: b", h.vis_éin(b, "oppg", "kl1"), "kl1{tittel=a-siste}")
+    skriv("klemming: to redigeringar 1 t fram i éin push vart klemde til no + 60 s i rekkjefølgje; den siste vann\n")
+
     returner 0
 }
 

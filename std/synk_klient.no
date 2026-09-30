@@ -18,7 +18,11 @@
 #   - Lokal kopi og utboks. Kvar skriving blir ei op {s, id, op: put|del, hlc, felt}. Ho blir
 #     lagd i utboksa («ko») og brukt på den lokale kopien med kj.bruk_op, og lyttarane blir
 #     kalla med ein gong (optimistisk UI). Den synlege kopien er alltid snap ⊕ utboks: «snap»
-#     er det tenaren sist stadfesta, og dei ventande op-ane blir brukte oppå i rekkjefølgje.
+#     er det tenaren sist stadfesta (pull, og kvitterte op-ar), og dei ventande op-ane blir
+#     brukte oppå i rekkjefølgje.
+#   - HLC: klienten tek imot HLC-en til tenaren (hallo, push, pull) og leiarfana (kanalen), og ei
+#     ny skriving av eit dokument får alltid ein HLC etter den høgaste i den synlege kopien, så ei
+#     redigering vinn over verdien brukaren såg, òg når klokka på eininga går for seint.
 #   - Lagring (når brukaren har valt «hugs»): IndexedDB via std/wasm_lager.no, éin database per
 #     brukar, nc-synk-<16 hex av sha256(brukar)>, med lagera meta, snap, dok (den synlege
 #     kopien) og ko (auto-nøkkel). Ei lokal skriving er ÉIN transaksjon med dokumentet og
@@ -45,12 +49,16 @@
 #   - Fleire faner: éi leiarfane (Web Locks, synk_las) gjer push og pull; alle faner skriv
 #     sjølve (IndexedDB) og fortel dei andre om endringane på ein BroadcastChannel (synk_kanal).
 #     Når ein annan fane oppgraderer eller slettar databasen (versionchange), blir tilstanden
-#     «db_endra», og appen bør laste sida på nytt.
-#   - Personvern: hallo stadfestar brukaren før noko lokalt blir vist (på nett). Utan nett blir
-#     berre kopien til den brukaren som sjølv valde «hugs» vist, merkt som ikkje stadfesta.
+#     «db_endra», og appen bør laste sida på nytt. Slår ei fane av «hugs», held alle fanene fram
+#     i minnet med det dei har (hendinga «hugs_av»; kvar får eigen klient-id).
+#   - Personvern: hallo stadfestar brukaren før noko lokalt blir vist. Berre når fetch ikkje får
+#     kontakt i det heile (ingen nett), blir kopien til den brukaren som sjølv valde «hugs» vist
+#     før hallo, merkt som ikkje stadfesta; eit feilsvar eller tidsavbrot er ikkje nok.
 #     Ein annan brukar på same eining (brukarbyte) ser aldri dataa: den førre brukaren sin
 #     database blir sletta når han ikkje har usynka endringar, elles blir han halden lukka
-#     (hendinga «brukarbyte» med talet på usynka endringar), og ein app kan forkaste dei.
+#     (hendinga «brukarbyte» med talet på usynka endringar). Utan «hugs» blir usynka endringar
+#     parkerte i minnet under den førre brukaren (same hending og tal) og sende når han loggar
+#     inn att i fana; dei blir aldri sende som ein annan brukar.
 #     logg_ut slettar databasen (og nøkkelen i localStorage) etter at køa er send, eller med
 #     `tving` etter ei åtvaring om N usynka endringar.
 #
@@ -59,7 +67,7 @@
 #   tilstand: startar, synka, ventar (N op-ar ikkje kvitterte), offline, feil, ikkje_innlogga,
 #             db_endra, logga_ut
 #   hending:  "" eller avvist (ei op tenaren avviste, med årsak), brukarbyte, usynka, resync,
-#             lagring (IndexedDB feila; skrivinga vart teken attende)
+#             hugs_av, lagring (IndexedDB feila; skrivinga vart teken attende)
 #
 # Testmodus (konf["test"]: sann, sjå tests/fixtures/synk_klient_hjelp.no): ingen vertsfunksjonar.
 # Nett, tid, kanal, lås og SSE går gjennom kø-/hook-funksjonane k_test_*; IndexedDB og
@@ -87,6 +95,9 @@ funksjon skjema() -> liste {
 funksjon brukar_nøkkel() -> tekst { returner "nc-synk-brukar" }
 
 funksjon maks_backoff_ms() -> heltall { returner 60000 }
+
+# Kor lenge SSE-straumen må ha vore oppe før eit brot tel som det første (backoff 1 s att).
+funksjon sse_stabil_ms() -> heltall { returner 30000 }
 
 # 1, 2, 4, 8, 16, 32, 60 s … etter talet på feil på rad (n ≥ 1).
 funksjon backoff_ms(n: heltall) -> heltall {
@@ -438,7 +449,7 @@ funksjon ny_klient(konf: ordbok, ved_status) -> ordbok {
         "resync_sett": null, "avviste": [], "etag": "", "etag_sidan": -1,
         "sist_status": "", "leiar_status": null, "db_endra": usann, "logga_ut": usann,
         "l_teljar": 0, "kanal_buffer": [], "hol_n": 0, "eigar_n": 0, "stille_n": 0, "utlogging": null, "varsling_av": usann, "hugs_opnar": usann, "pulla": usann, "sse_v_n": 0, "sse_brot_n": 0,
-        "brukarbyte_usynka": 0, "db_endra_til": "",
+        "brukarbyte_usynka": 0, "db_endra_til": "", "gen": 0, "parkert": {}, "sse_opna": 0,
         "test_no": 1000000, "test_nett": [], "test_kanal": [], "test_id": 0, "test_las": usann
     }
     hvis kl["test"] {
@@ -510,7 +521,10 @@ funksjon db_namn_for(kl: ordbok, brukar: tekst) -> tekst {
 # lagra; ein feil går til _lager_feil (og `ved_feil`, om han ikkje er null).
 funksjon _lagre(kl: ordbok, ops: liste, ok, ved_feil) -> heltall {
     hvis kl["hugs"] og ikkje kl["test"] {
-        lager.køyr(kl["db"], ops, fun(r) -> _lagra_ok(kl, ok, r), fun(f) -> _lager_feil(kl, f, ved_feil))
+        # Svar frå ein transaksjon frå før lagringa vart bytt (hugs av, brukarbyte, utlogging)
+        # høyrer til ein annan kopi og blir ikkje brukte
+        la g = kl["gen"]
+        lager.køyr(kl["db"], ops, fun(r) -> _lagra_ok_gen(kl, g, ok, r), fun(f) -> _lager_feil_gen(kl, g, f, ved_feil))
         returner 0
     }
     la m = kl["minne"]
@@ -533,6 +547,16 @@ funksjon _lagre(kl: ordbok, ops: liste, ok, ved_feil) -> heltall {
 funksjon _lagra_ok(kl: ordbok, ok, r) -> heltall {
     hvis ok != null { builtin.ncb_call_fn(ok, r) }
     returner 0
+}
+
+funksjon _lagra_ok_gen(kl: ordbok, g: heltall, ok, r) -> heltall {
+    hvis g != kl["gen"] { returner 0 }
+    returner _lagra_ok(kl, ok, r)
+}
+
+funksjon _lager_feil_gen(kl: ordbok, g: heltall, f, ved_feil) -> heltall {
+    hvis g != kl["gen"] { returner 0 }
+    returner _lager_feil(kl, f, ved_feil)
 }
 
 funksjon _lager_feil(kl: ordbok, f, ved_feil) -> heltall {
@@ -791,14 +815,28 @@ funksjon _valider_skriv(kl: ordbok, s: tekst, id: tekst, op: ordbok) -> heltall 
     returner 0
 }
 
-funksjon _ny_hlc(kl: ordbok) -> tekst {
-    kl["hlc"] = kj.hlc_send(kl["hlc"], _no(kl), kl["node"])
-    returner kl["hlc"]
+# HLC-en til ei ny lokal skriving av dokumentet n. Ho kjem alltid etter alt klienten har sett:
+# HLC-en til klienten (han har teke imot HLC-en til tenaren i hallo, push og pull, og til
+# leiarfana på kanalen) og, i tillegg, den høgaste HLC-en i den synlege kopien av dokumentet.
+# Ei eining med klokka bak vinn difor over verdien brukaren såg då han redigerte.
+funksjon _skriv_hlc(kl: ordbok, n: tekst) -> tekst {
+    la h = kl["hlc"]
+    hvis har_nokkel(kl["vis"], n) { h = kj.hlc_maks(h, kj.dok_maks_hlc(kl["vis"][n])) }
+    returner kj.hlc_send(h, _no(kl), kl["node"])
+}
+
+# Ta imot ein HLC frå tenaren eller leiarfana (ingenting når han er tom).
+funksjon _hlc_motta(kl: ordbok, h) -> heltall {
+    hvis h == null { returner 0 }
+    la t = tekst(h)
+    hvis t == "" { returner 0 }
+    kl["hlc"] = kj.hlc_motta(kl["hlc"], t, _no(kl), kl["node"])
+    returner 0
 }
 
 funksjon k_put(kl: ordbok, s: tekst, id: tekst, felt: ordbok) -> tekst {
     la op = {"n": dok_nøkkel(s, id), "s": s, "id": id, "op": "put", "hlc": "", "felt": felt}
-    op["hlc"] = kj.hlc_send(kl["hlc"], _no(kl), kl["node"])
+    op["hlc"] = _skriv_hlc(kl, op["n"])
     _valider_skriv(kl, s, id, op)
     kl["hlc"] = op["hlc"]
     _lokal_op(kl, op)
@@ -807,7 +845,7 @@ funksjon k_put(kl: ordbok, s: tekst, id: tekst, felt: ordbok) -> tekst {
 
 funksjon k_del(kl: ordbok, s: tekst, id: tekst) -> tekst {
     la op = {"n": dok_nøkkel(s, id), "s": s, "id": id, "op": "del", "hlc": ""}
-    op["hlc"] = kj.hlc_send(kl["hlc"], _no(kl), kl["node"])
+    op["hlc"] = _skriv_hlc(kl, op["n"])
     _valider_skriv(kl, s, id, op)
     kl["hlc"] = op["hlc"]
     _lokal_op(kl, op)
@@ -939,6 +977,16 @@ funksjon k_kanal_motta(kl: ordbok, t: tekst) -> heltall {
     }
     hvis m == null eller builtin.type(m) != "ordbok" { returner 0 }
     la art = tekst(m["t"])
+    hvis art == "hugs_av" {
+        # Ei anna fane slo av lagring på eininga (og slettar databasen): denne fana held fram
+        # i minnet med det ho har, òg når versionchange kom først (db_endra)
+        hvis kl["hugs"] { _til_minne(kl) }
+        returner 0
+    }
+    # I minnemodus deler ikkje fana noko med andre faner
+    hvis ikkje kl["hugs"] { returner 0 }
+    # Leiarfana sender HLC-en sin med (ho har teke imot HLC-en til tenaren)
+    hvis _har(m, "hlc") { _hlc_motta(kl, m["hlc"]) }
     hvis art == "op" {
         la op = m["op"]
         hvis _ko_set_inn(kl, op) {
@@ -953,11 +1001,20 @@ funksjon k_kanal_motta(kl: ordbok, t: tekst) -> heltall {
         }
     } ellers hvis art == "kvitt" {
         kl["meta"] = m["meta"]
+        # Det tenaren har kvittert for, er med i snap (sjå _kvitter) før det blir teke ut av køa
+        la sn = []
+        hvis _har(m, "snap") og m["snap"] != null { sn = _sett_snap(kl, m["snap"]) }
         la rørte = _ko_fjern_opptil(kl, m["opptil"])
+        la i = 0
+        mens i < lengde(sn) {
+            hvis ikkje _i_liste(rørte, sn[i]) { legg_til(rørte, sn[i]) }
+            i = i + 1
+        }
         _utlei_og_varsle(kl, rørte, "fane")
         _status_endra(kl, "")
     } ellers hvis art == "snap" {
         kl["meta"] = m["meta"]
+        _hlc_motta(kl, høgaste_hlc(m["e"]))
         _bruk_endringar(kl, m["e"], usann)
         _status_endra(kl, "")
     } ellers hvis art == "fjern" {
@@ -998,11 +1055,22 @@ funksjon k_start(kl: ordbok) -> heltall {
 
 funksjon _send(kl: ordbok, f: ordbok, ok, feil) -> heltall {
     nett.med_tidsgrense(f, kl["konf"]["tidsgrense_ms"])
+    # Eit svar på ein førespurnad frå før brukarbyte, «hugs» av eller utlogging høyrer til ein
+    # annan klient-id eller brukar og blir ikkje brukt
+    la g = kl["gen"]
+    la ok_g = fun(s) -> _svar_gen(kl, g, ok, s)
+    la feil_g = fun(e) -> _svar_gen(kl, g, feil, e)
     hvis kl["test"] {
-        legg_til(kl["test_nett"], {"f": f, "ok": ok, "feil": feil})
+        legg_til(kl["test_nett"], {"f": f, "ok": ok_g, "feil": feil_g})
         returner 0
     }
-    nett.send(f, ok, feil)
+    nett.send(f, ok_g, feil_g)
+    returner 0
+}
+
+funksjon _svar_gen(kl: ordbok, g: heltall, f, v) -> heltall {
+    hvis g != kl["gen"] { returner 0 }
+    builtin.ncb_call_fn(f, v)
     returner 0
 }
 
@@ -1021,7 +1089,7 @@ funksjon _hallo_ok(kl: ordbok, s: ordbok) -> heltall {
     kl["epoke"] = tekst(j["epoke"])
     kl["csrf"] = tekst(j["csrf"])
     hvis _har(j, "tak") og _har(j["tak"], "ops") og j["tak"]["ops"] < kl["tak_ops"] { kl["tak_ops"] = j["tak"]["ops"] }
-    hvis _har(j, "hlc") og j["hlc"] != "" { kl["hlc"] = kj.hlc_motta(kl["hlc"], tekst(j["hlc"]), _no(kl), kl["node"]) }
+    hvis _har(j, "hlc") { _hlc_motta(kl, j["hlc"]) }
     kl["feil_n"] = 0
     kl["offline"] = usann
     kl["feil"] = ""
@@ -1064,8 +1132,11 @@ funksjon _hallo_feil(kl: ordbok, e: ordbok) -> heltall {
         returner 0
     }
     hvis kva == "nett" {
-        hvis ikkje kl["stadfesta"] og ikkje kl["klar"] og kl["husk_brukar"] != "" og kl["brukar"] == "" {
-            # Utan nett: kopien til brukaren som valde «hugs» (ikkje stadfesta)
+        hvis tekst(e["art"]) == "nettverk" og ikkje kl["stadfesta"] og ikkje kl["klar"] og kl["husk_brukar"] != "" og kl["brukar"] == "" {
+            # Utan nett (fetch fekk ikkje kontakt i det heile): kopien til brukaren som valde
+            # «hugs» (ikkje stadfesta). Eit svar frå tenaren (5xx, 429, ei innloggingsside, JSON som
+            # manglar) eller eit tidsavbrot viser at det finst nett, og då ventar kopien på at
+            # hallo seier kven som er innlogga (ein annan brukar skal aldri sjå han).
             kl["brukar"] = kl["husk_brukar"]
             _nettfeil(kl, e)
             _bruk_idb(kl, kl["husk_brukar"])
@@ -1413,7 +1484,7 @@ funksjon _push_ok(kl: ordbok, batch: liste, s: ordbok) -> heltall {
     kl["csrf_forsøk"] = 0
     kl["hol_n"] = 0
     kl["eigar_n"] = 0
-    hvis _har(j, "hlc") og j["hlc"] != "" { kl["hlc"] = kj.hlc_motta(kl["hlc"], tekst(j["hlc"]), _no(kl), kl["node"]) }
+    hvis _har(j, "hlc") { _hlc_motta(kl, j["hlc"]) }
     _kvitter(kl, j["siste_seq"], j["res"], batch)
     hvis _har(j, "v") og j["v"] > kl["meta"]["cursor"] { kl["vil_pull"] = sann }
     # Vern mot ei evig lykkje: tenaren kvitterte ikkje for den første op-en i batchen
@@ -1434,11 +1505,14 @@ funksjon _push_ok(kl: ordbok, batch: liste, s: ordbok) -> heltall {
 }
 
 # Tenaren har kvittert for alt til og med seq S: fjern det frå utboksa (og lagringa), meld
-# avviste op-ar (res med ok:false) og rekn ut kopien til dei på nytt.
+# avviste op-ar (res med ok:false) og rekn ut kopien til dei på nytt. Dei godtekne op-ane blir
+# brukte på snap i same transaksjon, så den synlege kopien (snap ⊕ utboks) er uendra sjølv om
+# pullen etterpå feilar, og ei omlasting ikkje «rettar» han attende til det gamle.
 funksjon _kvitter(kl: ordbok, S: heltall, res, batch: liste) -> heltall {
     la m = kl["meta"]
     la opptil = m["base"] + S
     la avviste = []
+    la avvist_k = {}
     hvis res != null og builtin.type(res) == "liste" {
         la i = 0
         mens i < lengde(res) {
@@ -1448,6 +1522,7 @@ funksjon _kvitter(kl: ordbok, S: heltall, res, batch: liste) -> heltall {
                 mens j < lengde(batch) {
                     hvis batch[j]["k"] - m["base"] == r["seq"] {
                         legg_til(avviste, {"s": batch[j]["s"], "id": batch[j]["id"], "op": batch[j]["op"], "feil": tekst(r["feil"])})
+                        avvist_k[tekst(batch[j]["k"])] = sann
                     }
                     j = j + 1
                 }
@@ -1455,29 +1530,57 @@ funksjon _kvitter(kl: ordbok, S: heltall, res, batch: liste) -> heltall {
             i = i + 1
         }
     }
+    la godtekne = _kvitterte(kl, batch, opptil, avvist_k)
+    la før = {}
+    la i0 = 0
+    mens i0 < lengde(godtekne) {
+        la n0 = godtekne[i0]["n"]
+        hvis ikkje har_nokkel(før, n0) {
+            før[n0] = ""
+            hvis har_nokkel(kl["vis"], n0) { før[n0] = kj.json_kanonisk(kl["vis"][n0]) }
+        }
+        i0 = i0 + 1
+    }
     la rørte = _ko_fjern_opptil(kl, opptil)
     m["kvittert"] = S
     la ops = [lager.op_slett("ko", lager.opp_til(opptil, usann)), lager.op_put("meta", m)]
-    # Kopien endrar seg berre for dokument med avviste op-ar (dei andre er alt med i kopien)
+    la sn = _snap_bruk(kl, godtekne)
+    la sn_n = []
+    la i1 = 0
+    mens i1 < lengde(sn) {
+        legg_til(ops, lager.op_put("snap", sn[i1]))
+        legg_til(sn_n, sn[i1]["n"])
+        hvis ikkje _i_liste(rørte, sn[i1]["n"]) { legg_til(rørte, sn[i1]["n"]) }
+        i1 = i1 + 1
+    }
     la avvist_n = {}
     la i2 = 0
     mens i2 < lengde(avviste) {
         avvist_n[dok_nøkkel(avviste[i2]["s"], avviste[i2]["id"])] = sann
         i2 = i2 + 1
     }
+    # Kopien endrar seg for dokument med avviste op-ar, og for op-ar denne fana ikkje hadde fått
+    # på kanalen enno (dei andre er alt med i kopien)
     la endra = []
+    la frå_tenar = []
     la i3 = 0
     mens i3 < lengde(rørte) {
-        hvis har_nokkel(avvist_n, rørte[i3]) {
-            _utlei(kl, rørte[i3])
-            legg_til(ops, lager.op_put("dok", _dokpost(kl, rørte[i3])))
-            legg_til(endra, rørte[i3])
+        la n = rørte[i3]
+        _utlei(kl, n)
+        legg_til(ops, lager.op_put("dok", _dokpost(kl, n)))
+        hvis har_nokkel(avvist_n, n) {
+            legg_til(endra, n)
+        } ellers hvis har_nokkel(før, n) {
+            la no_t = ""
+            hvis har_nokkel(kl["vis"], n) { no_t = kj.json_kanonisk(kl["vis"][n]) }
+            hvis no_t != før[n] { legg_til(frå_tenar, n) }
         }
         i3 = i3 + 1
     }
     _lagre(kl, ops, null, null)
-    _kringkast(kl, {"t": "kvitt", "opptil": opptil, "meta": m})
+    _kringkast(kl, {"t": "kvitt", "opptil": opptil, "meta": m, "snap": sn, "hlc": kl["hlc"]})
     _varsle_alle(kl, endra, "avvist")
+    _varsle_alle(kl, frå_tenar, "tenar")
     la i4 = 0
     mens i4 < lengde(avviste) {
         legg_til(kl["avviste"], avviste[i4])
@@ -1494,6 +1597,83 @@ funksjon _kvitter(kl: ordbok, S: heltall, res, batch: liste) -> heltall {
         i4 = i4 + 1
     }
     returner 0
+}
+
+# Op-ane tenaren har godteke til og med nøkkelen opptil (i batchen, og i utboksa om svaret på ein
+# tidlegare push gjekk tapt), utan dei avviste, i nøkkelrekkjefølgje.
+funksjon _kvitterte(kl: ordbok, batch: liste, opptil: heltall, avvist_k: ordbok) -> liste {
+    la sett = {}
+    la ut = []
+    la kjelder = [batch, kl["ko"]]
+    la a = 0
+    mens a < 2 {
+        la l = kjelder[a]
+        la i = 0
+        mens i < lengde(l) {
+            la e = l[i]
+            hvis har_nokkel(e, "k") og e["k"] != null og e["k"] <= opptil og ikkje har_nokkel(avvist_k, tekst(e["k"])) og ikkje har_nokkel(sett, tekst(e["k"])) {
+                sett[tekst(e["k"])] = sann
+                legg_til(ut, e)
+                la j = lengde(ut) - 1
+                mens j > 0 og ut[j - 1]["k"] > ut[j]["k"] {
+                    la x = ut[j]
+                    ut[j] = ut[j - 1]
+                    ut[j - 1] = x
+                    j = j - 1
+                }
+            }
+            i = i + 1
+        }
+        a = a + 1
+    }
+    returner ut
+}
+
+# Bruk kvitterte op-ar på snap (versjonen blir verande til neste pull). Gjev dei endra postane
+# {n, s, id, v, d} slik dei blir lagra i «snap».
+funksjon _snap_bruk(kl: ordbok, ops: liste) -> liste {
+    la rekkje = []
+    la i = 0
+    mens i < lengde(ops) {
+        la op = ops[i]
+        la n = tekst(op["n"])
+        la d = null
+        la v = 0
+        hvis har_nokkel(kl["snap"], n) {
+            d = kl["snap"][n]["d"]
+            v = kl["snap"][n]["v"]
+        }
+        kl["snap"][n] = {"d": kj.bruk_op(d, op, op["hlc"])["dok"], "v": v}
+        hvis ikkje _i_liste(rekkje, n) { legg_til(rekkje, n) }
+        i = i + 1
+    }
+    la ut = []
+    i = 0
+    mens i < lengde(rekkje) {
+        la n2 = rekkje[i]
+        la p = builtin.index_of(n2, "/")
+        legg_til(ut, {"n": n2, "s": builtin.slice(n2, 0, p), "id": builtin.slice(n2, p + 1, lengde(n2)), "v": kl["snap"][n2]["v"], "d": kl["snap"][n2]["d"]})
+        i = i + 1
+    }
+    returner ut
+}
+
+# Snap-postar frå leiarfana (kvittering): gjev nøklane som vart sette.
+funksjon _sett_snap(kl: ordbok, postar: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(postar) {
+        la e = postar[i]
+        la n = tekst(e["n"])
+        la gammal_v = -1
+        hvis har_nokkel(kl["snap"], n) { gammal_v = kl["snap"][n]["v"] }
+        hvis e["v"] >= gammal_v {
+            kl["snap"][n] = {"d": e["d"], "v": e["v"]}
+            legg_til(ut, n)
+        }
+        i = i + 1
+    }
+    returner ut
 }
 
 funksjon _push_feil(kl: ordbok, batch: liste, e: ordbok) -> heltall {
@@ -1638,7 +1818,7 @@ funksjon _pull_ok(kl: ordbok, sidan: heltall, s: ordbok) -> heltall {
     hvis _har(s["headerar"], "etag") { etag = tekst(s["headerar"]["etag"]) }
     la e = j["endringar"]
     la h = høgaste_hlc(e)
-    hvis h != "" { kl["hlc"] = kj.hlc_motta(kl["hlc"], h, _no(kl), kl["node"]) }
+    _hlc_motta(kl, h)
     hvis j["v"] > kl["meta"]["cursor"] { kl["meta"]["cursor"] = j["v"] }
     _bruk_endringar(kl, e, sann)
     hvis j["meir"] {
@@ -1771,6 +1951,7 @@ funksjon _sse_start(kl: ordbok) -> heltall {
     hvis kl["stoppa"] != "" eller kl["logga_ut"] eller ikkje kl["leiar"] eller kl["varsling_av"] { returner 0 }
     kl["sse_open"] = sann
     kl["sse_neste"] = 0
+    kl["sse_opna"] = _no(kl)
     hvis ikkje kl["test"] { kl["sse_h"] = vert.synk_sse(_url(kl, "hendingar"), "_synk_sse") }
     returner 0
 }
@@ -1814,6 +1995,10 @@ funksjon k_sse(kl: ordbok, data: tekst) -> heltall {
         # Straumen er broten: lukk han (nettlesaren sin eigen gjenoppkopling blir ikkje brukt),
         # poll medan han er nede, og prøv SSE igjen etter backoff. Ein pull med ein gong viser
         # om tenaren er nede eller brukaren er logga ut.
+        # Backoff-teljaren blir nullstilt først når straumen har halde seg oppe ei stund: ein proxy
+        # eller tenar som godtek straumen og bryt han rett etter den første hendinga, gjev elles
+        # nye forsøk kvart sekund i det uendelege.
+        hvis kl["sse_opna"] > 0 og _no(kl) - kl["sse_opna"] >= sse_stabil_ms() { kl["sse_feil_n"] = 0 }
         _sse_stopp(kl)
         kl["sse_feil_n"] = kl["sse_feil_n"] + 1
         kl["sse_neste"] = _no(kl) + backoff_ms(kl["sse_feil_n"])
@@ -1824,7 +2009,6 @@ funksjon k_sse(kl: ordbok, data: tekst) -> heltall {
         returner 0
     }
     kl["sse_v_n"] = kl["sse_v_n"] + 1
-    kl["sse_feil_n"] = 0
     hvis kl["konf"]["varsling"] == "sse" { kl["neste_poll"] = 0 }
     la v = 0
     prøv {
@@ -1907,26 +2091,55 @@ funksjon k_sett_hugs(kl: ordbok, på: bool, ok) -> heltall {
         returner 0
     }
     _lokal_fjern(kl, brukar_nøkkel())
-    kl["husk_brukar"] = ""
-    _kringkast(kl, {"t": "logg_ut"})
+    # Dei andre fanene held fram i minnet med det dei har (brukaren er framleis innlogga)
+    _kringkast(kl, {"t": "hugs_av"})
+    la db = kl["db"]
+    la namn = kl["db_namn"]
+    _til_minne(kl)
+    _slett_db(kl, db, namn, null)
+    hvis ok != null { builtin.ncb_call_fn(ok, {"ok": sann}) }
+    returner 0
+}
+
+# Frå databasen på eininga til minnet (hugs av i denne eller ei anna fane). Fana blir sin eigen
+# leiar med det ho har: snap, kopien og utboksa (også op-ar som enno ikkje var lagra). Utboksa får
+# ein ny klient-id med seq frå 1, så fleire faner som gjer dette samtidig, aldri deler klient-id;
+# ei op som alt var send frå ei anna fane, blir då send ein gong til, og det er ufarleg (same HLC
+# og same verdi gjev ingen endring hjå tenaren). Svar og transaksjonar frå før blir ikkje brukte.
+funksjon _til_minne(kl: ordbok) -> heltall {
+    kl["gen"] = kl["gen"] + 1
+    _sse_stopp(kl)
     hvis ikkje kl["test"] {
         hvis kl["las_h"] >= 0 { vert.slepp(kl["las_h"]) }
         hvis kl["kanal_h"] >= 0 {
             vert.synk_lukk(kl["kanal_h"])
             vert.slepp(kl["kanal_h"])
         }
+        hvis kl["db"] != null { lager.lukk(kl["db"]) }
     }
     kl["las_h"] = -1
     kl["kanal_h"] = -1
-    _slett_db(kl, kl["db"], kl["db_namn"], null)
-    kl["hugs"] = usann
     kl["db"] = null
     kl["db_namn"] = ""
-    # Minnelageret får det som er i minnet (nøklane blir verande, så seq er uendra)
+    kl["hugs"] = usann
+    kl["hugs_opnar"] = usann
+    kl["husk_brukar"] = ""
+    kl["db_endra"] = usann
+    kl["leiar"] = usann
+    kl["leiar_status"] = null
+    kl["opptatt"] = usann
+    la ko = kl["ko"]
+    la i = 0
+    mens i < lengde(ko) {
+        ko[i]["k"] = i + 1
+        i = i + 1
+    }
+    la m = kl["meta"]
+    kl["meta"] = {"n": "meta", "klient": _uuid(kl), "base": 0, "kvittert": 0, "cursor": m["cursor"], "epoke": m["epoke"]}
     kl["minne"] = minne_lager()
     _skriv_alt(kl, null)
-    _status_endra(kl, "")
-    hvis ok != null { builtin.ncb_call_fn(ok, {"ok": sann}) }
+    _status_endra(kl, "hugs_av")
+    _bli_leiar(kl)
     returner 0
 }
 
@@ -2026,11 +2239,8 @@ funksjon _brukarbyte(kl: ordbok, førre: tekst) -> heltall {
     hvis kl["test"] {
         la dbar = kl["konf"]["test_eining"]["dbar"]
         la n = 0
-        hvis har_nokkel(dbar, namn) {
-            n = lengde(minne_køyr(dbar[namn], [lager.op_liste("ko", null, 0)])[0])
-            hvis n == 0 { fjern_nokkel(dbar, namn) }
-        }
-        _brukarbyte_meld(kl, n)
+        hvis har_nokkel(dbar, namn) { n = lengde(minne_køyr(dbar[namn], [lager.op_liste("ko", null, 0)])[0]) }
+        _brukarbyte_talt(kl, null, namn, n)
         returner 0
     }
     la db = lager.opne(namn, db_versjon(), skjema(), fun(d) -> 0, fun(f) -> 0)
@@ -2038,10 +2248,12 @@ funksjon _brukarbyte(kl: ordbok, førre: tekst) -> heltall {
     returner 0
 }
 
+# Same veg i nettlesaren og i testmodus: utan usynka endringar blir databasen sletta (_slett_db),
+# elles halden lukka.
 funksjon _brukarbyte_talt(kl: ordbok, db, namn: tekst, n: heltall) -> heltall {
     hvis n == 0 {
-        lager.logg_ut(db, namn, [], null, fun(f) -> 0)
-    } ellers {
+        _slett_db(kl, db, namn, null)
+    } ellers hvis db != null {
         lager.lukk(db)
     }
     _brukarbyte_meld(kl, n)
@@ -2054,10 +2266,75 @@ funksjon _brukarbyte_meld(kl: ordbok, n: heltall) -> heltall {
     returner 0
 }
 
+# Usynka op-ar til brukaren b, haldne i minnet (aldri vist eller sende for ein annan brukar).
+funksjon _parker(kl: ordbok, b: tekst, ops: liste) -> heltall {
+    hvis ikkje har_nokkel(kl["parkert"], b) { kl["parkert"][b] = [] }
+    la i = 0
+    mens i < lengde(ops) {
+        la o = ops[i]
+        la p = {"n": o["n"], "s": o["s"], "id": o["id"], "op": o["op"], "hlc": o["hlc"]}
+        hvis o["op"] == "put" { p["felt"] = o["felt"] }
+        legg_til(kl["parkert"][b], p)
+        i = i + 1
+    }
+    returner 0
+}
+
+# Brukaren b er stadfesta att i fana: dei parkerte op-ane hans går i utboksa (med HLC-en dei
+# fekk då dei vart skrivne).
+funksjon _hent_parkert(kl: ordbok, b: tekst) -> heltall {
+    hvis ikkje har_nokkel(kl["parkert"], b) { returner 0 }
+    la ops = kl["parkert"][b]
+    la rest = {}
+    la ks = nøkler(kl["parkert"])
+    la i = 0
+    mens i < lengde(ks) {
+        hvis ks[i] != b { rest[ks[i]] = kl["parkert"][ks[i]] }
+        i = i + 1
+    }
+    kl["parkert"] = rest
+    i = 0
+    mens i < lengde(ops) {
+        kl["hlc"] = kj.hlc_maks(kl["hlc"], tekst(ops[i]["hlc"]))
+        _lokal_op(kl, ops[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+# Talet på usynka endringar som er parkerte i minnet for andre brukarar enn den innlogga.
+funksjon k_parkert(kl: ordbok) -> heltall {
+    la n = 0
+    la ks = nøkler(kl["parkert"])
+    la i = 0
+    mens i < lengde(ks) {
+        n = n + lengde(kl["parkert"][ks[i]])
+        i = i + 1
+    }
+    returner n
+}
+
 # Brukaren skifta medan sida var open (hallo etter 401, eller kopien vart vist utan nett):
-# kopien til den førre blir skjult og lukka, og klienten startar på nytt for den nye.
+# kopien til den førre blir skjult og lukka, og klienten startar på nytt for den nye. Usynka
+# endringar blir aldri kasta i det stille: med «hugs» ligg dei i databasen til den førre (sjå
+# _brukarbyte); i minnet blir dei parkerte under den førre brukaren (hendinga «brukarbyte» med
+# talet) og sende når han loggar inn att i same fane. Dei blir aldri sende som ein annan brukar.
 funksjon _byt_brukar(kl: ordbok, førre: tekst, ny: tekst) -> heltall {
     la nøklar = nøkler(kl["vis"])
+    la var_hugs = kl["hugs"]
+    la usynka = []
+    la i = 0
+    mens i < lengde(kl["ko"]) {
+        # Med «hugs» er op-ane med nøkkel alt i databasen
+        hvis ikkje var_hugs eller ikkje har_nokkel(kl["ko"][i], "k") { legg_til(usynka, kl["ko"][i]) }
+        i = i + 1
+    }
+    kl["gen"] = kl["gen"] + 1
+    kl["opptatt"] = usann
+    kl["vil_push"] = usann
+    kl["etag"] = ""
+    kl["etag_sidan"] = -1
+    kl["resync_sett"] = null
     _sse_stopp(kl)
     hvis ikkje kl["test"] {
         hvis kl["las_h"] >= 0 { vert.slepp(kl["las_h"]) }
@@ -2083,10 +2360,14 @@ funksjon _byt_brukar(kl: ordbok, førre: tekst, ny: tekst) -> heltall {
     _varsle_alle(kl, nøklar, "brukarbyte")
     kl["brukar"] = ny
     kl["stadfesta"] = sann
+    hvis lengde(usynka) > 0 og førre != "" { _parker(kl, førre, usynka) }
     hvis kl["husk_brukar"] == førre og førre != "" {
         _brukarbyte(kl, førre)
+    } ellers hvis lengde(usynka) > 0 {
+        _brukarbyte_meld(kl, lengde(usynka))
     }
     _bruk_minne(kl)
+    _hent_parkert(kl, ny)
     returner 0
 }
 
@@ -2153,6 +2434,8 @@ funksjon _utlogga(kl: ordbok, ok, n: heltall) -> heltall {
 # Stopp alt, gløym kopien i minnet og varsle lyttarane (også når ei anna fane logga ut).
 funksjon _lokal_utlogging(kl: ordbok) -> heltall {
     la nøklar = nøkler(kl["vis"])
+    kl["gen"] = kl["gen"] + 1
+    kl["opptatt"] = usann
     _sse_stopp(kl)
     hvis ikkje kl["test"] {
         hvis kl["las_h"] >= 0 { vert.slepp(kl["las_h"]) }
@@ -2250,6 +2533,8 @@ funksjon lytt(sam: ordbok, f) -> heltall { returner k_lytt(sam["klient"], sam["n
 funksjon status() -> ordbok { returner k_status(_k) }
 
 funksjon ventar() -> heltall { returner k_ventar(_k) }
+
+funksjon parkert() -> heltall { returner k_parkert(_k) }
 
 funksjon ny_id() -> tekst { returner k_ny_id(_k) }
 
