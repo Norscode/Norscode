@@ -1358,6 +1358,8 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 
 ## Gjenstår før W9
 
+- **Tenarsida for synk (A6/A7) er på plass:** `std/apptenar.no` (keep-alive, SSE, caps) og NSP/1 i `std/synk.no` med kjernen `std/synk_kjerne.no`, som lowrar til WASM med same resultat som i VM-en. Sjå [APPTENAR_SYNK.md](APPTENAR_SYNK.md), også for kva klienten (W9) må gjere.
+
 - **W8 (nytt):**
   - Berre Chrome 154 (headless) er testa med service workeren. Installerbarheita («Installer app» og Application → Manifest i DevTools) er ikkje stadfesta i ekte Chrome; manifestet og ikona er validerte i Norscode, og ikona er dekoda av Chrome (`Image.decode`). Safari og Firefox er ikkje testa, og Safari kan slette data for nettstader som ikkje er installerte.
   - Service workeren krev HTTPS utanom `localhost`/`127.0.0.1`. Kven som terminerer TLS i produksjon, er framleis eit ope spørsmål.
