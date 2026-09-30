@@ -1,6 +1,6 @@
-# Klientlogikk i Norscode kompilert til WebAssembly (W0–W8)
+# Klientlogikk i Norscode kompilert til WebAssembly (W0–W9)
 
-Status: milepælane W0–W8 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
+Status: milepælane W0–W9 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
 
 - **W0** gav vegen frå kjelde til nettlesar: heiltal, kontrollflyt, kall og DOM-vertsfunksjonar.
 - **W1** gav verdimodellen: tekst, desimaltal, lister og ordbøker, med same semantikk som VM-en. Eit paritetskorpus køyrer kvart program i VM-en og i Chrome og krev identisk utskrift.
@@ -11,6 +11,7 @@ Status: milepælane W0–W8 i WASM-sporet (app-kjensle del 2). Klientkode blir s
 - **W6** gav asynk nett via tilbakekall: `std/wasm_nett.no` (fetch mot same opphav, JSON, status og headerar, tidsgrense og avbryting, tilbakekall i sende-rekkjefølgje) og demoen `examples/wasm_deltakarar/` (sjå «Nett»).
 - **W7** gav lokal lagring i IndexedDB: `std/wasm_lager.no` (database med oppgraderingsskjema, put/hent/slett/liste/tel, område- og indeksspørjingar, éin transaksjon per batch, tilbakekall i rekkjefølgje, LagerFeil, database per brukar og sletting ved utlogging), og ein lokal kopi i deltakar-demoen som blir vist straks ved omlasting (sjå «Lokal lagring»).
 - **W8** gav ein installerbar app som startar frå cache og verkar utan nett: web-app-manifest og ikon (PNG laga i Norscode) frå `std/wasm_pwa.no`, og ein service worker der logikken er Norscode kompilert til WebAssembly (`std/wasm_sw.no`) og `sw.js` er ein generert lastar; precache, strategiar per rute, aldri cache av private svar, versjon over alle precache-kroppar, oppdateringsflyt med ventande versjon og klikk, og CSP-kravet for workeren (sjå «Installerbar app og service worker»).
+- **W9** gav synk-klienten for NSP/1 i Norscode (`std/synk_klient.no`, kompilert til WebAssembly): utboks og lokal kopi med optimistisk visning, IndexedDB per brukar når brukaren vel det (dokument og køpost i éin transaksjon), push med CSRF og handtering av 409/410/401/403, pull med cursor og ETag, SSE med polling som fallback, éi leiarfane (Web Locks) og endringar mellom faner (BroadcastChannel), brukarbyte og utlogging; synk-gruppa i lastaren; og demoen `examples/wasm_synk/` under apptenaren (sjå «Synk (W9)»).
 
 ## Bygg og køyr
 
@@ -63,6 +64,7 @@ Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I 
 | `std/wasm_pwa.no` | PWA på tenaren: manifest, ikon, offline-side, versjon, `sw.js` og svara (W8) |
 | `std/wasm_pwa_klient.no` | Service worker frå sida: registrering og oppdateringsflyt (W8) |
 | `std/png_enkel.no` | PNG med palett og lagra deflate-blokker, og ein validator (W8) |
+| `std/synk_klient.no` | Synk-klienten for NSP/1 (W9): utboks, lokal kopi, IndexedDB per brukar, push/pull, SSE, faner, brukarbyte og utlogging |
 
 Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed. `std/wasm_rt.no` importerer `std/sha256.no` (som ligg i lukkinga), men endrar han ikkje. `std/wasm_serve.no` importerer `std/web.no`, som heller ikkje ligg i lukkinga. `std/wasm_nettlesar.no` brukar `std/prosess.no` og prosess-ABI-en (som testane i W0–W4).
 
@@ -95,6 +97,7 @@ Ein klientmodul er ei vanleg Norscode-fil med `start()`. Sjå `examples/wasm_skj
    - Reglar som ikkje rører DOM-en (validering, filtrering), bør vere reine funksjonar. Dei køyrer då likt i VM-en og kan testast der (sjå `tests/test_wasm_w4_chrome.no`).
    - **Nett (W6):** `bruk std.wasm_nett som nett`, så `nett.hent_json("/api/x", fun(svar) -> vis(svar["json"]), fun(feil) -> vis_feil(feil))`. Tilbakekalla til nett er closures med éin parameter (ikkje funksjonsnamn), og dei kjem i den rekkjefølgja førespurnadene vart sende. Sjå «Nett (W6)» og `examples/wasm_deltakarar/`.
    - **Lokal lagring (W7):** `bruk std.wasm_lager som lager`, så `la db = lager.opne(lager.brukar_db_namn("nc-app", uid), 1, skjema, fun(d) -> klar(), fun(f) -> vis_feil(f))` og `lager.køyr(db, [lager.op_put("dok", v), …], fun(r) -> …, fun(f) -> …)`. Same tilbakekall-API som nett. Sjå «Lokal lagring (W7)».
+   - **Synk (W9):** `bruk std.synk_klient som synk`, så `synk.start(konf, fun(s) -> vis_status(s))`, `la oppg = synk.samling("oppg")`, `synk.lytt(oppg, fun(h) -> teikn())` og `synk.put(oppg, synk.ny_id(), {…})`. Sjå «Synk (W9)» og `examples/wasm_synk/`.
 2. **Appen** (`app.no`): `bruk std.wasm_serve som ws`. WASM-sida blir levert med `ws.side(html)` (CSP med `'wasm-unsafe-eval'`), og HTML-en har `ws.script_tag()` i `<head>`. Alle andre sider brukar `ws.vanleg_side(html)`. Appen importerer ingenting under `build/`, og sida må fungere (utan klientlogikk) når WASM manglar.
 3. **Bygg** med `NC_WASM_KJELDE`, `NC_WASM_APP` og `NC_WASM_UT` (sjå over), og **server** `build/wasm/<app>/serve.no`.
 4. **Test**: bygg ein testklient med `NC_WASM_TESTBYGG=1` som importerer klienten, kallar `start()` og køyrer brukarsteg med testkrokane (`test_skriv`, `test_send`, `test_klikk`, `test_tast`). `skriv(...)` går då til `<pre id="nc-logg">`, som headless Chrome les (sjå `tests/fixtures/wasm_skjema_testklient.no`).
@@ -551,6 +554,19 @@ Hendingsdata blir lesne medan tilbakekallet køyrer (lastaren held hendinga i `V
 | `sw_inn()` → tekst | (SW) dataa til hendinga (`D`; før den første: konfigurasjonen `C`) |
 | `sw_ut(plan)` | (SW) planen (`Y`) |
 
+**Synk (W9)** — brukte av `std/synk_klient.no`, ikkje direkte av klientkoden (sjå «Synk (W9)»). Tilbakekalla er funksjonar utan parametrar; meldinga blir lesen med `synk_melding()` medan tilbakekallet køyrer:
+
+| Funksjon | JS-operasjon |
+|---|---|
+| `synk_sse(url, "funksjon")` → handtak | `W(W(new EventSource(url), "v", f, "data"), "error", f, "data")`: hendinga `v` gjev dataa (brukaren sin høgaste versjon), `error` gjev tom tekst |
+| `synk_kanal(namn, "funksjon")` → handtak | `W(new BroadcastChannel(namn), "message", f, "data")` |
+| `synk_kanal_send(h, melding)` | `E[h].postMessage(melding)` |
+| `synk_lukk(h)` | `E[h].close()` (EventSource eller BroadcastChannel) |
+| `synk_las(namn, "funksjon")` → handtak | `X(namn, f)`: `navigator.locks.request` med ein AbortController (handtaket); `f` blir kalla når fana har låsen, og låsen blir halden til `slepp(h)` (abort). Utan `navigator.locks` blir `f` kalla med ein gong |
+| `synk_db_vakt(h, "funksjon")` | `W(E[h], "versionchange", f, "newVersion")` på IndexedDB-tilkoplinga frå `std/wasm_lager.no` (i tillegg til `onversionchange`, som lukkar ho) |
+| `synk_melding()` → tekst | `K` |
+| `synk_uuid()` → tekst | `crypto.randomUUID()` |
+
 W8-testkrokar: `test_cachar("funksjon")` (Cache Storage som JSON `[[namn, [url, …]], …]`), `test_bilete(url, "funksjon")` (`Image.decode` → «breiddxhøgd» eller «feil») og `test_resultat()` (svaret, `M`).
 
 **Testkrokar** (berre med `NC_WASM_TESTBYGG=1`; elles kompileringsfeil): `test_klikk(h)` (`click()`), `test_skriv(h, verdi)` (set `value` og sender `input` som boblar), `test_tast(h, tast)` (`keydown` med `key`) og `test_send(h)` (`requestSubmit()`, som sender `submit` gjennom lyttarane).
@@ -611,6 +627,7 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
 | `I`, `J` (W7) | IndexedDB og konvolutten til det siste svaret (berre når modulen importerer `lager_start`/`lager_svar`) |
 | `G`, `B`, `O` (W8) | Registreringa av service workeren, registreringa og den siste hendinga (berre med PWA-importane) |
 | `M` (W8) | Svaret frå testkrokane `test_cachar` og `test_bilete` (berre testbygg) |
+| `K`, `W`, `X` (W9) | Den siste synk-meldinga; lyttar som set `K` til eit felt i hendinga og kallar tilbakekallet; Web Locks-låsen (berre med synk-importane) |
 
 Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), har nodane `vilkår` (`?:`), `ikkje` (`!`) og `sekvens` (`(a,b)`), og skriv nøklar med æ, ø og å utan hermeteikn (`tøm:`, `gå_til:`).
 
@@ -636,6 +653,10 @@ Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), h
 | Heile tabellen med testkrokane (W8, med PWA og `test_cachar`/`test_bilete`/`test_resultat`) | 5 585 byte | 5 920 byte (3 520 + 1 280 + 736 + 384) |
 | SW-lastaren (W8, `sw.js` utan konfigurasjonen) | 1 751 byte | 1 792 byte (eige tak) |
 | Deltakar-demoen (W8, med PWA) | 4 236 byte | 4 576 byte (2 560 + 1 280 + 736) |
+| Synk-gruppa (W9: `synk_sse`, `synk_kanal`, `synk_kanal_send`, `synk_lukk`, `synk_las`, `synk_db_vakt`, `synk_melding`, `synk_uuid`, `K`, `W`, `X`) | 660 byte | 704 byte (eige budsjett) |
+| Heile produksjonstabellen med nett, lagring, PWA og synk (W9) | 5 577 byte | 5 728 byte (5 024 + 704) |
+| Heile tabellen med testkrokane (W9, med synk) | 6 245 byte | 6 624 byte (5 920 + 704) |
+| Synk-demoen (W9, `examples/wasm_synk/`, med nett, lagring, PWA og synk) | 4 834 byte | |
 | Skjema-demoen (22 importar) | 1 755 byte | 2 048 byte |
 | Deltakar-demoen (W7, 27 importar med nett og lagring) | 3 402 byte (W6: 2 027) | 3 840 byte (2 560 + 1 280, `test_wasm_w6` og `test_wasm_w7_demo`) |
 | W4-proben (7 importar: `finn`, `sett_tekst`, `hent_verdi`, `deleger`, `hending_data`, `lagre_lokalt`, `nå_ms`) | 994 byte | |
@@ -645,6 +666,8 @@ Planen hadde 400 byte for W0-settet og 1 KB for eit typisk øy-program. Teljaren
 **Budsjettet for nett (W6).** Produksjonstabellen var 2 550 av 2 560 byte etter W4, så nett-gruppa fekk plass berre ved at noko anna vart kortare eller at taket vart justert. Grunngjevinga for eit eige budsjett i staden for å heve 2 560: tree-shakinga gjer at gruppa berre kostar modular som brukar `std/wasm_nett.no` (teljaren og skjema-demoen er uendra), og `Q` er éin fetch-kjede der det meste er påkravd API (`AbortSignal.any`/`timeout`, `Object.assign` for mode og credentials, `Object.fromEntries` for headerane). Planutkastet sitt `hent` (2 311 byte for heile settet) hadde verken tidsgrense, avbryting, headerar eller feilnamn. Den einaste innsparinga som vart gjord, er at `js_streng` skriv linjeskift som `\n` i staden for `\u000a`. `test_wasm_lastar` handhevar begge taka: resten ≤ 2 560 og nett-gruppa ≤ 448.
 
 **Budsjettet for lagring (W7).** Lagrings-gruppa har eige budsjett av same grunn: tree-shakinga gjer at berre modular som brukar `std/wasm_lager.no` betaler (teljaren, skjema-demoen og nett-klientane er byte-identiske med W6). Gruppa er 1 256 byte fordi IndexedDB-API-et er ordrikt: sju hendingsfelt (`onupgradeneeded`, `onsuccess`, `onerror`, `onblocked`, `oncomplete`, `onabort`, `onversionchange`), `objectStoreNames`/`indexNames`, `createObjectStore`/`createIndex`/`deleteObjectStore`/`deleteIndex` og `IDBKeyRange`. Alt anna er i Norscode: skjemaet kjem som data, og kvar op er eit metodenamn og ein argumentliste frå `std/wasm_lager.no` (`x[o.m].apply(x,o.a)`), så `I` har ingen greiner per op. Der var to val som kosta: `onversionchange` (ein gamal fane blokkerer ikkje oppgraderingar) og fjerning av indeksar og lager ved oppgradering (om lag 140 byte til saman). `test_wasm_lastar` handhevar taket (≤ 1 280) og at gruppa berre kjem med lagrings-importane.
+
+**Budsjettet for synk (W9).** Synk-gruppa har eige budsjett av same grunn som nett, lagring og PWA: tree-shakinga gjer at berre modular som brukar `std/synk_klient.no` betaler (målt i `test_wasm_lastar`: teljaren 543, skjema-klienten 1 755, nett-gruppa 405, lagrings-gruppa 1 256, PWA-gruppa 706 og SW-lastaren 1 751 byte, alle uendra, og produksjonstabellen er framleis 2 550 av 2 560 byte). Gruppa er 660 byte (tak 704): åtte importar og tre hjelparar. `W` er éin generell lyttar (EventSource, BroadcastChannel og IndexedDB-tilkoplinga) som legg eit felt frå hendinga i `K` og kallar tilbakekallet; kva meldinga betyr, avgjer Norscode. `X` er det einaste som ikkje kan vere ein lyttar: Web Locks krev ein callback som gjev eit Promise som held låsen, og ein AbortController (handtaket) slepper han. Alle tre bruker `addEventListener`, ikkje `on…`-felt, så `ingen_on_tildeling` gjeld utan nye unntak. `test_wasm_lastar` handhevar taket, tree-shakinga (utan synk-importar ingen `EventSource`, `BroadcastChannel`, `locks`, `W` eller `X`), éin `new EventSource(`, éin `new BroadcastChannel(` og éin `.request(` i heile tabellen, proveniens for kvart token, og at ein service worker ikkje kan importere synk-funksjonane.
 
 ## HTML-innsetjing og escaping
 
@@ -956,6 +979,135 @@ Resultat i Chrome 154 (`test_wasm_w8_demo`, testbygg, same profil): første bes�
 
 CLI: `NC_NETTLESAR_MODUS=offline NC_NETTLESAR_KJELDE=tests/fixtures/wasm_deltakarar_pwa_testklient.no NC_NETTLESAR_APP=tests/fixtures/wasm_deltakarar_pwa_testapp.no NC_NETTLESAR_TESTBYGG=1 NC_NETTLESAR_STI='/test?steg=1' NC_NETTLESAR_STI_OFFLINE='/test?steg=3' NC_NETTLESAR_KREV='ikon frå cachen' ./bin/nc run tools/wasm_nettlesar.no` gav `offline OK`; med `NC_NETTLESAR_SW=0` (utan workeren) «den andre lastinga feila» og exit ≠ 0.
 
+## Synk (W9): `std/synk_klient.no`
+
+Klientsida av NSP/1 (tenaren er `std/synk.no`, sjå [APPTENAR_SYNK.md](APPTENAR_SYNK.md)), skriven i Norscode og kompilert til WebAssembly av same backend som resten av klienten. HLC-en og samanflettinga er den same modulen som tenaren brukar (`std/synk_kjerne.no`), så tenaren og klienten fletter likt.
+
+```
+bruk std.synk_klient som synk
+
+synk.start({"samlingar": {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool"}, "maks_byte": 1024}}},
+           fun(s) -> vis_status(s))
+la oppg = synk.samling("oppg")
+synk.lytt(oppg, fun(h) -> teikn())                       # h = {"s", "id": [id …], "kjelde"}
+synk.put(oppg, synk.ny_id(), {"tittel": "Kjøp mjølk", "ferdig": usann})   # vist med ein gong
+synk.del(oppg, id)
+synk.liste(oppg)                                         # [{"id", "data", "ventar"}]
+synk.hent(oppg, id)                                      # felta (kopi) eller null
+synk.sett_hugs(sann, fun(r) -> 0)                        # lagre på eininga (brukaren sitt val)
+synk.logg_ut(usann, fun(r) -> …)                         # {"ok": usann, "usynka": N} eller {"ok": sann}
+```
+
+| Funksjon | |
+|---|---|
+| `start(konf, ved_status)` | Startar klienten (éin per side). `ved_status` får statusen ved kvar endring og kvar hending |
+| `samling(namn)`, `put(s, id, felt)`, `del(s, id)`, `hent(s, id)`, `liste(s)`, `lytt(s, f)` | Samlinga og dokumenta. `put` skriv felta som er med (siste skrivar vinn per felt), `del` slettar dokumentet. Lyttaren får `kjelde` `lokal`, `tenar`, `fane`, `lager` (lasta frå eininga), `avvist`, `lagring`, `brukarbyte` eller `logg_ut` |
+| `status()`, `ventar()` | `{"tilstand", "ventar", "melding", "leiar", "hugs", "brukar", "stadfesta", "hending", "avvist"}` |
+| `sett_hugs(på, ok)` | Lagring på eininga på eller av (sjå «Personvern») |
+| `logg_ut(tving, ok)` | Sender køa først; sjå «Personvern» |
+| `prøv_igjen()` | Etter innlogging (401) eller ein feil som stoppa synken |
+| `stopp_varsling()`, `start_varsling()` | SSE og polling av og på (t.d. når sida er skjult) |
+| `ny_id()` | `crypto.randomUUID()` |
+| `k_*` | Same funksjonar på ein eksplisitt klient (testar med fleire faner i same prosess) |
+
+Konfigurasjon: `prefiks` (`/_synk/`, ein sti på same opphav, elles `SynkFeil`), `db_prefiks` (`nc-synk`), `samlingar` (same register som tenaren; `kj.valider_op` før ei op kjem i køa, og ugyldige skrivingar kastar `SynkFeil: …` med ein gong), `varsling` (`sse`, `poll` eller `av`), `poll_ms` (10 000), `batch` (100, høgst `tak.ops` frå hallo), `pull_grense` (500), `tidsgrense_ms` (8 000).
+
+**Tilstandar** (`tilstand`): `startar` (til den første pullen er ferdig, eller leiarfana har sagt at ho er det), `synka`, `ventar` (N op-ar ikkje kvitterte), `offline` (ingen kontakt), `feil` (5xx, eller ein protokollfeil som stoppar synken), `ikkje_innlogga` (401), `db_endra` (ei anna fane oppgraderte eller sletta databasen: last sida på nytt), `logga_ut`. **Hendingar** (`hending`): `avvist` (ei op tenaren avviste, med årsaka i `avvist`), `hol`, `resync`, `brukarbyte`, `usynka`, `lagring` (IndexedDB tok ikkje imot skrivinga; ho blir teken attende), `ikkje_innlogga`, `feil`, `db_endra`.
+
+### Modell
+
+- **Kopien** er alltid `snap ⊕ utboks`: `snap` er det tenaren sist sende for dokumentet, og dei ventande op-ane blir brukte oppå i rekkjefølgje med `kj.bruk_op`. Ei skriving kjem i utboksa og kopien med ein gong, og lyttarane blir kalla før noko er lagra eller sendt (optimistisk). Ei op tenaren avviser (`res` med `ok:false`), blir kvittert og fjerna frå utboksa, så kopien går tilbake til det tenaren har, og hendinga `avvist` har årsaka.
+- **Lagring:** utan «hugs» ligg alt i minnet (eit minnelager med same op-ar og resultatform som `lager.køyr`, validert med `lager.batch_json`). Med «hugs» brukar klienten IndexedDB via `std/wasm_lager.no`: databasen `nc-synk-<16 hex>` per brukar med lagera `meta`, `snap`, `dok` (den synlege kopien) og `ko` (auto-nøkkel). **Ei lokal skriving er éin transaksjon med dokumentet (`dok`) og køposten (`ko`).** `snap` og `ko` er sanninga; ved lasting blir `dok` rekna ut på nytt og retta der han skil seg (to faner kan skrive same dokument samtidig).
+- **seq = nøkkel − base.** IndexedDB lagar nøklane i `ko` i commit-rekkjefølgje, også når fleire faner skriv, så seq er samanhengande utan at fanene samordnar seg. Base flyttar seg når klienten får ny klient-id (410, `klient_eigar` eller eit hol hjå klienten sjølv). Når «hugs» blir slått på, flyttar ein post med nøkkelen `base + kvittert` (sletta i same transaksjon) generatoren dit, elles ville den neste op-en fått ein seq tenaren alt har sett (mutasjonen M12 under viste at op-en då gjekk tapt som `dup`).
+- **Push** (berre leiarfana): utboksa blir lesen frå IndexedDB før kvar push (ho er sanninga når fleire faner skriv), i batchar på høgst `batch`, med `x-nc-csrf` og `kvittert`. **Køa blir aldri tømd automatisk:** berre op-ar til og med `siste_seq` frå tenaren blir fjerna.
+
+| Svar | Klienten |
+|---|---|
+| 200 | Kvitter til og med `siste_seq`, meld avviste op-ar, ta imot tenaren sin HLC, pull når `v` er nyare enn cursoren, send resten av køa |
+| 409 `hol` | Kvitter til og med `siste_seq` og send frå `siste_seq + 1`. Har den første ventande op-en ikkje seq `siste_seq + 1` (hol hjå klienten sjølv), ny klient-id med seq 1 på henne. Tenaren kan mindre enn han har kvittert for → som 410. Meir enn tre 409 på rad → `feil` |
+| 410 `resync` | Ny epoke, ny klient-id, seq frå 1, heile køa på nytt og full pull; dokument tenaren ikkje sende i den fulle pullen, blir fjerna frå `snap` etterpå (hendinga `resync`) |
+| 401 | `ikkje_innlogga`: stopp, behald køa (også på eininga), SSE av. `prøv_igjen()` stadfestar brukaren på nytt og held fram |
+| 403 `csrf` | Nytt token frå hallo og eitt nytt forsøk; same svar igjen → `feil` |
+| 403 `klient_eigar` | Ny klient-id og køa på nytt (høgst to gonger) |
+| 413 | Halv batch (til 1) |
+| anna 4xx | `feil`: stopp og behald køa |
+| nettverk, tidsavbrot, 5xx | `offline` eller `feil`, og nytt forsøk etter 1, 2, 4 … 60 s |
+
+- **Pull:** `GET /_synk/pull?sidan=<cursor>&grense=…` side for side til `meir` er `false`, og med `If-None-Match` når klienten har ETag-en for same `sidan` (304 = ingenting nytt). `fetch` sender då 304 vidare til sida (eit eksplisitt `If-None-Match` slår av HTTP-cachen for førespurnaden). Endringane erstattar `snap` (tenaren er autoritativ; tombstones er `dok:null`), og kopien blir snap ⊕ utboks. Cursoren blir lagra i same transaksjon som `snap` og `dok`. Ny epoke i pull → som 410.
+- **HLC:** `hlc_send` ved kvar lokal skriving, `hlc_motta` for tenaren sin HLC (hallo og push), den høgaste HLC-en i ei pull-side og op-ar frå andre faner. Noden er tilfeldig per fane.
+- **Drivaren:** éin nettverksførespurnad om gongen (hallo, push, pull), så svara aldri kryssar kvarandre, og ein tidtakar (`vert.etter`) for backoff, polling og SSE-gjenoppkopling.
+
+### Varsling
+
+Leiarfana opnar `EventSource` mot `/_synk/hendingar` (`synk_sse`). Hendinga `v` (brukaren sin høgaste versjon) gjev pull når ho ikkje er lik cursoren. Når straumen blir broten (`error`, som ikkje har data), lukkar klienten han sjølv (nettlesaren si eiga gjenoppkopling blir ikkje brukt), pollar med ETag kvart `poll_ms` medan han er nede, gjer ein pull med ein gong (han viser om tenaren er nede eller brukaren logga ut), og prøver SSE att etter 1, 2, 4 … 60 s. Ei hending nullstiller backoffen. Med `varsling: "poll"` er det berre polling, med `"av"` berre push og pull ved lokale endringar.
+
+### Fleire faner
+
+- **Val: Web Locks for leiaren og BroadcastChannel for endringane.** Web Locks gjev gjensidig utestenging, og låsen blir sleppt av nettlesaren når fana blir lukka eller krasjar, så den neste fana tek over utan hjartslag og tidsgrenser. Eit leiarval over BroadcastChannel åleine måtte hatt hjartslag og tidsgrenser, og ei fane som heng, ville halde på rolla. BroadcastChannel trengst likevel til å fortelje dei andre fanene om endringar med ein gong. Begge finst i alle nettlesarar som har exnref-golvet (Chrome 137, Firefox 131, Safari 18.4) [A]; Web Locks krev sikker kontekst (HTTPS eller localhost). Utan `navigator.locks` blir fana leiar med ein gong: to faner kan då sende same kø, og tenaren gjev `dup` på den andre (ikkje tap, men dobbel trafikk) [ikkje testa].
+- Alle faner skriv sjølve til IndexedDB og sender op-en på kanalen. Leiaren les køa frå databasen før kvar push, pullar, og sender `kvitt` (kvittert til og med nøkkel N), `snap` (endringane frå tenaren), `meta` og `status` på kanalen. Dei andre fanene oppdaterer kopien i minnet og syner same status. Ei ny fane spør leiaren om statusen (`spør`). Meldingar som kjem før kopien er lesen frå databasen, blir brukte etterpå (dei er idempotente).
+- Utan «hugs» deler ikkje fanene lagring, og kvar fane er sin eigen leiar med eigen klient-id.
+- **versionchange:** `synk_db_vakt` lyttar på IndexedDB-tilkoplinga (i tillegg til `onversionchange` i `std/wasm_lager.no`, som lukkar ho). Når ei anna fane oppgraderer eller slettar databasen, blir tilstanden `db_endra` og hendinga `db_endra` («Oppgåvene vart endra i ei anna fane. Last sida på nytt.» i demoen); klienten stoppar SSE og slepp låsen.
+
+### Personvern
+
+- **Ingenting på eininga utan at brukaren vel det.** Utan «hugs» blir ingenting lagra på eininga; kopien og køa er i minnet. `sett_hugs(sann)` opnar databasen til brukaren, skriv alt klienten har i minnet dit (også ventande op-ar) og lagrar brukaren i `localStorage` (`nc-synk-brukar`). `sett_hugs(usann)` slettar databasen og nøkkelen; kopien og køa i minnet blir verande så lenge sida er open.
+- **Hallo stadfestar brukaren før noko lokalt blir vist.** Databasenamnet er `nc-synk-<16 hex av sha256(brukar)>`, der `brukar` er hashen tenaren gjev i hallo (`sha256("nsp1-brukar|" + uid)[0:12]`), så klienten treng aldri uid-en. På nett blir databasen først opna når hallo har svara med same brukar som valde «hugs». Utan nett blir berre kopien til den brukaren vist, merkt `stadfesta: usann`, og han blir stadfesta (eller skjult, sjå under) når nettet er tilbake. 401 i hallo: ingenting blir vist.
+- **Brukarbyte:** svarar hallo med ein annan brukar enn den som valde «hugs», blir nøkkelen i `localStorage` fjerna og den førre brukaren sin database sletta når han ikkje har usynka endringar. Har han det, blir databasen halden lukka og aldri vist, og hendinga `brukarbyte` har talet (`brukarbyte_usynka`). Dette er eit medvite avvik frå «brukarbyte slettar databasen»: usynka endringar blir aldri kasta i det stille; dei blir sende når same brukar loggar inn att. Skiftar brukaren medan sida er open (etter 401, eller når kopien vart vist utan nett), blir kopien skjult med ein gong (lyttarane får `brukarbyte`).
+- **Utlogging:** `logg_ut(usann, ok)` sender køa først når fana er leiar og tenaren svarar. Står det att endringar etterpå (utan nett, 401, feil), blir ingenting sletta: `ok({"ok": usann, "usynka": N})` og hendinga `usynka`, så appen kan åtvare. `logg_ut(sann, ok)` slettar likevel. Databasen og `localStorage`-nøkkelen blir sletta, dei andre fanene får `logg_ut` på kanalen og gløymer kopien, og `ok` blir kalla òg når slettinga lokalt feilar (etter hendinga `lagring`), så appen alltid kan avslutte sesjonen hjå tenaren. Demoen sender så `POST /logg_ut`, som svarar med `Clear-Site-Data: "cache", "storage"`.
+
+### Service worker og synk
+
+Synk går aldri via cachen til service workeren (W8-reglane, testa i `test_synk_sw`):
+- `fetch` frå sida til `/_synk/` (hallo, pull, hendingar, push) er ikkje navigasjonar og står ikkje i precachen, så planen er `forbi`: ingen `respondWith`, aldri lagra. Det gjeld òg når appen har gløymt `med_privat("/_synk/")`.
+- Ein navigasjon til `/_synk/…` er `berre` (berre nettet, aldri lagra, offline-sida utan nett).
+- Svara frå tenaren har `Cache-Control: no-store` (pull: `private, no-cache`), som `lagre`-regelen aldri godtek. `test_synk_klient` sjekkar det for alle 153 svara frå den ekte tenaren i scenarioa.
+- `std/wasm_pwa.no` avviser app-skal og offline-ruter under `/_synk/` (`PwaFeil`).
+
+**Background Sync** er ikkje gjort; det er ei valfri forbetring. Vurdering: `sync`-hendinga finst berre i Chromium [A]. For å bruke ho måtte workeren sjølv køyre push (IndexedDB, fetch, CSRF-token og samordning med opne faner), men `sw.wasm` har med vilje berre SW-vertsfunksjonane (fail-closed: ikkje nett eller lagring), og leiarlogikken måtte kopierast inn i workeren. Utan Background Sync ligg køa trygt i IndexedDB og blir send neste gong appen er open og har nett; gevinsten ville vore synk etter at fana er lukka, berre i Chromium.
+
+### Demoen: `examples/wasm_synk/`
+
+Ei oppgåveliste under apptenaren (`nc run`) med NSP/1 frå `std/synk.no`: ny oppgåve, ferdig/ikkje ferdig og sletting blir viste med ein gong, rader som ventar på tenaren har «(ventar)», og statuslinja seier «Alt er synka.», «N endringar ventar på tenaren.», «Utan nett: N endringar ventar og blir sende når nettet er tilbake.», «Du er ikkje innlogga. N endringar ventar på eininga.» osv. (`status_tekst`, ein rein funksjon). «Hugs denne eininga» (`aria-pressed`) slår lagring på eininga av og på, «Logg ut» åtvarar om usynka endringar, avviste endringar blir viste med årsak, og demo-innlogginga er `/logg_inn?u=ada` eller `bo` (HttpOnly-kapsel, `SameSite=Strict`). Bygd med `NC_WASM_SW=1` registrerer sida service workeren (W8): app-skalet er sida og stilarket, `/_synk/`, `/logg_inn` og `/logg_ut` er private, og ein ny versjon ventar på «Oppdater».
+
+```sh
+NC_WASM_KJELDE=examples/wasm_synk/klient.no NC_WASM_APP=examples/wasm_synk/app.no \
+    NC_WASM_UT=build/wasm/wasm_synk NC_WASM_SW=1 ./bin/nc run tools/nc_wasm.no
+NC_SYNK_PORT=8080 ./bin/nc run build/wasm/wasm_synk/serve.no     # opne /logg_inn?u=ada
+```
+
+Produksjonsbygget: `app.wasm` 122 737 byte, lastaren 4 834 byte, `sw.wasm` 23 274 byte; bygget tek om lag 33 s i fastmodus. Rutene (innlogging med 303 og kapsel, hallo med kapselen, `/sw.js` med CSP og `Service-Worker-Allowed`, manifestet, sida) er sjekka med curl mot `nc run`. Sjølve produksjonssida kan ikkje lesast av headless Chrome med virtuell tid så lenge SSE-straumen er open (sjå «Funn i Chrome (W9)»); testbygget køyrer den same klienten og demo-koden.
+
+### Testar (W9)
+
+| Test | Kva han dekkjer |
+|---|---|
+| `tests/test_synk_klient.no` | Reine funksjonar (backoff, klassifisering av svar, seq, minnelageret med auto-nøkkel og validering, kopien, høgaste HLC) og 18 scenario mot den **ekte** tenaren i same prosess (`tests/fixtures/synk_klient_sjekk.no`: `app.dispatch`, utan socket, svara klassifiserte av `nett.resultat`): optimistisk skriving; hugs (dokument og køpost i éin transaksjon) og køa over omlasting; offline → gjenoppkopling → konvergens mellom to einingar; konflikt per felt; 409 (ei op forsvinn på vegen); 410 (ny epoke); 401 og ny innlogging; 403 csrf og `klient_eigar`; avvist op; to faner med leiarskifte (fylgjaren pushar og pullar aldri); versionchange; logg_ut med og utan nett; brukarbyte med og utan usynka endringar; ETag og 304; SSE-brot, polling og gjenoppkopling med backoff; sletting; «hugs» medan endringar ventar. Alle svar frå `/_synk/` har Cache-Control som workeren aldri lagrar |
+| `tests/test_synk_klient_wasm.no` | Korpusprogrammet `tests/wasm_korpus/synk_klient.no` (klienten mot ein liten NSP/1-tenar i Norscode, 34 linjer utskrift) i VM-en mot fasiten, bygt og validert (129 KB), og i Chrome med identisk utskrift (SKIP av Chrome-delen utan Chrome) |
+| `tests/test_synk_klient_chrome.no` | Valfri (Chrome). Testbygget av demoen mot ein barne-apptenar: optimistisk skriving, ei skriving frå ei anna eining som berre kan kome via SSE (klienten er i ro, polling er av), «hugs»; omlasting frå IndexedDB, tenaren blir stoppa frå sida, skriving utan nett i køa; tenaren startar att (same data og port), køa blir send, og ei anna eining (fersk profil) ser same fire oppgåver |
+| `tests/test_synk_klient_faner.no` | Valfri (Chrome). 409, 410 og 401 i nettlesaren; brukarbyte i same profil; to faner (toppsida og ei iframe i same profil) med nøyaktig éin leiar, endringar via kanalen og versionchange når iframen slettar databasen; utlogging på sida og at neste lasting ikkje er innlogga |
+| `tests/test_synk_sw.no` | W8-reglane mot synk (sjå over), med positive kontrollar (skalet er nett-først og blir lagra, modulen er cache først, eit vanleg `no-cache`-svar kan lagrast) |
+| `tests/test_wasm_lastar.no` | Synk-gruppa (seksjon 10, sjå «Budsjettet for synk») |
+
+Linux (Docker) har ikkje Chrome; der køyrer VM-, bygg- og tenarstega, og Chrome-stega er SKIP.
+
+### Funn i Chrome (W9) [V]
+
+- **Ein open SSE-straum held att IndexedDB-svar under virtuell tid.** Med `--virtual-time-budget` står den virtuelle klokka stille så lenge ein førespurnad er på nettet, og ein EventSource er alltid det. IndexedDB-svar kjem då ikkje før straumen er lukka: i eit JS-probe utanfor repoet vart `indexedDB.open` etter at SSE var oppe, ferdig først då straumen vart lukka etter 400 pulsar (utan SSE: etter 4). Chrome-stega med IndexedDB brukar difor polling, og SSE-steget køyrer før «hugs» og stoppar varslinga etterpå (`stopp_varsling`). Ein ekte nettlesar har ikkje virtuell tid.
+- **To pulsar svelt IndexedDB.** Med ein puls i både toppsida og iframen er det alltid ein førespurnad på nettet, og IndexedDB-opninga i iframen vart aldri ferdig. Iframen held ingen eigen puls; stega hennar går på hendingane (status og lyttarar), og toppsida sin puls held klokka i gang for begge.
+- **To faner = to iframes/sider i same profil.** `--dump-dom` har éi side; ei iframe på same opphav deler IndexedDB, Web Locks og BroadcastChannel med toppsida (målt først med eit JS-probe), og testen les iframen sin logg frå tenaren (`/test/rapport`). Kven som får låsen først, varierer; testen krev at nøyaktig éi er leiar.
+- **Utlogginga går til tenaren først når databasen er sletta.** Ein test som avslutta med ein gong tilstanden var `logga_ut`, kom før `POST /logg_ut`, så sesjonen levde vidare (neste lasting var innlogga). Testen ventar no på at demoen har fått svar frå `/logg_ut`.
+- Eit `If-None-Match` sett av sida gjev 304 til `fetch` (HTTP-cachen blir forbigått), og `EventSource` sender informasjonskapselen på same opphav.
+
+### Storleikar og byggjetid (W9)
+
+| | Byte |
+|---|---|
+| Korpusprogrammet `synk_klient` (testbygg) | 129 028 |
+| Testklienten for Chrome (testbygg, demoen + testkrokar) | om lag 132 000 |
+| Synk-demoen, produksjon: `app.wasm` / `nc.js` / `sw.wasm` | 122 737 / 4 834 / 23 274 |
+
+Bygget av testklienten tek om lag 30 s i fastmodus: lowringa 12,8 s og valideringa 13,9 s for 131 KB (resten er kompilering og skriving; målt med ein profil utanfor repoet). Valideringa er om lag 100 ms per KB. Chrome-testane er difor delte i to (under 55 s kvar i standard-VM-en), og dei deler eitt bygg: `tests/fixtures/synk_klient_chrome_hjelp.no` skriv eit stempel (sha256 over kjeldene til modulen, backenden og runtimen) i utmappa, og den andre testen brukar bygget når stempelet er det same. Ein test åleine byggjer alltid sjølv.
+
 ## Nettlesar-benken (W5)
 
 `std/wasm_nettlesar.no` er éin stad for det alle nettlesartestane treng, skrive i Norscode (`tests/fixtures/wasm_chrome_hjelp.no` er no eit tynt lag over han; `wasm_test_hjelp` har framleis sitt eige `bygg`, sidan det å importere benken der kosta om lag 3 s per test i standard-VM-en):
@@ -1143,6 +1295,11 @@ W7 (byte):
 | `tests/test_wasm_w8_serve.no` | Bygget av demoen med workeren (importar, eksportar, SW-lastartaket) og rutene i serve-inngangen utan sokkel (`/sw.js` med CSP, `Service-Worker-Allowed` og `no-cache`, `sw.wasm`, manifest, ikon med `immutable` og ETag, offline-side og head-taggar); fail-closed: SW-funksjonar på sida og DOM i workeren blir avviste. |
 | `tests/test_wasm_w8_demo.no` | Valfri. Demoen: installasjon og precache, private svar og feilsvar blir ikkje lagra, sida frå cachen utan nett med den lokale kopien og ikona, offline-sida for ukjende og private sider; fersk profil utan nett får ingenting. |
 | `tests/test_wasm_w8_oppdatering.no` | Valfri. Tre versjonar etter kvarandre med same profil: ny versjon ventar på klikk (to cachar, melding og knapp), klikk → aktivert og gamal cache sletta; automatisk aktivering med éi fane; `sw.js` utan `'wasm-unsafe-eval'` gjev ein worker som aldri blir aktiv (CSP-brotet frå `sw.js` i konsollen), og utan nett ingenting. |
+| `tests/test_synk_klient.no` | W9: reine funksjonar og 18 scenario mot den ekte NSP/1-tenaren utan nettlesar (sjå «Synk (W9)») |
+| `tests/test_synk_klient_wasm.no` | W9: paritetskorpuset `synk_klient` i VM, bygg og Chrome |
+| `tests/test_synk_klient_chrome.no` | Valfri. W9: offline-skriving, omstart og konvergens, SSE og «hugs» i Chrome mot ein barne-apptenar |
+| `tests/test_synk_klient_faner.no` | Valfri. W9: 409/410/401, brukarbyte, to faner med éin leiar og versionchange, og utlogging i Chrome |
+| `tests/test_synk_sw.no` | W9: W8-reglane mot synk (aldri cache for `/_synk/`) |
 
 Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag over nettlesar-benken `std/wasm_nettlesar.no`, med profilane under `build/wasm-nettlesar/fixtur/`). Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Serve utan sokkel (`NORSCODE_FAKE_HTTP_REQUESTS`) ligg i `tests/fixtures/wasm_serve_hjelp.no` (W6). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
 
@@ -1178,6 +1335,7 @@ Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag
 | `w6_nett_ko` (W6) | køa utan nettverk: konvoluttar i rekkjefølgja 3, 5, 4, 2, 1 gjev tilbakekall 1–5, eit ok- og eit feil-tilbakekall som kastar, manglande feil-tilbakekall, ukjend id, avbryt, ny førespurnad under levering |
 | `w7_lager` (W7) | skjemavalidering (9 tilfelle), skjemaet og opninga som JSON, nøklar (heiltal ved ±2⁵³, desimaltal, tekst, bool, null, liste), op-ane som JSON (put med nøsta indeksstiar, auto-nøkkel, eksplisitt nøkkel, område, grense, indeksar), 15 feil med ein gong, transaksjonsmodus og omfang, JSON utan rå kontrollteikn (rundtur), konvoluttar, feilklassar, resultat (auto-nøkkel sett inn, øydelagd lagra verdi), LagerFeil kasta og fanga, databasenamn per brukar |
 | `w7_lager_ko` (W7) | køa utan IndexedDB: konvoluttar i rekkjefølgja 3, 5, 4, 2, 1 gjev tilbakekall 1–5, tilbakekall som kastar, manglande feil-tilbakekall (kvote), ukjend id, eit andre svar på same id, ny førespurnad under levering |
+| `synk_klient` (W9) | synk-klienten i testmodus mot ein liten NSP/1-tenar i Norscode: optimistisk skriving, hugs, sidevis pull, offline og backoff, konflikt per felt, 409, 410, 401, 403 csrf, avvist op, `klient_eigar`, to faner med leiarskifte, polling med 304, logg_ut og brukarbyte (`tests/test_synk_klient_wasm.no`) |
 | `kontroll_trap` | ikkje paritet: positiv kontroll for konsollsjekken |
 
 Kvart program har ein **kjend fasit** i `#=`-linjer, og `test_wasm_korpus_chrome` køyrer dei i tre steg:
@@ -1290,9 +1448,28 @@ Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen ra
 | W8: private navigasjonar «nett først» med lagring | `test_wasm_w8_demo` (steg 2: `/mi-side` i cachen; testsida har ikkje `Cache-Control: private`, så konfigurasjonen åleine må verne ho) |
 | W8: sida sender ikkje `nc-auto` | `test_wasm_w8_oppdatering` (u4: «vart aldri aktivert») |
 | W8: `activate` slettar ingen gamle cachar | `test_wasm_w8_oppdatering` (u2: «cachar: 2») |
+| W9: kvitteringa fjernar ikkje op-ane frå utboksa | `test_synk_klient` (push om att og om att: «ingen ro») |
+| W9: 409 blir handtert som nettverksfeil | `test_synk_klient` («409 hending») |
+| W9: 410 utan ny klient-id | `test_synk_klient` («ny klient-id») |
+| W9: 401 blir handtert som nettverksfeil (nye forsøk) | `test_synk_klient` («401»: `feil` i staden for `ikkje_innlogga`) |
+| W9: lokal skriving utan dokumentet (berre køposten) | `test_synk_klient` («éin transaksjon: dok og ko») |
+| W9: pull utan `If-None-Match` | `test_synk_klient` (ETag: to 200 i staden for éin) |
+| W9: brukarbyte opnar kopien til den førre brukaren | `test_synk_klient` («brukarbyte-hending») |
+| W9: logg_ut slettar sjølv med usynka endringar | `test_synk_klient` («logg_ut offline: usynka») |
+| W9: fylgjarfana vil pushe og drivaren slepp henne til | `test_synk_klient` («leiaren pusha»: fylgjaren pusha i staden) |
+| W9: SSE-brot (tom melding) tolka som data (den første versjonen) | `test_synk_klient` («sse lukka») |
+| W9: «hugs» skriv ikkje utboksa til eininga | `test_synk_klient` («køa med til eininga», etter at mutasjonen overlevde først og scenario 18 vart laga) |
+| W9: auto-nøkkelen blir ikkje flytta når «hugs» blir slått på | `test_synk_klient` (op-en gjekk tapt som `dup`: «b har det a2 har») |
+| W9: backoff ×3 | `test_synk_klient_wasm` (VM-steget mot fasiten) |
+| W9: `/_synk/` tillaten som app-skal | `test_synk_sw` |
+| W9: ukjende GET nett-først med lagring i workeren | `test_synk_sw` («utan med_privat»: `/_synk/hallo` fekk planen `nett`) |
+| W9: `U` dreg med seg `W` | `test_wasm_lastar` (tree-shaking av synk-gruppa) |
+| W9: SSE-hendinga gjev ikkje pull | `test_synk_klient_chrome` (steg 1; mutasjonen overlevde først fordi pullen etter pushen kunne hente skrivinga, så steget ventar no til klienten er i ro) |
+| W9: kanalmeldingar om nye op-ar blir ignorerte | `test_synk_klient_faner` (toppsida såg aldri skrivinga frå iframen) |
 
 Kontrollar:
 - Ein semantisk no-op i lenkinga gav grøn `test_wasm_w4`.
+- W9: ein mutasjon som berre endra ein kommentar i `std/synk_klient.no`, gav grøn `test_synk_klient`. Den første runden med mutasjonar køyrde ikkje testen i det heile (zsh deler ikkje ein kommando i ein variabel); alle vart køyrde på nytt med eit skript som viser grunnen til at testen vart raud.
 - Å ikkje escape linjeskift eller NUL i den rå literalen gav grøn `test_wasm_serve`. Det er ikkje ein feil: lexeren les rå bytar (sjå «Serve-integrasjon»).
 
 ### Skjema-demoen
@@ -1343,6 +1520,13 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 | `test_wasm_w8_serve` (ny) | 30 | 29 | 31 | 26 (82 med kald rt-cache) |
 | `test_wasm_w8_demo` (ny) | 36 | 31 | 22 | 28 |
 | `test_wasm_w8_oppdatering` (ny) | 51 | 50 | 21 | 22 |
+| `test_synk_klient` (W9, ny) | 28 | 27 | 17 | 11 |
+| `test_synk_klient_wasm` (W9, ny) | 41 | 41 | 35 | 38 |
+| `test_synk_klient_chrome` (W9, ny) | 46 (17 med delt bygg) | 49 | 32 | 8 |
+| `test_synk_klient_faner` (W9, ny) | 44 åleine (64 under last før han vart korta ned) | 15 (delt bygg) | 7 (delt bygg) | 9 |
+| `test_synk_sw` (W9, ny) | 9 | 3 | 6 | 5 |
+
+- **W9:** tala over er frå éin regresjonsrunde (alle 36 wasm-, apptenar- og synk-testane, grøne i alle fire kolonnane) medan ei anna økt køyrde ein tung prosess på maskina (lastsnitt 4–6). Fleire av dei eldre testane var då tregare enn i W8-tabellen (macOS standard: `test_wasm_w7` 64 s, `test_wasm_w8_oppdatering` 61 s, `test_wasm_w8` 56 s; rt-cachen fekk òg ny nøkkel, sidan `std/wasm_vert.no` og `std/wasm_js.no` er endra). Chrome-testane for synk deler eitt bygg (stempel over kjeldene); `test_synk_klient_faner` åleine tok 44 s etter at han vart korta ned (éi Chrome-lasting mindre).
 
 - **W8:** `test_wasm_w8_oppdatering` er den tyngste (51 s i standard-VM-en på macOS): eit bygg med workeren (om lag 20 s i fastmodus), fire `nc serve`-oppstartar og seks lastingar i Chrome, der éi er om lag 9 s (nettlesaren ser etter den nye versjonen og installerer han). Ventinga på aktiveringa er korta ned til treige førespurnader på 0,4 s. Linux har ikkje Chrome, så der er berre bygget og serve-variantane med. Den første køyringa etter ei endring i `std/wasm_vert.no` (ny nøkkel for rt-cachen) tek lenger tid: `test_wasm_w8_serve` tok då 82 s i fastmodus på Linux (26 s med varm cache).
 - Dei andre testane er 1–8 s tregare enn i W7: rt-cachen fekk ny nøkkel (`std/wasm_vert.no` er endra), og demoen byggjer no òg PWA-gruppa.
@@ -1356,9 +1540,25 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 - **`test_wasm_w7`** hadde først bygga av testklienten og demoen med (60 s i fastmodus); dei er flytte til `test_wasm_w7_chrome` og `test_wasm_w7_demo`, som byggjer dei uansett, og regresjonen for rt-cachen brukar den minste modulen (`wasm_w7_utan_idb`).
 - Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome eller jsc, så dei stega er SKIP der. VM-, bygg- og tenarstega køyrer (også ryddetesten til benken og JSON-rutene til demoen). Alle testane er grøne på begge plattformene og i begge modusane.
 
-## Gjenstår før W9
+## Gjenstår
 
-- **Tenarsida for synk (A6/A7) er på plass:** `std/apptenar.no` (keep-alive, SSE, caps) og NSP/1 i `std/synk.no` med kjernen `std/synk_kjerne.no`, som lowrar til WASM med same resultat som i VM-en. Sjå [APPTENAR_SYNK.md](APPTENAR_SYNK.md), også for kva klienten (W9) må gjere.
+- **W9 (nytt):**
+  - Berre Chrome 154 (headless) er testa. Web Locks, BroadcastChannel, EventSource og `crypto.randomUUID` finst i alle nettlesarar med exnref-golvet [A], men Safari og Firefox er ikkje køyrde med synk-klienten, og JavaScriptCore-skalet har verken IndexedDB, EventSource eller BroadcastChannel (korpuset køyrer der berre i testmodus, utan vertsfunksjonar).
+  - Utan `navigator.locks` (ikkje sikker kontekst) blir kvar fane leiar; det er ikkje testa. To leiarar sender same kø (tenaren gjev `dup`), så det gjev dobbel trafikk, men ikkje tap.
+  - «To faner» er testa som toppsida og ei iframe i same profil (`--dump-dom` har éi side). Separate faner (`window.open`, fleire vindauge) er ikkje testa. Kven som får låsen, varierer mellom køyringar; testen godtek begge.
+  - Sida som startar frå cachen til service workeren utan nett, saman med synk: W8 har testa at sida kjem frå cachen utan nett (deltakar-demoen), og VM-testen (scenario 18) at klienten startar utan nett, viser kopien til brukaren som valde «hugs» og sender køa når nettet kjem att. Kombinasjonen i Chrome er ikkje køyrd: eit bygg med workeren tek om lag 50 s åleine, og produksjonssida med SSE kan ikkje lesast med virtuell tid (sjå «Funn i Chrome (W9)»). Demoen med workeren er berre bygd og sjekka med curl.
+  - Produksjonsbygget av demoen er ikkje køyrt i headless Chrome (SSE held den virtuelle klokka). Testbygget køyrer den same klient- og demokoden.
+  - A8-målet «optimistisk_ms < 16» er ikkje målt i nettlesaren; testane viser berre at rada er synleg (med «ventar») før nettet har svara.
+  - Brukarbyte med usynka endringar held databasen til den førre brukaren lukka på eininga til han loggar inn att; det finst ikkje noko API for å forkaste han (appen kan be brukaren logge inn og ut). Det er eit medvite avvik frå «brukarbyte slettar databasen», så usynka endringar aldri blir kasta i det stille.
+  - `versionchange` skil ikkje mellom oppgradering og sletting i statusen (`db_endra_til` har den nye versjonen eller `null`).
+  - Background Sync er ikkje gjort (sjå «Service worker og synk»).
+  - Polling har fast intervall (`poll_ms`); A8 føreslo kortare når sida er synleg og lengre når ho er skjult (`visibilitychange` er ikkje ein vertsfunksjon). Appen kan bruke `stopp_varsling()`/`start_varsling()`.
+  - Heile kopien ligg i minnet, og lasting les alle postane i databasen. Utleiinga av eit dokument går gjennom heile utboksa (O(kø) per dokument), og tombstones blir aldri rydda på klienten. Ikkje målt med meir enn nokre titals dokument i nettlesaren.
+  - `dok` (den synlege kopien i databasen) kan bli utdatert når to faner skriv same dokument samtidig; han blir retta ved neste lasting (kopien i minnet er alltid rekna ut frå `snap` og utboksa).
+  - CSRF-tokenet blir henta på nytt éin gong ved 403; T1 (sesjonsrotasjon, `std/csrf.no`) er framleis ikkje gjort.
+  - Chrome-testane ligg nær grensa på 55 s i standard-VM-en når maskina er under last (målt 64 s for `test_synk_klient_faner` før han vart korta ned og fekk dele bygget); bygget av testklienten (om lag 30 s) er det meste, og halvparten av det er valideringa (W10).
+
+- **Tenarsida for synk (A6/A7):** `std/apptenar.no` og NSP/1 i `std/synk.no`, sjå [APPTENAR_SYNK.md](APPTENAR_SYNK.md).
 
 - **W8 (nytt):**
   - Berre Chrome 154 (headless) er testa med service workeren. Installerbarheita («Installer app» og Application → Manifest i DevTools) er ikkje stadfesta i ekte Chrome; manifestet og ikona er validerte i Norscode, og ikona er dekoda av Chrome (`Image.decode`). Safari og Firefox er ikkje testa, og Safari kan slette data for nettstader som ikkje er installerte.
@@ -1369,7 +1569,7 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
   - Versjonen blir rekna ut på tenaren for kvar `/sw.js` (sha256 over om lag 10–20 KB); app-skalet må vere det same som tenaren leverer (appen gjev kroppen i `med_skal`). Leverte ikon blir validerte (PNG-sjekk) i kvar `/sw.js`, om lag 0,35 s for 512 px i fastmodus.
   - Precachen blir henta med `Promise.all` mot `nc serve`, som tek éi tilkopling om gongen; det tek om lag 5 s første gong (mest dei to 512-ikona, 0,4 s kvar i fastmodus). Ein apptenar (A6/R1) og cache av ikona på tenaren ville korte det ned.
   - SW-lastaren er 1 751 byte (tak 1 792) mot 1,5 KB i planen, sjå «Storleikar (W8)».
-  - Fragment-førespurnader (ei offline-side per fragment, A4) og NSP/1-synk i workeren er ikkje med (W9).
+  - Fragment-førespurnader (ei offline-side per fragment, A4) er ikkje med, og NSP/1-synk går aldri gjennom workeren (W9, sjå «Service worker og synk»).
   - Kill switch-en slettar cachane, men sida avregistrerer ikkje workeren.
 
 - **W7 (nytt):**
@@ -1377,8 +1577,8 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
   - Chrome med `--virtual-time-budget` ventar ikkje på IndexedDB. Testklientane held ein puls mot tenaren (`/api/puls`); ein testmodus utan puls krev CDP eller at benken sjølv held ein førespurnad open. Produksjonsbygget av demoen kan difor ikkje testast for den lokale kopien (det blir dumpa før IndexedDB svarar); testbygget køyrer den ekte klienten.
   - `kvote` og `blokkert` er klassifiserte og har meldingar i demoen, men er ikkje provoserte i ein test (kvoten krev store mengder data; `blocked` krev ein fane med eldre kode, sidan tilkoplingane frå `std/wasm_lager.no` lukkar seg ved `versionchange`).
   - Ei «blokkert»-opning blir levert som feil med ein gong. IndexedDB fullfører ho kanskje seinare; tilkoplinga blir då lukka, men appen må opne på nytt sjølv.
-  - Tilkoplinga som lukkar seg ved `versionchange`, seier ikkje frå til Norscode: neste `køyr` får `transaksjon` (`InvalidStateError`). W9 bør gje ei hending («databasen vart oppgradert i ein annan fane; last sida på nytt»).
-  - Ingen markør (cursor): `liste` med grense har ingen retning (nyaste først) og ingen side-for-side-lesing. W9 (synk) treng truleg `openCursor` med retning, eller ein indeks på tid.
+  - Tilkoplinga som lukkar seg ved `versionchange`, seier ikkje frå til andre brukarar av `std/wasm_lager.no`: neste `køyr` får `transaksjon` (`InvalidStateError`). Synk-klienten (W9) får hendinga via `synk_db_vakt` og blir `db_endra`.
+  - Ingen markør (cursor): `liste` med grense har ingen retning (nyaste først) og ingen side-for-side-lesing. Synk-klienten (W9) trong det ikkje (han les alt ved lasting og held kopien i minnet), men store datamengder vil trenge det.
   - Nøklar er tal og tekst, ikkje samansette (lister) og ikkje bytar. Samansette indeksar (t.d. `[samling, endra]`) må lagast som tekst.
   - Verdiar er JSON-tekst: `Date`, `Blob` og bytar blir ikkje lagra direkte (bytar kan lagrast som hex eller base64).
   - Lagrings-gruppa er 1 256 byte (eige budsjett 1 280). Heile produksjonstabellen med nett og lagring er 4 211 byte.

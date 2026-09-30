@@ -1,6 +1,6 @@
 # Apptenar og synk-tenar (A6 og A7)
 
-Status: milepælane A6 (`std/apptenar.no`) og A7 (NSP/1-tenaren i `std/synk.no`) frå app-kjensle-planen, som grunnlag for W9 (synk-klienten i WASM, sjå [WASM_KLIENT.md](WASM_KLIENT.md)). Alt er rein Norscode utanfor `nc_main`-lukkinga, så ingenting krev reseed.
+Status: milepælane A6 (`std/apptenar.no`) og A7 (NSP/1-tenaren i `std/synk.no`) frå app-kjensle-planen. Klienten (W9, `std/synk_klient.no` i WASM) er skildra i [WASM_KLIENT.md](WASM_KLIENT.md) og kort under «Klienten (W9)». Alt er rein Norscode utanfor `nc_main`-lukkinga, så ingenting krev reseed.
 
 | Fil | Rolle |
 |---|---|
@@ -279,18 +279,29 @@ Alle seks er grøne med `./bin/nc test` og `NC_TEST_VM_FAST=1 ./bin/nc test` på
 
 Eksisterande testar er grøne etter endringane: alle 25 `tests/test_wasm*.no` (med Chrome), `test_deploy_nginx_health_contract`, `test_security_gate_contract`, `test_production_maturity` og `test_web_runtime_production_matrix`. `feature-check` er bestått på alle nye og endra `.no`-filer, active-surface-porten i ratchet-modus (fersk kopi av git-indeksen) har uendra tak, og `verify_norscode_surface_ownership` er bestått. Ingen fil i `nc_main`-lukkinga er endra.
 
-## Gjenstår før W9 (synk-klienten)
+## Klienten (W9)
 
-Det W9 kan byggje på:
-- `std/synk_kjerne.no` er klar for klienten: `hlc_send`/`hlc_motta` (ta `hlc` frå `hallo`, `push` og felta i `pull`), `bruk_op` for den lokale kopien (same resultat som tenaren), `valider_op` før op-en blir lagd i køa, `json` og `endring_json`. Kjernen lowrar til 25,7 KB WASM.
-- Protokollen: `hallo` → (`epoke`, `csrf`, `v`, `brukar`); køa i IndexedDB (`std/wasm_lager.no`) med `seq` per klient-id; `push` med `x-nc-csrf`, `Content-Type: application/json` og `kvittert`; på 409 send frå `siste_seq + 1`; på 410 ny klient-id, `seq` frå 1 og heile køa; på 401 vis innlogging og behald køa; `pull?sidan=v` side for side til `meir` er `false`.
+Synk-klienten er `std/synk_klient.no` (Norscode, kompilert til WebAssembly), dokumentert i [WASM_KLIENT.md](WASM_KLIENT.md#synk-w9-stdsynk_klientno). Korleis han brukar protokollen:
+- `hallo` før noko lokalt blir vist (på nett): `brukar` (hashen) vel databasen `nc-synk-<16 hex av sha256(brukar)>` og avslører brukarbyte; `epoke`, `csrf`, `hlc` og `tak.ops` blir brukte i push.
+- Utboksa (auto-nøkkel i IndexedDB, eller i minnet utan «hugs») gjev seq = nøkkel − base, så fleire faner kan skrive utan å samordne seq. `kvittert` er den høgaste seq tenaren har stadfesta.
+- `push` i batchar (høgst 100 og `tak.ops`) med `x-nc-csrf`; 200 kvitterer til og med `siste_seq` (avviste op-ar blir melde med `feil` og fjerna frå køa); 409 kvitterer og sender frå `siste_seq + 1`; 410 gjev ny klient-id, seq frå 1, heile køa og full pull (dokument tenaren ikkje sende, blir fjerna etterpå); 401 stoppar og held på køa; 403 `csrf` hentar nytt token éin gong; 403 `klient_eigar` gjev ny klient-id. Køa blir aldri tømd på anna vis.
+- `pull?sidan=<cursor>` side for side til `meir` er `false`, og `If-None-Match` når klienten har ETag-en for same `sidan` (304 = ingenting nytt). Ny `epoke` i pull er som 410.
+- `hendingar` (SSE): hendinga `v` ≠ cursor gjev pull; eit brot gjev polling og gjenoppkopling med backoff (1 … 60 s).
 
-Gjenstår:
-- **Klienten sjølv (W9):** kø, sending og pull i Norscode→WASM, IDB-namnet `nc-synk-<sha256(uid)[0:16]>` (planen), `brukar` frå `hallo` som vakt mot brukarbyte, og tømming ved utlogging (W7 har det).
-- **Varsling i nettlesaren:** `EventSource` finst ikkje i vertstabellen (`std/wasm_vert.no`) og krev ein ny vertsfunksjon og plass i lastaren (2 550 av 2 560 byte er brukte). Til då: ETag-polling mot `pull` (304 kostar om lag 40 ms på tenaren).
-- **T1:** sesjonsrotasjon, `std/auth.no`/`std/sesjon.no`/`std/csrf.no` er ikkje endra. Synk har eige maskert CSRF-token bunde til sesjonen appen gjev i `brukar_fn`; appen må sjølv gje ein sesjon som går ut.
+Testa mot denne tenaren: 18 scenario i same prosess (`tests/test_synk_klient.no`, gjennom `app.dispatch` utan socket), der alle svara frå `/_synk/` òg er sjekka mot lagringsregelen til service workeren (`Cache-Control` er `no-store` eller `private`), og i Chrome mot ein barne-apptenar (`tests/test_synk_klient_chrome.no`, `tests/test_synk_klient_faner.no`). Demoen `examples/wasm_synk/` er ei oppgåveliste under apptenaren med `std/synk.no`.
+
+Funn om tenaren frå klientarbeidet:
+- `/_synk/hendingar` sender `v` med ein gong og etter kvar push som endra noko; ein EventSource i Chrome får det utan eigen gjenoppkopling.
+- Apptenaren sin førespurnad-mellomvare (`forespurnad_mw`) er nok til feilinjeksjon i testar (testappen fjernar den første op-en i ein push og gjev dermed 409).
+- Tenaren reknar HLC-klemma ut frå si eiga klokke; klienten tek imot tenaren sin HLC i hallo og push, så ei treg klokke på eininga tapar ikkje nye skrivingar.
+
+## Gjenstår
+
+- **Klienten:** sjå «Gjenstår» i [WASM_KLIENT.md](WASM_KLIENT.md) (berre Chrome testa, to faner som iframes, service worker saman med synk ikkje køyrd i Chrome, ingen Background Sync, brukarbyte med usynka endringar held den førre databasen).
+- **T1:** sesjonsrotasjon, `std/auth.no`/`std/sesjon.no`/`std/csrf.no` er ikkje endra. Synk har eige maskert CSRF-token bunde til sesjonen appen gjev i `brukar_fn`; appen må sjølv gje ein sesjon som går ut. Klienten hentar nytt token éin gong ved 403 `csrf`.
 - **Mellomvare-metadata under `nc run`:** `køyr_ncb` i `selfhost/vm.no` kopierer ikkje `response_middlewares` o.l. inn i VM-en (krev reseed). Apptenaren tek dei frå konfig i mellomtida.
 - **Ytelse:** push kostar 7–8 ms per op med 5 000 dokument (om lag 130 op/s), og eit sjekkpunkt stoppar tenaren om lag 2 s ved 5 000 dokument. Apptenaren er om lag 8 × tregare enn `nc serve` per førespurnad. `poll_many` gav `unknown handle` på macOS-seeden; lykkja les difor kvar socket for seg.
 - **Lagring:** tombstones blir aldri rydda (dei tel i kvoten); ingen indeks per samling; `fsync` etter `fil_append` er ikkje stadfesta; berre éin prosess per datamappe. Atomisk sjekkpunkt i `std/norsdb_motor.no` (A7-planen) er ikkje gjort, fordi synk ikkje brukar NorsDB.
+- **Restore:** etter ein restore (`ny_epoke`) sender klientane køa på nytt, men endringar tenaren hadde kvittert for og så mista, er borte (klienten har sletta dei frå køa); dei blir fjerna frå kopien etter den fulle pullen.
 - **Deploy:** systemd- og nginx-malane er genererte og caps-miljøet er testa, men `Restart=always` og nginx-oppsettet er ikkje køyrde på ein ekte vert. TLS-fronten er framleis eit ope spørsmål (planen).
-- **Ikkje testa:** fleire brukarar med mange samtidige SSE-straumar under last, kroppar med NUL-byte (teksttransporten kan miste dei), og paritetstesten mot `nc serve` frå A6-planen (`test_apptenar_paritet.no`); forskjellane er lista i tabellen øvst.
+- **Ikkje testa:** fleire brukarar med mange samtidige SSE-straumar under last (`maks_sse_per_kanal` er 4 per brukar: med «hugs» opnar berre leiarfana SSE per eining, men utan «hugs» opnar kvar fane sin eigen straum, så den femte fana eller eininga til same brukar får 503; klienten tolkar det som eit brot og pollar med backoff, men det er ikkje testa), kroppar med NUL-byte (teksttransporten kan miste dei), og paritetstesten mot `nc serve` frå A6-planen (`test_apptenar_paritet.no`); forskjellane er lista i tabellen øvst.
