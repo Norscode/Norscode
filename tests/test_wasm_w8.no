@@ -1,0 +1,283 @@
+# W8 (WASM-sporet): installerbar app med service worker, utan nettlesar (alle plattformer).
+#
+#   1. Paritetskorpuset w8_sw (dei reine funksjonane i std/wasm_sw.no og std/wasm_pwa_klient.no:
+#      validering av konfigurasjonen, planar for førespurnader, kva svar som kan lagrast, install,
+#      rydding, skip- og auto-meldinga, kill switch, status) gjev fasiten i VM-en, og same utskrift
+#      i Chrome når han finst (kh.køyr_korpus).
+#   2. PNG (std/png_enkel.no): CRC-32 og Adler-32 mot kjende vektorar, eit lite ikon er gyldig, og
+#      validatoren fangar øydelagd CRC, avkorting, feil signatur og ei komprimert deflate-blokk.
+#      Ikona på 192 og 512 px (i ein barneprosess i fastmodus, tests/fixtures/wasm_w8_png.no):
+#      gyldige, 1 bit palett, 512 px ≤ 40 KB, deterministiske, og eit levert ikon med feil storleik
+#      blir avvist.
+#   3. Manifestet (json_parse) har name, short_name, start_url innanfor scope, display
+#      standalone, theme_color, background_color og ikon 192, 512 og maskable. Valideringa avviser
+#      private app-skal, start_url utanfor scope eller utan app-skal, ugyldige fargar og display.
+#   4. Versjonen: berre teksten på offline-sida endra → både sw.js og cachenamnet endrar seg; det
+#      same for eit app-skal, klientversjonen og lastaren; same konfigurasjon → same sw.js.
+#      Precache-lista har ingen private ruter, og workeren godtek konfigurasjonen tenaren lagar.
+#   5. Stubbane kastar i VM-en; demoen avgjer oppdateringa (sw_handling) som venta.
+bruk std.png_enkel som png
+bruk std.wasm_pwa som pwa
+bruk std.wasm_sw som sw
+bruk std.wasm_rt som rt
+bruk std.wasm_pwa_klient som pk
+bruk examples.wasm_deltakarar.app som app
+bruk examples.wasm_deltakarar.klient som demo
+bruk tests.fixtures.wasm_test_hjelp som hjelp
+bruk tests.fixtures.wasm_korpus_hjelp som kh
+
+funksjon rot() -> tekst { returner "build/wasm/test_w8" }
+
+funksjon inneheld(t: tekst, nål: tekst) -> bool { returner builtin.index_of(t, nål) >= 0 }
+
+funksjon har(l: liste, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# ── 2 ──
+funksjon byt_byte(t: tekst, p: heltall) -> tekst {
+    la c = builtin.char_code(builtin.slice(t, p, p + 1))
+    returner builtin.slice(t, 0, p) + builtin.chr((c + 1) & 255) + builtin.slice(t, p + 1, lengde(t))
+}
+
+funksjon feil_av(b: tekst) -> tekst {
+    returner builtin.join(png.sjekk(b)["feil"], "; ")
+}
+
+funksjon png_sjekk() -> heltall {
+    assert_eq(png.crc32("123456789"), 3421780262)
+    assert_eq(png.crc32(""), 0)
+    assert_eq(png.adler32("Wikipedia"), 300286872)
+    assert_eq(png.adler32(""), 1)
+    la b = png.ikon(16, "#1f5f99", "#ffffff")
+    la s = png.sjekk(b)
+    assert(s["ok"])
+    assert_eq(s["bredde"], 16)
+    assert_eq(s["høgd"], 16)
+    assert_eq(s["rader"], 16)
+    assert_eq(builtin.join(s["chunks"], ","), "IHDR,PLTE,IDAT,IEND")
+    # IDAT-dataa byrjar etter signatur (8), IHDR (25), PLTE (12 + 6) og IDAT-hovudet (8)
+    la idat = 8 + 25 + 18 + 8
+    assert_eq(builtin.slice(b, idat - 4, idat), "IDAT")
+    assert_eq(feil_av(byt_byte(b, idat + 20)), "feil CRC i IDAT; feil Adler-32")
+    assert_eq(feil_av(byt_byte(b, 20)), "feil CRC i IHDR")
+    assert(inneheld(feil_av(builtin.slice(b, 0, lengde(b) - 5)), "avkorta"))
+    assert_eq(feil_av(byt_byte(b, 1)), "signaturen manglar")
+    # Ei komprimert blokk (BTYPE=01) i ein zlib-straum blir avvist, sjølv med rett CRC
+    la z = png.zlib_lagra("abc")
+    la z2 = builtin.slice(z, 0, 2) + builtin.chr(3) + builtin.slice(z, 3, lengde(z))
+    la tab = png.crc_tabell()
+    la ihdr = png.u32(1) + png.u32(1) + builtin.chr(8) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0)
+    la komp = png.signatur() + png.chunk(tab, "IHDR", ihdr) + png.chunk(tab, "IDAT", z2) + png.chunk(tab, "IEND", "")
+    assert(inneheld(feil_av(komp), "komprimert deflate-blokk"))
+    la rett = png.signatur() + png.chunk(tab, "IHDR", ihdr) + png.chunk(tab, "IDAT", png.zlib_lagra(builtin.chr(0) + builtin.chr(7))) + png.chunk(tab, "IEND", "")
+    assert(png.sjekk(rett)["ok"])
+    # Eit tomt stykke er éi tom lagra blokk
+    assert_eq(lengde(png.zlib_lagra("")), 2 + 5 + 4)
+    skriv("png: CRC-32, Adler-32 og validatoren (CRC, avkorting, signatur, komprimert blokk) OK (VM)\n")
+    # Dei store ikona i fastmodus
+    la m = hjelp.grunnmiljø(hjelp.root())
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = hjelp.root() + "/tests/fixtures/wasm_w8_png.no"
+    m["NORSCODE_VM_FAST"] = "1"
+    la r = hjelp.køyr_nc(m, 300000)
+    hjelp.krev_ok("wasm_w8_png", r)
+    la ut = r["stdout"]
+    assert(inneheld(ut, "ikon 192: ok=sann 192x192 bitdjupn=1 fargetype=3 palett=2 chunks=IHDR,PLTE,IDAT,IEND byte="))
+    assert(inneheld(ut, "ikon 512: ok=sann 512x512 bitdjupn=1 fargetype=3 palett=2 chunks=IHDR,PLTE,IDAT,IEND byte="))
+    la p = builtin.index_of(ut, "ikon 512:")
+    la bp = builtin.index_of(builtin.slice(ut, p, lengde(ut)), "byte=") + p + 5
+    la n = heltall_fra_tekst(builtin.slice(ut, bp, bp + 5))
+    skriv("png: ikon 512 er " + tekst(n) + " byte (tak 40 960)\n")
+    assert(n > 30000 og n <= 40960)
+    assert(inneheld(ut, "maskable lik 512: sann"))
+    assert(inneheld(ut, "deterministisk: sann andre fargar ulike: sann"))
+    assert(inneheld(ut, "levert 512 med 192 px: ikonet 512 er 192x192"))
+    assert(inneheld(ut, "levert 192: «» versjon frå bytane: sann"))
+    assert(inneheld(ut, "wasm_w8_png OK"))
+    returner 0
+}
+
+# ── 3 ──
+funksjon info() -> ordbok {
+    returner {"klient_v": "aaaaaaaaaaaa", "lastar": "LASTAR", "sw_v": "bbbbbbbbbbbb", "sw_lastar": "SWLASTAR", "prefiks": "/_nc/"}
+}
+
+funksjon manifest_sjekk() -> heltall {
+    la k = app.pwa_konfig()
+    assert_eq(lengde(pwa.valider(k)), 0)
+    la m = builtin.json_parse_raw(pwa.manifest_json(k))
+    assert_eq(m["name"], "Deltakarar")
+    assert_eq(m["short_name"], "Deltakarar")
+    assert_eq(m["start_url"], "/")
+    assert_eq(m["scope"], "/")
+    assert(builtin.starts_with(m["start_url"], m["scope"]))
+    assert_eq(m["display"], "standalone")
+    assert_eq(m["theme_color"], "#1f5f99")
+    assert_eq(m["background_color"], "#ffffff")
+    la ik = m["icons"]
+    assert_eq(lengde(ik), 3)
+    la storleikar = ""
+    la i = 0
+    mens i < lengde(ik) {
+        storleikar = storleikar + ik[i]["sizes"] + "/" + ik[i]["purpose"] + "/" + ik[i]["type"] + " "
+        assert(builtin.starts_with(ik[i]["src"], "/_nc/ikon-"))
+        assert(inneheld(ik[i]["src"], ".png?v="))
+        i = i + 1
+    }
+    assert_eq(storleikar, "192x192/any/image/png 512x512/any/image/png 512x512/maskable/image/png ")
+    # Head-taggane og offline-sida
+    la h = pwa.head_tags(k)
+    assert(inneheld(h, "<link rel=\"manifest\" href=\"/manifest.webmanifest\">"))
+    assert(inneheld(h, "<meta name=\"theme-color\" content=\"#1f5f99\">"))
+    assert(inneheld(h, "<link rel=\"apple-touch-icon\" href=\"/_nc/ikon-192.png?v="))
+    la ko = pwa.konfig("A&B", "A<B")
+    pwa.med_offline_side(ko, "<script>x</script>", "a & b")
+    la off = pwa.offline_html(ko)
+    assert(inneheld(off, "<body data-nc-offline=\"1\">"))
+    assert(inneheld(off, "<title>&lt;script&gt;x&lt;/script&gt;</title>"))
+    assert(inneheld(off, "<p>a &amp; b</p>"))
+    assert(ikkje inneheld(off, "<script>"))
+    assert_eq(pwa.utlogging_headerar()["clear-site-data"], "\"cache\", \"storage\"")
+    la ut = pwa.med_utlogging({"status": 200, "headers": {"x": "1"}, "body": ""})
+    assert_eq(ut["headers"]["clear-site-data"], "\"cache\", \"storage\"")
+    # Valideringa
+    la feil = []
+    la k1 = app.pwa_konfig()
+    pwa.med_skal(k1, "/api/meg", "persondata")
+    legg_til(feil, builtin.join(pwa.valider(k1), "; "))
+    la k2 = app.pwa_konfig()
+    pwa.med_start(k2, "/andre/", "/app/")
+    legg_til(feil, builtin.join(pwa.valider(k2), "; "))
+    la k3 = app.pwa_konfig()
+    pwa.med_start(k3, "/app/", "/app/")
+    legg_til(feil, builtin.join(pwa.valider(k3), "; "))
+    la k4 = app.pwa_konfig()
+    pwa.med_farger(k4, "blå", "#fff")
+    k4["display"] = "vindauge"
+    k4["namn"] = " "
+    legg_til(feil, builtin.join(pwa.valider(k4), "; "))
+    la k5 = app.pwa_konfig()
+    pwa.med_skal(k5, "/sw.js", "x")
+    pwa.med_offline_rute(k5, "/side?x=1", "x")
+    legg_til(feil, builtin.join(pwa.valider(k5), "; "))
+    assert_eq(builtin.join(feil, " | "),
+        "den private ruta /api/meg kan ikkje vere app-skal eller offline-rute | " +
+        "start_url /andre/ er utanfor scope /app/; start_url /andre/ er ikkje app-skal (legg ho til med med_skal), så appen kan ikkje starte utan nett | " +
+        "start_url /app/ er ikkje app-skal (legg ho til med med_skal), så appen kan ikkje starte utan nett | " +
+        "namn manglar; display må vere ein av standalone, fullscreen, minimal-ui, browser; tema må vere #rrggbb; bakgrunn må vere #rrggbb | " +
+        "app-skal /sw.js er ein av rutene til PWA-modulen; app-skal /side?x=1 kan ikkje ha spørjing")
+    la kasta = ""
+    prøv {
+        pwa.sw_svar(k1, info())
+    } fang (e) {
+        kasta = tekst(e)
+    }
+    assert(builtin.starts_with(kasta, "PwaFeil: den private ruta /api/meg"))
+    skriv("manifest, head, offline-side, utlogging og validering OK (VM)\n")
+    returner 0
+}
+
+# ── 4 ──
+funksjon versjon_sjekk() -> heltall {
+    la k = app.pwa_konfig()
+    la js0 = pwa.sw_js(k, info())
+    assert(builtin.starts_with(js0, "let C=\""))
+    assert(builtin.ends_with(js0, "\";SWLASTAR"))
+    assert_eq(pwa.sw_js(app.pwa_konfig(), info()), js0)
+    la c = pwa.sw_konfig(k, info())
+    assert_eq(lengde(c["v"]), 64)
+    assert_eq(c["c"], "nc-" + builtin.slice(c["v"], 0, 16))
+    assert_eq(builtin.join(c["p"], " "), "/ /stil.css /_nc/offline /manifest.webmanifest /_nc/ikon-192.png?v=" + pwa.ikon_versjon(k, "192") +
+        " /_nc/ikon-512.png?v=" + pwa.ikon_versjon(k, "512") + " /_nc/ikon-maskable.png?v=" + pwa.ikon_versjon(k, "maskable") +
+        " /_nc/nc.js /_nc/app.wasm?v=aaaaaaaaaaaa /_nc/sw.wasm?v=bbbbbbbbbbbb")
+    assert_eq(builtin.join(c["r"], " "), "/ /stil.css /_nc/offline /manifest.webmanifest /_nc/nc.js")
+    assert_eq(builtin.join(c["x"], " "), "/api/")
+    # Workeren godtek konfigurasjonen tenaren lagar (same JSON som i sw.js)
+    assert_eq(sw.valider_konfig(rt.json_parse(builtin.json_stringify(c))), "")
+    # Endringar
+    la endra = []
+    la k1 = app.pwa_konfig()
+    pwa.med_offline_side(k1, "Deltakarar: du er fråkopla", "Ein annan tekst.")
+    legg_til(endra, ["offline-teksten", k1, info()])
+    la k2 = app.pwa_konfig()
+    k2["skal"][1]["kropp"] = k2["skal"][1]["kropp"] + " "
+    legg_til(endra, ["stilarket", k2, info()])
+    la i3 = info()
+    i3["klient_v"] = "cccccccccccc"
+    legg_til(endra, ["klientversjonen", app.pwa_konfig(), i3])
+    la i4 = info()
+    i4["lastar"] = "LASTAR2"
+    legg_til(endra, ["lastaren", app.pwa_konfig(), i4])
+    la k5 = app.pwa_konfig()
+    pwa.med_aktivering(k5, usann)
+    legg_til(endra, ["aktiveringa", k5, info()])
+    la i = 0
+    mens i < lengde(endra) {
+        la e = endra[i]
+        la js1 = pwa.sw_js(e[1], e[2])
+        la c1 = pwa.sw_konfig(e[1], e[2])
+        hvis js1 == js0 eller c1["c"] == c["c"] {
+            skriv("endra " + e[0] + ", men sw.js eller cachenamnet er det same\n")
+            assert(usann)
+        }
+        i = i + 1
+    }
+    # Precache-lista: ingen private ruter, og ingen spørjing utan ?v=
+    la j = 0
+    mens j < lengde(c["p"]) {
+        assert(ikkje pwa.er_privat(k, c["p"][j]))
+        assert(builtin.index_of(c["p"][j], "?") < 0 eller builtin.index_of(c["p"][j], "?v=") >= 0)
+        j = j + 1
+    }
+    skriv("versjon: offline-teksten, eit app-skal, klientversjonen, lastaren og aktiveringa endrar sw.js og cachenamnet (" + c["c"] + "); ingen private ruter i precachen OK (VM)\n")
+    returner 0
+}
+
+# ── 5 ──
+funksjon stubbar_og_demo() -> heltall {
+    la t = ""
+    prøv {
+        pk.registrer(null)
+    } fang (e) {
+        t = tekst(e)
+    }
+    assert(inneheld(t, "wasm_vert.sw_registrer finst berre i nettlesaren"))
+    la t2 = ""
+    prøv {
+        sw.start()
+    } fang (e) {
+        t2 = tekst(e)
+    }
+    assert(inneheld(t2, "wasm_vert.sw_inn finst berre i nettlesaren"))
+    la h = [["ventar", usann], ["ventar", sann], ["aktivert", usann], ["aktivert", sann], ["klar", usann], ["feil TypeError", usann]]
+    la ut = []
+    la i = 0
+    mens i < lengde(h) {
+        la a = demo.sw_handling(h[i][0], h[i][1])
+        legg_til(ut, h[i][0] + "/" + tekst(h[i][1]) + ": «" + a["melding"] + "» knapp=" + tekst(a["knapp"]) + " last=" + tekst(a["last_på_nytt"]))
+        i = i + 1
+    }
+    assert_eq(builtin.join(ut, " | "),
+        "ventar/usann: «Ein ny versjon er klar.» knapp=sann last=usann | ventar/sann: «» knapp=usann last=usann | " +
+        "aktivert/usann: «Ein ny versjon er teken i bruk. Han blir lasta neste gong du opnar sida.» knapp=usann last=usann | " +
+        "aktivert/sann: «» knapp=usann last=sann | klar/usann: «» knapp=usann last=usann | feil TypeError/usann: «» knapp=usann last=usann")
+    skriv("stubbar og demo (sw_handling) OK (VM)\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    hjelp.mkdir(rot())
+    kh.køyr_korpus("test_wasm_w8", rot() + "/korpus", ["w8_sw"], [], "48388", {})
+    png_sjekk()
+    manifest_sjekk()
+    versjon_sjekk()
+    stubbar_og_demo()
+    skriv("test_wasm_w8 OK\n")
+    returner 0
+}
