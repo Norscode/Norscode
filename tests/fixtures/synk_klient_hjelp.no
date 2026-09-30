@@ -1,0 +1,270 @@
+# Testbenk for synk-klienten (std/synk_klient.no) utan nettlesar: ei «verd» med faner (klientar i
+# testmodus), ei klokke, ein tenar (ein closure som svarar på førespurnader) og ein kanal mellom
+# fanene. Lykkja er deterministisk: førespurnader blir svara i sende-rekkjefølgje (som
+# std/wasm_nett.no), meldingar på kanalen blir leverte til dei andre fanene med same eining, og
+# når ingenting ventar, går klokka fram til neste tidtakar.
+#
+# Tenaren: fun(f, fane) -> konvolutt (tekst), same form som lastaren gjev std/wasm_nett.no:
+# «id\nstatus\nheaderar-JSON\nkropp». Svaret blir klassifisert av nett.resultat, som i nettlesaren.
+# Brukt av tests/fixtures/synk_klient_sjekk.no (den ekte tenaren std/synk.no via app.dispatch) og
+# tests/wasm_korpus/synk_klient.no (ein liten tenar i Norscode, same utskrift i VM og WASM).
+bruk std.synk_klient som sk
+bruk std.wasm_nett som nett
+
+funksjon ny_verd(tenar) -> ordbok {
+    returner {"tenar": tenar, "faner": [], "no": 1000000, "offline": usann, "logg": [], "sse_v": 0, "førespurnader": 0}
+}
+
+# Ei ny fane på eininga `eining` (sk.test_eining(): IndexedDB og localStorage i minnet) med
+# informasjonskapselen `sesjon`. Statushendingane blir samla i fane["hendingar"].
+funksjon ny_fane(verd: ordbok, namn: tekst, eining: ordbok, sesjon: tekst, ekstra: ordbok) -> ordbok {
+    la konf = {"test": sann, "test_namn": namn, "test_eining": eining, "varsling": "sse", "poll_ms": 10000,
+               "samlingar": {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool", "pri": "heltall", "notat": "tekst"}, "maks_byte": 2048}}}
+    la ks = nøkler(ekstra)
+    la i = 0
+    mens i < lengde(ks) {
+        konf[ks[i]] = ekstra[ks[i]]
+        i = i + 1
+    }
+    la fane = {"namn": namn, "kl": null, "sesjon": sesjon, "eining": eining, "hendingar": [], "status": null, "open": sann, "endringar": 0}
+    fane["kl"] = sk.ny_klient(konf, fun(s) -> _status(fane, s))
+    sk.k_test_no(fane["kl"], verd["no"])
+    sk.k_lytt(fane["kl"], "*", fun(h) -> _endra(fane, h))
+    legg_til(verd["faner"], fane)
+    returner fane
+}
+
+funksjon _status(fane: ordbok, s: ordbok) -> heltall {
+    fane["status"] = s
+    hvis s["hending"] != "" { legg_til(fane["hendingar"], s["hending"]) }
+    returner 0
+}
+
+funksjon _endra(fane: ordbok, h: ordbok) -> heltall {
+    fane["endringar"] = fane["endringar"] + lengde(h["id"])
+    returner 0
+}
+
+funksjon start_fane(verd: ordbok, fane: ordbok) -> heltall {
+    sk.k_start(fane["kl"])
+    returner 0
+}
+
+# Lukk fana (som å lukke ein nettlesarfane): ho får ingenting meir.
+funksjon lukk_fane(fane: ordbok) -> heltall {
+    fane["open"] = usann
+    returner 0
+}
+
+# Konvolutten for ein nettverksfeil (ingen kontakt med tenaren).
+funksjon nettverksfeil(f: ordbok) -> tekst {
+    returner "1\n0\nTypeError\n"
+}
+
+funksjon konvolutt(status: heltall, headerar: ordbok, kropp: tekst) -> tekst {
+    returner "1\n" + tekst(status) + "\n" + builtin.json_stringify(headerar) + "\n" + kropp
+}
+
+funksjon _lever(verd: ordbok, fane: ordbok, r: ordbok) -> heltall {
+    verd["førespurnader"] = verd["førespurnader"] + 1
+    la konv = ""
+    hvis verd["offline"] {
+        konv = nettverksfeil(r["f"])
+    } ellers {
+        konv = builtin.ncb_call_fn(verd["tenar"], r["f"], fane)
+    }
+    la k = nett.tolk_konvolutt(konv)
+    la res = nett.resultat(r["f"], k)
+    hvis res["ok"] {
+        builtin.ncb_call_fn(r["ok"], res["verdi"])
+    } ellers {
+        builtin.ncb_call_fn(r["feil"], res["verdi"])
+    }
+    # SSE: etter ein push som gav ein ny versjon, får opne straumar (same brukar) hendinga «v»
+    hvis ikkje verd["offline"] og k["status"] == 200 og builtin.ends_with(tekst(r["f"]["url"]), "/push") {
+        la j = builtin.json_parse_raw(k["kropp"])
+        verd["sse_v"] = j["v"]
+        _sse_alle(verd, fane["sesjon"], tekst(j["v"]))
+    }
+    returner 0
+}
+
+funksjon _sse_alle(verd: ordbok, sesjon: tekst, data: tekst) -> heltall {
+    la i = 0
+    mens i < lengde(verd["faner"]) {
+        la f = verd["faner"][i]
+        hvis f["open"] og f["sesjon"] == sesjon og sk.k_intern(f["kl"])["sse_open"] { sk.k_sse(f["kl"], data) }
+        i = i + 1
+    }
+    returner 0
+}
+
+# SSE-straumane blir brotne (tenaren går ned): alle opne straumar får «error».
+funksjon sse_brot(verd: ordbok) -> heltall {
+    la i = 0
+    mens i < lengde(verd["faner"]) {
+        la f = verd["faner"][i]
+        hvis f["open"] og sk.k_intern(f["kl"])["sse_open"] { sk.k_sse(f["kl"], "") }
+        i = i + 1
+    }
+    returner 0
+}
+
+# Gje låsen (Web Locks) til fana (ho blir leiar når kopien er lesen).
+funksjon gje_las(fane: ordbok) -> heltall {
+    sk.k_test_leiar(fane["kl"])
+    returner 0
+}
+
+# Køyr til ingenting ventar, og med klokka fram til høgst `maks_ms` etter no. Gjev talet på runde.
+funksjon køyr(verd: ordbok, maks_ms: heltall) -> heltall {
+    la slutt = verd["no"] + maks_ms
+    la runde = 0
+    mens runde < 1500 {
+        runde = runde + 1
+        la noko = usann
+        la i = 0
+        mens i < lengde(verd["faner"]) {
+            la fane = verd["faner"][i]
+            hvis fane["open"] {
+                la ut = sk.k_test_ut(fane["kl"])
+                la j = 0
+                mens j < lengde(ut) {
+                    noko = sann
+                    _lever(verd, fane, ut[j])
+                    j = j + 1
+                }
+                la meld = sk.k_test_kanal_ut(fane["kl"])
+                j = 0
+                mens j < lengde(meld) {
+                    noko = sann
+                    la a = 0
+                    mens a < lengde(verd["faner"]) {
+                        la mot = verd["faner"][a]
+                        hvis mot["open"] og a != i og mot["eining"] == fane["eining"] { sk.k_kanal_motta(mot["kl"], meld[j]) }
+                        a = a + 1
+                    }
+                    j = j + 1
+                }
+            } ellers {
+                # Ei lukka fane: det ho sende, forsvinn (fana finst ikkje lenger)
+                sk.k_test_ut(fane["kl"])
+                sk.k_test_kanal_ut(fane["kl"])
+            }
+            i = i + 1
+        }
+        hvis ikkje noko {
+            la t = 0
+            la i2 = 0
+            mens i2 < lengde(verd["faner"]) {
+                la f2 = verd["faner"][i2]
+                la ta = sk.k_intern(f2["kl"])["tikk_at"]
+                hvis f2["open"] og ta > 0 og (t == 0 eller ta < t) { t = ta }
+                i2 = i2 + 1
+            }
+            hvis t == 0 eller t > slutt { returner runde }
+            hvis t > verd["no"] { verd["no"] = t }
+            la i3 = 0
+            mens i3 < lengde(verd["faner"]) {
+                la f3 = verd["faner"][i3]
+                sk.k_test_no(f3["kl"], verd["no"])
+                hvis f3["open"] og sk.k_intern(f3["kl"])["tikk_at"] > 0 og sk.k_intern(f3["kl"])["tikk_at"] <= verd["no"] { sk.k_tikk(f3["kl"]) }
+                i3 = i3 + 1
+            }
+        }
+    }
+    kast "synk-benken: ingen ro etter " + tekst(runde) + " rundar"
+}
+
+# Klokka fram `ms` (utan å køyre tidtakarane; dei går i neste køyr).
+funksjon vent(verd: ordbok, ms: heltall) -> heltall {
+    verd["no"] = verd["no"] + ms
+    la i = 0
+    mens i < lengde(verd["faner"]) {
+        sk.k_test_no(verd["faner"][i]["kl"], verd["no"])
+        i = i + 1
+    }
+    returner 0
+}
+
+# ─── Utskrift ────────────────────────────────────────────────────────────────
+
+# Den synlege lista i ei samling, sortert på id: «id{felt=verdi,…}*» (* = ventar på tenaren).
+funksjon vis(fane: ordbok, s: tekst) -> tekst {
+    la l = sk.k_liste(fane["kl"], s)
+    la id = []
+    la per = {}
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(id, l[i]["id"])
+        per[l[i]["id"]] = l[i]
+        i = i + 1
+    }
+    la s_id = _sorter(id)
+    la delar = []
+    i = 0
+    mens i < lengde(s_id) {
+        la e = per[s_id[i]]
+        la t = s_id[i] + _felt(e["data"])
+        hvis e["ventar"] { t = t + "*" }
+        legg_til(delar, t)
+        i = i + 1
+    }
+    returner "[" + builtin.join(delar, " ") + "]"
+}
+
+funksjon _felt(d: ordbok) -> tekst {
+    la ks = _sorter(nøkler(d))
+    la delar = []
+    la i = 0
+    mens i < lengde(ks) {
+        legg_til(delar, ks[i] + "=" + tekst(d[ks[i]]))
+        i = i + 1
+    }
+    returner "{" + builtin.join(delar, ",") + "}"
+}
+
+funksjon _sorter(l: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(ut, tekst(l[i]))
+        la j = lengde(ut) - 1
+        mens j > 0 og ut[j] < ut[j - 1] {
+            la x = ut[j]
+            ut[j] = ut[j - 1]
+            ut[j - 1] = x
+            j = j - 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# «tilstand ventar=N leiar=… hugs=…» for fana.
+funksjon tilstand(fane: ordbok) -> tekst {
+    la s = sk.k_status(fane["kl"])
+    returner s["tilstand"] + " ventar=" + tekst(s["ventar"]) + " leiar=" + tekst(s["leiar"]) + " hugs=" + tekst(s["hugs"])
+}
+
+# Hendingane sidan sist (og tøm lista).
+funksjon hendingar(fane: ordbok) -> tekst {
+    la h = builtin.join(fane["hendingar"], ",")
+    fane["hendingar"] = []
+    returner h
+}
+
+# Databasane på eininga (namn med prefikset) og tal på postar i «ko».
+funksjon dbar(eining: ordbok) -> tekst {
+    la ks = _sorter(nøkler(eining["dbar"]))
+    la delar = []
+    la i = 0
+    mens i < lengde(ks) {
+        la db = eining["dbar"][ks[i]]
+        la ko = 0
+        hvis har_nokkel(db["storar"], "ko") { ko = lengde(db["storar"]["ko"]["nøklar"]) }
+        legg_til(delar, "db(ko=" + tekst(ko) + ")")
+        i = i + 1
+    }
+    returner tekst(lengde(ks)) + " " + builtin.join(delar, " ")
+}
