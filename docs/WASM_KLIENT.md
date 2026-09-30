@@ -1,6 +1,6 @@
-# Klientlogikk i Norscode kompilert til WebAssembly (W0–W7)
+# Klientlogikk i Norscode kompilert til WebAssembly (W0–W8)
 
-Status: milepælane W0–W7 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
+Status: milepælane W0–W8 i WASM-sporet (app-kjensle del 2). Klientkode blir skriven i Norscode og kompilert til ein WasmGC-modul. Nettlesaren startar modulen med ein liten lastar som blir **emittert frå Norscode-data**. Det finst ingen handskriven JavaScript i repoet.
 
 - **W0** gav vegen frå kjelde til nettlesar: heiltal, kontrollflyt, kall og DOM-vertsfunksjonar.
 - **W1** gav verdimodellen: tekst, desimaltal, lister og ordbøker, med same semantikk som VM-en. Eit paritetskorpus køyrer kvart program i VM-en og i Chrome og krev identisk utskrift.
@@ -10,6 +10,7 @@ Status: milepælane W0–W7 i WASM-sporet (app-kjensle del 2). Klientkode blir s
 - **W5** gav nettlesar-benken `std/wasm_nettlesar.no` og CLI-en `tools/wasm_nettlesar.no`: Chrome og JavaScriptCore frå Norscode, rydding av berre eigne prosessar, app-kjensle målt i WASM-sida sjølv og sidelastingstid frå Chrome-netloggen (sjå «Nettlesar-benken»).
 - **W6** gav asynk nett via tilbakekall: `std/wasm_nett.no` (fetch mot same opphav, JSON, status og headerar, tidsgrense og avbryting, tilbakekall i sende-rekkjefølgje) og demoen `examples/wasm_deltakarar/` (sjå «Nett»).
 - **W7** gav lokal lagring i IndexedDB: `std/wasm_lager.no` (database med oppgraderingsskjema, put/hent/slett/liste/tel, område- og indeksspørjingar, éin transaksjon per batch, tilbakekall i rekkjefølgje, LagerFeil, database per brukar og sletting ved utlogging), og ein lokal kopi i deltakar-demoen som blir vist straks ved omlasting (sjå «Lokal lagring»).
+- **W8** gav ein installerbar app som startar frå cache og verkar utan nett: web-app-manifest og ikon (PNG laga i Norscode) frå `std/wasm_pwa.no`, og ein service worker der logikken er Norscode kompilert til WebAssembly (`std/wasm_sw.no`) og `sw.js` er ein generert lastar; precache, strategiar per rute, aldri cache av private svar, versjon over alle precache-kroppar, oppdateringsflyt med ventande versjon og klikk, og CSP-kravet for workeren (sjå «Installerbar app og service worker»).
 
 ## Bygg og køyr
 
@@ -27,6 +28,7 @@ NC_WASM_KJELDE=examples/wasm_skjema/klient.no NC_WASM_APP=examples/wasm_skjema/a
 | `nc.js` | Lastaren, berre for innsyn |
 | `klient_data.no` | Norscode-modul med bytane som éin rå tekstliteral (W4; i W0–W3 var det hex), lastaren og versjonane |
 | `serve.no` | (med `NC_WASM_APP`, W4) inngangen for `nc serve`: importerer appen og `klient_data`, og leverer modulen og lastaren med `std/wasm_serve.no` |
+| `sw.wasm`, `sw_lastar.js` | (med `NC_WASM_SW=1`, W8) service workeren og SW-lastaren; `klient_data.no` får `sw_wasm()`, `sw_versjon()` og `sw_lastar()`, og `serve.no` rutene til workeren, manifestet, ikona og offline-sida |
 
 Alt er generert og blir aldri committa. Både `build/` og `*.wasm` er git-ignorerte. Mappene i `NC_WASM_APP` og `NC_WASM_UT` blir modulnamn (`build.wasm.x.klient_data`), så dei må vere gyldige namn og ikkje nøkkelord (t.d. ikkje `test`).
 
@@ -57,6 +59,10 @@ Lowringa er rask i VM-fastmodus (`NORSCODE_VM_FAST=1`). `liste.no` tek 0,4 s. I 
 | `std/wasm_nettlesar.no` | Nettlesar-benken: Chrome, jsc, serve, rydding, logg, mål og netlogg (W5; berre testar og verktøy) |
 | `std/wasm_jsc.no` | Vertsshimen for `jsc -e` som JS-tre (W5) |
 | `tools/wasm_nettlesar.no` | CLI for benken: `royk`, `korpus`, `maal`, `offline` (W5) |
+| `std/wasm_sw.no` | Service workeren i Norscode (blir `sw.wasm`, W8) |
+| `std/wasm_pwa.no` | PWA på tenaren: manifest, ikon, offline-side, versjon, `sw.js` og svara (W8) |
+| `std/wasm_pwa_klient.no` | Service worker frå sida: registrering og oppdateringsflyt (W8) |
+| `std/png_enkel.no` | PNG med palett og lagra deflate-blokker, og ein validator (W8) |
 
 Ingen av dei ligg i `nc_main`-lukkinga, så dei krev ingen reseed. `std/wasm_rt.no` importerer `std/sha256.no` (som ligg i lukkinga), men endrar han ikkje. `std/wasm_serve.no` importerer `std/web.no`, som heller ikkje ligg i lukkinga. `std/wasm_nettlesar.no` brukar `std/prosess.no` og prosess-ABI-en (som testane i W0–W4).
 
@@ -534,6 +540,19 @@ Hendingsdata blir lesne medan tilbakekallet køyrer (lastaren held hendinga i `V
 | `lager_svar()` → tekst | `J`: `JSON.stringify([id, feilnamn, melding, data])` |
 | `fjern_lokalt(nøkkel)` | `localStorage.removeItem` (utlogging) |
 
+**Service worker (W8)** — sida brukar dei gjennom `std/wasm_pwa_klient.no`, workeren gjennom `std/wasm_sw.no` (berre i SW-lastaren):
+
+| Funksjon | JS-operasjon |
+|---|---|
+| `sw_registrer(url, "funksjon")` | `G`: `navigator.serviceWorker.register(url)`, `update()`, lyttarar på `updatefound`/`statechange`, `controllerchange` og `ready`; hendinga i `O` |
+| `sw_status()` → tekst | `O + " " + [kontrollert, installerer, ventar, aktiv]` som 0/1 |
+| `sw_send(melding)` | `B.waiting.postMessage(melding)` (når ein ventar) |
+| `sw_lytt("hending", "funksjon")` | (SW) `A[hending] = x[funksjon]` |
+| `sw_inn()` → tekst | (SW) dataa til hendinga (`D`; før den første: konfigurasjonen `C`) |
+| `sw_ut(plan)` | (SW) planen (`Y`) |
+
+W8-testkrokar: `test_cachar("funksjon")` (Cache Storage som JSON `[[namn, [url, …]], …]`), `test_bilete(url, "funksjon")` (`Image.decode` → «breiddxhøgd» eller «feil») og `test_resultat()` (svaret, `M`).
+
 **Testkrokar** (berre med `NC_WASM_TESTBYGG=1`; elles kompileringsfeil): `test_klikk(h)` (`click()`), `test_skriv(h, verdi)` (set `value` og sender `input` som boblar), `test_tast(h, tast)` (`keydown` med `key`) og `test_send(h)` (`requestSubmit()`, som sender `submit` gjennom lyttarane).
 
 **Handtakstabellen.** Eit handtak er ein indeks i tabellen `E` i lastaren. `slepp(h)`:
@@ -590,6 +609,8 @@ Tabellen i `vertsfunksjonar()` skildrar kvar funksjon med namn, parametertypar, 
 | `L` (W4) | Lyttar (direkte eller delegert), med `AbortController` og `preventDefault` for `send` |
 | `Q`, `R` (W6) | fetch og konvolutten til det siste svaret (berre når modulen importerer `hent_start`/`hent_svar`) |
 | `I`, `J` (W7) | IndexedDB og konvolutten til det siste svaret (berre når modulen importerer `lager_start`/`lager_svar`) |
+| `G`, `B`, `O` (W8) | Registreringa av service workeren, registreringa og den siste hendinga (berre med PWA-importane) |
+| `M` (W8) | Svaret frå testkrokane `test_cachar` og `test_bilete` (berre testbygg) |
 
 Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), har nodane `vilkår` (`?:`), `ikkje` (`!`) og `sekvens` (`(a,b)`), og skriv nøklar med æ, ø og å utan hermeteikn (`tøm:`, `gå_til:`).
 
@@ -610,6 +631,11 @@ Emitteren (W4) set parentesar etter presedensen i JS (`a-(b-c)`, `(a??b)||c`), h
 | Lagrings-gruppa (W7: `lager_start`, `lager_svar`, `fjern_lokalt`, hjelparane `I` og `J`) | 1 256 byte | 1 280 byte (eige budsjett) |
 | Heile produksjonstabellen med nett og lagring (42) | 4 211 byte | 4 288 byte (2 560 + 448 + 1 280) |
 | Heile tabellen med testkrokane, nett og lagring (47) | 4 523 byte | 4 800 byte (W6: 3 520) |
+| PWA-gruppa (W8: `sw_registrer`, `sw_status`, `sw_send`, `G`, `B`, `O`) | 674 byte | 704 byte (eige budsjett) |
+| Heile produksjonstabellen med nett, lagring og PWA (W8) | 4 885 byte | 4 992 byte |
+| Heile tabellen med testkrokane (W8, med PWA og `test_cachar`/`test_bilete`/`test_resultat`) | 5 553 byte | 5 888 byte (3 520 + 1 280 + 704 + 384) |
+| SW-lastaren (W8, `sw.js` utan konfigurasjonen) | 1 751 byte | 1 792 byte (eige tak) |
+| Deltakar-demoen (W8, med PWA) | 4 204 byte | 4 544 byte (2 560 + 1 280 + 704) |
 | Skjema-demoen (22 importar) | 1 755 byte | 2 048 byte |
 | Deltakar-demoen (W7, 27 importar med nett og lagring) | 3 402 byte (W6: 2 027) | 3 840 byte (2 560 + 1 280, `test_wasm_w6` og `test_wasm_w7_demo`) |
 | W4-proben (7 importar: `finn`, `sett_tekst`, `hent_verdi`, `deleger`, `hending_data`, `lagre_lokalt`, `nå_ms`) | 994 byte | |
@@ -798,6 +824,136 @@ lager.logg_ut(db, lager.brukar_db_namn("nc-app", uid), ["nc-app-val"], fun(x) ->
 
 **Funn: rt-cachen og ncb_call_fn.** Analysecachen frå W4 tok opp verknadene til ein funksjon når setta av closures, dispatcharar og vertskall var like store før og etter analysen. Var dispatcharen for `ncb_call_fn` med same aritet alt registrert av ein annan funksjon, vart verknadene tekne opp utan han, og eit anna program som henta analysen av `std.wasm_lager._kall` frå cachen, fekk ein modul som validatoren avviste (`venta i32, fekk (ref null eq)`). Lowringa merkjer no opptaket som ureint når analysen rører closures, `CALL_VALUE`, `ncb_call_fn` eller vertsfunksjonar (`_opptak_urein`). `test_wasm_w7` byggjer to program etter kvarandre med ein fersk, delt cache og krev at modulen er byte-lik den utan cache.
 
+## Installerbar app og service worker (W8)
+
+Appen kan installerast, startar frå cache og verkar utan nett. Service worker-logikken er Norscode kompilert til WebAssembly (`sw.wasm`), og `sw.js` er ein **generert lastar**, emittert av `std/wasm_js.no` frå same vertstabell som sidelastaren. Det finst framleis ingen handskriven JavaScript.
+
+| Fil | Rolle |
+|---|---|
+| `std/wasm_sw.no` | Service workeren i Norscode (blir `sw.wasm`): konfigurasjonen, planane for install, activate, message og fetch, og regelen for kva svar som kan lagrast |
+| `std/wasm_pwa.no` | Tenarsida: konfigurasjon som Norscode-data, validering, manifest, ikon, offline-side, head-taggar, versjon, `sw.js` og svara, Clear-Site-Data ved utlogging, kill switch |
+| `std/wasm_pwa_klient.no` | Sida: registrering, hendingar (`registrert`, `klar`, `ventar`, `aktivert`, `feil …`, `ustøtta`), `aktiver_ny()` |
+| `std/png_enkel.no` | Ikon: indeksert PNG med 1 bit palett, lagra deflate-blokker, CRC-32 og Adler-32, og ein validator (`sjekk`) |
+
+### Bruk
+
+```
+# app.no
+bruk std.wasm_pwa som pwa
+
+funksjon pwa_konfig() -> ordbok {
+    la k = pwa.konfig("Deltakarar", "Deltakarar")
+    pwa.med_farger(k, "#1f5f99", "#ffffff")
+    pwa.med_skal(k, "/", side_html(""))          # app-skal: HTML utan persondata
+    pwa.med_skal(k, "/stil.css", stil_css())
+    pwa.med_privat(k, "/api/")                    # aldri cacha, aldri frå cachen
+    returner k
+}
+# i <head>: pwa.head_tags(k)  (manifest, theme-color, ikon)
+
+# klient.no
+bruk std.wasm_pwa_klient som pwa
+pwa.registrer(fun(s) -> sw_endra(s))            # s["hending"]: ventar → vis «Oppdater»
+pwa.aktiver_ny()                                 # klikk på «Oppdater»
+```
+
+Bygg med `NC_WASM_SW=1` (i tillegg til `NC_WASM_KJELDE`, `NC_WASM_APP` og `NC_WASM_UT`). `tools/nc_wasm.no` byggjer då òg `sw.wasm` (frå ein generert drivar som kallar `std.wasm_sw.start()`, eller `NC_WASM_SW_KJELDE`) og SW-lastaren, skriv ei ekstra linje `SW: sw.wasm <n> byte, sw-lastar <m> byte, v=<12 hex> importar=… eksportar=… rt=…`, og legg rutene til i `serve.no`:
+
+| Rute | Svar |
+|---|---|
+| `GET /sw.js` | `let C="<konfig-JSON>"` + SW-lastaren; `text/javascript`, `no-cache`, `Service-Worker-Allowed: /`, CSP med `'wasm-unsafe-eval'` |
+| `GET /_nc/sw.wasm?v=…` | modulen, `immutable` ved rett `v` |
+| `GET /manifest.webmanifest` | `application/manifest+json`, `no-cache` |
+| `GET /_nc/ikon-192.png?v=…`, `ikon-512.png`, `ikon-maskable.png` | `image/png`, `immutable` ved rett `v`, ETag |
+| `GET /_nc/offline` | offline-sida (`<body data-nc-offline="1">`, ingen skript, standard-CSP) |
+
+Fail-closed: sida kan ikkje importere vertsfunksjonane til workeren (`sw_lytt`, `sw_inn`, `sw_ut`), og workeren kan berre importere dei og dei interne (`vert.sw_tillatne()`: ikkje DOM, nett, lagring eller `logg_test`). Begge gjev exit 1 med ei melding.
+
+### Workeren (`std/wasm_sw.no`)
+
+SW-lastaren registrerer `install`, `activate`, `message` og `fetch` **synkront** når skriptet blir evaluert (kravet i spesifikasjonen), og kvar hending ventar på `K`: modulen blir henta frå Cache Storage først (`sw.wasm?v=` er precacha, så workeren kan starte utan nett), elles frå nettet. `Z(hending, data)` gjev dataa til Norscode som JSON og får ein plan attende; lastaren utfører berre planen:
+
+| Hending | Data til Norscode | Plan |
+|---|---|---|
+| install | — | `{c, u}`: cachenamnet og URL-ane som skal precachast. Kvar URL blir henta med `cache: "reload"`, og lagra berre når `lagre` seier ja; elles feilar installasjonen (ein privat eller feil konfigurert app-skal-URL stoppar han) |
+| activate | namna på cachane | cachane som skal slettast: alle `nc-…` unnateke den gjeldande |
+| message | `{m, k}`: meldinga og talet på faner (`clients.matchAll({includeUncontrolled: true})`) | `{s}`: skipWaiting for `nc-skip` (klikk), og for `nc-auto` når konfigurasjonen tillèt automatisk aktivering og `k ≤ 1` |
+| fetch | `{m, u, n, o}`: metode, URL, modus, opphav | `{k, n, l, c, o}`, sjå under |
+| lagre | `{s, t, r, c}`: status, type, omdirigert, Cache-Control | `{l}`: 2xx (ikkje 206), `basic`, ikkje omdirigert, utan `private` eller `no-store` (store og små bokstavar, med argument) |
+
+Strategiane (`k`):
+
+| `k` | Når | Kva lastaren gjer |
+|---|---|---|
+| `cache` | versjonerte ressursar (`?v=` i precachen) | cache først, elles nettet (og lagre) |
+| `nett` | app-skalet og dei eksplisitte offline-rutene (nøkkelen er stien utan spørjing) | nettet først og lagre når `lagre` seier ja; utan nett cachen, så offline-sida for navigasjonar |
+| `berre` | private stiar og ukjende sider, når det er ein navigasjon | berre nettet, aldri lagra; utan nett offline-sida |
+| `forbi` | andre metodar enn GET, andre opphav, private førespurnader som ikkje er navigasjonar (`/api/…`), alt anna | ingen `respondWith` i det heile når modulen er klar (sjå «Funn»), elles `fetch` |
+
+Eit feilsvar (4xx/5xx), eit privat svar eller ei omdirigering skriv difor aldri over ei oppføring, og innlogga HTML blir aldri cacha. Ein handterar som kastar, gjev ein trygg plan (ingenting lagra, ingen skipWaiting, fetch rett til nettet; ved install `null`, så installasjonen feilar). Kan modulen ikkje startast (t.d. CSP), går førespurnaden til nettet.
+
+**Kill switch:** `pwa.slå_av(k)` gjev ein worker som ikkje handterer noko, ikkje precachar, tek seg sjølv i bruk ved `nc-auto` og slettar alle `nc-…`-cachar.
+
+### Konfigurasjon, versjon og validering (`std/wasm_pwa.no`)
+
+Konfigurasjonen workeren får (`C` i `sw.js`): `{v, c, p, i, r, x, o, a, av}` = versjon (64 hex), cachenamn `nc-<16 hex>`, precache-URL-ar, immutable (`?v=`), nett-først-stiar, private stiar, offline-sida, automatisk aktivering med éi fane, kill switch. `std/wasm_sw.no` validerer han (`valider_konfig`) og kastar `SwFeil` når han er ugyldig; då blir ingen handterar registrert, og installasjonen feilar.
+
+Precachen er app-skalet og offline-rutene appen oppgjev, offline-sida, manifestet, ikona, lastaren (`/_nc/nc.js`), `app.wasm?v=` og `sw.wasm?v=`. **Versjonen** er sha256 over konfigurasjonen (med versjonane til klientmodulen, `sw.wasm` og ikona i URL-ane) og kroppane til alt som blir precacha utan `?v=`: app-skalet, offline-rutene, offline-sida, manifestet og lastaren. Han blir rekna ut i `/sw.js`-ruta (sha256 er ein builtin). Endrar éin av dei seg, endrar både `sw.js` og cachenamnet seg (testa for offline-teksten, eit app-skal, klientversjonen, lastaren og aktiveringa), og nettlesaren installerer ein ny worker.
+
+`pwa.valider(k)` (også kalla i `sw_svar` og `manifest_svar`, som kastar `PwaFeil`): namn og kortnamn, `scope` er ein sti som sluttar på `/`, `start_url` innanfor scope **og** app-skal (elles kan appen ikkje starte utan nett), `display`, fargar `#rrggbb`, app-skal er absolutte stiar utan spørjing, ikkje private og ikkje PWA-rutene, og leverte ikon er gyldige PNG-ar med rett storleik.
+
+**Manifest:** `id`, `name`, `short_name`, `description`, `lang`, `start_url`, `scope`, `display` (`standalone`), `theme_color`, `background_color` og ikon 192×192 (`any`), 512×512 (`any`) og 512×512 (`maskable`). **Ikon:** levert av appen (`pwa.med_ikon(k, "192", bytar)`) eller laga av `std/png_enkel.no`: ein ring i bakgrunnsfargen på temafargen, 1 bit palett, 192 px = 4 886 byte og 512 px = 33 366 byte (tak i testen 40 KB). Ringen ligg innanfor tryggleikssona til maskable-ikon (radius 40 %), så 512-biletet blir brukt til begge. Versjonen til eit generert ikon er sha256 av generatorversjonen, storleiken og fargane, så `/sw.js` treng ikkje lage ikona (512 px tek om lag 0,4 s i fastmodus). **Utlogging:** `pwa.utlogging_headerar()` / `pwa.med_utlogging(svar)` gjev `Clear-Site-Data: "cache", "storage"` (Cache Storage, IndexedDB, localStorage og registreringa).
+
+### Sida (`std/wasm_pwa_klient.no`) og oppdateringsflyten
+
+`registrer(ved_endring)` registrerer `/sw.js` (hjelparen `G` i lastaren), ber nettlesaren sjå etter ein ny versjon med ein gong (`update()`, som feilar stille utan nett), og kallar `ved_endring(status())` ved kvar hending. Flyten (standardval frå app-planen):
+1. Ein ny versjon blir installert og **ventar**. Sida får `ventar`, og klienten sender `nc-auto` av seg sjølv. Workeren tek han i bruk berre når konfigurasjonen tillèt det (`med_aktivering`, standard sann) og det berre finst **éi fane**.
+2. Elles ventar han til brukaren klikkar. Demoen viser «Ein ny versjon er klar.» og knappen «Oppdater»; klikket sender `nc-skip` (`aktiver_ny()`).
+3. Når den nye workeren har teke over (`aktivert`, controllerchange), blir sida lasta på nytt med `vert.gå_til` (full navigasjon), men berre når brukaren sjølv bad om det. Ved automatisk aktivering seier demoen «Ein ny versjon er teken i bruk. Han blir lasta neste gong du opnar sida.».
+4. Gamle cachar blir sletta i `activate`.
+
+Avgjerda i demoen er ein rein funksjon (`klient.sw_handling(hending, klikka)`), testa i VM-en.
+
+### CSP for service workeren [V]
+
+Det er policyen på **svaret for `sw.js`** som gjeld i workeren, ikkje policyen på sida. Målt i Chrome 154 (headless) med eit scratch-skript og så med den ekte workeren:
+- `sw.js` med `script-src 'self'`: `WebAssembly.compile` i workeren feilar med «Compiling or instantiating WebAssembly module violates the following Content Security policy directive because 'unsafe-eval' is not an allowed source of script …» (kjelde: `sw.js`), K blir avvist, installasjonen feilar, og workeren blir aldri aktiv. Utan nett etterpå får profilen ingenting («Page load failed»).
+- `sw.js` med `script-src 'self' 'wasm-unsafe-eval'` (`ws.csp_wasm()`, som `pwa.sw_svar` brukar): `wasm-ok`.
+
+`test_wasm_w8_oppdatering` (steg u5) er den negative kontrollen: same bygg med `pwa.sw_svar_med_csp(…, ws.csp_standard())`. `'wasm-unsafe-eval'` opnar ikkje for `eval`, og sw.js er det einaste skriptet utanom WASM-sidene som får han.
+
+### Funn i Chrome [V]
+
+- **Virtuell tid:** med `--virtual-time-budget` ventar ikkje Chrome på at workeren blir installert (som IndexedDB i W7). Testklientane held ein puls (`/api/puls`) i gang til workeren er `klar`. Utan puls (produksjonsbygget) blir ikkje installasjonen ferdig før DOM-en blir dumpa.
+- **Aktivering:** Chrome aktiverer ikkje ein ventande worker (heller ikkje etter `skipWaiting`) så lenge den gamle har hendingar i gang, og ein jamn straum av `fetch` gjennom den gamle (pulsen) held han oppteken. Lastaren slepp difor `forbi`-førespurnader rett til nettet utan `respondWith` når modulen er klar, og testklienten byter pulsen ut med éin treg førespurnad om gongen (`/api/vent`, 1 s) medan han ventar på `aktivert`.
+- **skipWaiting under install** (første utkast, planen `s` ved install) gjorde ikkje at Chrome aktiverte workeren når han var installert, målt med eit reint JS-probe og med den ekte workeren. Den automatiske aktiveringa går difor via `nc-auto`-meldinga, med talet på faner, etter at sida har fått `ventar`.
+- **Kopien før respondWith:** `c.put(n, s.clone())` inne i `caches.open().then()` gav «Response body is already used» (Uncaught i konsollen, fanga av testen): kopien blir laga synkront før svaret går vidare.
+- **Navigasjon:** headless Chrome med `--dump-dom` og virtuell tid dumpar aldri DOM-en etter ein JS-navigasjon (målt: hang til tidsgrensa). Omlastinga etter aktiveringa er difor slått av i testbygget (`last_på_nytt`: usann), og avgjerda er testa i VM-en.
+- **Offline utan workeren:** Chrome skriv «Page load failed: net::ERR_CONNECTION_REFUSED» og dumpar ingenting; benken stoppar då med ein gong (`side_feila`) i staden for å vente til tidsgrensa.
+- **HTTP-cachen:** `sw.wasm?v=` er `immutable`, så nettlesaren finn han i HTTP-cachen òg utan nett. Ein mutasjon der K berre hentar frå nettet, gav difor grøn demotest; at modulen kjem frå Cache Storage, er testa i lastaren (`test_wasm_lastar`).
+
+### Storleikar (W8)
+
+| | Byte |
+|---|---|
+| `sw.wasm` (std/wasm_sw.no med JSON frå runtime-biblioteket) | 23 274 |
+| SW-lastaren (`sw_lastar.js`) | 1 751 (tak 1 792) |
+| `sw.js` for demoen (konfigurasjon + lastar) | 2 473 |
+| PWA-gruppa i sidelastaren (`G`, `B`, `O`, `sw_registrer`, `sw_status`, `sw_send`) | 674 (tak 704) |
+| Testkrokane `test_cachar`, `test_bilete`, `test_resultat` (`M`) | 352 (tak 384) |
+| Deltakar-demoen, produksjon: `app.wasm` / `nc.js` | 54 949 / 4 204 (W7: 52 213 / 3 402) |
+| Ikon 192 / 512 px | 4 886 / 33 366 |
+
+Planen hadde 1,5 KB for SW-lastaren. Utkastet der (1 168 byte) hadde verken svarmetadata til Norscode (regelen for lagring ligg i Norscode, ikkje i lastaren), kopien før `respondWith`, fallbacken til nettet når modulen ikkje kan startast, den synkrone gjennomsleppinga av `forbi` eller talet på faner i meldingane. `test_wasm_lastar` handhevar det nye taket, proveniensen for kvart token i `sw.js` og at han berre kan importere SW-funksjonane.
+
+### Demoen utan nett
+
+`examples/wasm_deltakarar/` er installerbar: app-skalet er sida og stilarket (lista kjem frå `/api/`, som er privat), og utan nett blir den lokale kopien frå W7 vist før feilen frå tenaren, med statusen «Viser lagra kopi frå eininga (N deltakarar). Tenaren svarar ikkje, så lista kan vere eldre enn på tenaren.» (feilen ventar no på kopien, som svaret frå tenaren gjorde i W7).
+
+Resultat i Chrome 154 (`test_wasm_w8_demo`, testbygg, same profil): første besøk installerte workeren og precacha 12 URL-ar i éin cache `nc-<16 hex>` (om lag 5,3 s, mest ikona og precachen mot `nc serve`); `/mi-side` (utan `Cache-Control: private`, men privat i konfigurasjonen) og `/api/` vart aldri lagra, og `/nyheiter?ny=1` oppdaterte offline-ruta medan 403 og eit privat svar ikkje gjorde det. Med `nc serve` stoppa kom sida frå cachen (om lag 0,4 s), den lokale kopien vart vist, ikona var 192×192 og 512×512 frå cachen, `/nyheiter` var «nyheiter v2», og `/finst-ikkje` og `/mi-side` gav offline-sida. Ein fersk profil utan nett fekk ingenting. Ingen «Uncaught».
+
+CLI: `NC_NETTLESAR_MODUS=offline NC_NETTLESAR_KJELDE=tests/fixtures/wasm_deltakarar_pwa_testklient.no NC_NETTLESAR_APP=tests/fixtures/wasm_deltakarar_pwa_testapp.no NC_NETTLESAR_TESTBYGG=1 NC_NETTLESAR_STI='/test?steg=1' NC_NETTLESAR_STI_OFFLINE='/test?steg=3' NC_NETTLESAR_KREV='ikon frå cachen' ./bin/nc run tools/wasm_nettlesar.no` gav `offline OK`; med `NC_NETTLESAR_SW=0` (utan workeren) «den andre lastinga feila» og exit ≠ 0.
+
 ## Nettlesar-benken (W5)
 
 `std/wasm_nettlesar.no` er éin stad for det alle nettlesartestane treng, skrive i Norscode (`tests/fixtures/wasm_chrome_hjelp.no` er no eit tynt lag over han; `wasm_test_hjelp` har framleis sitt eige `bygg`, sidan det å importere benken der kosta om lag 3 s per test i standard-VM-en):
@@ -981,6 +1137,10 @@ W7 (byte):
 | `tests/test_wasm_w7.no` | W7 utan nettlesar: korpusa `w7_lager` (reine funksjonar) og `w7_lager_ko` (køa) i VM, bygg og Chrome; stubbane kastar i VM-en; ugyldige argument kastar LagerFeil «data» utan at noko blir registrert; den lokale kopien i demoen i VM-en (skjema, databasenamn, feilmeldingar); regresjon for rt-cachen (to program etter kvarandre med fersk, delt cache, byte-likt); jsc (valfri): korpusa lik fasiten, og utan IndexedDB gjev opninga LagerFeil «open» i rekkjefølgje utan «Uncaught» (ende til ende er SKIP i jsc). |
 | `tests/test_wasm_w7_chrome.no` | Valfri. W7-testklienten i tre lastingar med same profil: opne/oppgradere (v1→v2→v3, ny indeks, nytt lager, fjerna lager, v3 medan v2 er open), CRUD i rekkjefølgje med eit tilbakekall som kastar, verdiar attende like, nøkkelrekkjefølgje, 100 dokument i éin batch, område- og indeksspørjingar, batchar som rullar tilbake (unik indeks, ukjent lager), versjon, lukka database; dei 100 etter omlasting; ein annan brukar ser ein tom database; logg_ut; ny og tom database etter utlogging; lukk medan opninga går (det som alt var bede om, blir køyrt, det som kjem etter, får `transaksjon`). Negativ kontroll: fersk profil finn ingenting. Utan Chrome: bygget med lagrings-importane. |
 | `tests/test_wasm_w7_demo.no` | Valfri. Demoen: lokal kopi vist før tenarsvaret (tenaren svarar etter 800 ms), ulagra endringar som blir ståande, lagring, sletting med knappen, ingen kopi etter sletting; fersk profil utan kopi (negativ kontroll); produksjonsbygget viser dei 10 frå tenaren utan lokal kopi. Utan Chrome: bygga, lagrings-importane og lastartaket (3 840 byte). |
+| `tests/test_wasm_w8.no` | W8 utan nettlesar: korpuset `w8_sw` (dei reine funksjonane i workeren og statusen på sida) i VM, bygg og Chrome; PNG (CRC-32 og Adler-32 mot kjende vektorar, validatoren fangar øydelagd CRC, avkorting, signatur og komprimerte blokker; ikona 192 og 512 i fastmodus: gyldige, 512 ≤ 40 KB, deterministiske, levert ikon med feil storleik avvist); manifestet og valideringa; versjonen (offline-teksten, eit app-skal, klientversjonen, lastaren og aktiveringa endrar `sw.js` og cachenamnet), ingen private ruter i precachen, workeren godtek konfigurasjonen frå tenaren; stubbane; `sw_handling` i demoen. |
+| `tests/test_wasm_w8_serve.no` | Bygget av demoen med workeren (importar, eksportar, SW-lastartaket) og rutene i serve-inngangen utan sokkel (`/sw.js` med CSP, `Service-Worker-Allowed` og `no-cache`, `sw.wasm`, manifest, ikon med `immutable` og ETag, offline-side og head-taggar); fail-closed: SW-funksjonar på sida og DOM i workeren blir avviste. |
+| `tests/test_wasm_w8_demo.no` | Valfri. Demoen: installasjon og precache, private svar og feilsvar blir ikkje lagra, sida frå cachen utan nett med den lokale kopien og ikona, offline-sida for ukjende og private sider; fersk profil utan nett får ingenting. |
+| `tests/test_wasm_w8_oppdatering.no` | Valfri. Tre versjonar etter kvarandre med same profil: ny versjon ventar på klikk (to cachar, melding og knapp), klikk → aktivert og gamal cache sletta; automatisk aktivering med éi fane; `sw.js` utan `'wasm-unsafe-eval'` gjev ein worker som aldri blir aktiv (CSP-brotet frå `sw.js` i konsollen), og utan nett ingenting. |
 
 Chrome-hjelparane ligg i `tests/fixtures/wasm_chrome_hjelp.no` (W5: eit tynt lag over nettlesar-benken `std/wasm_nettlesar.no`, med profilane under `build/wasm-nettlesar/fixtur/`). Der les `dump_med_konsoll` DOM-en og Chrome-konsollen (stderr med `--enable-logging`). Serve utan sokkel (`NORSCODE_FAKE_HTTP_REQUESTS`) ligg i `tests/fixtures/wasm_serve_hjelp.no` (W6). Korpushjelparane ligg i `tests/fixtures/wasm_korpus_hjelp.no`, modulinnsyn (seksjonar, kroppar) i `tests/fixtures/wasm_test_hjelp.no`, og `tests/fixtures/wasm_valider_fil.no` validerer ei fil i ein barneprosess. W3: `kh.køyr_korpus` er heile tre-stegs-køyringa, som begge korpustestane brukar.
 
@@ -1113,6 +1273,21 @@ Testane er prøvde med mellombelse mutasjonar, og kvar av desse gjorde testen ra
 | W7: alle batchar readonly | `test_wasm_w7_chrome` |
 | W7: demoen held ikkje på ulagra endringar frå eininga | `test_wasm_w7_demo` |
 | W7: demoen lagrar utan at brukaren har valt det | `test_wasm_w7_demo` |
+| W8: `private` blir ikkje sett på som ein grunn til å ikkje lagre | `test_wasm_w8` (VM-steget, `w8_sw`) og `test_wasm_w8_demo` (steg 3: «privat utgåve») |
+| W8: versjonen utan offline-sida | `test_wasm_w8` (versjonen) |
+| W8: feil CRC-polynom | `test_wasm_w8` (CRC-vektoren) |
+| W8: auto-meldinga ser bort frå konfigurasjonen | `test_wasm_w8` (VM-steget) og `test_wasm_w8_oppdatering` (u2) |
+| W8: kopien etter `caches.open` (etter respondWith) | `test_wasm_lastar` |
+| W8: `respondWith` for `forbi` òg | `test_wasm_lastar` |
+| W8: `finn` tillaten i workeren | `test_wasm_lastar` |
+| W8: `G` dreg med seg `M` | `test_wasm_lastar` (hjelparane til PWA-gruppa) |
+| W8: sida kan importere `sw_lytt` | `test_wasm_w8_serve` |
+| W8: `sw.js` med standard-CSP | `test_wasm_w8_serve` |
+| W8: `sw.js` utan `Service-Worker-Allowed` | `test_wasm_w8_serve` |
+| W8: statusgrensa 499 i staden for 299 (403 blir lagra) | `test_wasm_w8_demo` (steg 3: «status 403 nekta») |
+| W8: private navigasjonar «nett først» med lagring | `test_wasm_w8_demo` (steg 2: `/mi-side` i cachen; testsida har ikkje `Cache-Control: private`, så konfigurasjonen åleine må verne ho) |
+| W8: sida sender ikkje `nc-auto` | `test_wasm_w8_oppdatering` (u4: «vart aldri aktivert») |
+| W8: `activate` slettar ingen gamle cachar | `test_wasm_w8_oppdatering` (u2: «cachar: 2») |
 
 Kontrollar:
 - Ein semantisk no-op i lenkinga gav grøn `test_wasm_w4`.
@@ -1172,7 +1347,19 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 - **`test_wasm_w7`** hadde først bygga av testklienten og demoen med (60 s i fastmodus); dei er flytte til `test_wasm_w7_chrome` og `test_wasm_w7_demo`, som byggjer dei uansett, og regresjonen for rt-cachen brukar den minste modulen (`wasm_w7_utan_idb`).
 - Linux (Docker `nc-x86tools`, stage0 frå `bootstrap/`, eigen `build/`) har ikkje Chrome eller jsc, så dei stega er SKIP der. VM-, bygg- og tenarstega køyrer (også ryddetesten til benken og JSON-rutene til demoen). Alle testane er grøne på begge plattformene og i begge modusane.
 
-## Gjenstår før W8
+## Gjenstår før W9
+
+- **W8 (nytt):**
+  - Berre Chrome 154 (headless) er testa med service workeren. Installerbarheita («Installer app» og Application → Manifest i DevTools) er ikkje stadfesta i ekte Chrome; manifestet og ikona er validerte i Norscode, og ikona er dekoda av Chrome (`Image.decode`). Safari og Firefox er ikkje testa, og Safari kan slette data for nettstader som ikkje er installerte.
+  - Service workeren krev HTTPS utanom `localhost`/`127.0.0.1`. Kven som terminerer TLS i produksjon, er framleis eit ope spørsmål.
+  - Produksjonsbygget kan ikkje testast ende til ende i headless Chrome: utan ein puls blir ikkje installasjonen ferdig før DOM-en blir dumpa. Testbygget køyrer den ekte klienten og workeren.
+  - Den fulle navigasjonen etter aktiveringa er slått av i Chrome-testen (headless dumpar ikkje etter ein navigasjon); avgjerda er testa i VM-en, og `vert.gå_til` er testa i W4.
+  - «Éi fane» er talet på vindauge `clients.matchAll({includeUncontrolled: true})` gjev når sida sender `nc-auto`; to faner er ikkje testa (`--dump-dom` har éi fane).
+  - Versjonen blir rekna ut på tenaren for kvar `/sw.js` (sha256 over om lag 10–20 KB); app-skalet må vere det same som tenaren leverer (appen gjev kroppen i `med_skal`). Leverte ikon blir validerte (PNG-sjekk) i kvar `/sw.js`, om lag 0,35 s for 512 px i fastmodus.
+  - Precachen blir henta med `Promise.all` mot `nc serve`, som tek éi tilkopling om gongen; det tek om lag 5 s første gong (mest dei to 512-ikona, 0,4 s kvar i fastmodus). Ein apptenar (A6/R1) og cache av ikona på tenaren ville korte det ned.
+  - SW-lastaren er 1 751 byte (tak 1 792) mot 1,5 KB i planen, sjå «Storleikar (W8)».
+  - Fragment-førespurnader (ei offline-side per fragment, A4) og NSP/1-synk i workeren er ikkje med (W9).
+  - Kill switch-en slettar cachane, men sida avregistrerer ikkje workeren.
 
 - **W7 (nytt):**
   - IndexedDB er berre testa i Chrome 154. JavaScriptCore-skalet har ikkje IndexedDB (ende til ende er SKIP der; berre vegen utan IndexedDB er testa), og Safari og Firefox er ikkje testa med lagring.
@@ -1190,7 +1377,7 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
 - **W5/W6:**
   - `nc serve` tek éi tilkopling om gongen. Parallelle førespurnader med avbrot eller tidsavbrot medan dei ventar på ei tilkopling kan få tenaren til å vente på ein sokkel utan førespurnad (sjå «Nett»). Krev ein apptenar med fleire tilkoplingar (A6/R1); til då: høgst seks om gongen og avbrot etter at førespurnaden er skriven.
   - Tidsgrenser kan berre testast i Chrome med virtuell tid når sida sjølv held klokka i gang (testklienten ventar aktivt i 60 ms). Ein testmodus utan virtuell tid krev CDP eller ein ekstra ressurs som held `load` att.
-  - Offline-modusen i benken finst, men utan service worker viser den andre lastinga ingenting (W8).
+  - Offline-modusen i benken byggjer no med service workeren (W8), men den første sida må halde nettet i gang til workeren er klar (testbygg med puls).
   - `web.request_header` og `web.request_cookie` skil mellom store og små bokstavar under `nc serve` (demoen går rundt det). Bør rettast i `std/web.no` (utanfor lukkinga) i eit eige steg.
   - Nett-gruppa i lastaren har eige budsjett (448 byte). Heile produksjonstabellen med nett er 2 955 byte.
   - Firefox er framleis ikkje testa. Safari-motoren (jsc) er testa for korpusprogram utan DOM; demoane treng ein DOM og er berre køyrde i Chrome.
