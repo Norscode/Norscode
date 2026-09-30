@@ -140,6 +140,35 @@ Windows i CI.
 Estimat: W0–W2 er éi–to økter kvar; W3/W4 to–tre; W5 éi; W6 er den største (tre–fem);
 W7 éi. Kring 8 milepælar / 12–18 økter til promoterbar seed.
 
+## 3c. Status (2026-09-30) — W1 codegen-innkopling landa (fikstursett)
+
+* **W1 codegen-innkopling — LANDA og verifisert** (commit 661f21d + os_getrandom-fiks 99dabb5).
+  `native_codegen_v2.no` emitterer no ein Norscode-bygd PE32+ for `NC_TARGET=windows-x86_64`:
+  * Målplumbing: `X86_MAL()` les `NC_TARGET` (standard `linux-x86_64` → byte-identisk), `ER_WINDOWS()`;
+    `heap_layout` deler `windows-x86_64` med `linux-x86_64` (identiske VA-ar).
+  * PE-container `bygg_pe_bilete`: samanhengande seksjonar per §2.1; `.idata = [OSTAB 4096 B @0x771000]
+    ++ [importkatalog @0x772000]`; `.heap` som bss; NCB-trailer som overlay. `OSTAB_VA()`/`IMPORT_VA()`.
+  * OS-rutinane (write/read/exit/getrandom/mprotect/clock_gettime + enosys) via `win64.emit_os_routines`
+    inn i `.text`, 512-slot OSTAB fylt med VA-ane. `emit_syscall_site` (FF 14 25 disp32, 7 B).
+  * Windows-`_start` gata i `kompiler_v2` (stakk-base, rekursjonsvakt, GC-vaktside via `VirtualProtect`,
+    `ExitProcess`-exit). **Minimal tom argv/envp** enno (sjå «att» under).
+  * Ruta syscall-stader: skriv-write (split 7765), `_start` exit(60), GC-guard mprotect(10),
+    now_ms clock_gettime(228), random_byte getrandom(318) — alle lengdebevarande, gata på `ER_WINDOWS()`.
+  * **Verifisert seed-uavhengig** (Docker `nc-x86tools` byggjer cg1 frå worktree-kjelde via committa
+    `native_codegen_x86_64.elf`; køyrt i `nc-wine`): 6/6 fikstur (hei/tekst/unnatak/gcstress/lister/
+    tidrand) **byte-identisk Linux-output** OG **rett stdout + exitkode under wine** via kernel32. Wine
+    er trygg oracle på desse (ingen rå syscall i stiane; exitkoden kan ikkje forfalskast).
+  * Adversarial review (4 dim + verify): éin ekte bug funnen og fiksa — `os_getrandom` testa heile
+    rax på RtlGenRandom sin 1-byte BOOLEAN (fail-closed-brot); fiks `and rax,255`.
+* **Att i W1:** full argv/envp i Windows-`_start` (GetCommandLineW/CommandLineToArgvW/
+  WideCharToMultiByte — MERK: `builtin.argv()` gjev argc=0 på Linux-baseline òg, så semantikken må
+  avklarast før Windows-argv kan verifiserast); batch-vegen `ncval_x86_link_with` sin `_start` (for
+  full nc_main / W5); resten av split/bare2-stadene til `os_enosys` inntil W2/W4-rutinane finst.
+* **Merk harness:** `scratch/windows/`-skripta (§3b) blir tømde ved sesjonsomstart. Den reproduserte
+  raske lykkja: `nc bundle native_codegen_v2.no` → Docker `nc-x86tools` byggjer cg1 via committa
+  codegen-ELF (~1,6 s) → cg1 kompilerer fikstur for begge mål (~0,16 s) → `cmp` mot committa-codegen-
+  output (Linux-identitet) + `nc-wine`-køyring (exitkode/stdout).
+
 ## 3b. Status (2026-09-28)
 
 * **W0 — ferdig.** `pe_emitter.no`: `bygg_importar` (importkatalog/ILT/IAT/namn, fleire DLL-ar),
