@@ -1,0 +1,136 @@
+# A7: det NSP/1-tenaren skal avvise. 401 (utan sesjon, utgått sesjon, feil i
+# sesjonsoppslaget) også når appen har ein open funksjon kalla krev_brukar; 403 csrf
+# (manglar, feil, token frå ein annan sesjon, framand Origin, cross-site); 415; ingen
+# CORS; validering (ukjend samling, «__»-felt, ukjent felt, feil type, for stort
+# dokument), kontrollteikn, for stor batch, for stor kropp og kvote per brukar.
+bruk tests.fixtures.apptenar_hjelp som ah
+bruk tests.fixtures.synk_hjelp som sh
+
+funksjon feilkode(r: ordbok, i: heltall) -> tekst {
+    la x = r["json"]["res"][i]
+    hvis x["ok"] { returner "ok" }
+    returner x["feil"]
+}
+
+funksjon start() -> heltall {
+    la data = ah.ny_datamappe("synk-negativ")
+    la app = sh.start_tenar(data, {"SYNK_MAKS_DOK": "3", "SYNK_MAKS_OPS": "5"})
+    la port = app["port"]
+    la no = builtin.tid_ms()
+
+    # ── 401 ──
+    sh.krev_feil("hallo utan sesjon", sh.hallo(port, ""), 401, "ikkje_innlogga")
+    sh.krev_feil("hallo utgått", sh.hallo(port, "t-utgatt"), 401, "ikkje_innlogga")
+    sh.krev_feil("hallo når oppslaget kastar", sh.hallo(port, "t-kast"), 401, "ikkje_innlogga")
+    sh.krev_feil("pull utan sesjon", sh.pull(port, "", 0, {}), 401, "ikkje_innlogga")
+    sh.krev_feil("pull utgått", sh.pull(port, "t-utgatt", 0, {}), 401, "ikkje_innlogga")
+    sh.krev_feil("push utan sesjon", sh.push(port, "", "", "e", "k", 0, []), 401, "ikkje_innlogga")
+    la ev = ah.kall(port, "GET", "/_synk/hendingar", {}, "")
+    assert_eq(ev["status"], 401)
+    skriv("401: utan sesjon, utgått sesjon og kastande oppslag, på hallo, pull, push og hendingar\n")
+
+    la h = sh.hallo(port, "t-u1")
+    sh.krev("hallo u1", h, 200)
+    la csrf = h["json"]["csrf"]
+    la epoke = h["json"]["epoke"]
+    la ops = [sh.op_put(1, "oppg", "a1", sh.hlc(no, 0, "k1"), "{\"tittel\":\"x\"}")]
+    la kropp = sh.push_kropp(epoke, "k1", 0, ops)
+
+    # ── CSRF ──
+    sh.krev_feil("utan token", sh.push_rå(port, "t-u1", "", kropp, {}), 403, "csrf")
+    la u2_token = sh.hallo(port, "t-u2")["json"]["csrf"]
+    sh.krev_feil("token frå u2", sh.push_rå(port, "t-u1", u2_token, kropp, {}), 403, "csrf")
+    la snudd = builtin.slice(csrf, 0, 127) + "0"
+    hvis builtin.slice(csrf, 127, 128) == "0" { snudd = builtin.slice(csrf, 0, 127) + "1" }
+    sh.krev_feil("endra token", sh.push_rå(port, "t-u1", snudd, kropp, {}), 403, "csrf")
+    sh.krev_feil("framand Origin", sh.push_rå(port, "t-u1", csrf, kropp, {"Origin": "https://x.norscode.no"}), 403, "csrf")
+    sh.krev_feil("cross-site", sh.push_rå(port, "t-u1", csrf, kropp, {"Sec-Fetch-Site": "cross-site"}), 403, "csrf")
+    la utan_ct = ah.kall(port, "POST", "/_synk/push", {"Cookie": "nc_sesjon=t-u1", "X-NC-CSRF": csrf, "Content-Type": "text/plain"}, kropp)
+    assert_eq(utan_ct["status"], 415)
+    # Eit anna maskert token for same sesjon er òg gyldig; same opphav er lov
+    la csrf_b = sh.hallo(port, "t-u1")["json"]["csrf"]
+    assert(csrf_b != csrf)
+    la ok = sh.push_rå(port, "t-u1", csrf_b, kropp, {"Origin": "http://127.0.0.1"})
+    sh.krev("rett token og same opphav", ok, 200)
+    skriv("csrf: manglande, framand, endra token, framand Origin og cross-site gav 403 csrf; to ulike maskerte token var begge gyldige\n")
+
+    # ── Ingen CORS ──
+    la cors = ah.kall(port, "GET", "/_synk/pull?sidan=0", {"Cookie": "nc_sesjon=t-u1", "Origin": "https://x.norscode.no"}, "")
+    assert_eq(cors["status"], 200)
+    assert_eq(ah.hdr(cors, "access-control-allow-origin"), "")
+    assert_eq(ah.hdr(cors, "access-control-allow-credentials"), "")
+    la opt = ah.kall(port, "OPTIONS", "/_synk/push", {"Origin": "https://x.norscode.no", "Access-Control-Request-Method": "POST"}, "")
+    assert_eq(ah.hdr(opt, "access-control-allow-origin"), "")
+    skriv("CORS: pull med framand Origin og gyldig cookie gav ingen Access-Control-Allow-Origin\n")
+
+    # ── Validering per op (seq blir brukt opp, resten av batchen går vidare) ──
+    la stor = "0123456789"
+    la i = 0
+    mens i < 5 {
+        stor = stor + stor
+        i = i + 1
+    }
+    la v = sh.push(port, "t-u1", csrf, epoke, "k1", 1, [
+        sh.op_put(2, "ukjend", "x", sh.hlc(no, 1, "k1"), "{\"a\":1}"),
+        sh.op_put(3, "oppg", "a1", sh.hlc(no, 2, "k1"), "{\"__del__\":1}"),
+        sh.op_put(4, "oppg", "a1", sh.hlc(no, 3, "k1"), "{\"farge\":\"raud\"}"),
+        sh.op_put(5, "oppg", "a1", sh.hlc(no, 4, "k1"), "{\"pri\":\"høg\"}"),
+        sh.op_put(6, "merke", "m1", sh.hlc(no, 5, "k1"), "{\"namn\":\"" + stor + "\"}")
+    ])
+    sh.krev("validering", v, 200)
+    assert_eq(feilkode(v, 0), "samling")
+    assert_eq(feilkode(v, 1), "felt_namn:__del__")
+    assert_eq(feilkode(v, 2), "felt_ukjent:farge")
+    assert_eq(feilkode(v, 3), "felt_type:pri")
+    assert_eq(feilkode(v, 4), "for_stor")
+    assert_eq(v["json"]["siste_seq"], 6)
+    # For stort etter samanfletting: to felt under taket kvar, over taket saman
+    la halv = builtin.slice(stor, 0, 150)
+    la v2 = sh.push(port, "t-u1", csrf, epoke, "k1", 6, [
+        sh.op_put(7, "merke", "m2", sh.hlc(no, 6, "k1"), "{\"namn\":\"" + halv + "\"}"),
+        sh.op_put(8, "merke", "m2", sh.hlc(no, 7, "k1"), "{\"farge\":\"" + halv + "\"}"),
+        sh.op_put(9, "oppg", "a1", sh.hlc(no, 8, "k1"), "{\"id\":1}"),
+        sh.op_put(10, "oppg", "a b", sh.hlc(no, 9, "k1"), "{\"pri\":1}"),
+        sh.op_put(11, "oppg", "a1", "1790000000000:1:k1", "{\"pri\":1}")
+    ])
+    assert_eq(feilkode(v2, 0), "ok")
+    assert_eq(feilkode(v2, 1), "for_stor")
+    assert_eq(feilkode(v2, 2), "felt_ukjent:id")
+    assert_eq(feilkode(v2, 3), "id")
+    assert_eq(feilkode(v2, 4), "hlc")
+    skriv("validering: ukjend samling, «__del__», ukjent felt, feil type, for stort dokument (også etter samanfletting), id og HLC avviste per op\n")
+
+    # ── Kroppen: kontrollteikn, form, batch og storleik ──
+    sh.krev_feil("kontrollteikn", sh.push_rå(port, "t-u1", csrf, "{\"p\":1,\"epoke\":\"" + epoke + "\",\"klient\":\"k1\",\"kvittert\":11,\"ops\":[{\"seq\":12,\"op\":\"put\",\"s\":\"oppg\",\"id\":\"a1\",\"hlc\":\"" + sh.hlc(no, 10, "k1") + "\",\"felt\":{\"tittel\":\"x\\u0001\"}}]}", {}), 400, "kontrollteikn")
+    sh.krev_feil("ikkje JSON-objekt", sh.push_rå(port, "t-u1", csrf, "[1,2]", {}), 400, "ugyldig")
+    sh.krev_feil("feil protokoll", sh.push_rå(port, "t-u1", csrf, "{\"p\":2}", {}), 400, "protokoll")
+    sh.krev_feil("ugyldig klient", sh.push_rå(port, "t-u1", csrf, "{\"p\":1,\"klient\":\"a/b\",\"ops\":[]}", {}), 400, "klient")
+    la seks = []
+    i = 0
+    mens i < 6 {
+        legg_til(seks, sh.op_put(12 + i, "oppg", "a1", sh.hlc(no, 20 + i, "k1"), "{\"pri\":1}"))
+        i = i + 1
+    }
+    sh.krev_feil("for stor batch", sh.push(port, "t-u1", csrf, epoke, "k1", 11, seks), 413, "for_stor_batch")
+    la k = ah.koble(port)
+    ah.send(k, "POST /_synk/push HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 300000\r\n\r\n")
+    assert_eq(ah.les_svar(k, "", usann, 10000)["status"], 413)
+    skriv("kropp: kontrollteikn 400, feil form 400, 6 op-ar over taket på 5 gav 413, 300 000 byte gav 413\n")
+
+    # ── Kvote: 3 dokument per brukar; oppdateringar går framleis ──
+    la q = sh.push(port, "t-u1", csrf, epoke, "k1", 11, [
+        sh.op_put(12, "oppg", "a2", sh.hlc(no, 30, "k1"), "{\"pri\":1}"),
+        sh.op_put(13, "oppg", "a3", sh.hlc(no, 31, "k1"), "{\"pri\":1}"),
+        sh.op_put(14, "oppg", "a1", sh.hlc(no, 32, "k1"), "{\"pri\":5}")
+    ])
+    assert_eq(feilkode(q, 0), "ok")
+    assert_eq(feilkode(q, 1), "kvote")
+    assert_eq(feilkode(q, 2), "ok")
+    skriv("kvote: dokument nr. 4 for u1 gav kvote, oppdatering av eit eksisterande gjekk\n")
+
+    ah.kall(port, "POST", "/test/stopp", {}, "")
+    assert_eq(ah.vent_slutt(app["h"], 15000), 0)
+    ah.stopp(app["h"])
+    skriv("test_synk_negativ OK\n")
+    returner 0
+}
