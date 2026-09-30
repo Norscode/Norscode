@@ -1,0 +1,157 @@
+# Testapp for synk-klienten i Chrome (W9, tests/test_synk_klient_chrome.no og
+# tests/test_synk_klient_faner.no): demoen examples/wasm_synk/app.no (sida, innlogging og NSP/1)
+# under apptenaren, og testruter. Miljø (krev env.read): SYNK_DATA (absolutt datamappe) og
+# SYNK_PORT (fast port, så opphavet og dermed IndexedDB er det same etter ein omstart).
+#
+#   GET  /test?steg=…&u=u1   testsida (demoen + <pre id="nc-logg">); med u: ny sesjon i kapselen
+#   GET  /test/faner?steg=…  testsida med ei iframe (/test/fane): to faner i same profil
+#   GET  /test/fane?steg=…   iframe-sida (CSP frame-ancestors 'self')
+#   GET  /test/logg_inn?u=   ny sesjon (kapsel) frå sida sjølv
+#   POST /test/utgaa?u=      alle sesjonane til brukaren går ut (401)
+#   POST /test/stopp         sjekkpunkt og stopp tenaren (offline)
+#   POST /test/ny_epoke      restore → 410
+#   POST /test/hol           neste push mistar den første op-en (→ 409)
+#   POST /test/tenar_skriv?u=&id=&tittel=  ei endring frå «ei anna eining» (SSE-hending)
+#   POST /test/rapport       loggline frå iframe-fana; GET /test/rapportar gjev dei
+#   GET  /api/puls           held Chrome-klokka i gang (IndexedDB, sjå docs/WASM_KLIENT.md)
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.synk som synk
+bruk std.synk_kjerne som kj
+bruk std.wasm_serve som ws
+bruk examples.wasm_synk.app som demo
+
+la _t: ordbok = {"hol": usann, "rapportar": [], "skriv_n": 0}
+
+funksjon _miljø(namn: tekst, standard: tekst) -> tekst {
+    la v = ""
+    prøv { v = builtin.miljo_hent(namn) } fang (e) { v = "" }
+    hvis v == "" { returner standard }
+    returner v
+}
+
+funksjon _q(ctx: ordbok_tekst, namn: tekst) -> tekst {
+    la q = ctx["__query__"]
+    hvis q != null og har_nokkel(q, namn) { returner tekst(q[namn]) }
+    returner ""
+}
+
+funksjon _ok(body: tekst) -> ordbok_tekst {
+    returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": body, "cache_control": "no-store"}
+}
+
+# Sida med CSP som tillèt å vere i ei iframe på same opphav (fanetesten).
+funksjon _side(html: tekst, token: tekst) -> ordbok_tekst {
+    la csp = builtin.replace(ws.csp_wasm(), "frame-ancestors 'none'", "frame-ancestors 'self'")
+    la s = ws.svar("text/html; charset=utf-8", html, csp, "no-cache")
+    hvis token != "" { s["headers"]["set-cookie"] = demo.sesjon_kapsel(token) }
+    returner s
+}
+
+funksjon t_side(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /test")
+    la u = _q(ctx, "u")
+    la token = ""
+    hvis u != "" { token = demo.ny_sesjon(u) }
+    returner _side(demo.side_html("<pre id=\"nc-logg\"></pre>"), token)
+}
+
+funksjon t_faner(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /test/faner")
+    returner _side(demo.side_html("<pre id=\"nc-logg\"></pre><iframe src=\"/test/fane?steg=fb\" title=\"Fane B\"></iframe>"), "")
+}
+
+funksjon t_fane(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /test/fane")
+    returner _side(demo.side_html("<pre id=\"nc-logg\"></pre>"), "")
+}
+
+funksjon t_logg_inn(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /test/logg_inn")
+    la s = _ok("ok")
+    s["headers"] = {"set-cookie": demo.sesjon_kapsel(demo.ny_sesjon(_q(ctx, "u")))}
+    returner s
+}
+
+funksjon t_utgaa(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/utgaa")
+    returner _ok(tekst(demo.avslutt_brukar(_q(ctx, "u"))))
+}
+
+funksjon t_stopp(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/stopp")
+    synk.sjekkpunkt()
+    app.stopp()
+    returner _ok("stoppar")
+}
+
+funksjon t_epoke(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/ny_epoke")
+    returner _ok(synk.ny_epoke())
+}
+
+funksjon t_hol(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/hol")
+    _t["hol"] = sann
+    returner _ok("ok")
+}
+
+# Førespurnad-mellomvare: når /test/hol er kalla, mistar neste push med minst to op-ar den første.
+funksjon hol_mw(ctx: ordbok) -> ordbok {
+    hvis _t["hol"] og ctx["__path__"] == "/_synk/push" {
+        la b = builtin.json_parse_raw(ctx["__body__"])
+        hvis builtin.type(b) == "ordbok" og har_nokkel(b, "ops") og lengde(b["ops"]) >= 2 {
+            _t["hol"] = usann
+            la ops = []
+            la i = 1
+            mens i < lengde(b["ops"]) {
+                legg_til(ops, b["ops"][i])
+                i = i + 1
+            }
+            b["ops"] = ops
+            ctx["__body__"] = builtin.json_stringify(b)
+        }
+    }
+    returner ctx
+}
+
+# Ei endring frå ei anna eining (ein annan klient hjå same brukar), gjennom den ekte push-vegen.
+funksjon t_tenar_skriv(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/tenar_skriv")
+    la u = _q(ctx, "u")
+    la token = demo.ny_sesjon(u)
+    _t["skriv_n"] = _t["skriv_n"] + 1
+    la hlc = kj.hlc_lag(builtin.tid_ms(), 0, "tenar")
+    la kropp = "{\"p\":1,\"epoke\":" + kj.json_tekst(synk.status()["epoke"]) + ",\"klient\":\"tenar-" + tekst(_t["skriv_n"]) + "-" + builtin.random_hex(4) +
+        "\",\"kvittert\":0,\"ops\":[{\"seq\":1,\"op\":\"put\",\"s\":\"oppg\",\"id\":" + kj.json_tekst(_q(ctx, "id")) +
+        ",\"hlc\":" + kj.json_tekst(hlc) + ",\"felt\":{\"tittel\":" + kj.json_tekst(_q(ctx, "tittel")) + ",\"ferdig\":false,\"laga\":1}}]}"
+    la c = {"method": "POST", "__method__": "post", "__path__": "/_synk/push", "__query__": {},
+            "__headers__": {"host": "127.0.0.1", "cookie": "nc_sesjon=" + token, "content-type": "application/json",
+                            "x-nc-csrf": synk.csrf_token(token)},
+            "__body__": kropp, "__params__": {}, "__lh__": sann}
+    la r = synk.push(c)
+    demo.avslutt_sesjon(token)
+    returner _ok(tekst(r["status"]))
+}
+
+funksjon t_rapport(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /test/rapport")
+    legg_til(_t["rapportar"], tekst(ctx["__body__"]))
+    returner _ok("ok")
+}
+
+funksjon t_rapportar(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /test/rapportar")
+    returner _ok(builtin.join(_t["rapportar"], "\n"))
+}
+
+funksjon puls(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /api/puls")
+    returner _ok("ok")
+}
+
+funksjon start() -> heltall {
+    demo.sett_opp_synk(_miljø("SYNK_DATA", ""))
+    returner app.lytt({"port": heltall_fra_tekst(_miljø("SYNK_PORT", "0")), "maks_ms": 170000, "sse_hb_ms": 1000,
+                       "forespurnad_mw": ["tests.fixtures.synk_klient_testapp.hol_mw"], "logg": _miljø("SYNK_LOGG", "feil")})
+}

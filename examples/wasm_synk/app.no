@@ -1,0 +1,182 @@
+# examples/wasm_synk/app.no — synka oppgåveliste (W9): klientlogikken (examples/wasm_synk/klient.no)
+# er Norscode kompilert til WebAssembly, og tenaren er apptenaren (std/apptenar.no, nc run) med
+# NSP/1-endepunkta frå std/synk.no.
+#
+#   GET  /                 sida (CSP med 'wasm-unsafe-eval'); inga persondata i HTML-en
+#   GET  /stil.css         stilark
+#   GET  /logg_inn?u=ada   demo-innlogging (ada eller bo): ny sesjon i ein HttpOnly-kapsel, så /
+#   POST /logg_ut          sesjonen blir avslutta, kapselen sletta, og Clear-Site-Data
+#   /_synk/…               hallo, push, pull og hendingar (SSE), sjå docs/APPTENAR_SYNK.md
+#
+# Oppgåvene blir viste straks dei er skrivne (optimistisk), overlever fråkopling og omlasting
+# når brukaren har valt «Hugs denne eininga» (IndexedDB per brukar), og blir synka når nettet er
+# tilbake. Fleire faner held seg samde (éi leiarfane synkar, dei andre får endringane på ein
+# kanal). Ein annan brukar på same eining ser aldri dei førre sine oppgåver.
+#
+# Bygg og køyr (frå rota i repoet):
+#   NC_WASM_KJELDE=examples/wasm_synk/klient.no NC_WASM_APP=examples/wasm_synk/app.no \
+#       NC_WASM_UT=build/wasm/wasm_synk NC_WASM_SW=1 ./bin/nc run tools/nc_wasm.no
+#   NC_SYNK_PORT=8080 ./bin/nc run build/wasm/wasm_synk/serve.no
+#   (opne http://127.0.0.1:8080/logg_inn?u=ada)
+#
+# Miljø: NC_SYNK_PORT (standard 8080), NC_SYNK_DATA (absolutt datamappe, standard
+# <rota>/build/wasm_synk-data). I produksjon: deploy.apptenar_miljø (disk berre i datamappa).
+#
+# Service worker (W8, NC_WASM_SW=1): app-skalet er sida og stilarket; /_synk/, /logg_inn og
+# /logg_ut er private (aldri cacha, aldri frå cachen), og synk-svara har sjølve no-store eller
+# private.
+
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.synk som synk
+bruk std.wasm_serve som ws
+bruk std.wasm_pwa som pwa
+
+# Sesjonar i minnet: token → {"uid", "sesjon"}. Ein ekte app har sitt eige sesjonslager.
+la _sesjonar: ordbok = {}
+
+funksjon kapsel_namn() -> tekst { returner "nc_sesjon" }
+
+funksjon brukarar() -> liste { returner ["ada", "bo"] }
+
+funksjon samlingar() -> ordbok {
+    returner {"oppg": {"felt": {"tittel": "tekst", "ferdig": "bool", "laga": "heltall"}, "maks_byte": 1024}}
+}
+
+# NSP/1: brukaren til førespurnaden, eller {} (ikkje innlogga).
+funksjon synk_brukar(ctx: ordbok_tekst) -> ordbok_tekst {
+    la t = app.cookie(ctx, kapsel_namn())
+    hvis t != "" og har_nokkel(_sesjonar, t) { returner _sesjonar[t] }
+    returner {}
+}
+
+funksjon ny_sesjon(uid: tekst) -> tekst {
+    la t = builtin.random_hex(24)
+    _sesjonar[t] = {"uid": uid, "sesjon": t}
+    returner t
+}
+
+# Avslutt alle sesjonane til brukaren (t.d. «logg ut overalt», eller at sesjonen går ut).
+funksjon avslutt_brukar(uid: tekst) -> heltall {
+    la ks = nøkler(_sesjonar)
+    la n = 0
+    la i = 0
+    mens i < lengde(ks) {
+        hvis _sesjonar[ks[i]]["uid"] == uid {
+            fjern_nokkel(_sesjonar, ks[i])
+            n = n + 1
+        }
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon avslutt_sesjon(token: tekst) -> heltall {
+    hvis har_nokkel(_sesjonar, token) {
+        fjern_nokkel(_sesjonar, token)
+        returner 1
+    }
+    returner 0
+}
+
+funksjon sesjon_kapsel(token: tekst) -> tekst {
+    returner kapsel_namn() + "=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+}
+
+# Sida. `ekstra` kjem sist i <body> (testappen legg inn <pre id="nc-logg">).
+funksjon side_html(ekstra: tekst) -> tekst {
+    returner "<!doctype html><html lang=\"nn\"><head><meta charset=\"utf-8\">" +
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+        "<title>Oppgåver (synka)</title>" +
+        "<link rel=\"stylesheet\" href=\"/stil.css\">" + pwa.head_tags(pwa_grunn()) + ws.script_tag() + "</head>" +
+        "<body><main><h1>Oppgåver</h1>" +
+        "<p><span id=\"status\" role=\"status\" aria-live=\"polite\">Oppgåvene krev WebAssembly.</span></p>" +
+        "<p id=\"feil\" class=\"feil\" role=\"alert\" hidden></p>" +
+        "<form id=\"skjema\" novalidate><p><label for=\"tittel\">Ny oppgåve</label> " +
+        "<input id=\"tittel\" name=\"tittel\" maxlength=\"200\" autocomplete=\"off\"> " +
+        "<button id=\"legg-til\" type=\"submit\">Legg til</button></p></form>" +
+        "<ul id=\"liste\"></ul>" +
+        "<p><output id=\"nc-resultat\">–</output></p>" +
+        "<p><button id=\"hugs\" type=\"button\" aria-pressed=\"false\">Hugs denne eininga</button> " +
+        "<span id=\"lokal\" role=\"status\" aria-live=\"polite\"></span></p>" +
+        "<p><button id=\"logg-ut\" type=\"button\">Logg ut</button> " +
+        "<a href=\"/logg_inn?u=ada\">Logg inn som Ada</a> · <a href=\"/logg_inn?u=bo\">Logg inn som Bo</a></p>" +
+        "</main>" + ekstra + "</body></html>"
+}
+
+funksjon side(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /")
+    returner ws.side(side_html(""))
+}
+
+funksjon stil_css() -> tekst {
+    returner "body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem}" +
+        ".feil{color:#b00020}#liste li{margin:.3rem 0}#liste .ferdig span{text-decoration:line-through;color:#555}" +
+        "#liste .ventar small{color:#8a5a00}button[disabled]{opacity:.5}"
+}
+
+funksjon stil(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /stil.css")
+    returner ws.svar("text/css; charset=utf-8", stil_css(), ws.csp_standard(), "no-cache")
+}
+
+funksjon logg_inn(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /logg_inn")
+    la u = ""
+    la q = ctx["__query__"]
+    hvis q != null og har_nokkel(q, "u") { u = tekst(q["u"]) }
+    hvis u != "ada" og u != "bo" {
+        returner {"status": 400, "content_type": "text/plain; charset=utf-8", "body": "Ukjend brukar", "cache_control": "no-store"}
+    }
+    la t = ny_sesjon(u)
+    returner {"status": 303, "body": "", "location": "/", "cache_control": "no-store", "headers": {"set-cookie": sesjon_kapsel(t)}}
+}
+
+funksjon logg_ut(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /logg_ut")
+    la t = app.cookie(ctx, kapsel_namn())
+    hvis t != "" og har_nokkel(_sesjonar, t) { fjern_nokkel(_sesjonar, t) }
+    la h = pwa.utlogging_headerar()
+    h["set-cookie"] = kapsel_namn() + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+    returner {"status": 204, "body": "", "cache_control": "no-store", "headers": h}
+}
+
+# ─── PWA (W8) ────────────────────────────────────────────────────────────────
+
+funksjon pwa_grunn() -> ordbok {
+    la k = pwa.konfig("Oppgåver", "Oppgåver")
+    pwa.med_skildring(k, "Synka oppgåveliste med klientlogikk i Norscode og WebAssembly.")
+    pwa.med_farger(k, "#2d6a4f", "#ffffff")
+    returner k
+}
+
+funksjon pwa_konfig() -> ordbok {
+    la k = pwa_grunn()
+    pwa.med_skal(k, "/", side_html(""))
+    pwa.med_skal(k, "/stil.css", stil_css())
+    pwa.med_privat(k, "/_synk/")
+    pwa.med_privat(k, "/logg_inn")
+    pwa.med_privat(k, "/logg_ut")
+    pwa.med_offline_side(k, "Oppgåver: du er fråkopla", "Denne sida finst ikkje på eininga. Opne Oppgåver for å sjå oppgåvene du har valt å hugse.")
+    returner k
+}
+
+# ─── Oppstart ────────────────────────────────────────────────────────────────
+
+funksjon _miljø(namn: tekst, standard: tekst) -> tekst {
+    la v = ""
+    prøv { v = builtin.miljo_hent(namn) } fang (e) { v = "" }
+    hvis v == "" { returner standard }
+    returner v
+}
+
+funksjon sett_opp_synk(data: tekst) -> heltall {
+    builtin.mkdir_p(data)
+    returner synk.sett_opp({"datamappe": data, "brukar_fn": "examples.wasm_synk.app.synk_brukar", "samlingar": samlingar()})
+}
+
+funksjon start() -> heltall {
+    la data = _miljø("NC_SYNK_DATA", tekst(builtin.system_info()["cwd"]) + "/build/wasm_synk-data")
+    sett_opp_synk(data)
+    returner app.lytt({"port": heltall_fra_tekst(_miljø("NC_SYNK_PORT", "8080"))})
+}
