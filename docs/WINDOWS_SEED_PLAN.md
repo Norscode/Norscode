@@ -140,6 +140,32 @@ Windows i CI.
 Estimat: W0–W2 er éi–to økter kvar; W3/W4 to–tre; W5 éi; W6 er den største (tre–fem);
 W7 éi. Kring 8 milepælar / 12–18 økter til promoterbar seed.
 
+## 3d. Status (2026-10-01) — W1 fullført (argv) + W2 fil-I/O; nc compile på Windows
+
+* **Full argv** (commit 5f8dd2f): `os_setup_argv` (OSTAB-slot 500) synteserer argv frå
+  GetCommandLineW→CommandLineToArgvW→WideCharToMultiByte(CP_UTF8) inn i ein VirtualAlloc-
+  buffer, skriv {argv**, argc} + tomt envp til verts-ABI-slottane. `builtin.argv_list_v1`
+  gjev IDENTISK argc/args på Linux og Windows (verifisert `foo bar` → argc=3).
+* **W2 fil-I/O — LANDA** (c07d51d/e1580a6/029e163): nye OS-rutinar med UTF-8→UTF-16-
+  stikonvertering: os_access (GetFileAttributesW), os_open (CreateFileW + flagg-kart),
+  os_close (CloseHandle), os_lseek (SetFilePointerEx), os_stat (st_mode). Ruta syscall-
+  stadene i fil_finnes (access), fil_les_safe (stat), fil_les (open/lseek×2/read/close —
+  read-staden er den ikkje-lengdenøytrale §5-staden: 4 spennande handkoda hopp justerte ±3)
+  og fil_skriv (open/write/close, alt lengdenøytralt).
+* **MILEPÆL: nc_main byggjer som Windows-PE og fungerer som kompilator.** `nc version`,
+  `nc` (bruk), `nc compile <fil> -o <ncb>` køyrer under wine med **byte-identisk output**
+  som Linux (nc compile NCB sha256-verifisert lik). fil_finnes/fil_les/fil_skriv gjev
+  identiske resultat Linux↔wine. Wine er trygg oracle på alle desse (ingen rå syscall att
+  i stiane). 6/6 fikstur (hei/tekst/unnatak/gcstress/lister/tidrand) framleis LINID+WIN-OK.
+* **W2-review** (win-w2-review, dbaa3ad): fiksa UTF-16-buffer-overflyt (ramme 4128→4160) og
+  to os_setup_argv-layout-kollisjonar (envp↔argv argc≥769; argv↔streng argc≥1025) via
+  dynamisk argc-basert bufferlayout. Verifisert argc=901 → tomt miljø + rette args.
+* **Att (lang hale):** binær fil-I/O (fil_skriv_binar/fil_les_bin), katalog-op (getdents64
+  →FindFirstFileW, mkdir/unlink/rmdir/rename/chmod), system_info (uname/getcwd/readlink),
+  lstat — alle W2-rutinar som manglar; og W4 (nanosleep/futex/clone/thread-exit, arkitektur:
+  CreateThread ≠ clone). W5 (kryss-codegen-seed-bygg) + W6 (attestasjon på EKTE Windows-CI,
+  ikkje lokalt køyrbar) + W7 (promotering) står att.
+
 ## 3c. Status (2026-09-30) — W1 codegen-innkopling landa (fikstursett)
 
 * **W1 codegen-innkopling — LANDA og verifisert** (commit 661f21d + os_getrandom-fiks 99dabb5).
