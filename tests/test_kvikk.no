@@ -1,0 +1,398 @@
+// App-kjensle del 1: std/kvikk.no utan klientkode.
+//   - Speculation Rules er gyldig JSON med rett innhald (prefetch/prerender,
+//     iver, same origin, unntak for /_*, utlogging, data-nc-prefetch=false,
+//     rel=nofollow og eigne mønster), og private sider får ikkje prerender
+//     utan at appen slår det på.
+//   - Headerane på HTML, reglar og stilark: Speculation-Rules, Content-Type,
+//     Cache-Control (aldri no-store på HTML), ETag, 304 ved svak If-None-Match.
+//   - Sec-Purpose kjennest att kasus-uavhengig, og vaktene er totale.
+//   - Ingen HTML frå laget inneheld <script eller on*=-attributt.
+//   - Gjennom web.handle_request (in-process) held responskontrakten: ingen
+//     no-store, og response_finalize legg ikkje ein gissa content-type i headers.
+bruk std.web som web
+bruk std.http_cache som hc
+bruk std.kvikk som kvikk
+bruk std.frontend som frontend
+
+funksjon fart() -> ordbok_tekst {
+    returner kvikk.med_unntak(kvikk.oppsett(), "/admin/*")
+}
+
+funksjon kvikk_ressurs(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_nc/{fil:tekst}")
+    returner kvikk.ressurs(ctx, fart())
+}
+
+funksjon kvikk_heim(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /kvikk-heim")
+    returner kvikk.side(ctx, fart(), "<!doctype html><title>Heim</title><p>heim</p>")
+}
+
+funksjon kvikk_teljar(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.use_guard("std.kvikk.vakt_ingen_spekulasjon")
+    web.route("GET /kvikk-teljar")
+    returner kvikk.side(ctx, fart(), "<p>talt</p>")
+}
+
+// ─── Hjelparar ──────────────────────────────────────────────────────────────
+
+funksjon hdr(s: ordbok_tekst, namn: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(s, "headers") eller s["headers"] == null { returner "" }
+    la h = s["headers"]
+    la ks = nøkler(h)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis tekst_til_liten(k) == tekst_til_liten(namn) { returner tekst(h[k]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon krev_kontrakt(namn: tekst, s: ordbok_tekst) -> heiltall {
+    la feil = hc.kontrakt_feil(s)
+    hvis feil != "" { skriv("kontraktbrot i " + namn + ": " + feil + "\n") }
+    assert_eq(feil, "")
+    returner 0
+}
+
+funksjon ctx_h(h: ordbok_tekst) -> ordbok_tekst {
+    returner {"__headers__": h, "__query__": {}, "__params__": {}}
+}
+
+funksjon ctx_ressurs(fil: tekst, v: tekst) -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    hvis v != "" { q["v"] = v }
+    returner {"__headers__": {}, "__query__": q, "__params__": {"fil": fil}}
+}
+
+// Kasus-uavhengig søk. Lowercasar berre korte bitar: tekst_til_liten heng på
+// tekstar over 256 byte på Linux-x86-stage0 (bootstrap/stage0, målt 2026-09-29).
+funksjon inneheld_ci(t: tekst, nål: tekst) -> bool {
+    la n = lengde(t)
+    la m = lengde(nål)
+    la i: heiltall = 0
+    mens i + m <= n {
+        hvis tekst_til_liten(builtin.slice(t, i, i + m)) == nål { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Sann når teksten har eit on<bokstavar>=-attributt (onclick=, ONLOAD= …) etter
+// mellomrom, / eller linjeskift.
+funksjon har_on_attributt(html: tekst) -> bool {
+    la n = lengde(html)
+    la i: heiltall = 1
+    mens i + 2 < n {
+        la før = builtin.slice(html, i - 1, i)
+        la skil = før == " " eller før == "/" eller før == "\n" eller før == "\t" eller før == "\r"
+        hvis skil og tekst_til_liten(builtin.slice(html, i, i + 2)) == "on" {
+            la j = i + 2
+            la fleire = sann
+            mens fleire og j < n {
+                la c = builtin.char_code(builtin.slice(html, j, j + 1))
+                hvis (c >= 97 og c <= 122) eller (c >= 65 og c <= 90) { j = j + 1 } ellers { fleire = usann }
+            }
+            hvis j > i + 2 og j < n og builtin.slice(html, j, j + 1) == "=" { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon krev_utan_skript(namn: tekst, html: tekst) -> heiltall {
+    la skript = inneheld_ci(html, "<script")
+    la on = har_on_attributt(html)
+    hvis skript eller on { skriv("klientkode i " + namn + ": <script=" + tekst(skript) + " on*=" + tekst(on) + "\n") }
+    assert(ikkje skript)
+    assert(ikkje on)
+    returner 0
+}
+
+funksjon inneheld_tekst(l, verdi: tekst) -> bool {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == verdi { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon inneheld_sti(l, sti: tekst) -> bool {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]["pathname"]) == sti { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon kastar_unntak(mønster: tekst) -> bool {
+    prøv {
+        kvikk.med_unntak(kvikk.oppsett(), mønster)
+    } fang (e) {
+        returner sann
+    }
+    returner usann
+}
+
+funksjon kastar_iver(iver: tekst) -> bool {
+    prøv {
+        kvikk.med_iver(kvikk.oppsett(), iver)
+    } fang (e) {
+        returner sann
+    }
+    returner usann
+}
+
+// Éin regel (prefetch[0] eller prerender[0]) har rett form og alle unntaka.
+funksjon krev_regel(namn: tekst, r, iver: tekst, for_prerender: bool) -> heiltall {
+    assert_eq(tekst(r["source"]), "document")
+    assert_eq(tekst(r["eagerness"]), iver)
+    la og_ledd = r["where"]["and"]
+    assert_eq(lengde(og_ledd), 3)
+    // same origin: berre pathname, resten frå dokumentet
+    assert_eq(tekst(og_ledd[0]["href_matches"]["pathname"]), "/*")
+    la mønster = og_ledd[1]["not"]["href_matches"]
+    assert(inneheld_sti(mønster, "/_*"))
+    assert(inneheld_sti(mønster, "/*logout*"))
+    assert(inneheld_sti(mønster, "/*logg-ut*"))
+    assert(inneheld_sti(mønster, "/*utlogg*"))
+    assert(inneheld_sti(mønster, "/admin/*"))
+    la veljarar = og_ledd[2]["not"]["selector_matches"]
+    assert(inneheld_tekst(veljarar, "[data-nc-prefetch='false']"))
+    assert(inneheld_tekst(veljarar, "[rel~='nofollow']"))
+    assert_eq(inneheld_tekst(veljarar, "[data-nc-prerender='false']"), for_prerender)
+    returner 0
+}
+
+// ─── Testar ─────────────────────────────────────────────────────────────────
+
+funksjon test_regler_json() -> heiltall {
+    la o = fart()
+    la p = builtin.json_parse_raw(kvikk.regler_json(o, usann))
+    assert_eq(builtin.type(p), "ordbok")
+    assert_eq(lengde(nøkler(p)), 2)
+    assert_eq(lengde(p["prefetch"]), 1)
+    assert_eq(lengde(p["prerender"]), 1)
+    krev_regel("prefetch", p["prefetch"][0], "moderate", usann)
+    krev_regel("prerender", p["prerender"][0], "moderate", sann)
+
+    // Private sider: berre prefetch, med mindre appen slår på prerender.
+    la pp = builtin.json_parse_raw(kvikk.regler_json(o, sann))
+    assert(finnes_nøkkel(pp, "prefetch"))
+    assert(ikkje finnes_nøkkel(pp, "prerender"))
+    la pp2 = builtin.json_parse_raw(kvikk.regler_json(kvikk.med_prerender_privat(fart()), sann))
+    assert(finnes_nøkkel(pp2, "prerender"))
+
+    // Iver og av-brytarar.
+    la pe = builtin.json_parse_raw(kvikk.regler_json(kvikk.med_iver(fart(), "conservative"), usann))
+    krev_regel("conservative", pe["prefetch"][0], "conservative", usann)
+    la ingen_pre = builtin.json_parse_raw(kvikk.regler_json(kvikk.utan_prerender(fart()), usann))
+    assert(ikkje finnes_nøkkel(ingen_pre, "prerender"))
+    la av = kvikk.utan_prerender(kvikk.utan_prefetch(fart()))
+    assert(ikkje kvikk.har_regler(av, usann))
+    assert(ikkje kvikk.har_regler(av, sann))
+    assert_eq(hdr(kvikk.side(ctx_h({}), av, "<p>x</p>"), "speculation-rules"), "")
+
+    // Validering av oppsettet.
+    assert(kastar_unntak("admin/*"))
+    assert(kastar_unntak("https://example.com/*"))
+    assert(kastar_unntak("/a\r\nb"))
+    assert(ikkje kastar_unntak("/ok/*"))
+    assert(kastar_iver("snart"))
+    assert(ikkje kastar_iver("eager"))
+
+    // JSON-escaping: rundtur gjennom parseren for ", \ og kontrollteikn.
+    la vanskeleg = "a\"b\\c" + builtin.chr(1) + builtin.chr(31) + "\t\næøå"
+    la tilbake = builtin.json_parse_raw("{\"v\":" + kvikk.json_tekst(vanskeleg) + "}")
+    assert_eq(tekst(tilbake["v"]), vanskeleg)
+    la med_sitat = builtin.json_parse_raw(kvikk.regler_json(kvikk.med_unntak(kvikk.oppsett(), "/a\"b\\c"), usann))
+    assert(inneheld_sti(med_sitat["prefetch"][0]["where"]["and"][1]["not"]["href_matches"], "/a\"b\\c"))
+    returner 0
+}
+
+funksjon test_html_svar() -> heiltall {
+    la o = fart()
+    la html = "<!doctype html><title>T</title><p>side</p>"
+    la s = kvikk.side(ctx_h({}), o, html)
+    krev_kontrakt("side", s)
+    assert_eq(s["status"], 200)
+    assert_eq(tekst(s["content_type"]), "text/html; charset=utf-8")
+    assert_eq(tekst(s["etag"]), hc.etag_av(html))
+    assert_eq(hdr(s, "cache-control"), "no-cache")
+    assert_eq(hdr(s, "speculation-rules"), "\"" + hc.versjonert_url("/_nc/spekulasjon.json", kvikk.regler_json(o, usann)) + "\"")
+    assert_eq(hdr(s, "content-security-policy"), hc.csp_standard())
+    assert_eq(hdr(s, "x-content-type-options"), "nosniff")
+
+    la p = kvikk.privat_side(ctx_h({}), o, html)
+    krev_kontrakt("privat_side", p)
+    assert_eq(hdr(p, "cache-control"), "private, no-cache")
+    assert_eq(hdr(p, "speculation-rules"), "\"" + hc.versjonert_url("/_nc/spekulasjon-privat.json", kvikk.regler_json(o, sann)) + "\"")
+
+    la f = kvikk.side_med_status(ctx_h({}), o, 422, "<p>feil</p>")
+    krev_kontrakt("side_med_status", f)
+    assert_eq(f["status"], 422)
+    assert(ikkje finnes_nøkkel(f, "etag"))
+    assert_eq(hdr(f, "cache-control"), "private, no-cache")
+
+    // Ingen HTML-svar frå laget har no-store (det blokkerer bfcache).
+    assert(ikkje builtin.contains(hdr(s, "cache-control"), "no-store"))
+    assert(ikkje builtin.contains(hdr(p, "cache-control"), "no-store"))
+    assert(ikkje builtin.contains(hdr(f, "cache-control"), "no-store"))
+
+    la r = kvikk.sjå_anna("/oppgaver")
+    krev_kontrakt("sjå_anna", r)
+    assert_eq(r["status"], 303)
+    assert_eq(hdr(r, "location"), "/oppgaver")
+    returner 0
+}
+
+funksjon test_304() -> heiltall {
+    la o = fart()
+    la html = "<p>uendra</p>"
+    la etag = hc.etag_av(html)
+    la treff: liste_tekst = [etag, "W/" + etag, "\"x\", " + etag, "*"]
+    la i: heiltall = 0
+    mens i < lengde(treff) {
+        la s = kvikk.side(ctx_h({"If-None-Match": treff[i]}), o, html)
+        hvis s["status"] != 304 { skriv("venta 304 for If-None-Match " + treff[i] + "\n") }
+        assert_eq(s["status"], 304)
+        assert_eq(tekst(s["body"]), "")
+        assert_eq(tekst(s["etag"]), etag)
+        assert(ikkje finnes_nøkkel(s, "content_type"))
+        assert_eq(hdr(s, "cache-control"), "no-cache")
+        assert(hdr(s, "speculation-rules") != "")
+        krev_kontrakt("304", s)
+        i = i + 1
+    }
+    // Porten seier nei: anna ETag, tom header, prefiks av rett ETag.
+    assert_eq(kvikk.side(ctx_h({"if-none-match": "\"annan\""}), o, html)["status"], 200)
+    assert_eq(kvikk.side(ctx_h({}), o, html)["status"], 200)
+    assert_eq(kvikk.side(ctx_h({"if-none-match": builtin.slice(etag, 0, 20) + "\""}), o, html)["status"], 200)
+    assert(ikkje kvikk.etag_treff("", etag))
+    returner 0
+}
+
+funksjon test_ressursar() -> heiltall {
+    la o = fart()
+    la v = hc.versjon_av(kvikk.regler_json(o, usann))
+    la r = kvikk.ressurs(ctx_ressurs("spekulasjon.json", v), o)
+    krev_kontrakt("regler", r)
+    assert_eq(r["status"], 200)
+    assert_eq(tekst(r["content_type"]), "application/speculationrules+json")
+    assert_eq(hdr(r, "cache-control"), "public, max-age=31536000, immutable")
+    assert_eq(tekst(r["body"]), kvikk.regler_json(o, usann))
+    assert_eq(tekst(r["etag"]), hc.etag_av(tekst(r["body"])))
+    // Feil eller manglande v: aldri immutable.
+    assert_eq(hdr(kvikk.ressurs(ctx_ressurs("spekulasjon.json", "gammal"), o), "cache-control"), "no-cache")
+    assert_eq(hdr(kvikk.ressurs(ctx_ressurs("spekulasjon.json", ""), o), "cache-control"), "no-cache")
+
+    la rp = kvikk.ressurs(ctx_ressurs("spekulasjon-privat.json", ""), o)
+    assert_eq(tekst(rp["body"]), kvikk.regler_json(o, sann))
+
+    la href = kvikk.stil_href(o)
+    assert(builtin.starts_with(href, "/_nc/stil.css?v="))
+    la sv = builtin.slice(href, lengde("/_nc/stil.css?v="), lengde(href))
+    assert_eq(lengde(sv), 12)
+    la c = kvikk.ressurs(ctx_ressurs("stil.css", sv), o)
+    krev_kontrakt("stil", c)
+    assert_eq(tekst(c["content_type"]), "text/css; charset=utf-8")
+    assert_eq(hdr(c, "cache-control"), "public, max-age=31536000, immutable")
+    la css = tekst(c["body"])
+    assert(builtin.contains(css, "@view-transition { navigation: auto; }"))
+    assert(builtin.contains(css, "@media (prefers-reduced-motion: reduce)"))
+    assert(builtin.contains(css, "navigation: none;"))
+    // Appen sitt stilark kjem etter, og endrar versjonen.
+    la o2 = kvikk.med_stil(fart(), ".x { color: red; }")
+    assert(builtin.contains(kvikk.stil_css(o2), ".x { color: red; }"))
+    assert(kvikk.stil_href(o2) != href)
+    assert(ikkje builtin.contains(kvikk.stil_css(kvikk.utan_overgang(fart())), "@view-transition"))
+
+    la ukjend = kvikk.ressurs(ctx_ressurs("anna.js", ""), o)
+    assert_eq(ukjend["status"], 404)
+    krev_kontrakt("404", ukjend)
+    returner 0
+}
+
+funksjon test_sec_purpose() -> heiltall {
+    la ingen = ctx_h({})
+    la pf = ctx_h({"Sec-Purpose": "prefetch"})
+    la pr = ctx_h({"sec-purpose": "prefetch;prerender"})
+    la gammal = ctx_h({"Purpose": "prefetch"})
+    la anna = ctx_h({"Sec-Purpose": "noko-anna"})
+    assert(ikkje kvikk.er_spekulativ(ingen))
+    assert(kvikk.er_spekulativ(pf))
+    assert(kvikk.er_spekulativ(pr))
+    assert(kvikk.er_spekulativ(gammal))
+    assert(ikkje kvikk.er_spekulativ(anna))
+    assert(ikkje kvikk.er_prerender(pf))
+    assert(kvikk.er_prerender(pr))
+    assert(kvikk.vakt_ingen_spekulasjon(ingen))
+    assert(ikkje kvikk.vakt_ingen_spekulasjon(pf))
+    assert(ikkje kvikk.vakt_ingen_spekulasjon(pr))
+    assert(kvikk.vakt_ingen_prerender(pf))
+    assert(ikkje kvikk.vakt_ingen_prerender(pr))
+    // Totale: ein ctx utan headers kastar ikkje ut av vakta.
+    assert(kvikk.vakt_ingen_spekulasjon({}))
+    la v = kvikk.med_vary_spekulasjon(hc.med_vary(kvikk.side(ingen, fart(), "<p>x</p>"), "Cookie"))
+    assert_eq(hdr(v, "vary"), "Cookie, Sec-Purpose")
+    returner 0
+}
+
+funksjon test_utan_klientkode() -> heiltall {
+    // Detektoren kan seie ja.
+    assert(har_on_attributt("<a href=\"/\" onclick=\"x()\">"))
+    assert(har_on_attributt("<body\nONLOAD=x>"))
+    assert(ikkje har_on_attributt("<p>Om oss: ein tekst om onsdagar</p>"))
+    assert(inneheld_ci("<p><SCRIPT src=x>", "<script"))
+    assert(ikkje inneheld_ci("<p>skript</p>", "<script"))
+    la o = fart()
+    krev_utan_skript("kvikk.head", kvikk.head(o))
+    assert(builtin.contains(kvikk.head(o), "<link rel=\"expect\" href=\"#app-main\" blocking=\"render\">"))
+    assert(ikkje builtin.contains(kvikk.head(kvikk.utan_overgang(fart())), "rel=\"expect\""))
+    la side = frontend.layout_app_med_head("Tavle", frontend.nav_link("Heim", "/"), "<p>innhald</p>", "fot", kvikk.stil_href(o), kvikk.head(o))
+    krev_utan_skript("layout_app_med_head", side)
+    assert(builtin.contains(side, "<main id=\"app-main\" class=\"app-main\">"))
+    assert(builtin.contains(side, kvikk.head(o) + "<title>"))
+    assert(builtin.contains(side, "href=\"" + kvikk.stil_href(o) + "\""))
+    // page/layout_app er uendra (golden).
+    assert_eq(frontend.page("T", "x", "/a.css"), "<!doctype html><html><head><meta charset=\"utf-8\"></meta><title>T</title><link rel=\"stylesheet\" href=\"/a.css\"></link></head><body><div class=\"shell\">x</div></body></html>")
+    assert(ikkje builtin.contains(frontend.layout_app("T", "", "x", "f"), "id=\"app-main\""))
+    returner 0
+}
+
+funksjon test_handle_request() -> heiltall {
+    la r = web.handle_request(web.request_context("GET", "/kvikk-heim", {}, {}, ""))
+    assert_eq(web.response_status(r), 200)
+    assert_eq(hdr(r, "cache-control"), "no-cache")
+    assert(builtin.contains(hdr(r, "speculation-rules"), "/_nc/spekulasjon.json?v="))
+    // Toppnøkkelen content_type vinn; ingen gissa text/plain i headers.
+    assert_eq(tekst(r["content_type"]), "text/html; charset=utf-8")
+    assert_eq(hdr(r, "content-type"), "")
+
+    la q: ordbok_tekst = {"v": hc.versjon_av(kvikk.regler_json(fart(), usann))}
+    la rr = web.handle_request(web.request_context("GET", "/_nc/spekulasjon.json", q, {}, ""))
+    assert_eq(web.response_status(rr), 200)
+    assert_eq(tekst(rr["content_type"]), "application/speculationrules+json")
+    assert_eq(hdr(rr, "content-type"), "")
+    assert_eq(hdr(rr, "cache-control"), "public, max-age=31536000, immutable")
+
+    // Vakta: vanleg førespurnad 200, spekulativ 403.
+    assert_eq(web.response_status(web.handle_request(web.request_context("GET", "/kvikk-teljar", {}, {}, ""))), 200)
+    assert_eq(web.response_status(web.handle_request(web.request_context("GET", "/kvikk-teljar", {}, {"sec-purpose": "prefetch"}, ""))), 403)
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    test_regler_json()
+    test_html_svar()
+    test_304()
+    test_ressursar()
+    test_sec_purpose()
+    test_utan_klientkode()
+    test_handle_request()
+    skriv("test_kvikk OK\n")
+    returner 0
+}

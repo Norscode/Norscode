@@ -1,0 +1,217 @@
+// std.multiprocessing.prosess_map: parallell map over ekte barneprosessar.
+//
+// Sjekkar at resultata er dei same som ein sekvensiell map og kjem i rett
+// rekkjefølgje, at spesialteikn (æøå, linjeskift, ", \, %, @) kjem uendra fram,
+// at arbeidet faktisk køyrer i fleire prosessar samstundes (overlappande
+// søvnintervall kan ikkje kome frå éin prosess), at bolkar blir fordelte på
+// færre arbeidarar enn bolkar, at unntak i barnet blir ProsessPoolFeil, og at
+// eit barn som ikkje kan startast gjev feil. Frist: frist_ms < 1 (og prosess_map)
+// gjev inga frist, ein positiv frist_ms drep eit barn som går over og seier det i
+// feilen. Koordinatoren søv medan barna reknar: poll-rundane er få (aukande pausar),
+// ikkje éin kvart 5. ms.
+//
+// VM: arbeidarane er `nc run tests/fixtures/prosess_map_arbeidar.no`.
+// AOT: arbeidaren er testbinæren sjølv (mp.er_prosessarbeidar() → arbeidarmodus).
+// Verifisert med ekte barneprosessar på VM (macOS + Linux x86-64), x86-64 AOT og
+// macOS arm64 AOT. Berre ein eksplisitt NATIV-GAP (eit AOT-mål utan process_operation)
+// får gjere at map-en køyrer lokalt; då blir berre resultatkontrakten sjekka.
+//
+// Importen av std.native_gap (→ std.tls13_session) gjer at tools/nc_test.no
+// klassifiserer testen som tung (_tung_modulnamn «std.tls»): han køyrer i slow-lanen,
+// eller direkte med `nc test tests/test_multiprocessing_prosess_map.no` (~9 s med
+// NC_TEST_VM_FAST=1, ~18 s utan — kvar VM-arbeidar er ein ny `nc run`).
+bruk std.multiprocessing som mp
+// x86 AOT bygd frå --ncb: builtin.process_operation krev std.native_gap i bunten
+// (utan han er kallet null og map-en ville falle attende til lokal køyring).
+bruk std.native_gap som _ng
+bruk tests.fixtures.prosess_map_arbeidar som barn
+
+funksjon inneheld(t: tekst, del: tekst) -> boolsk {
+    returner builtin.index_of(t, del) >= 0
+}
+
+// 1 = ekte barneprosessar, 0 = lokal reserve (berre lov ved NATIV-GAP).
+funksjon ekte_prosessar(r) -> heiltall {
+    hvis r["backend"] == "prosessar" { returner 1 }
+    hvis ikkje inneheld(tekst(r["grunn"]), "NATIV-GAP") {
+        kast "venta barneprosessar, fekk backend=" + tekst(r["backend"]) + " grunn=" + tekst(r["grunn"])
+    }
+    returner 0
+}
+
+// 12 tal og 7 spesialteikn-verdiar i éin map (3 arbeidarar → bolkar 7/7/5).
+funksjon test_som_sekvensiell(kmd) -> heiltall {
+    la inn = []
+    la venta = []
+    la i: heiltall = 0
+    mens i < 12 {
+        legg_til(inn, "kv:" + tekst(i))
+        legg_til(venta, tekst(i * i))
+        i = i + 1
+    }
+    la spes = ["ekko:æøå ÆØÅ", "ekko:a\"b\\c", "ekko:linje1\nlinje2\r\nslutt", "ekko:%@;:@E@PPR0:x@E%41;",
+               "", "ekko:tab\tslutt", "ekko:"]
+    la spes_venta = ["æøå ÆØÅ", "a\"b\\c", "linje1\nlinje2\r\nslutt", "%@;:@E@PPR0:x@E%41;", "tom", "tab\tslutt", ""]
+    i = 0
+    mens i < lengde(spes) {
+        legg_til(inn, spes[i])
+        legg_til(venta, spes_venta[i])
+        i = i + 1
+    }
+    la r = mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), inn, 3, kmd, 60000, 0)
+    la ekte = ekte_prosessar(r)
+    la ut = r["resultat"]
+    assert_eq(lengde(ut), 19)
+    i = 0
+    mens i < 19 {
+        // Same svar som ein sekvensiell map i denne prosessen, same lengd, rett plass.
+        assert_eq(ut[i], barn.arbeid(inn[i]))
+        assert_eq(lengde(ut[i]), lengde(venta[i]))
+        assert_eq(ut[i], venta[i])
+        i = i + 1
+    }
+    hvis ekte == 1 {
+        assert_eq(r["bolkar"], 3)
+        assert_eq(r["prosessar"], 3)
+    }
+    returner ekte
+}
+
+// Fire søvnar på 700 ms i fire arbeidarar: minst to intervall må overlappe.
+funksjon test_samstundes(kmd, ekte: heiltall) -> heiltall {
+    la t0 = builtin.tid_ms()
+    la r = mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), ["sov:700", "sov:700", "sov:700", "sov:700"], 4, kmd, 60000, 0)
+    la gått = builtin.tid_ms() - t0
+    assert_eq(lengde(r["resultat"]), 4)
+    hvis ekte == 0 { returner 0 }
+    assert_eq(r["prosessar"], 4)
+    assert_eq(r["frist_ms"], 60000)
+    // Aukande pausar (5, 10, … ms opp til 200 ms): om lag éin runde per 200 ms etter
+    // oppstarten, altså langt under gått/100 + 10. Ein fast 5 ms-pause gav éin runde
+    // per 5 ms (+ kostnaden per runde), altså mange gonger so mange.
+    la runder: heiltall = r["poll_runder"]
+    hvis runder < 1 eller runder * 100 > gått + 1000 {
+        kast "koordinatoren polla " + tekst(runder) + " gonger på " + tekst(gått) + " ms (venta høgst " +
+            tekst((gått + 1000) / 100) + ")"
+    }
+    la start = []
+    la slutt = []
+    la i: heiltall = 0
+    mens i < 4 {
+        la d = builtin.split(r["resultat"][i], ":")
+        legg_til(start, heltall_fra_tekst(d[0]))
+        legg_til(slutt, heltall_fra_tekst(d[1]))
+        assert(slutt[i] - start[i] >= 650)
+        i = i + 1
+    }
+    la overlapp: heiltall = 0
+    i = 0
+    mens i < 4 {
+        la j: heiltall = i + 1
+        mens j < 4 {
+            hvis start[i] < slutt[j] og start[j] < slutt[i] { overlapp = overlapp + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    hvis overlapp < 1 {
+        kast "ingen overlappande søvnintervall: arbeidarane køyrde ikkje samstundes"
+    }
+    returner overlapp
+}
+
+// Fleire bolkar enn arbeidarar (bolk_storleik 2, 7 verdiar, 3 arbeidarar → 4 bolkar).
+funksjon test_bolkar(kmd, ekte: heiltall) -> heiltall {
+    la inn = []
+    la i: heiltall = 0
+    mens i < 7 {
+        legg_til(inn, "kv:" + tekst(i + 100))
+        i = i + 1
+    }
+    la r = mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), inn, 3, kmd, 60000, 2)
+    la ut = r["resultat"]
+    assert_eq(lengde(ut), 7)
+    i = 0
+    mens i < 7 {
+        assert_eq(ut[i], tekst((i + 100) * (i + 100)))
+        i = i + 1
+    }
+    hvis ekte == 1 {
+        assert_eq(r["bolkar"], 4)
+        assert_eq(r["prosessar"], 4)
+    }
+    returner 0
+}
+
+// frist_ms < 1 = inga frist (det prosess_map brukar); ein positiv frist gjeld heile
+// bolken til barnet: eit barn over fristen blir drepe snart etter fristen, og feilen
+// seier status timeout og kva fristen var.
+funksjon test_frist(kmd, ekte: heiltall) -> heiltall {
+    la r = mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), ["kv:3", "kv:4"], 1, kmd, 0, 0)
+    assert_eq(r["frist_ms"], 0)
+    assert_eq(lengde(r["resultat"]), 2)
+    assert_eq(r["resultat"][0], "9")
+    assert_eq(r["resultat"][1], "16")
+    hvis ekte == 0 { returner 0 }
+    la feil = ""
+    la t0 = builtin.tid_ms()
+    prøv {
+        mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), ["sov:8000"], 1, kmd, 1000, 0)
+    } fang (e) {
+        feil = tekst(e)
+    }
+    la gått = builtin.tid_ms() - t0
+    hvis ikkje inneheld(feil, "status timeout") eller ikkje inneheld(feil, "frist 1000 ms per barneprosess") {
+        kast "venta tidsavbrot med frist 1000 ms, fekk: " + feil
+    }
+    // Drepe ved fristen (runda opp til 1 s), ikkje etter dei 8 s barnet ville sove.
+    hvis gått > 6000 { kast "tidsavbrotet kom først etter " + tekst(gått) + " ms" }
+    returner 0
+}
+
+funksjon test_feil(kmd, ekte: heiltall) -> heiltall {
+    la feil = ""
+    prøv {
+        mp.prosess_map(fun(x) -> barn.arbeid(x), ["kv:1", "bom:pang", "kv:3"], 2, kmd)
+    } fang (e) {
+        feil = tekst(e)
+    }
+    assert(inneheld(feil, "ProsessPoolFeil: element 1"))
+    assert(inneheld(feil, "ArbeidFeil: pang"))
+    // Tom liste: ingen barn.
+    la tom = mp.prosess_map_rapport(fun(x) -> barn.arbeid(x), [], 4, kmd, 60000, 0)
+    assert_eq(lengde(tom["resultat"]), 0)
+    assert_eq(tom["prosessar"], 0)
+    feil = ""
+    prøv { mp.prosess_map(fun(x) -> barn.arbeid(x), ["kv:1"], 0, kmd) } fang (e) { feil = tekst(e) }
+    assert(inneheld(feil, "arbeidarar"))
+    // Eit program som ikkje finst, gjev ProsessPoolFeil (ikkje stille lokal køyring).
+    hvis ekte == 1 {
+        feil = ""
+        prøv {
+            mp.prosess_map(fun(x) -> barn.arbeid(x), ["kv:1"], 1, ["/finst/ikkje/norscode-arbeidar"])
+        } fang (e) {
+            feil = tekst(e)
+        }
+        assert(inneheld(feil, "ProsessPoolFeil"))
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    hvis mp.er_prosessarbeidar() {
+        returner mp.prosessarbeidar(fun(x) -> barn.arbeid(x))
+    }
+    la kmd = mp.arbeidar_kommando("tests/fixtures/prosess_map_arbeidar.no")
+    la ekte = test_som_sekvensiell(kmd)
+    test_samstundes(kmd, ekte)
+    test_bolkar(kmd, ekte)
+    test_frist(kmd, ekte)
+    test_feil(kmd, ekte)
+    hvis ekte == 1 {
+        skriv("test_multiprocessing_prosess_map OK (barneprosessar)\n")
+    } ellers {
+        skriv("test_multiprocessing_prosess_map OK (lokal: NATIV-GAP)\n")
+    }
+    returner 0
+}

@@ -1,0 +1,295 @@
+# std/prioritetsko.no — prioritetskø med komparator (Java PriorityQueue<E>(Comparator)).
+#
+# Binær heap over vilkårlege verdiar. dytt/pop er O(log n), topp er O(1).
+# Til skilnad frå std.prioritet (berre heiltall, min-heap) og std.heapq
+# (Python-heapq over heiltall/tekst) tek denne modulen ein komparator-lambda,
+# så han handterer postar, tekst, tupel-liknande lister og omvendt orden.
+#
+# Bruk:
+#   bruk std.prioritetsko som pk
+#   la q = pk.ny()                                  # min-heap, naturleg orden
+#   pk.dytt(q, 5)
+#   pk.dytt(q, 2)
+#   pk.topp(q)                                      # 2 (utan å fjerne)
+#   pk.pop(q)                                       # 2
+#   la oppg = pk.ny_med(fun(a, b) -> a["pri"] - b["pri"])
+#   pk.dytt(oppg, {"namn": "rydd", "pri": 3})
+#
+# Komparator: (a, b) -> heiltall, < 0 når a skal ut før b. Naturleg orden brukar
+# `<`/`>` (tal etter verdi, tekst etter kodepunkt). ny_maks() gjev største først.
+# Ved lik prioritet (komparatoren gjev 0) kjem elementa ut i innsetjingsrekkje-
+# følgje (FIFO). Det er sterkare enn Java, som ikkje lovar noko her, og gjer
+# resultatet likt på alle køyrevegar.
+#
+# API (Java-motstykke i parentes):
+#   ny() / ny_maks() / ny_med(komparator)
+#   frå_liste(xs) / frå_liste_med(xs, komparator)   heapify, O(n)
+#   dytt(q, x) -> heiltall   ny storleik              (offer / add)
+#   topp(q)                  minste eller ingenting   (peek)
+#   pop(q)                   fjernar minste, eller ingenting når tom (poll)
+#   pop_eller_kast(q)        som pop, men kastar "TomtFeil: ..." når tom (remove())
+#   storleik / er_tom / tøm                           (size / isEmpty / clear)
+#   inneheld(q, x) -> bool   lineært søk med ==       (contains)
+#   fjern(q, x) -> bool      fjernar første like (==) element, O(n) (remove(Object))
+#   til_liste(q)             kopi i heap-rekkjefølgje (iterator(); ikkje sortert)
+#   til_sortert_liste(q)     kopi i prioritetsrekkjefølgje, q er urørt
+#   tøm_til_liste(q)         poppar alt i prioritetsrekkjefølgje (q blir tom)
+#
+# Komparatoren blir kalla direkte (komp(a, b)) frå ein namngjeven funksjon, ikkje
+# via builtin.ncb_call_fn, så modulen verkar på VM og i native AOT. Fjerning skjer
+# med fjern_siste (den einaste list-krympinga som verkar likt på alle vegar).
+#
+# NB: modulen definerer `fjern`, som skuggar builtin fjern INNE i denne fila.
+#
+# Representasjon og kostnad: køa er ei ordbok {"__prioritetsko__", "modus", "seq",
+# "a"}, der a = [h, s, komparator] er ei lita liste (tre element) med heap-lista h
+# og sekvensnummera s. Kvar offentleg operasjon hentar a éin gong og sender ho
+# vidare til hjelpefunksjonane. Grunnen er VM-en utan NORSCODE_VM_FAST (standard
+# for nc run og nc test): der blir kvar liste eller ordbok som blir lesen ut av
+# ei ordbok (eller av ei liste med meir enn fire element) registrert i skugge-
+# heapen, med kostnad som veks med storleiken. Oppslag i ei liste med høgst fire
+# element og lesing av tal er gratis, så hjelparane les h og s via a.
+
+funksjon _ny_tom(modus: heiltall, komp) -> ordbok {
+    returner {
+        "__prioritetsko__": sann,
+        "modus": modus,
+        "seq": 0,
+        "a": [[], [], komp]
+    }
+}
+
+# Naturleg orden: minste først.
+funksjon ny() -> ordbok {
+    returner _ny_tom(0, ingenting)
+}
+
+# Omvendt naturleg orden: største først.
+funksjon ny_maks() -> ordbok {
+    returner _ny_tom(1, ingenting)
+}
+
+funksjon ny_med(komparator) -> ordbok {
+    returner _ny_tom(2, komparator)
+}
+
+funksjon _nat(a, b) -> heiltall {
+    hvis a < b { returner -1 }
+    hvis a > b { returner 1 }
+    returner 0
+}
+
+funksjon _cmp(modus: heiltall, a: liste, x, y) -> heiltall {
+    hvis modus == 0 { returner _nat(x, y) }
+    hvis modus == 1 { returner _nat(y, x) }
+    la komp = a[2]
+    la r = komp(x, y)
+    hvis r < 0 { returner -1 }
+    hvis r > 0 { returner 1 }
+    returner 0
+}
+
+# sann viss element i skal ut før element j.
+funksjon _før(modus: heiltall, a: liste, i: heiltall, j: heiltall) -> bool {
+    la h = a[0]
+    la s = a[1]
+    la c = _cmp(modus, a, h[i], h[j])
+    hvis c != 0 { returner c < 0 }
+    returner s[i] < s[j]
+}
+
+funksjon _byt(a: liste, i: heiltall, j: heiltall) {
+    la h = a[0]
+    la s = a[1]
+    la tv = h[i]
+    h[i] = h[j]
+    h[j] = tv
+    la ts = s[i]
+    s[i] = s[j]
+    s[j] = ts
+}
+
+funksjon _opp(modus: heiltall, a: liste, start: heiltall) {
+    la i = start
+    mens i > 0 {
+        la p = (i - 1) / 2
+        hvis _før(modus, a, i, p) {
+            _byt(a, i, p)
+            i = p
+        } ellers {
+            returner
+        }
+    }
+}
+
+funksjon _ned(modus: heiltall, a: liste, start: heiltall) {
+    la n = lengde(a[0])
+    la i = start
+    mens sann {
+        la best = i
+        la v = 2 * i + 1
+        la r = v + 1
+        hvis v < n og _før(modus, a, v, best) { best = v }
+        hvis r < n og _før(modus, a, r, best) { best = r }
+        hvis best == i { returner }
+        _byt(a, i, best)
+        i = best
+    }
+}
+
+funksjon _fyll(q: ordbok, xs) -> ordbok {
+    la a = q["a"]
+    la h = a[0]
+    la s = a[1]
+    la seq = q["seq"]
+    for x i xs {
+        legg_til(h, x)
+        legg_til(s, seq)
+        seq = seq + 1
+    }
+    q["seq"] = seq
+    # Heapify nedanfrå: frå siste indre node (n / 2 - 1) til rota.
+    la modus = q["modus"]
+    la i = lengde(h) / 2 - 1
+    mens i >= 0 {
+        _ned(modus, a, i)
+        i = i - 1
+    }
+    returner q
+}
+
+funksjon frå_liste(xs) -> ordbok {
+    returner _fyll(ny(), xs)
+}
+
+funksjon frå_liste_med(xs, komparator) -> ordbok {
+    returner _fyll(ny_med(komparator), xs)
+}
+
+funksjon dytt(q: ordbok, x) -> heiltall {
+    la a = q["a"]
+    la h = a[0]
+    la s = a[1]
+    legg_til(h, x)
+    legg_til(s, q["seq"])
+    q["seq"] = q["seq"] + 1
+    _opp(q["modus"], a, lengde(h) - 1)
+    returner lengde(h)
+}
+
+funksjon topp(q: ordbok) {
+    la a = q["a"]
+    la h = a[0]
+    hvis lengde(h) == 0 { returner ingenting }
+    returner h[0]
+}
+
+# Fjernar elementet på indeks i og held heap-eigenskapen. Det siste elementet
+# flyttar inn på plass i og kan måtte både ned (større enn eit barn) og opp
+# (mindre enn forelderen, når i ikkje er rota).
+funksjon _fjern_ved(modus: heiltall, a: liste, i: heiltall) {
+    la h = a[0]
+    la s = a[1]
+    la sist = lengde(h) - 1
+    hvis i != sist {
+        h[i] = h[sist]
+        s[i] = s[sist]
+    }
+    fjern_siste(h)
+    fjern_siste(s)
+    hvis i < lengde(h) {
+        _ned(modus, a, i)
+        _opp(modus, a, i)
+    }
+}
+
+funksjon pop(q: ordbok) {
+    la a = q["a"]
+    la h = a[0]
+    hvis lengde(h) == 0 { returner ingenting }
+    la v = h[0]
+    _fjern_ved(q["modus"], a, 0)
+    returner v
+}
+
+funksjon pop_eller_kast(q: ordbok) {
+    hvis storleik(q) == 0 { kast "TomtFeil: prioritetskøa er tom" }
+    returner pop(q)
+}
+
+funksjon storleik(q: ordbok) -> heiltall {
+    la a = q["a"]
+    returner lengde(a[0])
+}
+
+funksjon er_tom(q: ordbok) -> bool {
+    returner storleik(q) == 0
+}
+
+funksjon tøm(q: ordbok) {
+    la a = q["a"]
+    q["a"] = [[], [], a[2]]
+}
+
+funksjon _indeks_av(a: liste, x) -> heiltall {
+    la h = a[0]
+    la i = 0
+    mens i < lengde(h) {
+        hvis h[i] == x { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon inneheld(q: ordbok, x) -> bool {
+    returner _indeks_av(q["a"], x) >= 0
+}
+
+funksjon fjern(q: ordbok, x) -> bool {
+    la a = q["a"]
+    la i = _indeks_av(a, x)
+    hvis i < 0 { returner usann }
+    _fjern_ved(q["modus"], a, i)
+    returner sann
+}
+
+funksjon til_liste(q: ordbok) -> liste {
+    la a = q["a"]
+    la ut = []
+    for x i a[0] {
+        legg_til(ut, x)
+    }
+    returner ut
+}
+
+funksjon _kopi(q: ordbok) -> ordbok {
+    la a = q["a"]
+    la k = _ny_tom(q["modus"], a[2])
+    la ka = k["a"]
+    la kh = ka[0]
+    la ks = ka[1]
+    for x i a[0] {
+        legg_til(kh, x)
+    }
+    for x i a[1] {
+        legg_til(ks, x)
+    }
+    k["seq"] = q["seq"]
+    returner k
+}
+
+funksjon tøm_til_liste(q: ordbok) -> liste {
+    la a = q["a"]
+    la h = a[0]
+    la modus = q["modus"]
+    la ut = []
+    mens lengde(h) > 0 {
+        legg_til(ut, h[0])
+        _fjern_ved(modus, a, 0)
+    }
+    returner ut
+}
+
+funksjon til_sortert_liste(q: ordbok) -> liste {
+    returner tøm_til_liste(_kopi(q))
+}

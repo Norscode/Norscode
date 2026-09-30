@@ -1,0 +1,174 @@
+// F39: `nc lsp` (selfhost/lsp/server.no) svarar på initialize, publiserer
+// typecheck-diagnostikk ved didOpen/didChange og gjev hover/definition frå
+// posisjon. Testen køyrer `bin/nc lsp` som underprosess:
+//   A) NORSCODE_LSP_PAYLOAD (diagnosemodus) — alle plattformer.
+//   B) NORSCODE_LSP_USE_STDIN=1 med batchen på stdin (ramma svar) — berre der
+//      seeden les ei pipe via /dev/stdin (macOS). Linux-seeden sin fil_les les
+//      st_size byte, som er 0 for ei pipe (omdirigert FIL fungerer der), så
+//      B blir hoppa over på Linux til ein stdin-builtin kjem i vm.no (reseed).
+//   C) Utan /dev/stdin i disk-scopet skal stdin-modus feile lukka med forklaring.
+// Batchen er éi JSON-liste på éi linje: prosess-ABI-en avviser linjeskift i
+// stdin og miljøverdiar (process_abi._trygt_felt).
+bruk tools.process_runner som prosess
+bruk std.runtime.process_abi som process_abi
+
+funksjon repo_root() -> tekst {
+    prøv {
+        la root = miljo_hent("NORSCODE_ROOT")
+        hvis root != "" { returner root }
+    } fang (e) {}
+    prøv { returner tekst(builtin.system_info()["cwd"]) } fang (e) { returner "." }
+    returner "."
+}
+
+funksjon er_macos() -> boolsk {
+    prøv {
+        returner tekst(builtin.system_info()["system"]) == "Darwin"
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+funksjon json_tekst(s: tekst) -> tekst {
+    la ut = "\""
+    la i = 0
+    mens i < lengde(s) {
+        la c = builtin.slice(s, i, i + 1)
+        hvis c == "\"" {
+            ut = ut + "\\\""
+        } ellers hvis c == "\n" {
+            ut = ut + "\\n"
+        } ellers {
+            ut = ut + c
+        }
+        i = i + 1
+    }
+    returner ut + "\""
+}
+
+funksjon lsp(root: tekst, stdin: tekst, stdin_modus: boolsk, payload: tekst, disk_root: tekst) {
+    la exe = root + "/bin/nc"
+    la miljø = {}
+    miljø["NORSCODE_LSP_USE_STDIN"] = ""
+    hvis stdin_modus { miljø["NORSCODE_LSP_USE_STDIN"] = "1" }
+    miljø["NORSCODE_LSP_PAYLOAD"] = payload
+    miljø["NORSCODE_LSP_STREAM"] = ""
+    // Barnet arvar forelderen sitt miljø: set både kjelde- og målpolicy.
+    miljø["NORSCODE_VM_DISK_ROOT"] = disk_root
+    miljø["NORSCODE_VM_TARGET_DISK_ROOT"] = disk_root
+    miljø["NORSCODE_VM_CAPABILITIES"] = "env.read,env.write,disk.read"
+    miljø["NORSCODE_VM_TARGET_CAPABILITIES"] = "env.read,env.write,disk.read"
+    la req = process_abi.request(exe, ["lsp"], root, stdin, 120000, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, sann)
+    process_abi.sett_environment(req, prosess.nc_miljø_frå_argv(exe, ["lsp"], miljø))
+    returner builtin.process_spawn_argv(req)
+}
+
+funksjon utdata(res) -> tekst {
+    returner tekst(res["stdout"]) + tekst(res["stderr"])
+}
+
+funksjon krev(res, bit: tekst, namn: tekst) -> heiltall {
+    hvis builtin.contains(utdata(res), bit) { returner 0 }
+    skriv("FEIL " + namn + ": manglar «" + bit + "» i utdata:\n" + utdata(res) + "\n")
+    returner 1
+}
+
+funksjon krev_ikkje(res, bit: tekst, namn: tekst) -> heiltall {
+    hvis ikkje builtin.contains(utdata(res), bit) { returner 0 }
+    skriv("FEIL " + namn + ": uventa «" + bit + "» i utdata:\n" + utdata(res) + "\n")
+    returner 1
+}
+
+funksjon krev_exit_0(res, namn: tekst) -> heiltall {
+    hvis tekst(res["status"]) == "ferdig" og heltall_fra_tekst(tekst(res["exit_code"])) == 0 { returner 0 }
+    skriv("FEIL " + namn + ": status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + "\n" + utdata(res) + "\n")
+    returner 1
+}
+
+funksjon tal_forekomstar(t: tekst, bit: tekst) -> heiltall {
+    la n = 0
+    la rest = t
+    la p = builtin.index_of(rest, bit)
+    mens p >= 0 {
+        n = n + 1
+        rest = builtin.slice(rest, p + lengde(bit), lengde(rest))
+        p = builtin.index_of(rest, bit)
+    }
+    returner n
+}
+
+// Felles innhaldssjekkar for A og B.
+funksjon krev_protokoll(res, uri: tekst, namn: tekst) -> heiltall {
+    la feil = 0
+    feil = feil + krev_exit_0(res, namn + " exit")
+    feil = feil + krev_ikkje(res, "Ukjent variabel", namn + " ingen stopp-feil")
+    feil = feil + krev_ikkje(res, "Ukjent innebygd", namn + " ingen ukjende builtins")
+    feil = feil + krev(res, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":", namn + " initialize-svar")
+    feil = feil + krev(res, "\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"" + uri + "\"", namn + " publishDiagnostics")
+    feil = feil + krev(res, "\"range\":{\"start\":{\"line\":4,\"character\":19}", namn + " diagnoseposisjon")
+    feil = feil + krev(res, "\"severity\":1,\"code\":\"type-error\"", namn + " typefeil-severity")
+    feil = feil + krev(res, "Typefeil 5:20 - argument 1 til tar_tal() er tekst, venta tal", namn + " typefeilmelding")
+    feil = feil + krev(res, "\"id\":2,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"```norscode\\nfunksjon tar_tal(x: heltall) -> heltall", namn + " hover-signatur")
+    feil = feil + krev(res, "\"id\":3,\"result\":{\"uri\":\"" + uri + "\",\"range\":{\"start\":{\"line\":0,\"character\":9}", namn + " definition")
+    feil = feil + krev(res, "\"diagnostics\":[]}", namn + " didChange tømer diagnostikk")
+    feil = feil + krev(res, "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":null}", namn + " shutdown-svar")
+    returner feil
+}
+
+funksjon start() -> heiltall {
+    la root = repo_root()
+    la feil = 0
+    la uri = "file:///tmp/lsp_typefeil.no"
+    la kjelde_feil = "funksjon tar_tal(x: heltall) -> heltall {\n    returner x\n}\nfunksjon start() -> heltall {\n    la a = tar_tal(\"tekst\")\n    returner a\n}\n"
+    la kjelde_ok = "funksjon tar_tal(x: heltall) -> heltall {\n    returner x\n}\nfunksjon start() -> heltall {\n    la a = tar_tal(5)\n    returner a\n}\n"
+    la pos = "\"position\":{\"line\":4,\"character\":13}"
+
+    la batch = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"" + uri +
+        "\",\"languageId\":\"norscode\",\"version\":1,\"text\":" + json_tekst(kjelde_feil) + "}}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"}," + pos + "}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"}," + pos + "}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"" + uri +
+        "\",\"version\":2},\"contentChanges\":[{\"text\":" + json_tekst(kjelde_ok) + "}]}}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"shutdown\"}"
+    batch = batch + ",{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}]"
+    la scope_med_stdin = root + ",.,/tmp,/private/tmp,/dev/stdin"
+    la scope_utan_stdin = root + ",.,/tmp,/private/tmp"
+
+    // A) Diagnosemodus via miljøet.
+    la a = lsp(root, "", usann, batch, scope_utan_stdin)
+    feil = feil + krev_protokoll(a, uri, "A")
+    feil = feil + krev(a, "lsp_stdio_main OK", "A ferdig")
+
+    // B) Batch over stdin med ramma svar.
+    hvis er_macos() {
+        la b = lsp(root, batch, sann, "", scope_med_stdin)
+        feil = feil + krev_protokoll(b, uri, "B")
+        // initialize, diag(didOpen), hover, definition, diag(didChange), shutdown.
+        la rammer = tal_forekomstar(tekst(b["stdout"]), "Content-Length: ")
+        hvis rammer != 6 {
+            skriv("FEIL B rammer: venta 6 Content-Length-rammer, fekk " + tekst(rammer) + "\n" + utdata(b) + "\n")
+            feil = feil + 1
+        }
+    } ellers {
+        skriv("test_lsp_diagnostikk: B hoppa over (seeden les ikkje pipe via /dev/stdin på denne plattforma)\n")
+    }
+
+    // C) Utan /dev/stdin i disk-scopet: lukka feil med forklaring.
+    la c = lsp(root, batch, sann, "", scope_utan_stdin)
+    hvis heltall_fra_tekst(tekst(c["exit_code"])) == 0 {
+        skriv("FEIL C: nekta stdin gav exit 0\n" + utdata(c) + "\n")
+        feil = feil + 1
+    }
+    feil = feil + krev(c, "krev /dev/stdin i NORSCODE_VM_DISK_ROOT", "C forklaring")
+
+    hvis feil > 0 {
+        skriv("test_lsp_diagnostikk FEIL (" + tekst(feil) + ")\n")
+        returner 1
+    }
+    skriv("test_lsp_diagnostikk OK\n")
+    returner 0
+}

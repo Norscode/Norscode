@@ -1,0 +1,154 @@
+// A0 (app-kjensle): web.response_finalize og preflight speglar ikkje lenger
+// vilkårleg Origin med credentials. Før vart kvar Origin sett i
+// access-control-allow-origin saman med access-control-allow-credentials: true,
+// so ei framand side med brukaren sin cookie kunne lese private svar. Då
+// header-oppslaget vart kasus-uavhengig, ville «Origin» frå nc serve opne holet
+// for ekte nettlesarar; difor kjem begge fiksane i same commit.
+// Diskriminerer: berre header-kasus-fiksen utan CORS-fiksen gjev ACAO for
+// «Origin» (tilfelle A); b8e7869 gjev ACAO for «origin» (tilfelle B).
+bruk std.web som web
+
+funksjon cors_vakt(ctx: ordbok_tekst) -> bool {
+    web.guard()
+    prøv {
+        returner web.request_cookie(ctx, "session") != ""
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+funksjon privat(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.use_guard("cors_vakt")
+    web.route("GET /_cors/privat")
+    returner web.response_builder(200, {"content-type": "application/json"}, "{\"dok\":\"privat\"}")
+}
+
+// Headeroppslag i svaret, kasus-uavhengig (så testen ikkje blir blind for
+// «Access-Control-Allow-Origin» med anna kasus).
+funksjon svar_header(r: ordbok_tekst, namn: tekst) -> tekst {
+    la hs = web.response_headers(r)
+    hvis hs == null { returner "" }
+    la ks = nøkler(hs)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis tekst_til_liten(k) == tekst_til_liten(namn) { returner tekst(hs[k]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon ctx_med(metode: tekst, sti: tekst, h: ordbok_tekst) -> ordbok_tekst {
+    returner web.request_context(metode, sti, {}, h, "")
+}
+
+funksjon krev_ingen_cors(namn: tekst, r: ordbok_tekst) -> heiltall {
+    la acao = svar_header(r, "access-control-allow-origin")
+    la acac = svar_header(r, "access-control-allow-credentials")
+    hvis acao != "" eller acac != "" {
+        skriv("FEIL " + namn + ": access-control-allow-origin=[" + acao + "] access-control-allow-credentials=[" + acac + "]\n")
+    }
+    assert_eq(acao, "")
+    assert_eq(acac, "")
+    returner 0
+}
+
+funksjon vary_har(r: ordbok_tekst, ledd: tekst) -> bool {
+    la deler = builtin.split(svar_header(r, "vary"), ",")
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        hvis tekst_til_liten(builtin.trim(deler[i])) == tekst_til_liten(ledd) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Program som importerer std.web: namnet builtin.web.handle_request blir løyst til
+// std/web.no (målt), so òg den vegen er utan spegling. VM-spegelen i selfhost/vm.no
+// (berre nådd utan std.web) er eit kjent avvik: sjå test_web_vm_spegel_kjent_avvik.
+funksjon builtin_namn_med_std_web() -> heiltall {
+    la h: ordbok_tekst = {}
+    h["Origin"] = "https://x.norscode.no"
+    h["Cookie"] = "session=u1"
+    la r = builtin.web.handle_request(ctx_med("GET", "/_cors/privat", h))
+    assert_eq(web.response_status(r), 200)
+    krev_ingen_cors("builtin.web.handle_request m/std.web", r)
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    // A: nettlesar via nc serve: «Origin» og «Cookie» med stor forbokstav.
+    la ha: ordbok_tekst = {}
+    ha["Host"] = "app.norscode.no"
+    ha["Origin"] = "https://x.norscode.no"
+    ha["Cookie"] = "session=u1"
+    la ra = web.handle_request(ctx_med("GET", "/_cors/privat", ha))
+    assert_eq(web.response_status(ra), 200)
+    assert_eq(web.response_body(ra), "{\"dok\":\"privat\"}")
+    krev_ingen_cors("A GET Origin", ra)
+
+    // B: HTTP/2-proxy: små bokstavar (spegla på b8e7869).
+    la hb: ordbok_tekst = {}
+    hb["origin"] = "https://evil.example"
+    hb["cookie"] = "session=u1"
+    la rb = web.handle_request(ctx_med("GET", "/_cors/privat", hb))
+    assert_eq(web.response_status(rb), 200)
+    krev_ingen_cors("B GET origin", rb)
+
+    // C: preflight utan allowlist: ingen credentials, ingen origin.
+    la hc: ordbok_tekst = {}
+    hc["Origin"] = "https://evil.example"
+    hc["Access-Control-Request-Method"] = "GET"
+    la rc = web.handle_request(ctx_med("OPTIONS", "/_cors/privat", hc))
+    assert_eq(web.response_status(rc), 204)
+    assert(builtin.contains(svar_header(rc, "allow"), "GET"))
+    krev_ingen_cors("C OPTIONS", rc)
+
+    // D: 403 frå vakta med Origin: heller ingen CORS.
+    la hd: ordbok_tekst = {}
+    hd["Origin"] = "https://evil.example"
+    la rd = web.handle_request(ctx_med("GET", "/_cors/privat", hd))
+    assert_eq(web.response_status(rd), 403)
+    krev_ingen_cors("D 403", rd)
+
+    // E: allowlist-vegen speglar tillaten origin, legg Origin til Vary utan å
+    // skrive over det som stod der.
+    la he: ordbok_tekst = {}
+    he["Origin"] = "https://x.norscode.no"
+    la ctx_e = ctx_med("GET", "/", he)
+    la re = web.response_finalize_strict_cors(ctx_e,
+        web.response_builder(200, {"vary": "x-norscode-fragment"}, "hei"),
+        "https://a.norscode.no, https://x.norscode.no")
+    assert_eq(svar_header(re, "access-control-allow-origin"), "https://x.norscode.no")
+    assert_eq(svar_header(re, "access-control-allow-credentials"), "true")
+    assert(vary_har(re, "Origin"))
+    assert(vary_har(re, "x-norscode-fragment"))
+
+    // F: allowlist utan treff: ingen spegling, men Vary: Origin.
+    la hf: ordbok_tekst = {}
+    hf["origin"] = "https://evil.example"
+    la rf = web.response_finalize_strict_cors(ctx_med("GET", "/", hf),
+        web.response_builder(200, {}, "hei"), "https://x.norscode.no")
+    krev_ingen_cors("F strict_cors utan treff", rf)
+    assert(vary_har(rf, "Origin"))
+
+    // G: preflight med allowlist frå ctx (request-middleware set __cors_origins__).
+    la hg: ordbok_tekst = {}
+    hg["Origin"] = "https://x.norscode.no"
+    la ctx_g = ctx_med("OPTIONS", "/_cors/privat", hg)
+    ctx_g["__cors_origins__"] = "https://x.norscode.no"
+    la rg = web.handle_request(ctx_g)
+    assert_eq(web.response_status(rg), 204)
+    assert_eq(svar_header(rg, "access-control-allow-origin"), "https://x.norscode.no")
+    assert_eq(svar_header(rg, "access-control-allow-credentials"), "true")
+    la hg2: ordbok_tekst = {}
+    hg2["Origin"] = "https://evil.example"
+    la ctx_g2 = ctx_med("OPTIONS", "/_cors/privat", hg2)
+    ctx_g2["__cors_origins__"] = "https://x.norscode.no"
+    krev_ingen_cors("G2 OPTIONS allowlist utan treff", web.handle_request(ctx_g2))
+
+    builtin_namn_med_std_web()
+    skriv("test_web_cors OK\n")
+    returner 0
+}

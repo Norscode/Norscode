@@ -1,0 +1,217 @@
+# http_cache.no — svar i den felles responskontrakten for app-kjensle (A0)
+#
+# Kontrakten (docs/APP_KJENSLE.md):
+#   - Toppnøklar: status, body, content_type og etag. etag må vere toppnøkkel,
+#     fordi 304-vegen i nc serve berre les han der.
+#   - Alle andre headerar ligg i headers, med små bokstavar (cache-control,
+#     vary, x-content-type-options, content-security-policy, x-norscode-*).
+#   - Same header står aldri begge stader (ingen content-type/etag i headers).
+#   - Alle headerverdiar går gjennom header_trygg: CR, LF, NUL og andre
+#     kontrollteikn gjev unntak (serialiseringa i nc serve filtrerer ikkje).
+#
+# Bruk:
+#   bruk std.http_cache som hc
+#   funksjon side(ctx: ordbok_tekst) -> ordbok_tekst {
+#       web.route("GET /side")
+#       returner hc.med_tryggleik(hc.svar_revalider("<p>hei</p>", "text/html; charset=utf-8"))
+#   }
+#
+# Modulen har ingen globalar og brukar berre builtin.sha256, so han verkar både
+# under nc serve (utan disk- og env-caps) og under web.handle_request.
+
+funksjon _sha256_hex(innhald: tekst) -> tekst {
+    la h = ""
+    prøv {
+        h = tekst(builtin.sha256(innhald))
+    } fang (e) {
+        kast "http_cache krev builtin.sha256"
+    }
+    hvis lengde(h) < 32 { kast "http_cache krev builtin.sha256" }
+    returner h
+}
+
+# ─── Verdiar ─────────────────────────────────────────────────────────────────
+
+# Kastar når verdien kan bryte ut av headerlinja: CR, LF, NUL og andre
+# kontrollteikn (0x00–0x1F utanom HTAB, og 0x7F). Returnerer verdien uendra.
+funksjon header_trygg(verdi: tekst) -> tekst {
+    la i: heiltall = 0
+    la n = lengde(verdi)
+    mens i < n {
+        la c = builtin.char_code(builtin.slice(verdi, i, i + 1))
+        hvis (c < 32 og c != 9) eller c == 127 {
+            kast "http_cache: ugyldig teikn (kode " + tekst(c) + ") i headerverdi"
+        }
+        i = i + 1
+    }
+    returner verdi
+}
+
+# Headernamn: token-teikn (RFC 9110 §5.6.2), returnert med små bokstavar.
+funksjon headernamn_trygt(namn: tekst) -> tekst {
+    hvis namn == "" { kast "http_cache: tomt headernamn" }
+    la tillatne = "!#$%&'*+-.^_`|~"
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la t = builtin.slice(namn, i, i + 1)
+        la c = builtin.char_code(t)
+        la ok = (c >= 48 og c <= 57) eller (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller builtin.contains(tillatne, t)
+        hvis ikkje ok { kast "http_cache: ugyldig headernamn '" + namn + "'" }
+        i = i + 1
+    }
+    returner tekst_til_liten(namn)
+}
+
+# Sterk ETag: sitert prefiks (128 bit) av SHA-256 over innhaldet.
+funksjon etag_av(innhald: tekst) -> tekst {
+    returner "\"" + builtin.slice(_sha256_hex(innhald), 0, 32) + "\""
+}
+
+# Kort innhaldsversjon for ?v= (48 bit er nok til å skilje utgåver av same fil).
+funksjon versjon_av(innhald: tekst) -> tekst {
+    returner builtin.slice(_sha256_hex(innhald), 0, 12)
+}
+
+funksjon versjonert_url(sti: tekst, innhald: tekst) -> tekst {
+    la skil = "?"
+    hvis builtin.contains(sti, "?") { skil = "&" }
+    returner sti + skil + "v=" + versjon_av(innhald)
+}
+
+funksjon csp_standard() -> tekst {
+    returner "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+}
+
+# ─── Svar ────────────────────────────────────────────────────────────────────
+
+funksjon nytt_svar(status: heiltall, content_type: tekst, body: tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["status"] = status
+    s["content_type"] = header_trygg(content_type)
+    s["body"] = body
+    s["headers"] = {}
+    returner s
+}
+
+funksjon _med_etag(s: ordbok_tekst) -> ordbok_tekst {
+    s["etag"] = etag_av(tekst(s["body"]))
+    returner s
+}
+
+# HTML og fragment: alltid revalider mot ETag (304 når innhaldet er uendra).
+funksjon svar_revalider(body: tekst, content_type: tekst) -> ordbok_tekst {
+    la s = _med_etag(nytt_svar(200, content_type, body))
+    returner med_header(s, "cache-control", "no-cache")
+}
+
+# Privat HTML (innlogga): ingen delt cache, revalider mot ETag.
+funksjon svar_privat(body: tekst, content_type: tekst) -> ordbok_tekst {
+    la s = _med_etag(nytt_svar(200, content_type, body))
+    returner med_header(s, "cache-control", "private, no-cache")
+}
+
+# Versjonert ressurs: immutable berre når ?v= er versjonen av akkurat dette
+# innhaldet. Feil eller manglande v gjev no-cache, so ein gammal URL aldri
+# låser ein ny fil i cachen i eitt år.
+funksjon svar_immutable(body: tekst, content_type: tekst, v: tekst) -> ordbok_tekst {
+    la s = _med_etag(nytt_svar(200, content_type, body))
+    hvis v != "" og v == versjon_av(body) {
+        returner med_header(s, "cache-control", "public, max-age=31536000, immutable")
+    }
+    returner med_header(s, "cache-control", "no-cache")
+}
+
+# ─── Headerar ────────────────────────────────────────────────────────────────
+
+funksjon _headers(s: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje finnes_nøkkel(s, "headers") eller s["headers"] == null {
+        s["headers"] = {}
+    }
+    returner s["headers"]
+}
+
+# Set ein header i headers (små bokstavar). content-type og etag er toppnøklar
+# i kontrakten og blir avviste her, so same header aldri står begge stader.
+funksjon med_header(s: ordbok_tekst, namn: tekst, verdi: tekst) -> ordbok_tekst {
+    la n = headernamn_trygt(namn)
+    hvis n == "content-type" eller n == "etag" {
+        kast "http_cache: '" + n + "' er toppnøkkel i responskontrakten, ikkje header"
+    }
+    la h = _headers(s)
+    h[n] = header_trygg(verdi)
+    s["headers"] = h
+    returner s
+}
+
+funksjon _har_header(s: ordbok_tekst, namn: tekst) -> boolsk {
+    la h = _headers(s)
+    returner finnes_nøkkel(h, tekst_til_liten(namn))
+}
+
+# Legg eit ledd til Vary utan å skrive over det som alt står der.
+funksjon med_vary(s: ordbok_tekst, ledd: tekst) -> ordbok_tekst {
+    la nytt = builtin.trim(header_trygg(ledd))
+    hvis nytt == "" { returner s }
+    la h = _headers(s)
+    la før_verdi = ""
+    hvis finnes_nøkkel(h, "vary") { før_verdi = builtin.trim(tekst(h["vary"])) }
+    hvis før_verdi == "" { returner med_header(s, "vary", nytt) }
+    la deler = builtin.split(før_verdi, ",")
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la d = tekst_til_liten(builtin.trim(deler[i]))
+        hvis d == tekst_til_liten(nytt) eller d == "*" { returner s }
+        i = i + 1
+    }
+    returner med_header(s, "vary", før_verdi + ", " + nytt)
+}
+
+# Tryggleiksheaderar for HTML, fragment, øyer og JS (nc serve legg ikkje på
+# nokon sjølv). Verdiar appen alt har sett, blir ståande.
+funksjon med_tryggleik(s: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje _har_header(s, "x-content-type-options") { s = med_header(s, "x-content-type-options", "nosniff") }
+    hvis ikkje _har_header(s, "content-security-policy") { s = med_header(s, "content-security-policy", csp_standard()) }
+    hvis ikkje _har_header(s, "referrer-policy") { s = med_header(s, "referrer-policy", "no-referrer") }
+    returner s
+}
+
+# ─── Kontrakt ────────────────────────────────────────────────────────────────
+
+# Tom tekst når `s` følgjer responskontrakten; elles første brot.
+funksjon kontrakt_feil(s: ordbok_tekst) -> tekst {
+    hvis s == null { returner "svaret er null" }
+    hvis ikkje finnes_nøkkel(s, "status") { returner "manglar toppnøkkel status" }
+    hvis ikkje finnes_nøkkel(s, "body") { returner "manglar toppnøkkel body" }
+    la topp = nøkler(s)
+    la i: heiltall = 0
+    mens i < lengde(topp) {
+        la k = tekst(topp[i])
+        hvis k != "status" og k != "body" og k != "content_type" og k != "etag" og k != "headers" {
+            returner "ukjend toppnøkkel '" + k + "' (headerar skal liggje i headers)"
+        }
+        i = i + 1
+    }
+    prøv {
+        hvis finnes_nøkkel(s, "content_type") { header_trygg(tekst(s["content_type"])) }
+        hvis finnes_nøkkel(s, "etag") { header_trygg(tekst(s["etag"])) }
+    } fang (e) {
+        returner "ugyldig toppverdi: " + tekst(e)
+    }
+    hvis finnes_nøkkel(s, "headers") og s["headers"] != null {
+        la h = s["headers"]
+        la ks = nøkler(h)
+        la j: heiltall = 0
+        mens j < lengde(ks) {
+            la k = tekst(ks[j])
+            hvis k != tekst_til_liten(k) { returner "headernamn med store bokstavar: '" + k + "'" }
+            hvis k == "content-type" eller k == "etag" { returner "'" + k + "' står i headers, men er toppnøkkel" }
+            prøv {
+                header_trygg(tekst(h[k]))
+            } fang (e) {
+                returner "ugyldig verdi i header '" + k + "'"
+            }
+            j = j + 1
+        }
+    }
+    returner ""
+}

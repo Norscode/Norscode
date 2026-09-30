@@ -1,0 +1,701 @@
+// Norscode lint-kjerne — felles diagnostikk for `nc lint` og `nc lsp`.
+//
+// Køyrer frå kjelde (nc_køyr_verktøy), så endringar her verkar utan reseed.
+//
+// Inngang:
+//   lint_kjelde(kilde) -> liste av funn, sorterte etter linje/kolonne.
+//   Kvart funn er ei ordbok med:
+//     "severity"  "error" | "warning" | "info"
+//     "code"      regelnamn (sjå under)
+//     "linje"     1-basert linje (heiltall, 0 = ukjend)
+//     "kolonne"   1-basert kolonne (heiltall, 0 = ukjend)
+//     "melding"   lesbar melding
+//
+// Reglar:
+//   syntax-error       (error)   lexer-/parserfeil — fila kan ikkje kompilerast
+//   type-error         (error)   statisk typefeil frå selfhost/compiler/typecheck.no
+//                                (argument, returverdi, la x: T, tilordning til typa
+//                                variabel). Meldinga har forma «Typefeil L:K - …».
+//   unused-variable    (warning) `la x` i ein funksjon der x aldri blir lesen
+//                                nokon stad i funksjonen (la er funksjonsskopa)
+//   redeclaration      (warning) `la x` når x alt er deklarert i same blokk
+//                                (eller er parameter i funksjonsblokka), eller i
+//                                ei omsluttande blokk (den indre la-en skriv over
+//                                den ytre variabelen); ikkje for søskenblokker
+//   unreachable-code   (warning) setning etter returner/bryt/fortsett/kast (eller
+//                                etter hvis/ellers der alle greiner avsluttar)
+//   duplicate-import   (warning) same alias importert to gonger
+//   unused-import      (warning) importert alias som aldri blir brukt
+//   type-change        (warning) utypa `la x = v` som seinare får verdi av annan
+//                                type («Typeendring L:K - …»); lov i Norscode,
+//                                men ein Java-stil kodelukt
+//   typecheck-internal (info)    typesjekken krasja internt på denne fila
+//
+// Berre error-nivå skal gje exit != 0 i `nc lint`.
+// Namn som byrjar med `_` eller `ignorert` blir aldri rapporterte som ubrukte.
+
+bruk selfhost.lexer.lexer_m1
+bruk selfhost.parser
+bruk selfhost.compiler.typecheck som tc
+
+// ─── Funn ────────────────────────────────────────────────────────────────────
+
+funksjon lk_funn(severity: tekst, code: tekst, linje, kolonne, melding: tekst) {
+    la f = {}
+    f["severity"] = severity
+    f["code"] = code
+    f["linje"] = lk_tal(linje)
+    f["kolonne"] = lk_tal(kolonne)
+    f["melding"] = melding
+    returner f
+}
+
+funksjon lk_tal(v) -> heiltall {
+    hvis v == null { returner 0 }
+    hvis type(v) == "heltall" { returner v }
+    la t = tekst(v)
+    hvis t == "" { returner 0 }
+    prøv {
+        returner heltall_fra_tekst(t)
+    } fang (e) {
+        returner 0
+    }
+    returner 0
+}
+
+funksjon lk_er_siffer(c: tekst) -> boolsk {
+    returner c == "0" eller c == "1" eller c == "2" eller c == "3" eller c == "4" eller
+             c == "5" eller c == "6" eller c == "7" eller c == "8" eller c == "9"
+}
+
+// Les «L:K» rett etter prefiks i ei feilmelding. Returnerer [linje, kolonne].
+funksjon lk_posisjon_etter(melding: tekst, prefiks: tekst) {
+    la pos = [0, 0]
+    la start = builtin.index_of(melding, prefiks)
+    hvis start < 0 { returner pos }
+    la i = start + lengde(prefiks)
+    la linje_t = ""
+    mens i < lengde(melding) og lk_er_siffer(builtin.slice(melding, i, i + 1)) {
+        linje_t = linje_t + builtin.slice(melding, i, i + 1)
+        i = i + 1
+    }
+    hvis linje_t == "" { returner pos }
+    pos[0] = heltall_fra_tekst(linje_t)
+    hvis i < lengde(melding) og builtin.slice(melding, i, i + 1) == ":" {
+        i = i + 1
+        la kol_t = ""
+        mens i < lengde(melding) og lk_er_siffer(builtin.slice(melding, i, i + 1)) {
+            kol_t = kol_t + builtin.slice(melding, i, i + 1)
+            i = i + 1
+        }
+        hvis kol_t != "" { pos[1] = heltall_fra_tekst(kol_t) }
+    }
+    returner pos
+}
+
+// ─── Import-reglar (tokenbaserte) ────────────────────────────────────────────
+
+funksjon lk_er_ident_eller_type(t: tekst) -> boolsk {
+    returner t == "IDENT" eller t == "TYPE_INT" eller t == "TYPE_TEXT" eller
+             t == "TYPE_BOOL" eller t == "TYPE_LIST_INT" eller
+             t == "TYPE_LIST_TEXT" eller t == "TYPE_MAP_INT" eller
+             t == "TYPE_MAP_TEXT" eller t == "TYPE_MAP_BOOL"
+}
+
+funksjon lk_finn_imports(tokens) {
+    la imports = []
+    la i = 0
+    la n = lengde(tokens)
+    mens i < n {
+        la tok = tokens[i]
+        hvis tok["type"] == "BRUK" {
+            la j = i + 1
+            la modul = ""
+            mens j < n og (lk_er_ident_eller_type(tokens[j]["type"]) eller tokens[j]["type"] == "DOT") {
+                modul = modul + tokens[j]["value"]
+                j = j + 1
+            }
+            la alias = ""
+            hvis j < n og tokens[j]["type"] == "SOM" {
+                j = j + 1
+                hvis j < n og lk_er_ident_eller_type(tokens[j]["type"]) {
+                    alias = tokens[j]["value"]
+                    j = j + 1
+                }
+            }
+            hvis lengde(alias) == 0 {
+                la delar = builtin.split(modul, ".")
+                hvis lengde(delar) > 0 { alias = delar[lengde(delar) - 1] }
+            }
+            la imp = {}
+            imp["modul"] = modul
+            imp["alias"] = alias
+            imp["linje"] = tok["line"]
+            imp["kolonne"] = tok["column"]
+            legg_til(imports, imp)
+            i = j
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner imports
+}
+
+funksjon lk_alias_brukt(alias: tekst, tokens) -> boolsk {
+    la i = 0
+    la n = lengde(tokens)
+    mens i < n {
+        la tok = tokens[i]
+        hvis lk_er_ident_eller_type(tok["type"]) og tok["value"] == alias {
+            la forrige = ""
+            hvis i > 0 { forrige = tokens[i - 1]["type"] }
+            // NB: eit ualiasert `bruk a.b.c` tel som brukt (tokenet c i sjølve
+            // bruk-setninga), fordi importerte funksjonar kan kallast utan prefiks.
+            hvis forrige != "SOM" og forrige != "BRUK" { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon lk_import_reglar(tokens, funn) {
+    la imports = lk_finn_imports(tokens)
+    la sett = {}
+    la i = 0
+    mens i < lengde(imports) {
+        la imp = imports[i]
+        la alias = imp["alias"]
+        hvis finnes_nøkkel(sett, alias) {
+            legg_til(funn, lk_funn("warning", "duplicate-import", imp["linje"], imp["kolonne"], "Duplikat import: " + alias))
+        } ellers {
+            sett[alias] = sann
+        }
+        hvis ikkje lk_alias_brukt(alias, tokens) {
+            legg_til(funn, lk_funn("warning", "unused-import", imp["linje"], imp["kolonne"], "Ubrukt import: " + imp["modul"] + " som " + alias))
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// ─── AST-reglar: ubrukte variablar, re-deklarasjon, uoppnåeleg kode ─────────
+//
+// `la` er FUNKSJONSSKOPA i Norscode (som `var` i JavaScript): ein variabel frå
+// ein `la` inni hvis/ellers/for/mens er synleg etter blokka, og ein indre `la x`
+// skriv over den ytre x-en (same variabel). Reglane følgjer det:
+//   - ubrukt: ein `la x` er ubrukt berre når x ALDRI blir lesen nokon stad i
+//     funksjonen (òg i nøsta lambdaer/funksjonar, som kan fange han).
+//   - re-deklarasjon: `la x` (eller ein for-variabel x) når x alt er deklarert
+//     i same blokk, eller i ei omsluttande blokk i same funksjon (inkludert
+//     parametrar). I det siste tilfellet skriv den indre deklarasjonen over den
+//     ytre variabelen — Java avviser det same. `la v` i to søskenblokker
+//     (hvis { la v … } ellers { la v … }) er ikkje re-deklarasjon.
+//
+// Funksjonskonteksten (ctx["fn_stakk"], øvst = gjeldande funksjon) er ei ordbok:
+//   "lest"     namn -> sann for alle namn som blir lesne i funksjonskroppen
+//   "decls"    `la`-deklarasjonar som skal meldast om dei er ubrukte
+//   "blokker"  blokkstakk; kvar blokk er namn -> deklarasjon {linje, kolonne}
+// Toppnivået (modulglobalar, skript-stil) har ingen funksjonskontekst: der blir
+// deklarasjonar ikkje registrerte, fordi globalar kan brukast frå andre modular.
+
+funksjon lk_forkast_namn(namn: tekst) -> boolsk {
+    returner builtin.starts_with(namn, "_") eller builtin.starts_with(namn, "ignorert")
+}
+
+funksjon lk_fn(ctx) {
+    la stakk = ctx["fn_stakk"]
+    hvis lengde(stakk) == 0 { returner null }
+    returner stakk[lengde(stakk) - 1]
+}
+
+funksjon lk_push_blokk(ctx) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    legg_til(fnc["blokker"], {})
+    returner 0
+}
+
+funksjon lk_pop_blokk(ctx) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    fjern_siste(fnc["blokker"])
+    returner 0
+}
+
+// Deklarasjonen av namn i ei omsluttande blokk (ikkje den øvste), eller null.
+funksjon lk_finn_ytre(blokker, namn: tekst) {
+    la i = lengde(blokker) - 2
+    mens i >= 0 {
+        la b = blokker[i]
+        hvis finnes_nøkkel(b, namn) { returner b[namn] }
+        i = i - 1
+    }
+    returner null
+}
+
+funksjon lk_deklarer(ctx, namn: tekst, linje, kolonne, rapporter: boolsk, sjekk_ytre: boolsk) {
+    la fnc = lk_fn(ctx)
+    hvis fnc == null { returner 0 }
+    la blokker = fnc["blokker"]
+    hvis lengde(blokker) == 0 { returner 0 }
+    la topp = blokker[lengde(blokker) - 1]
+    hvis ikkje lk_forkast_namn(namn) {
+        hvis finnes_nøkkel(topp, namn) {
+            la gammal = topp[namn]
+            legg_til(ctx["funn"], lk_funn("warning", "redeclaration", linje, kolonne,
+                "Re-deklarasjon av " + namn + " i same scope (fyrst deklarert på linje " + tekst(gammal["linje"]) + ")"))
+        } ellers hvis sjekk_ytre {
+            la ytre = lk_finn_ytre(blokker, namn)
+            hvis ytre != null {
+                legg_til(ctx["funn"], lk_funn("warning", "redeclaration", linje, kolonne,
+                    "Re-deklarasjon av " + namn + " i indre blokk: la er funksjonsskopa, så dette skriv over " +
+                    namn + " frå linje " + tekst(ytre["linje"])))
+            }
+        }
+    }
+    la d = {}
+    d["namn"] = namn
+    d["linje"] = linje
+    d["kolonne"] = kolonne
+    topp[namn] = d
+    hvis rapporter { legg_til(fnc["decls"], d) }
+    returner 0
+}
+
+// Alle namn som blir LESNE i node (Ident-ar), inkludert i nøsta lambdaer og
+// funksjonar. Målet for ei rein tilordning (x = …) er ikkje ei lesing; x += …
+// les x og tel difor.
+funksjon lk_samle_lest(node, ut) {
+    hvis node == null { returner 0 }
+    hvis type(node) != "ordbok" { returner 0 }
+    la t = node["type"]
+    hvis t == "Ident" {
+        ut[tekst(node["verdi"])] = sann
+        returner 0
+    }
+    la barn = node["barn"]
+    la i = 0
+    hvis t == "Sett" og lengde(barn) > 0 og barn[0]["type"] == "Ident" { i = 1 }
+    mens i < lengde(barn) {
+        lk_samle_lest(barn[i], ut)
+        i = i + 1
+    }
+    returner 0
+}
+
+// Avsluttar denne setninga alltid kontrollflyten i blokka?
+funksjon lk_terminerer(stmt) -> boolsk {
+    hvis stmt == null { returner usann }
+    la t = stmt["type"]
+    hvis t == "Returner" eller t == "Kast" eller t == "Bryt" eller t == "Fortsett" { returner sann }
+    hvis t == "Blokk" { returner lk_blokk_terminerer(stmt) }
+    hvis t == "Hvis" {
+        la barn = stmt["barn"]
+        hvis lengde(barn) < 3 { returner usann }
+        returner lk_blokk_terminerer(barn[1]) og lk_blokk_terminerer(barn[2])
+    }
+    returner usann
+}
+
+funksjon lk_blokk_terminerer(blokk) -> boolsk {
+    hvis blokk == null { returner usann }
+    hvis blokk["type"] != "Blokk" { returner lk_terminerer(blokk) }
+    la barn = blokk["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        hvis lk_terminerer(barn[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon lk_barn_av_type(node, t: tekst) {
+    la barn = node["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        hvis barn[i]["type"] == t { returner barn[i] }
+        i = i + 1
+    }
+    returner null
+}
+
+funksjon lk_siste_blokk(node) {
+    la barn = node["barn"]
+    la i = lengde(barn) - 1
+    mens i >= 0 {
+        hvis barn[i]["type"] == "Blokk" { returner barn[i] }
+        i = i - 1
+    }
+    returner null
+}
+
+// Blokk: ny blokk på blokkstakken, setningar i rekkjefølgje, uoppnåeleg kode
+// etter avslutning. parametrar: [{namn, linje, kolonne, ytre}] som blir
+// deklarerte i blokka (funksjonsparametrar, for-variabel, fang-variabel);
+// «ytre» = sjekk re-deklarasjon mot omsluttande blokker.
+funksjon lk_blokk(ctx, blokk, parametrar) {
+    lk_push_blokk(ctx)
+    hvis parametrar != null {
+        la pi = 0
+        mens pi < lengde(parametrar) {
+            la p = parametrar[pi]
+            la ytre = finnes_nøkkel(p, "ytre") og p["ytre"] == sann
+            lk_deklarer(ctx, p["namn"], p["linje"], p["kolonne"], usann, ytre)
+            pi = pi + 1
+        }
+    }
+    la barn = blokk["barn"]
+    la meldt = usann
+    la i = 0
+    mens i < lengde(barn) {
+        la stmt = barn[i]
+        lk_node(ctx, stmt)
+        hvis ikkje meldt og i + 1 < lengde(barn) og lk_terminerer(stmt) {
+            la neste_stmt = barn[i + 1]
+            legg_til(ctx["funn"], lk_funn("warning", "unreachable-code", neste_stmt["linje"], neste_stmt["kolonne"],
+                "Uoppnåeleg kode etter " + lk_avslutt_namn(stmt)))
+            meldt = sann
+        }
+        i = i + 1
+    }
+    lk_pop_blokk(ctx)
+    returner 0
+}
+
+funksjon lk_avslutt_namn(stmt) -> tekst {
+    la t = stmt["type"]
+    hvis t == "Returner" { returner "returner" }
+    hvis t == "Kast" { returner "kast" }
+    hvis t == "Bryt" { returner "bryt" }
+    hvis t == "Fortsett" { returner "fortsett" }
+    returner "hvis/ellers der alle greiner avsluttar"
+}
+
+funksjon lk_param(namn: tekst, linje, kolonne, ytre: boolsk) {
+    la d = {}
+    d["namn"] = namn
+    d["linje"] = linje
+    d["kolonne"] = kolonne
+    d["ytre"] = ytre
+    returner d
+}
+
+// Parametrar frå ein Parametere-node: [{namn, linje, kolonne, ytre}], og besøk
+// standardverdiane (dei kan lese variablar i ytre scope).
+funksjon lk_parametrar(ctx, fn_node) {
+    la ut = []
+    la pnode = lk_barn_av_type(fn_node, "Parametere")
+    hvis pnode == null { returner ut }
+    la barn = pnode["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        la p = barn[i]
+        la std_node = lk_barn_av_type(p, "Standard")
+        hvis std_node != null { lk_barn(ctx, std_node) }
+        legg_til(ut, lk_param(tekst(p["verdi"]), p["linje"], p["kolonne"], usann))
+        i = i + 1
+    }
+    returner ut
+}
+
+// Funksjon, lambda eller test: eigen funksjonskontekst. Ubrukte `la`-variablar
+// blir melde når heile kroppen er gått gjennom.
+funksjon lk_funksjonskropp(ctx, kropp, params) {
+    la fnc = {}
+    la lest = {}
+    lk_samle_lest(kropp, lest)
+    fnc["lest"] = lest
+    fnc["decls"] = []
+    fnc["blokker"] = []
+    legg_til(ctx["fn_stakk"], fnc)
+    // Parameterblokka og kroppsblokka er éi blokk for re-deklarasjon (som Java).
+    lk_blokk(ctx, kropp, params)
+    fjern_siste(ctx["fn_stakk"])
+    la decls = fnc["decls"]
+    la i = 0
+    mens i < lengde(decls) {
+        la d = decls[i]
+        la namn = d["namn"]
+        hvis ikkje finnes_nøkkel(lest, namn) og ikkje lk_forkast_namn(namn) {
+            legg_til(ctx["funn"], lk_funn("warning", "unused-variable", d["linje"], d["kolonne"], "Ubrukt variabel: " + namn))
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon lk_funksjon(ctx, fn_node) {
+    la params = lk_parametrar(ctx, fn_node)
+    la kropp = lk_siste_blokk(fn_node)
+    hvis kropp == null { returner 0 }
+    lk_funksjonskropp(ctx, kropp, params)
+    returner 0
+}
+
+funksjon lk_barn(ctx, node) {
+    la barn = node["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        lk_node(ctx, barn[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon lk_node(ctx, node) {
+    hvis node == null { returner 0 }
+    hvis type(node) != "ordbok" { returner 0 }
+    la t = node["type"]
+    hvis t == "Ident" {
+        // Lesingar er samla på førehand per funksjon (lk_samle_lest).
+        returner 0
+    }
+    hvis t == "Funksjon" eller t == "Lambda" {
+        lk_funksjon(ctx, node)
+        returner 0
+    }
+    hvis t == "Test" {
+        la tkropp = lk_siste_blokk(node)
+        hvis tkropp != null { lk_funksjonskropp(ctx, tkropp, null) }
+        returner 0
+    }
+    hvis t == "Blokk" {
+        lk_blokk(ctx, node, null)
+        returner 0
+    }
+    hvis t == "La" {
+        // Verdien først: `la x = x + 1` les den ytre x-en.
+        la lb = node["barn"]
+        la li = 0
+        mens li < lengde(lb) {
+            hvis lb[li]["type"] != "Type" { lk_node(ctx, lb[li]) }
+            li = li + 1
+        }
+        lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], sann, sann)
+        returner 0
+    }
+    hvis t == "LaDestrukt" {
+        la db = node["barn"]
+        hvis lengde(db) > 1 { lk_node(ctx, db[1]) }
+        hvis lengde(db) > 0 {
+            la maal = db[0]["barn"]
+            la mi = 0
+            mens mi < lengde(maal) {
+                lk_deklarer(ctx, tekst(maal[mi]["verdi"]), maal[mi]["linje"], maal[mi]["kolonne"], usann, sann)
+                mi = mi + 1
+            }
+        }
+        returner 0
+    }
+    hvis t == "Sett" {
+        la sb = node["barn"]
+        hvis lengde(sb) > 0 og sb[0]["type"] != "Ident" { lk_node(ctx, sb[0]) }
+        hvis lengde(sb) > 1 { lk_node(ctx, sb[1]) }
+        returner 0
+    }
+    hvis t == "For" eller t == "ForRange" {
+        la fb = node["barn"]
+        la fi = 0
+        la kropp = null
+        mens fi < lengde(fb) {
+            hvis fb[fi]["type"] == "Blokk" {
+                kropp = fb[fi]
+            } ellers {
+                lk_node(ctx, fb[fi])
+            }
+            fi = fi + 1
+        }
+        hvis kropp != null {
+            // For-variabelen er funksjonsskopa òg: ein nøsta `for i` inni ein
+            // ytre `for i` skriv over den ytre løkkevariabelen.
+            lk_blokk(ctx, kropp, [lk_param(tekst(node["verdi"]), node["linje"], node["kolonne"], sann)])
+        }
+        returner 0
+    }
+    hvis t == "PrøvFang" {
+        la pb = node["barn"]
+        hvis lengde(pb) > 0 { lk_blokk(ctx, pb[0], null) }
+        hvis lengde(pb) > 1 {
+            // fang (e) inni ein ytre fang (e) er vanleg og ufarleg: ikkje meld.
+            lk_blokk(ctx, pb[1], [lk_param(tekst(node["verdi"]), node["linje"], node["kolonne"], usann)])
+        }
+        hvis lengde(pb) > 2 { lk_blokk(ctx, pb[2], null) }
+        returner 0
+    }
+    hvis t == "ListeKomprehensjon" {
+        la kb = node["barn"]
+        hvis lengde(kb) > 0 { lk_node(ctx, kb[0]) }
+        lk_push_blokk(ctx)
+        lk_deklarer(ctx, tekst(node["verdi"]), node["linje"], node["kolonne"], usann, usann)
+        la ki = 1
+        mens ki < lengde(kb) {
+            lk_node(ctx, kb[ki])
+            ki = ki + 1
+        }
+        lk_pop_blokk(ctx)
+        returner 0
+    }
+    lk_barn(ctx, node)
+    returner 0
+}
+
+funksjon lk_ast_reglar(ast, funn) {
+    la ctx = {}
+    ctx["funn"] = funn
+    ctx["fn_stakk"] = []
+    // Toppnivå: modulglobalar kan brukast frå andre modular, så dei blir ikkje
+    // rapporterte som ubrukte og deklarasjonar der blir ikkje registrerte.
+    la barn = ast["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        la node = barn[i]
+        la t = node["type"]
+        hvis t == "Funksjon" eller t == "Test" {
+            lk_node(ctx, node)
+        } ellers hvis t != "Bruk" og t != "La" og t != "Struktur" og t != "Enum" og t != "Grensesnitt" {
+            // Toppnivå-setningar (skript-stil): besøk for uoppnåeleg kode o.l.
+            // inni blokkar, men utan funksjonskontekst for sjølve toppnivået.
+            lk_node(ctx, node)
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// ─── Typesjekk ───────────────────────────────────────────────────────────────
+
+funksjon lk_param_typar(fn_node) {
+    la ut = []
+    la pnode = lk_barn_av_type(fn_node, "Parametere")
+    hvis pnode == null { returner ut }
+    la barn = pnode["barn"]
+    la vararg = usann
+    la i = 0
+    mens i < lengde(barn) {
+        la p = barn[i]
+        hvis finnes_nøkkel(p, "vararg") og p["vararg"] == sann { vararg = sann }
+        hvis vararg {
+            // Varargs samlar resten av argumenta i ei liste: elementa har
+            // ikkje parametertypen, så dei blir ikkje sjekka.
+            legg_til(ut, "")
+        } ellers {
+            legg_til(ut, tc.kt_param_type(p))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lk_typesjekk(ast, funn) {
+    la tabell = {}
+    tabell["funksjonar"] = {}
+    tabell["param_typar"] = {}
+    tabell["retur_typar"] = {}
+    tabell["typefeil"] = []
+    tabell["typeaatvaringar"] = []
+    tabell["feil"] = []
+    la barn = ast["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        la node = barn[i]
+        hvis node["type"] == "Funksjon" {
+            la namn = tekst(node["verdi"])
+            tabell["param_typar"][namn] = lk_param_typar(node)
+            la rt = lk_barn_av_type(node, "Returtype")
+            hvis rt != null { tabell["retur_typar"][namn] = tekst(rt["verdi"]) }
+        }
+        i = i + 1
+    }
+    prøv {
+        tc.kt_koyr(tabell, ast)
+    } fang (e) {
+        legg_til(funn, lk_funn("info", "typecheck-internal", 0, 0, "Typesjekken stoppa internt: " + tekst(e)))
+    }
+    la feilliste = tabell["typefeil"]
+    la j = 0
+    mens j < lengde(feilliste) {
+        la m = tekst(feilliste[j])
+        la pos = lk_posisjon_etter(m, "Typefeil ")
+        legg_til(funn, lk_funn("error", "type-error", pos[0], pos[1], m))
+        j = j + 1
+    }
+    la aat = tabell["typeaatvaringar"]
+    la k = 0
+    mens k < lengde(aat) {
+        la am = tekst(aat[k])
+        la apos = lk_posisjon_etter(am, "Typeendring ")
+        legg_til(funn, lk_funn("warning", "type-change", apos[0], apos[1], am))
+        k = k + 1
+    }
+    returner 0
+}
+
+// ─── Sortering og oppsummering ───────────────────────────────────────────────
+
+funksjon lk_foer(a, b) -> boolsk {
+    hvis a["linje"] != b["linje"] { returner a["linje"] < b["linje"] }
+    returner a["kolonne"] < b["kolonne"]
+}
+
+funksjon lk_sorter(funn) {
+    // Innsetjingssortering: stabil, og funnlistene er små.
+    la ut = []
+    la i = 0
+    mens i < lengde(funn) {
+        la f = funn[i]
+        la j = lengde(ut)
+        legg_til(ut, f)
+        mens j > 0 og lk_foer(f, ut[j - 1]) {
+            ut[j] = ut[j - 1]
+            j = j - 1
+        }
+        ut[j] = f
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon tal_med_severity(funn, severity: tekst) -> heiltall {
+    la n = 0
+    la i = 0
+    mens i < lengde(funn) {
+        hvis funn[i]["severity"] == severity { n = n + 1 }
+        i = i + 1
+    }
+    returner n
+}
+
+// ─── Inngang ─────────────────────────────────────────────────────────────────
+
+funksjon lint_kjelde(kilde: tekst) {
+    la funn = []
+    la tokens = null
+    prøv {
+        tokens = lexer_m1.lex(kilde)
+    } fang (e) {
+        la m = tekst(e)
+        la pos = lk_posisjon_etter(m, "linje ")
+        la kol = lk_posisjon_etter(m, "kolonne ")
+        legg_til(funn, lk_funn("error", "syntax-error", pos[0], kol[0], m))
+        returner funn
+    }
+    lk_import_reglar(tokens, funn)
+    la ast = null
+    prøv {
+        ast = selfhost.parser.parse_program(tokens)
+    } fang (e) {
+        la m = tekst(e)
+        la pos = lk_posisjon_etter(m, "Parserfeil ")
+        legg_til(funn, lk_funn("error", "syntax-error", pos[0], pos[1], m))
+        returner lk_sorter(funn)
+    }
+    lk_ast_reglar(ast, funn)
+    lk_typesjekk(ast, funn)
+    returner lk_sorter(funn)
+}
+
+funksjon start() -> heiltall {
+    la f = lint_kjelde("funksjon f(x: heltall) -> heltall {\n    returner x\n}\nfunksjon start() {\n    la a = f(\"t\")\n}\n")
+    skriv("linter_kjerne: " + tekst(lengde(f)) + " funn\n")
+    returner 0
+}

@@ -1,0 +1,318 @@
+// std.kanal: bunden blokkerande kanal (ny_blokkerande_kanal) — FIFO-rekkjefølgje,
+// mottrykk (send ventar når full), motta ventar når tom, lukk vekkjer ventande,
+// fristar, fleire produsentar/konsumentar, og at det gamle API-et verkar på begge slag.
+//
+// Med trådar (VM, grøne trådar) køyrer produsentar og konsumentar som trådar.
+// Utan trådar (AOT i dag) blir den eintråda kontrakten sjekka: full/tom kanal
+// utan frist kastar SamtidFeil i staden for å henge, med frist svarar han usann.
+// Alle ventingar på hovudtråden har tak (join 5 s), so testen heng aldri.
+bruk std.kanal som kanal
+bruk std.samtid som sm
+bruk std.runtime.atomic som atom
+
+funksjon inneheld(t: tekst, del: tekst) -> boolsk {
+    returner builtin.index_of(t, del) >= 0
+}
+
+funksjon krev_feil(e, del: tekst) -> heiltall {
+    hvis ikkje inneheld(tekst(e), del) {
+        kast "venta feil med «" + del + "», fekk: " + tekst(e)
+    }
+    returner 0
+}
+
+funksjon join(t) {
+    hvis ikkje sm.tråd_join_innan(t, 5000) { kast "tråden vart ikkje ferdig innan 5 s" }
+    returner sm.tråd_resultat(t)
+}
+
+// Join etter ei handling som skal vekkje tråden med ein gong (signal frå send/
+// motta/lukk), ikkje først når 2 s-vakta i std.samtid._vent går ut.
+funksjon join_snøgt(t) {
+    la t0 = builtin.tid_ms()
+    la v = join(t)
+    la ms = builtin.tid_ms() - t0
+    hvis ms >= 1500 { kast "vekkinga tok " + tekst(ms) + " ms (venta signal, ikkje vakt-tidsavbrot)" }
+    returner v
+}
+
+// ── produsent/konsument med mottrykk ─────────────────────────────────────────
+funksjon w_produsent(k, n: heiltall, motteke, brot) -> heiltall {
+    la i: heiltall = 0
+    mens i < n {
+        kanal.send_vent(k, i)
+        // Etter send nr. i+1 kan kanalen halde høgst 2 (kapasitet) og konsumenten
+        // ha teke éin som enno ikkje er talt: motteke >= (i+1) - 2 - 1.
+        hvis (i + 1) - atom.load(motteke, "seq_cst") > 3 { atom.fetch_add(brot, 1, "seq_cst") }
+        i = i + 1
+    }
+    kanal.lukk(k)
+    returner n
+}
+
+funksjon w_konsument(k, motteke, ut) -> heiltall {
+    la ferdig = usann
+    mens ikkje ferdig {
+        la r = kanal.motta_vent(k)
+        hvis r["har"] {
+            legg_til(ut, r["verdi"])
+            atom.fetch_add(motteke, 1, "seq_cst")
+            sm.sov(2)
+        } ellers {
+            assert(r["stengd"])
+            ferdig = sann
+        }
+    }
+    returner lengde(ut)
+}
+
+funksjon test_mottrykk_og_rekkjefølgje() -> heiltall {
+    la k = kanal.ny_blokkerande_kanal(2)
+    assert_eq(kanal.kapasitet(k), 2)
+    la motteke = atom.ny(0)
+    la brot = atom.ny(0)
+    la ut = []
+    la kons = sm.tråd_start(fun() -> w_konsument(k, motteke, ut))
+    la prod = sm.tråd_start(fun() -> w_produsent(k, 40, motteke, brot))
+    assert_eq(join(prod), 40)
+    assert_eq(join(kons), 40)
+    assert_eq(atom.load(brot, "seq_cst"), 0)
+    la i: heiltall = 0
+    mens i < 40 {
+        assert_eq(ut[i], i)
+        i = i + 1
+    }
+    assert(ikkje kanal.er_open(k))
+    returner 0
+}
+
+// ── fleire produsentar og konsumentar ────────────────────────────────────────
+funksjon w_prod_merka(k, p: heiltall, n: heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < n {
+        kanal.send(k, p * 1000 + i)
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon w_kons_samle(k, ut) -> heiltall {
+    la n: heiltall = 0
+    la ferdig = usann
+    mens ikkje ferdig {
+        la r = kanal.motta_vent(k)
+        hvis r["har"] {
+            legg_til(ut, r["verdi"])
+            n = n + 1
+        } ellers {
+            ferdig = sann
+        }
+    }
+    returner n
+}
+
+// Innanfor éin konsument kjem kvar produsent sine verdiar i aukande rekkjefølgje.
+funksjon per_produsent_aukande(ut) -> boolsk {
+    la sist = {}
+    la i: heiltall = 0
+    mens i < lengde(ut) {
+        la p = tekst(ut[i] / 1000)
+        hvis har_nokkel(sist, p) og sist[p] >= ut[i] { returner usann }
+        sist[p] = ut[i]
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon test_fleire_partar() -> heiltall {
+    la k = kanal.ny_blokkerande_kanal(3)
+    la ut1 = []
+    la ut2 = []
+    la k1 = sm.tråd_start(fun() -> w_kons_samle(k, ut1))
+    la k2 = sm.tråd_start(fun() -> w_kons_samle(k, ut2))
+    la p1 = sm.tråd_start(fun() -> w_prod_merka(k, 1, 25))
+    la p2 = sm.tråd_start(fun() -> w_prod_merka(k, 2, 25))
+    la p3 = sm.tråd_start(fun() -> w_prod_merka(k, 3, 25))
+    join(p1)
+    join(p2)
+    join(p3)
+    kanal.lukk(k)
+    la n1 = join(k1)
+    la n2 = join(k2)
+    assert_eq(n1 + n2, 75)
+    // Kvar verdi nøyaktig éin gong.
+    la sett = {}
+    la alle = []
+    la i: heiltall = 0
+    mens i < lengde(ut1) { legg_til(alle, ut1[i])  i = i + 1 }
+    i = 0
+    mens i < lengde(ut2) { legg_til(alle, ut2[i])  i = i + 1 }
+    i = 0
+    mens i < lengde(alle) {
+        la nk = tekst(alle[i])
+        assert(ikkje har_nokkel(sett, nk))
+        sett[nk] = 1
+        i = i + 1
+    }
+    assert_eq(lengde(nøkler(sett)), 75)
+    assert(per_produsent_aukande(ut1))
+    assert(per_produsent_aukande(ut2))
+    returner 0
+}
+
+// ── blokkering, lukk og fristar ──────────────────────────────────────────────
+funksjon w_motta_ein(k) {
+    returner kanal.motta_vent(k)
+}
+
+funksjon w_send_ein(k, v) -> tekst {
+    prøv {
+        kanal.send_vent(k, v)
+    } fang (e) {
+        returner tekst(e)
+    }
+    returner "sendt"
+}
+
+funksjon test_blokkering_og_lukk() -> heiltall {
+    // motta_vent ventar til nokon sender.
+    la k = kanal.ny_blokkerande_kanal(1)
+    la m = sm.tråd_start(fun() -> w_motta_ein(k))
+    sm.sov(30)
+    assert(ikkje sm.tråd_ferdig(m))
+    kanal.send_vent(k, "hei")
+    la r = join_snøgt(m)
+    assert(r["har"])
+    assert_eq(r["verdi"], "hei")
+    // send_vent ventar når kanalen er full, til nokon tek ut.
+    kanal.send_vent(k, 1)
+    assert(ikkje kanal.send_straks(k, 2))
+    la s = sm.tråd_start(fun() -> w_send_ein(k, 2))
+    sm.sov(30)
+    assert(ikkje sm.tråd_ferdig(s))
+    assert_eq(kanal.motta_vent(k)["verdi"], 1)
+    assert_eq(join_snøgt(s), "sendt")
+    assert_eq(kanal.motta_vent(k)["verdi"], 2)
+    // lukk vekkjer ein ventande mottakar: har=usann, stengd=sann.
+    la m2 = sm.tråd_start(fun() -> w_motta_ein(k))
+    sm.sov(20)
+    assert(ikkje sm.tråd_ferdig(m2))
+    kanal.lukk(k)
+    la r2 = join_snøgt(m2)
+    assert(ikkje r2["har"])
+    assert(r2["stengd"])
+    // lukk vekkjer ein ventande avsendar: KanalFeil.
+    la k2 = kanal.ny_blokkerande_kanal(1)
+    kanal.send_vent(k2, "full")
+    la s2 = sm.tråd_start(fun() -> w_send_ein(k2, "for mykje"))
+    sm.sov(20)
+    assert(ikkje sm.tråd_ferdig(s2))
+    kanal.lukk(k2)
+    krev_feil(join_snøgt(s2), "KanalFeil")
+    // Det som låg i kanalen før lukk kan framleis hentast.
+    la r3 = kanal.motta_vent(k2)
+    assert(r3["har"])
+    assert_eq(r3["verdi"], "full")
+    assert(kanal.motta_vent(k2)["stengd"])
+    returner 0
+}
+
+// ── fristar og felles API (begge backendar) ──────────────────────────────────
+funksjon test_fristar_og_felles_api() -> heiltall {
+    la k = kanal.ny_blokkerande_kanal(2)
+    assert(kanal.send_straks(k, "a"))
+    assert(kanal.send_innan(k, "b", 10))
+    assert(ikkje kanal.send_straks(k, "c"))
+    la t0 = builtin.tid_ms()
+    assert(ikkje kanal.send_innan(k, "c", 40))
+    assert(builtin.tid_ms() - t0 >= 35)
+    assert_eq(kanal.lengd(k), 2)
+    // Gamalt API på blokkerande kanal: motta er ikkje-blokkerande, FIFO.
+    la a = kanal.motta(k)
+    assert(a["har"])
+    assert_eq(a["verdi"], "a")
+    assert_eq(kanal.motta_innan(k, 10)["verdi"], "b")
+    assert(kanal.er_tom(k))
+    assert(ikkje kanal.motta(k)["har"])
+    la t1 = builtin.tid_ms()
+    la tom = kanal.motta_innan(k, 40)
+    assert(ikkje tom["har"])
+    assert(ikkje tom["stengd"])
+    assert(builtin.tid_ms() - t1 >= 35)
+    kanal.send(k, 7)
+    kanal.send(k, 8)
+    kanal.steng(k)
+    la feil = ""
+    prøv { kanal.send(k, 9) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "KanalFeil: send på stengd kanal")
+    la rest = kanal.tapp(k)
+    assert_eq(lengde(rest), 2)
+    assert_eq(rest[0], 7)
+    assert_eq(rest[1], 8)
+    assert(kanal.motta_vent(k)["stengd"])
+    // Ugyldig kapasitet og blokkerande kall på ubunden kanal.
+    feil = ""
+    prøv { kanal.ny_blokkerande_kanal(0) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "kapasitet")
+    la ub = kanal.ny_kanal()
+    assert_eq(kanal.kapasitet(ub), -1)
+    feil = ""
+    prøv { kanal.motta_vent(ub) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ny_blokkerande_kanal")
+    // Ubunden kanal: FIFO når køen veks (0, 1000, 1, 1001, …), og kø-lista blir
+    // kompaktert i stødig drift (utan kompaktering ville ho hatt 94 plassar; kompakteringa slår inn frå hovud 32).
+    la i: heiltall = 0
+    mens i < 12 {
+        kanal.send(ub, i)
+        kanal.send(ub, i + 1000)
+        la r = kanal.motta(ub)
+        assert(r["har"])
+        hvis i % 2 == 0 { assert_eq(r["verdi"], i / 2) } ellers { assert_eq(r["verdi"], 1000 + (i - 1) / 2) }
+        i = i + 1
+    }
+    assert_eq(kanal.lengd(ub), 12)
+    assert_eq(lengde(kanal.tapp(ub)), 12)
+    i = 0
+    mens i < 70 {
+        kanal.send(ub, i)
+        assert_eq(kanal.motta(ub)["verdi"], i)
+        i = i + 1
+    }
+    assert(kanal.er_tom(ub))
+    assert(lengde(ub["kø"]) < 66)
+    returner 0
+}
+
+funksjon test_eintråda() -> heiltall {
+    la k = kanal.ny_blokkerande_kanal(2)
+    kanal.send_vent(k, 1)
+    kanal.send_vent(k, 2)
+    la feil = ""
+    prøv { kanal.send_vent(k, 3) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ville blokkert for alltid")
+    assert_eq(kanal.lengd(k), 2)
+    assert_eq(kanal.motta_vent(k)["verdi"], 1)
+    assert_eq(kanal.motta_vent(k)["verdi"], 2)
+    feil = ""
+    prøv { kanal.motta_vent(k) } fang (e) { feil = tekst(e) }
+    krev_feil(feil, "ville blokkert for alltid")
+    kanal.lukk(k)
+    la r = kanal.motta_vent(k)
+    assert(ikkje r["har"])
+    assert(r["stengd"])
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    test_fristar_og_felles_api()
+    hvis ikkje sm.har_trådar() {
+        test_eintråda()
+        skriv("test_kanal_blokkerande OK (eintråda)\n")
+        returner 0
+    }
+    test_mottrykk_og_rekkjefølgje()
+    test_fleire_partar()
+    test_blokkering_og_lukk()
+    skriv("test_kanal_blokkerande OK (vm-green)\n")
+    returner 0
+}

@@ -1,0 +1,144 @@
+// A0 (app-kjensle): deploy-malane køyrer VM-en i fast-modus, og nginx-malen
+//   - komprimerer berre ressursar som aldri er HTML (gzip on i /_nc/ og /static/,
+//     gzip_types utan text/html, gzip off i server-blokka: nginx komprimerer
+//     text/html ALLTID når gzip er på, og BREACH-vernet kjem først i T1),
+//   - strippar W/ frå If-None-Match (gzip gjer ETag-ar svake; nc serve samanliknar eksakt),
+//   - gjev immutable på /static/ berre når URL-en har ?v= (elles no-cache),
+//   - har ikkje lenger den verkningslause upstream-keepalive.
+// nginx-malen kan ikkje køyrast lokalt; han blir testa som tekst her og må
+// verifiserast på server (sjekklista i docs/APP_KJENSLE.md).
+bruk std.deploy som deploy
+bruk std.filops som filops
+
+funksjon blokk(t: tekst, start: tekst) -> tekst {
+    // Tekst frå `start` til og med den tilhøyrande avsluttande klammeparentesen.
+    la p = builtin.index_of(t, start)
+    hvis p < 0 { returner "" }
+    la i = p + lengde(start)
+    la djupn: heiltall = 1
+    mens i < lengde(t) og djupn > 0 {
+        la c = builtin.slice(t, i, i + 1)
+        hvis c == "{" { djupn = djupn + 1 }
+        hvis c == "}" { djupn = djupn - 1 }
+        i = i + 1
+    }
+    returner builtin.slice(t, p, i)
+}
+
+funksjon tal(t: tekst, nål: tekst) -> heiltall {
+    la n: heiltall = 0
+    la rest = t
+    la p = builtin.index_of(rest, nål)
+    mens p >= 0 {
+        n = n + 1
+        rest = builtin.slice(rest, p + lengde(nål), lengde(rest))
+        p = builtin.index_of(rest, nål)
+    }
+    returner n
+}
+
+funksjon linjer_med(t: tekst, nål: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la ls = builtin.split(t, "\n")
+    la i: heiltall = 0
+    mens i < lengde(ls) {
+        hvis builtin.contains(ls[i], nål) { legg_til(ut, ls[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la root = tekst(info["cwd"])
+    la dir = root + "/build/deploy-app-kjensle-" + builtin.random_hex(6)
+    assert(filops.lag_katalogar(dir))
+    la c = deploy.ny_konfig("min-app")
+    deploy.sett_mappe(c, dir)
+    deploy.sett_port(c, 8123)
+
+    // systemd: Environment før EnvironmentFile (env-fila kan overstyre til 0).
+    la sd = deploy.generer_systemd(c)
+    assert(builtin.contains(sd, "\nEnvironment=NORSCODE_VM_FAST=1\n"))
+    assert(builtin.index_of(sd, "Environment=NORSCODE_VM_FAST=1") < builtin.index_of(sd, "EnvironmentFile="))
+    assert_eq(fil_les(dir + "/min-app.service"), sd)
+
+    // supervisor
+    la sv = deploy.generer_supervisor(c)
+    la sv_env = linjer_med(sv, "environment=")
+    assert_eq(lengde(sv_env), 1)
+    assert(builtin.contains(sv_env[0], "NORSCODE_VM_FAST=\"1\""))
+    assert(builtin.contains(sv_env[0], "HOME=\"" + dir + "\""))
+
+    // Docker
+    la df = deploy.generer_dockerfile(c)
+    assert(builtin.contains(df, "\nENV NORSCODE_VM_FAST=1\n"))
+    assert(builtin.index_of(df, "ENV NORSCODE_VM_FAST=1") < builtin.index_of(df, "CMD ["))
+
+    // nginx
+    la ng = deploy.generer_nginx(c, "app.example.no")
+    assert_eq(fil_les(dir + "/min-app-nginx.conf"), ng)
+    assert_eq(tal(ng, "{"), tal(ng, "}"))
+    // Variabelnamn utan bindestrek (nginx-variablar er [a-z0-9_]).
+    assert(builtin.contains(ng, "$nc_min_app_if_none_match"))
+    assert(ikkje builtin.contains(ng, "$nc_min-app"))
+
+    // gzip: på for ressursar, aldri text/html; av i server-blokka.
+    assert(builtin.contains(ng, "gzip on;"))
+    la typar = linjer_med(ng, "gzip_types")
+    assert(lengde(typar) >= 1)
+    la i: heiltall = 0
+    mens i < lengde(typar) {
+        assert(ikkje builtin.contains(typar[i], "text/html"))
+        assert(builtin.contains(typar[i], "application/manifest+json"))
+        assert(builtin.contains(typar[i], "text/css"))
+        assert(builtin.contains(typar[i], "text/javascript"))
+        i = i + 1
+    }
+    la server = blokk(ng, "server {")
+    assert(server != "")
+    la rot = blokk(server, "location / {")
+    assert(rot != "")
+    assert(ikkje builtin.contains(rot, "gzip on"))
+    // gzip off står i server-blokka utanfor location-ane (arva av location / og helse).
+    la utanfor_location = builtin.slice(server, 0, builtin.index_of(server, "location "))
+    assert(builtin.contains(utanfor_location, "gzip off;"))
+
+    // If-None-Match: map som strippar W/, brukt i proxy-location-ane.
+    la inm = blokk(ng, "map $http_if_none_match $nc_min_app_if_none_match {")
+    assert(inm != "")
+    assert(builtin.contains(inm, "\"~^W/(.+)$\" $1;"))
+    assert(builtin.contains(inm, "default $http_if_none_match;"))
+    assert(builtin.contains(rot, "proxy_set_header If-None-Match $nc_min_app_if_none_match;"))
+    assert(builtin.contains(blokk(server, "location /_nc/ {"), "proxy_set_header If-None-Match $nc_min_app_if_none_match;"))
+
+    // /static/: immutable berre i v-greina.
+    la stat = blokk(server, "location /static/ {")
+    assert(stat != "")
+    assert(ikkje builtin.contains(stat, "immutable"))
+    assert(ikkje builtin.contains(stat, "expires"))
+    assert(builtin.contains(stat, "add_header Cache-Control $nc_min_app_static_cache always;"))
+    la sc = blokk(ng, "map $arg_v $nc_min_app_static_cache {")
+    assert(sc != "")
+    la tom_v = linjer_med(sc, "\"\" ")
+    assert_eq(lengde(tom_v), 1)
+    assert(builtin.contains(tom_v[0], "\"no-cache\""))
+    assert(ikkje builtin.contains(tom_v[0], "immutable"))
+    la def = linjer_med(sc, "default")
+    assert_eq(lengde(def), 1)
+    assert(builtin.contains(def[0], "immutable"))
+    assert_eq(tal(ng, "immutable"), 1)
+
+    // Ingen verkningslaus upstream-keepalive.
+    la up = blokk(ng, "upstream min-app_backend {")
+    assert(up != "")
+    assert(ikkje builtin.contains(up, "keepalive"))
+    assert(ikkje builtin.contains(ng, "keepalive"))
+
+    // Helse-location er urørt.
+    assert(builtin.contains(server, "location /helse {"))
+
+    filops.slett_tre(dir)
+    skriv("test_deploy_app_kjensle OK\n")
+    returner 0
+}

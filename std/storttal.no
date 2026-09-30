@@ -1,0 +1,557 @@
+# std/storttal.no — signert heiltal med vilkårleg presisjon (Java BigInteger).
+#
+# Byggjer på std.bigint (usignerte limb-lister, base 2^16) utan å endre han, og
+# legg til forteikn, tekstkonvertering og Java-semantikk for deling.
+#
+# Bruk:
+#   bruk std.storttal som st
+#   la a = st.fra_tekst("-12345678901234567890")
+#   la b = st.pow(2, 100)                         # heiltall og tekst blir konverterte automatisk
+#   st.til_tekst(st.gonger(a, b))
+#   st.samanlikn(a, 0)                            # -1
+#
+# Verdiar er ordbøker {"__storttal__": sann, "s": forteikn (-1, 0, 1), "m": limbar}
+# og skal handsamast som uforanderlege. Alle operasjonar tek storttal, heiltall
+# eller desimal tekst som argument (fra(x)).
+#
+# API (Java-motstykke i parentes):
+#   fra(x)                    storttal/heiltall/tekst -> storttal   (valueOf / new BigInteger(s))
+#   fra_heiltall(n) / fra_tekst(s) / fra_tekst_radix(s, radix)  radix 2..36, valfritt +/- først
+#   til_tekst(x) / til_tekst_radix(x, radix)                      (toString / toString(radix))
+#   til_heiltall(x)           kastar OverflytFeil utanfor 64-bit (longValueExact)
+#   null() / ein()                                                (ZERO / ONE)
+#   pluss / minus / gonger(a, b)                                  (add / subtract / multiply)
+#   deling(a, b)              avkorta mot null                    (divide)
+#   rest(a, b)                forteikn som a                      (remainder)
+#   divmod(a, b)              {"kvotient": q, "rest": r}          (divideAndRemainder)
+#   mod(a, m)                 alltid >= 0, krev m > 0             (mod)
+#   neg / abs / forteikn / er_null                                (negate / abs / signum)
+#   samanlikn(a, b) -> -1|0|1 / er_lik / min / maks               (compareTo / equals / min / max)
+#   pow(a, e: heiltall)       e >= 0                              (pow)
+#   gcd(a, b)                 alltid >= 0, gcd(0, 0) = 0          (gcd)
+#   modpow(a, e, m)           e >= 0, m > 0                       (modPow)
+#   er_storttal(x)
+#
+# Feil: deling med null kastar "DivisjonMedNull: ...", ugyldig tekst
+# "TalformatFeil: ...", negative eksponentar/modular "ArgumentFeil: ...".
+bruk std.bigint som bn
+
+funksjon _er_null_mag(m) -> bool {
+    la i = 0
+    mens i < lengde(m) {
+        hvis m[i] != 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _lag(s: heiltall, m) -> ordbok {
+    hvis lengde(m) == 0 eller _er_null_mag(m) {
+        returner {"__storttal__": sann, "s": 0, "m": [0]}
+    }
+    returner {"__storttal__": sann, "s": s, "m": bn.norm(m)}
+}
+
+funksjon null() -> ordbok {
+    returner _lag(0, [0])
+}
+
+funksjon ein() -> ordbok {
+    returner _lag(1, [1])
+}
+
+funksjon er_storttal(x) -> bool {
+    hvis builtin.type(x) != "ordbok" { returner usann }
+    returner har_nokkel(x, "__storttal__")
+}
+
+# ── Limb-hjelparar på stad ───────────────────────────────────────────────
+#
+# Hjelparane under endrar ei limb-liste som modulen sjølv eig (ein kopi), i
+# staden for å byggje ei ny liste per steg. I VM-en utan NORSCODE_VM_FAST
+# (standard for nc run og nc test) kostar kvar ny liste og kvar liste lesen ut
+# av ei ordbok ei registrering i skuggeheapen, og kostnaden veks med kor mange
+# registreringar køyringa har gjort; aritmetikk på tal i ei liste er gratis.
+# Limb-lister her kan ha leiande (høge) null-limbar; _lag normaliserer.
+
+funksjon _kopi_mag(m) -> liste {
+    la ut = []
+    for x i m {
+        legg_til(ut, x)
+    }
+    returner ut
+}
+
+# Fjernar høge null-limbar frå ein eigen kopi (minst éin limb blir att), så
+# lengda følgjer talet og _topp/_cmp_mag blir O(1) i gcd-løkka.
+funksjon _trim(m) {
+    mens lengde(m) > 1 og m[lengde(m) - 1] == 0 { fjern_siste(m) }
+}
+
+# Indeksen til høgaste limb som ikkje er null, eller -1 når m er null.
+funksjon _topp(m) -> heiltall {
+    la i = lengde(m) - 1
+    mens i >= 0 og m[i] == 0 { i = i - 1 }
+    returner i
+}
+
+# m = m * mul + add på stad (mul, add < 2^31).
+funksjon _mul_liten_add_på_stad(m, mul: heiltall, add: heiltall) {
+    la carry = add
+    la i = 0
+    mens i < lengde(m) {
+        la p = m[i] * mul + carry
+        m[i] = p & 65535
+        carry = p >> 16
+        i = i + 1
+    }
+    mens carry > 0 {
+        legg_til(m, carry & 65535)
+        carry = carry >> 16
+    }
+}
+
+# m = m / d på stad for 0 < d < 2^31; returnerer resten.
+funksjon _del_liten_på_stad(m, d: heiltall) -> heiltall {
+    la rem = 0
+    la i = lengde(m) - 1
+    mens i >= 0 {
+        la cur = rem * 65536 + m[i]
+        m[i] = cur / d
+        rem = cur % d
+        i = i - 1
+    }
+    returner rem
+}
+
+# -1, 0 eller 1 for x samanlikna med y (begge kan ha leiande null-limbar).
+funksjon _cmp_mag(x, y) -> heiltall {
+    la tx = _topp(x)
+    la ty = _topp(y)
+    hvis tx != ty {
+        hvis tx < ty { returner -1 }
+        returner 1
+    }
+    la i = tx
+    mens i >= 0 {
+        hvis x[i] != y[i] {
+            hvis x[i] < y[i] { returner -1 }
+            returner 1
+        }
+        i = i - 1
+    }
+    returner 0
+}
+
+# x = x - y på stad; krev x >= y.
+funksjon _sub_på_stad(x, y) {
+    la ny = lengde(y)
+    la borrow = 0
+    la i = 0
+    mens i < lengde(x) {
+        la yi = 0
+        hvis i < ny { yi = y[i] }
+        la d = x[i] - yi - borrow
+        hvis d < 0 {
+            d = d + 65536
+            borrow = 1
+        } ellers {
+            borrow = 0
+        }
+        x[i] = d
+        hvis i >= ny og borrow == 0 { bryt }
+        i = i + 1
+    }
+    _trim(x)
+}
+
+# Talet på null-bitar nedst i m (m != 0).
+funksjon _nullbitar_nedst(m) -> heiltall {
+    la j = 0
+    mens m[j] == 0 { j = j + 1 }
+    la v = m[j]
+    la c = 0
+    mens (v & 1) == 0 {
+        v = v >> 1
+        c = c + 1
+    }
+    returner j * 16 + c
+}
+
+# m = m >> bitar på stad.
+funksjon _shr_på_stad(m, bitar: heiltall) {
+    hvis bitar <= 0 { returner }
+    la q = bitar / 16
+    la r = bitar % 16
+    la n = lengde(m)
+    la i = 0
+    mens i < n {
+        la src = i + q
+        la lo = 0
+        hvis src < n { lo = m[src] }
+        hvis r == 0 {
+            m[i] = lo
+        } ellers {
+            la hi = 0
+            hvis src + 1 < n { hi = m[src + 1] }
+            m[i] = ((lo >> r) | (hi << (16 - r))) & 65535
+        }
+        i = i + 1
+    }
+    _trim(m)
+}
+
+# Ny liste m << bitar.
+funksjon _shl(m, bitar: heiltall) -> liste {
+    la ut = []
+    la q = bitar / 16
+    la r = bitar % 16
+    la i = 0
+    mens i < q {
+        legg_til(ut, 0)
+        i = i + 1
+    }
+    la carry = 0
+    for x i m {
+        la v = (x << r) | carry
+        legg_til(ut, v & 65535)
+        carry = v >> 16
+    }
+    hvis carry > 0 { legg_til(ut, carry) }
+    returner ut
+}
+
+funksjon fra_heiltall(n: heiltall) -> ordbok {
+    hvis n == 0 { returner null() }
+    la s = 1
+    la v = n
+    hvis v < 0 {
+        s = -1
+        v = 0 - v
+        # -2^63 har ingen positiv motpart i 64 bit.
+        hvis v < 0 { returner fra_tekst("-9223372036854775808") }
+    }
+    la m = []
+    mens v > 0 {
+        legg_til(m, v & 65535)
+        v = v >> 16
+    }
+    returner _lag(s, m)
+}
+
+funksjon _siffer(ch: tekst) -> heiltall {
+    la i = builtin.index_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
+    hvis i >= 36 { returner i - 26 }
+    returner i
+}
+
+# Største k slik at radix^k <= 10^9 (for bolkvis konvertering).
+funksjon _bolk(radix: heiltall) -> heiltall {
+    la k = 1
+    la p = radix
+    mens p * radix <= 1000000000 {
+        p = p * radix
+        k = k + 1
+    }
+    returner k
+}
+
+funksjon _potens_liten(radix: heiltall, k: heiltall) -> heiltall {
+    la p = 1
+    la i = 0
+    mens i < k {
+        p = p * radix
+        i = i + 1
+    }
+    returner p
+}
+
+funksjon fra_tekst_radix(t: tekst, radix: heiltall) -> ordbok {
+    hvis radix < 2 eller radix > 36 { kast "ArgumentFeil: radix må vere 2..36, fekk " + tekst(radix) }
+    la n = lengde(t)
+    la start = 0
+    la s = 1
+    hvis n > 0 {
+        la første_teikn = builtin.slice(t, 0, 1)
+        hvis første_teikn == "-" {
+            s = -1
+            start = 1
+        } ellers hvis første_teikn == "+" {
+            start = 1
+        }
+    }
+    hvis start >= n { kast "TalformatFeil: ugyldig heiltal: \"" + t + "\"" }
+    la k = _bolk(radix)
+    la m = [0]
+    la i = start
+    mens i < n {
+        # Første bolk tek resten slik at dei andre blir fulle.
+        la bolk_len = k
+        hvis i == start {
+            bolk_len = (n - start) % k
+            hvis bolk_len == 0 { bolk_len = k }
+        }
+        la verdi = 0
+        la j = 0
+        mens j < bolk_len {
+            la d = _siffer(builtin.slice(t, i + j, i + j + 1))
+            hvis d < 0 eller d >= radix { kast "TalformatFeil: ugyldig heiltal: \"" + t + "\"" }
+            verdi = verdi * radix + d
+            j = j + 1
+        }
+        _mul_liten_add_på_stad(m, _potens_liten(radix, bolk_len), verdi)
+        i = i + bolk_len
+    }
+    returner _lag(s, m)
+}
+
+funksjon fra_tekst(t: tekst) -> ordbok {
+    returner fra_tekst_radix(t, 10)
+}
+
+funksjon fra(x) -> ordbok {
+    la ty = builtin.type(x)
+    hvis ty == "heltall" eller ty == "heiltall" { returner fra_heiltall(x) }
+    hvis ty == "tekst" { returner fra_tekst(x) }
+    hvis er_storttal(x) { returner x }
+    kast "TypeFeil: kan ikkje gjere " + ty + " om til storttal"
+}
+
+funksjon _siffertekst(v: heiltall, radix: heiltall) -> tekst {
+    hvis v == 0 { returner "0" }
+    la alfabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    la ut = ""
+    la x = v
+    mens x > 0 {
+        la d = x % radix
+        ut = builtin.slice(alfabet, d, d + 1) + ut
+        x = x / radix
+    }
+    returner ut
+}
+
+funksjon til_tekst_radix(x_in, radix: heiltall) -> tekst {
+    hvis radix < 2 eller radix > 36 { kast "ArgumentFeil: radix må vere 2..36, fekk " + tekst(radix) }
+    la x = fra(x_in)
+    hvis x["s"] == 0 { returner "0" }
+    la k = _bolk(radix)
+    la d = _potens_liten(radix, k)
+    # Samle bolkar frå minst signifikant ved å dele ein eigen kopi på stad.
+    la bolkar = []
+    la m = _kopi_mag(x["m"])
+    mens lengde(m) > 0 og m[lengde(m) - 1] == 0 { fjern_siste(m) }
+    mens lengde(m) > 0 {
+        legg_til(bolkar, _del_liten_på_stad(m, d))
+        mens lengde(m) > 0 og m[lengde(m) - 1] == 0 { fjern_siste(m) }
+    }
+    la ut = ""
+    hvis x["s"] < 0 { ut = "-" }
+    la i = lengde(bolkar) - 1
+    ut = ut + _siffertekst(bolkar[i], radix)
+    i = i - 1
+    mens i >= 0 {
+        la del = _siffertekst(bolkar[i], radix)
+        mens lengde(del) < k { del = "0" + del }
+        ut = ut + del
+        i = i - 1
+    }
+    returner ut
+}
+
+funksjon til_tekst(x) -> tekst {
+    returner til_tekst_radix(x, 10)
+}
+
+funksjon til_heiltall(x_in) -> heiltall {
+    la x = fra(x_in)
+    hvis x["s"] == 0 { returner 0 }
+    la m = x["m"]
+    # 2^63 = limbar [0, 0, 0, 32768].
+    la c = bn.cmp(m, [0, 0, 0, 32768])
+    hvis c > 0 eller (c == 0 og x["s"] > 0) {
+        kast "OverflytFeil: " + til_tekst(x) + " får ikkje plass i 64-bit heiltall"
+    }
+    hvis c == 0 { returner -9223372036854775807 - 1 }
+    la v = 0
+    la i = lengde(m) - 1
+    mens i >= 0 {
+        v = v * 65536 + m[i]
+        i = i - 1
+    }
+    hvis x["s"] < 0 { returner 0 - v }
+    returner v
+}
+
+funksjon forteikn(x_in) -> heiltall {
+    returner fra(x_in)["s"]
+}
+
+funksjon er_null(x_in) -> bool {
+    returner fra(x_in)["s"] == 0
+}
+
+funksjon neg(x_in) -> ordbok {
+    la x = fra(x_in)
+    returner _lag(0 - x["s"], x["m"])
+}
+
+funksjon abs(x_in) -> ordbok {
+    la x = fra(x_in)
+    hvis x["s"] < 0 { returner _lag(1, x["m"]) }
+    returner x
+}
+
+funksjon samanlikn(a_in, b_in) -> heiltall {
+    la a = fra(a_in)
+    la b = fra(b_in)
+    hvis a["s"] != b["s"] {
+        hvis a["s"] < b["s"] { returner -1 }
+        returner 1
+    }
+    hvis a["s"] == 0 { returner 0 }
+    la c = bn.cmp(a["m"], b["m"])
+    hvis a["s"] < 0 { returner 0 - c }
+    returner c
+}
+
+funksjon er_lik(a, b) -> bool {
+    returner samanlikn(a, b) == 0
+}
+
+funksjon min(a, b) -> ordbok {
+    hvis samanlikn(a, b) <= 0 { returner fra(a) }
+    returner fra(b)
+}
+
+funksjon maks(a, b) -> ordbok {
+    hvis samanlikn(a, b) >= 0 { returner fra(a) }
+    returner fra(b)
+}
+
+funksjon pluss(a_in, b_in) -> ordbok {
+    la a = fra(a_in)
+    la b = fra(b_in)
+    hvis a["s"] == 0 { returner b }
+    hvis b["s"] == 0 { returner a }
+    hvis a["s"] == b["s"] { returner _lag(a["s"], bn.add(a["m"], b["m"])) }
+    la c = bn.cmp(a["m"], b["m"])
+    hvis c == 0 { returner null() }
+    hvis c > 0 { returner _lag(a["s"], bn.sub(a["m"], b["m"])) }
+    returner _lag(b["s"], bn.sub(b["m"], a["m"]))
+}
+
+funksjon minus(a, b) -> ordbok {
+    returner pluss(a, neg(b))
+}
+
+# sann viss x er eit heiltall med |x| < 2^31 (kan brukast som liten faktor).
+funksjon _er_lite_heiltall(x) -> bool {
+    la ty = builtin.type(x)
+    hvis ty != "heltall" og ty != "heiltall" { returner usann }
+    returner x > -2147483648 og x < 2147483648
+}
+
+# a * n for eit lite heiltall n: éin kopi av limbane, multiplisert på stad.
+funksjon _gonger_lite(a_in, n: heiltall) -> ordbok {
+    la a = fra(a_in)
+    hvis a["s"] == 0 eller n == 0 { returner null() }
+    la s = a["s"]
+    la faktor = n
+    hvis n < 0 {
+        s = 0 - s
+        faktor = 0 - n
+    }
+    la m = _kopi_mag(a["m"])
+    _mul_liten_add_på_stad(m, faktor, 0)
+    returner _lag(s, m)
+}
+
+funksjon gonger(a_in, b_in) -> ordbok {
+    hvis _er_lite_heiltall(b_in) { returner _gonger_lite(a_in, b_in) }
+    hvis _er_lite_heiltall(a_in) { returner _gonger_lite(b_in, a_in) }
+    la a = fra(a_in)
+    la b = fra(b_in)
+    hvis a["s"] == 0 eller b["s"] == 0 { returner null() }
+    returner _lag(a["s"] * b["s"], bn.mul(a["m"], b["m"]))
+}
+
+funksjon divmod(a_in, b_in) -> ordbok {
+    la a = fra(a_in)
+    la b = fra(b_in)
+    hvis b["s"] == 0 { kast "DivisjonMedNull: divisjon med null (storttal)" }
+    hvis a["s"] == 0 { returner {"kvotient": null(), "rest": null()} }
+    la r = bn.divmod(a["m"], b["m"])
+    returner {"kvotient": _lag(a["s"] * b["s"], r["q"]), "rest": _lag(a["s"], r["r"])}
+}
+
+funksjon deling(a, b) -> ordbok {
+    returner divmod(a, b)["kvotient"]
+}
+
+funksjon rest(a, b) -> ordbok {
+    returner divmod(a, b)["rest"]
+}
+
+funksjon mod(a, m_in) -> ordbok {
+    la m = fra(m_in)
+    hvis m["s"] <= 0 { kast "ArgumentFeil: modulus må vere positiv, fekk " + til_tekst(m) }
+    la r = rest(a, m)
+    hvis r["s"] < 0 { returner pluss(r, m) }
+    returner r
+}
+
+funksjon pow(a_in, e: heiltall) -> ordbok {
+    hvis e < 0 { kast "ArgumentFeil: negativ eksponent " + tekst(e) }
+    la a = fra(a_in)
+    la resultat = [1]
+    la basis = a["m"]
+    la n = e
+    mens n > 0 {
+        hvis n % 2 == 1 { resultat = bn.mul(resultat, basis) }
+        n = n / 2
+        hvis n > 0 { basis = bn.mul(basis, basis) }
+    }
+    hvis e == 0 { returner ein() }
+    la s = a["s"]
+    hvis s < 0 og e % 2 == 0 { s = 1 }
+    returner _lag(s, resultat)
+}
+
+# Binær gcd (Stein) på eigne kopiar av limbane: gcd(x, y) = 2^k * gcd av dei
+# odde delane, og for odde x > y er gcd(x, y) = gcd((x - y) / 2^j, y). Berre
+# subtraksjon og skift på stad, ingen nye lister per steg (sjå «Limb-hjelparar
+# på stad» over); Euclid med bn.divmod byggjer fleire lister per steg.
+funksjon gcd(a_in, b_in) -> ordbok {
+    la x = _kopi_mag(fra(a_in)["m"])
+    la y = _kopi_mag(fra(b_in)["m"])
+    hvis _topp(x) < 0 { returner _lag(1, y) }
+    hvis _topp(y) < 0 { returner _lag(1, x) }
+    la kx = _nullbitar_nedst(x)
+    la ky = _nullbitar_nedst(y)
+    la k = kx
+    hvis ky < k { k = ky }
+    _shr_på_stad(x, kx)
+    _shr_på_stad(y, ky)
+    mens sann {
+        la c = _cmp_mag(x, y)
+        hvis c == 0 { bryt }
+        hvis c < 0 {
+            la tmp = x
+            x = y
+            y = tmp
+        }
+        _sub_på_stad(x, y)
+        _shr_på_stad(x, _nullbitar_nedst(x))
+    }
+    returner _lag(1, _shl(x, k))
+}
+
+funksjon modpow(a, e_in, m_in) -> ordbok {
+    la m = fra(m_in)
+    la e = fra(e_in)
+    hvis m["s"] <= 0 { kast "ArgumentFeil: modulus må vere positiv, fekk " + til_tekst(m) }
+    hvis e["s"] < 0 { kast "ArgumentFeil: negativ eksponent i modpow" }
+    hvis bn.cmp(m["m"], [1]) == 0 { returner null() }
+    la basis = mod(a, m)
+    returner _lag(1, bn.modexp(basis["m"], e["m"], m["m"]))
+}

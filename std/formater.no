@@ -1,0 +1,899 @@
+# formater.no — printf / String.format-stil tekstformatering
+# Java: String.format, PrintStream.printf, java.util.Formatter
+# C:    printf / snprintf
+#
+# Bruk:
+#   bruk std.formater som fmt
+#   fmt.formater("%05.1f|%-4s|%x", [3.14159, "ab", 255])   # => "003.1|ab  |ff"
+#   fmt.formater("%,d kr", [1234567])                        # => "1,234,567 kr"
+#   fmt.formater("%2$s %1$s", ["verd", "hei"])               # => "hei verd"
+#   fmt.skrivf("%d%%%n", [42])                                # skriv "42%\n"
+#
+# Mønsteret er vanleg tekst med formatspesifikasjonar på forma
+#   %[argindeks$][flagg][breidd][.presisjon]konvertering
+#
+# Konverteringar:
+#   %s %S   tekst (tekst(v); null gjev "null"). Presisjon kuttar til N teikn. S = store bokstavar.
+#   %d %i   heiltall i titalssystemet.
+#   %x %X   heiltall heksadesimalt, %o oktalt, %b binært. Negative tal blir
+#           skrivne som 64-bits tokomplement (som Java sin Long): -1 → ffffffffffffffff.
+#   %b %B   med boolsk argument: "sann"/"usann" (Java sin %b for Boolean); null gjev "usann".
+#   %c %C   eitt teikn: heiltall (Unicode-kodepunkt, UTF-8-koda) eller tekst med eitt teikn.
+#   %f      desimaltall (eller heiltall) med fast desimalpunkt, standard presisjon 6.
+#   %e %E   vitskapleg notasjon, t.d. 1.234560e+01 (eksponent minst to siffer).
+#   %n      linjeskift, %% eit prosentteikn.
+#
+# Flagg:
+#   -  venstrejuster (krev breidd)          0  fyll med nullar etter forteiknet (krev breidd)
+#   +  alltid forteikn på tal               ' ' (mellomrom) mellomrom framfor positive tal
+#   ,  tusenskilje "," (%d og %f)           (  negative tal i parentes (%d, %f, %e)
+#   #  alternativ form: 0x/0/0b-prefiks for %x/%o/%b, alltid desimalpunkt for %f/%e
+#
+# Argumentindeks: "%2$s" brukar argument 2 (1-basert), "%<s" brukar førre argument
+# om att. Vanlege spesifikasjonar tel vidare uavhengig av eksplisitte indeksar (som Java).
+#
+# Avrunding av %f/%e: den EKSAKTE binærverdien til desimaltalet blir avrunda
+# «halv opp» (som BigDecimal.setScale(p, HALF_UP) og JavaScript sin toFixed).
+# Eksakte halvdelar går difor opp (0.125 → "0.13", 2.5 med %.0f → "3"), men
+# 1.005 (som eigentleg er 1.00499999999999989...) gjev "1.00". Java sin
+# String.format rundar av den korte desimalrepresentasjonen og gjev "1.01" der;
+# C/Python/JavaScript gjev "1.00" som her. Utrekninga er rein heiltalsaritmetikk
+# på IEEE-754-bita (builtin.desimal_til_bits), så svaret er bit-identisk på VM og AOT.
+# NaN og uendeleg blir "NaN", "Infinity" og "-Infinity" (fylt med mellomrom).
+#
+# %s av eit desimaltall går gjennom std.desimaltall_tekst (same tekst som tekst() gjev
+# på VM og x86-64), så macOS-AOT òg skriv "1.5" og ikkje dei rå IEEE-bita.
+#
+# Breidd og presisjon for tekst blir målt i Unicode-kodepunkt, ikkje bytes.
+#
+# Feil blir kasta som tekst med typen FormatFeil, så `fang (e: FormatFeil)` fangar dei:
+#   for få argument, ukjend konvertering, ugyldige flaggkombinasjonar,
+#   presisjon på heiltalskonverteringar og feil argumenttype (t.d. %d med tekst).
+# Overflødige argument blir ignorerte (som Java).
+
+bruk std.desimaltall_tekst som dtk
+
+# ─── Byte- og teiknhjelparar ──────────────────────────────────────────────────
+
+funksjon _byte(s: tekst, i: heiltall) -> heiltall {
+    returner builtin.char_code(s[i])
+}
+
+funksjon _er_siffer(b: heiltall) -> boolsk {
+    returner b >= 48 og b <= 57
+}
+
+# Tal Unicode-kodepunkt i ein UTF-8-tekst (bytes som ikkje er fortsetjingsbytes).
+funksjon teikn_tal(s: tekst) -> heiltall {
+    la n: heiltall = lengde(s)
+    la i: heiltall = 0
+    la tal: heiltall = 0
+    mens i < n {
+        hvis (_byte(s, i) & 192) != 128 {
+            tal = tal + 1
+        }
+        i = i + 1
+    }
+    returner tal
+}
+
+# Dei fyrste `maks` kodepunkta av s.
+funksjon _kutt_teikn(s: tekst, maks: heiltall) -> tekst {
+    la n: heiltall = lengde(s)
+    la i: heiltall = 0
+    la tal: heiltall = 0
+    mens i < n {
+        hvis (_byte(s, i) & 192) != 128 {
+            hvis tal == maks {
+                returner builtin.slice(s, 0, i)
+            }
+            tal = tal + 1
+        }
+        i = i + 1
+    }
+    returner s
+}
+
+funksjon _gjenta(s: tekst, n: heiltall) -> tekst {
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < n {
+        ut = ut + s
+        i = i + 1
+    }
+    returner ut
+}
+
+# UTF-8-koding av eitt kodepunkt.
+funksjon _utf8(kp: heiltall) -> tekst {
+    hvis kp < 0 eller kp > 1114111 eller (kp >= 55296 og kp <= 57343) {
+        kast "FormatFeil: ugyldig kodepunkt " + tekst(kp) + " for %c"
+    }
+    hvis kp < 128 {
+        returner builtin.chr(kp)
+    }
+    hvis kp < 2048 {
+        returner builtin.chr(192 + kp / 64) + builtin.chr(128 + kp % 64)
+    }
+    hvis kp < 65536 {
+        returner builtin.chr(224 + kp / 4096) + builtin.chr(128 + (kp / 64) % 64) + builtin.chr(128 + kp % 64)
+    }
+    returner builtin.chr(240 + kp / 262144) + builtin.chr(128 + (kp / 4096) % 64) + builtin.chr(128 + (kp / 64) % 64) + builtin.chr(128 + kp % 64)
+}
+
+# ─── Store naturlege tal (base 10^9, minst signifikante ledd fyrst) ───────────
+# Berre det som trengst for eksakt desimalomforming av IEEE-754-verdiar:
+# multiplikasjon og heiltalsdivisjon med små faktorar (≤ 2^30).
+
+funksjon _bn_frå(n: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    hvis n == 0 {
+        legg_til(r, 0)
+        returner r
+    }
+    la v: heiltall = n
+    mens v > 0 {
+        legg_til(r, v % 1000000000)
+        v = v / 1000000000
+    }
+    returner r
+}
+
+funksjon _bn_mul(a: liste_heltall, k: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    la mente: heiltall = 0
+    la i: heiltall = 0
+    la n: heiltall = lengde(a)
+    mens i < n {
+        la p: heiltall = a[i] * k + mente
+        legg_til(r, p % 1000000000)
+        mente = p / 1000000000
+        i = i + 1
+    }
+    mens mente > 0 {
+        legg_til(r, mente % 1000000000)
+        mente = mente / 1000000000
+    }
+    returner r
+}
+
+funksjon _bn_legg_til_liten(a: liste_heltall, k: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    la mente: heiltall = k
+    la i: heiltall = 0
+    la n: heiltall = lengde(a)
+    mens i < n {
+        la p: heiltall = a[i] + mente
+        legg_til(r, p % 1000000000)
+        mente = p / 1000000000
+        i = i + 1
+    }
+    mens mente > 0 {
+        legg_til(r, mente % 1000000000)
+        mente = mente / 1000000000
+    }
+    returner r
+}
+
+# floor(a / d) for 1 <= d <= 2^30. Ledande null-ledd blir fjerna.
+funksjon _bn_div(a: liste_heltall, d: heiltall) -> liste_heltall {
+    la n: heiltall = lengde(a)
+    la q: liste_heltall = []
+    la i: heiltall = 0
+    mens i < n {
+        legg_til(q, 0)
+        i = i + 1
+    }
+    la rest: heiltall = 0
+    i = n - 1
+    mens i >= 0 {
+        la cur: heiltall = rest * 1000000000 + a[i]
+        q[i] = cur / d
+        rest = cur % d
+        i = i - 1
+    }
+    la topp: heiltall = n
+    mens topp > 1 og q[topp - 1] == 0 {
+        topp = topp - 1
+    }
+    hvis topp == n {
+        returner q
+    }
+    la r: liste_heltall = []
+    i = 0
+    mens i < topp {
+        legg_til(r, q[i])
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon _bn_mul_pot2(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = a
+    la igjen: heiltall = n
+    mens igjen >= 30 {
+        r = _bn_mul(r, 1073741824)
+        igjen = igjen - 30
+    }
+    hvis igjen > 0 {
+        r = _bn_mul(r, 1 << igjen)
+    }
+    returner r
+}
+
+funksjon _bn_div_pot2(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = a
+    la igjen: heiltall = n
+    mens igjen >= 30 {
+        r = _bn_div(r, 1073741824)
+        igjen = igjen - 30
+        hvis lengde(r) == 1 og r[0] == 0 {
+            returner r
+        }
+    }
+    hvis igjen > 0 {
+        r = _bn_div(r, 1 << igjen)
+    }
+    returner r
+}
+
+funksjon _pot10(n: heiltall) -> heiltall {
+    la r: heiltall = 1
+    la i: heiltall = 0
+    mens i < n {
+        r = r * 10
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon _bn_mul_pot10(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = a
+    la igjen: heiltall = n
+    mens igjen >= 9 {
+        r = _bn_mul(r, 1000000000)
+        igjen = igjen - 9
+    }
+    hvis igjen > 0 {
+        r = _bn_mul(r, _pot10(igjen))
+    }
+    returner r
+}
+
+funksjon _bn_div_pot10(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = a
+    la igjen: heiltall = n
+    mens igjen >= 9 {
+        r = _bn_div(r, 1000000000)
+        igjen = igjen - 9
+        hvis lengde(r) == 1 og r[0] == 0 {
+            returner r
+        }
+    }
+    hvis igjen > 0 {
+        r = _bn_div(r, _pot10(igjen))
+    }
+    returner r
+}
+
+funksjon _bn_til_tekst(a: liste_heltall) -> tekst {
+    la n: heiltall = lengde(a)
+    la ut: tekst = tekst(a[n - 1])
+    la i: heiltall = n - 2
+    mens i >= 0 {
+        la ledd: tekst = tekst(a[i])
+        ut = ut + _gjenta("0", 9 - lengde(ledd)) + ledd
+        i = i - 1
+    }
+    returner ut
+}
+
+# round_half_up(m * 2^e2 * 10^e10) som desimaltekst, m >= 0.
+# Brukar floor(floor(x/a)/b) = floor(x/(ab)) og round(v) = floor((floor(2v) + 1) / 2).
+funksjon _skaler_avrund(m: heiltall, e2: heiltall, e10: heiltall) -> tekst {
+    la tal: liste_heltall = _bn_frå(m)
+    la ned2: heiltall = 0
+    la ned10: heiltall = 0
+    hvis e2 >= 0 {
+        tal = _bn_mul_pot2(tal, e2)
+    } ellers {
+        ned2 = -e2
+    }
+    hvis e10 >= 0 {
+        tal = _bn_mul_pot10(tal, e10)
+    } ellers {
+        ned10 = -e10
+    }
+    hvis ned2 == 0 og ned10 == 0 {
+        returner _bn_til_tekst(tal)
+    }
+    tal = _bn_mul(tal, 2)
+    tal = _bn_div_pot10(tal, ned10)
+    tal = _bn_div_pot2(tal, ned2)
+    tal = _bn_legg_til_liten(tal, 1)
+    tal = _bn_div(tal, 2)
+    returner _bn_til_tekst(tal)
+}
+
+# ─── IEEE-754-dekoding ────────────────────────────────────────────────────────
+# Returnerer [klasse, negativ(0/1), m, e2] der verdien er m * 2^e2.
+# klasse: 0 = endeleg tal, 1 = uendeleg, 2 = NaN.
+
+funksjon _dekod(x) -> liste_heltall {
+    la bits: heiltall = builtin.desimal_til_bits(x)
+    la neg: heiltall = 0
+    hvis bits < 0 {
+        neg = 1
+    }
+    la ef: heiltall = (bits >> 52) & 2047
+    la mant: heiltall = bits & 4503599627370495
+    hvis ef == 2047 {
+        hvis mant == 0 {
+            returner [1, neg, 0, 0]
+        }
+        returner [2, 0, 0, 0]
+    }
+    hvis ef == 0 {
+        returner [0, neg, mant, -1074]
+    }
+    returner [0, neg, mant + 4503599627370496, ef - 1075]
+}
+
+funksjon _bitlengd(m: heiltall) -> heiltall {
+    la n: heiltall = 0
+    la v: heiltall = m
+    mens v > 0 {
+        v = v >> 1
+        n = n + 1
+    }
+    returner n
+}
+
+# floor(a / b) for b > 0 (Norscode sin / trunkerer mot null).
+funksjon _golvdiv(a: heiltall, b: heiltall) -> heiltall {
+    la q: heiltall = a / b
+    hvis (a % b) != 0 og a < 0 {
+        q = q - 1
+    }
+    returner q
+}
+
+# ─── Hjelparar for tal-utdata ─────────────────────────────────────────────────
+
+funksjon _grupper(siffer: tekst) -> tekst {
+    la n: heiltall = lengde(siffer)
+    hvis n <= 3 {
+        returner siffer
+    }
+    la ut: tekst = ""
+    la fyrst: heiltall = n % 3
+    hvis fyrst == 0 {
+        fyrst = 3
+    }
+    ut = builtin.slice(siffer, 0, fyrst)
+    la i: heiltall = fyrst
+    mens i < n {
+        ut = ut + "," + builtin.slice(siffer, i, i + 3)
+        i = i + 3
+    }
+    returner ut
+}
+
+# Set saman forteikn, siffer og fylling etter flagga (Java sin leadingSign/trailingSign).
+funksjon _tal_ut(spes, negativ: boolsk, siffer: tekst) -> tekst {
+    la føre: tekst = ""
+    la etter: tekst = ""
+    hvis negativ {
+        hvis spes["parentes"] {
+            føre = "("
+            etter = ")"
+        } ellers {
+            føre = "-"
+        }
+    } ellers hvis spes["pluss"] {
+        føre = "+"
+    } ellers hvis spes["mellomrom"] {
+        føre = " "
+    }
+    la breidd: heiltall = spes["breidd"]
+    hvis spes["nullfyll"] {
+        la mangel: heiltall = breidd - teikn_tal(føre) - teikn_tal(siffer) - teikn_tal(etter)
+        hvis mangel > 0 {
+            siffer = _gjenta("0", mangel) + siffer
+        }
+    }
+    returner _juster(spes, føre + siffer + etter)
+}
+
+funksjon _juster(spes, s: tekst) -> tekst {
+    la breidd: heiltall = spes["breidd"]
+    la n: heiltall = teikn_tal(s)
+    hvis breidd <= n {
+        returner s
+    }
+    hvis spes["venstre"] {
+        returner s + _gjenta(" ", breidd - n)
+    }
+    returner _gjenta(" ", breidd - n) + s
+}
+
+# ─── Konverteringar ───────────────────────────────────────────────────────────
+
+funksjon _type(v) -> tekst {
+    returner builtin.type(v)
+}
+
+funksjon _konv_tekst(spes, v) -> tekst {
+    la s: tekst = ""
+    la t: tekst = _type(v)
+    hvis t == "ingenting" {
+        s = "null"
+    } ellers hvis t == "tekst" {
+        s = v
+    } ellers hvis t == "desimaltall" {
+        s = dtk.desimal_til_tekst(v)
+    } ellers {
+        s = tekst(v)
+    }
+    hvis spes["presisjon"] >= 0 {
+        s = _kutt_teikn(s, spes["presisjon"])
+    }
+    hvis spes["stor"] {
+        s = builtin.upper(s)
+    }
+    returner _juster(spes, s)
+}
+
+funksjon _krev_heiltall(spes, v) -> heiltall {
+    la t: tekst = _type(v)
+    hvis t != "heltall" {
+        kast "FormatFeil: %" + spes["konv"] + " krev heiltall, fekk " + t
+    }
+    returner v
+}
+
+funksjon _konv_desimal(spes, v) -> tekst {
+    la n: heiltall = _krev_heiltall(spes, v)
+    la s: tekst = tekst(n)
+    la negativ: boolsk = n < 0
+    hvis negativ {
+        s = builtin.slice(s, 1, lengde(s))
+    }
+    hvis spes["gruppe"] {
+        s = _grupper(s)
+    }
+    returner _tal_ut(spes, negativ, s)
+}
+
+# Usignert 64-bits omforming til base 2^bitar (1, 3 eller 4 bitar per siffer).
+funksjon _konv_base(spes, v, bitar: heiltall) -> tekst {
+    la n: heiltall = _krev_heiltall(spes, v)
+    la teikn_sett: tekst = "0123456789abcdef"
+    la maske: heiltall = (1 << bitar) - 1
+    la s: tekst = ""
+    hvis n == 0 {
+        s = "0"
+    }
+    la resten: heiltall = n
+    la nsiffer: heiltall = 0
+    # 64 bit i alt; aritmetisk skift gjer negative tal til -1 og aldri 0, så tel nsiffer.
+    mens resten != 0 og (nsiffer + 1) * bitar <= 64 {
+        la d: heiltall = resten & maske
+        s = teikn_sett[d] + s
+        resten = resten >> bitar
+        nsiffer = nsiffer + 1
+    }
+    hvis n < 0 og bitar == 3 {
+        # 64 bit er ikkje deleleg med 3: øvste oktalsiffer har berre éin bit (alltid 1).
+        s = "1" + s
+    }
+    la prefiks: tekst = ""
+    hvis spes["alt"] {
+        hvis bitar == 4 {
+            prefiks = "0x"
+        } ellers hvis bitar == 3 {
+            prefiks = "0"
+        } ellers {
+            prefiks = "0b"
+        }
+    }
+    hvis spes["stor"] {
+        s = builtin.upper(s)
+        prefiks = builtin.upper(prefiks)
+    }
+    hvis spes["nullfyll"] {
+        la mangel: heiltall = spes["breidd"] - lengde(prefiks) - lengde(s)
+        hvis mangel > 0 {
+            s = _gjenta("0", mangel) + s
+        }
+    }
+    returner _juster(spes, prefiks + s)
+}
+
+funksjon _konv_bool_eller_binær(spes, v) -> tekst {
+    la t: tekst = _type(v)
+    hvis t == "boolsk" eller t == "ingenting" {
+        hvis spes["alt"] eller spes["nullfyll"] eller spes["pluss"] eller spes["mellomrom"] eller spes["gruppe"] eller spes["parentes"] {
+            kast "FormatFeil: ugyldige flagg for %" + spes["konv"] + " med boolsk verdi"
+        }
+        la s: tekst = "usann"
+        hvis t == "boolsk" og v {
+            s = "sann"
+        }
+        hvis spes["presisjon"] >= 0 {
+            s = _kutt_teikn(s, spes["presisjon"])
+        }
+        hvis spes["stor"] {
+            s = builtin.upper(s)
+        }
+        returner _juster(spes, s)
+    }
+    hvis spes["presisjon"] >= 0 {
+        kast "FormatFeil: presisjon er ikkje lov for %" + spes["konv"] + " med heiltall"
+    }
+    returner _konv_base(spes, v, 1)
+}
+
+funksjon _konv_teikn(spes, v) -> tekst {
+    la t: tekst = _type(v)
+    la s: tekst = ""
+    hvis t == "heltall" {
+        s = _utf8(v)
+    } ellers hvis t == "tekst" {
+        hvis teikn_tal(v) != 1 {
+            kast "FormatFeil: %c krev eitt teikn, fekk \"" + v + "\""
+        }
+        s = v
+    } ellers hvis t == "ingenting" {
+        s = "null"
+    } ellers {
+        kast "FormatFeil: %c krev heiltall eller tekst, fekk " + t
+    }
+    hvis spes["stor"] {
+        s = builtin.upper(s)
+    }
+    returner _juster(spes, s)
+}
+
+funksjon _ikkje_endeleg(spes, klasse: heiltall, negativ: boolsk) -> tekst {
+    la s: tekst = "NaN"
+    hvis klasse == 1 {
+        hvis negativ {
+            hvis spes["parentes"] {
+                s = "(Infinity)"
+            } ellers {
+                s = "-Infinity"
+            }
+        } ellers hvis spes["pluss"] {
+            s = "+Infinity"
+        } ellers hvis spes["mellomrom"] {
+            s = " Infinity"
+        } ellers {
+            s = "Infinity"
+        }
+    }
+    hvis spes["stor"] {
+        s = builtin.upper(s)
+    }
+    returner _juster(spes, s)
+}
+
+# Hent [klasse, neg, m, e2] for eit desimaltall eller heiltall.
+funksjon _tal_verdi(spes, v) -> liste_heltall {
+    la t: tekst = _type(v)
+    hvis t == "desimaltall" {
+        returner _dekod(v)
+    }
+    hvis t == "heltall" {
+        hvis v < 0 {
+            # -2^63 kan ikkje negerast; han er -1 * 2^63.
+            hvis v == -9223372036854775807 - 1 {
+                returner [0, 1, 1, 63]
+            }
+            returner [0, 1, -v, 0]
+        }
+        returner [0, 0, v, 0]
+    }
+    kast "FormatFeil: %" + spes["konv"] + " krev desimaltall eller heiltall, fekk " + t
+}
+
+funksjon _konv_fast(spes, v) -> tekst {
+    la d: liste_heltall = _tal_verdi(spes, v)
+    la negativ: boolsk = d[1] == 1
+    hvis d[0] != 0 {
+        returner _ikkje_endeleg(spes, d[0], negativ)
+    }
+    la p: heiltall = spes["presisjon"]
+    hvis p < 0 {
+        p = 6
+    }
+    la siffer: tekst = _skaler_avrund(d[2], d[3], p)
+    hvis lengde(siffer) <= p {
+        siffer = _gjenta("0", p + 1 - lengde(siffer)) + siffer
+    }
+    la heil: tekst = builtin.slice(siffer, 0, lengde(siffer) - p)
+    la brøk: tekst = builtin.slice(siffer, lengde(siffer) - p, lengde(siffer))
+    hvis spes["gruppe"] {
+        heil = _grupper(heil)
+    }
+    la s: tekst = heil
+    hvis p > 0 {
+        s = heil + "." + brøk
+    } ellers hvis spes["alt"] {
+        s = heil + "."
+    }
+    returner _tal_ut(spes, negativ, s)
+}
+
+funksjon _konv_vitskapleg(spes, v) -> tekst {
+    la d: liste_heltall = _tal_verdi(spes, v)
+    la negativ: boolsk = d[1] == 1
+    hvis d[0] != 0 {
+        returner _ikkje_endeleg(spes, d[0], negativ)
+    }
+    la p: heiltall = spes["presisjon"]
+    hvis p < 0 {
+        p = 6
+    }
+    la m: heiltall = d[2]
+    la e2: heiltall = d[3]
+    la eksp: heiltall = 0
+    la siffer: tekst = ""
+    hvis m == 0 {
+        siffer = _gjenta("0", p + 1)
+    } ellers {
+        # log10(2) ≈ 0.301029995664; golv(...) er aldri over den sanne eksponenten.
+        la b: heiltall = e2 + _bitlengd(m) - 1
+        eksp = _golvdiv(b * 301029995664, 1000000000000)
+        siffer = _skaler_avrund(m, e2, p - eksp)
+        la runde: heiltall = 0
+        mens lengde(siffer) != p + 1 og runde < 4 {
+            hvis lengde(siffer) > p + 1 {
+                eksp = eksp + 1
+            } ellers {
+                eksp = eksp - 1
+            }
+            siffer = _skaler_avrund(m, e2, p - eksp)
+            runde = runde + 1
+        }
+    }
+    la s: tekst = builtin.slice(siffer, 0, 1)
+    hvis p > 0 {
+        s = s + "." + builtin.slice(siffer, 1, lengde(siffer))
+    } ellers hvis spes["alt"] {
+        s = s + "."
+    }
+    la ek: tekst = "e"
+    hvis spes["stor"] {
+        ek = "E"
+    }
+    la abs_eksp: heiltall = eksp
+    la eteikn: tekst = "+"
+    hvis eksp < 0 {
+        abs_eksp = -eksp
+        eteikn = "-"
+    }
+    la et: tekst = tekst(abs_eksp)
+    hvis lengde(et) < 2 {
+        et = "0" + et
+    }
+    returner _tal_ut(spes, negativ, s + ek + eteikn + et)
+}
+
+# ─── Spesifikasjonsparsing ────────────────────────────────────────────────────
+
+funksjon _ny_spes() {
+    returner {venstre: usann, alt: usann, pluss: usann, mellomrom: usann, nullfyll: usann, gruppe: usann, parentes: usann, stor: usann, breidd: -1, presisjon: -1, konv: "", indeks: 0, relativ: usann}
+}
+
+funksjon _valider(spes, spes_tekst: tekst) {
+    la k: tekst = spes["konv"]
+    la heil: boolsk = k == "d" eller k == "i"
+    la base: boolsk = k == "x" eller k == "o" eller k == "b"
+    la flyt: boolsk = k == "f" eller k == "e"
+    hvis spes["venstre"] og spes["nullfyll"] {
+        kast "FormatFeil: flagga '-' og '0' kan ikkje brukast saman i '" + spes_tekst + "'"
+    }
+    hvis spes["pluss"] og spes["mellomrom"] {
+        kast "FormatFeil: flagga '+' og ' ' kan ikkje brukast saman i '" + spes_tekst + "'"
+    }
+    hvis (spes["venstre"] eller spes["nullfyll"]) og spes["breidd"] < 0 {
+        kast "FormatFeil: manglar breidd i '" + spes_tekst + "'"
+    }
+    hvis k == "n" {
+        hvis spes["breidd"] >= 0 eller spes["presisjon"] >= 0 eller spes["venstre"] {
+            kast "FormatFeil: %n tek ikkje breidd, presisjon eller flagg"
+        }
+    }
+    hvis spes["presisjon"] >= 0 og (heil eller k == "x" eller k == "o" eller k == "c" eller k == "%") {
+        kast "FormatFeil: presisjon er ikkje lov i '" + spes_tekst + "'"
+    }
+    hvis spes["nullfyll"] og ikkje (heil eller base eller flyt) {
+        kast "FormatFeil: flagget '0' krev ein talkonvertering i '" + spes_tekst + "'"
+    }
+    hvis (spes["pluss"] eller spes["mellomrom"] eller spes["parentes"]) og ikkje (heil eller flyt) {
+        kast "FormatFeil: forteiknsflagg krev %d, %f eller %e i '" + spes_tekst + "'"
+    }
+    hvis spes["gruppe"] og ikkje (heil eller k == "f") {
+        kast "FormatFeil: flagget ',' krev %d eller %f i '" + spes_tekst + "'"
+    }
+    hvis spes["alt"] og ikkje (base eller flyt) {
+        kast "FormatFeil: flagget '#' er ikkje lov i '" + spes_tekst + "'"
+    }
+}
+
+funksjon _konverter(spes, v) -> tekst {
+    la k: tekst = spes["konv"]
+    hvis k == "s" {
+        returner _konv_tekst(spes, v)
+    }
+    hvis k == "d" eller k == "i" {
+        returner _konv_desimal(spes, v)
+    }
+    hvis k == "x" {
+        returner _konv_base(spes, v, 4)
+    }
+    hvis k == "o" {
+        returner _konv_base(spes, v, 3)
+    }
+    hvis k == "b" {
+        returner _konv_bool_eller_binær(spes, v)
+    }
+    hvis k == "c" {
+        returner _konv_teikn(spes, v)
+    }
+    hvis k == "f" {
+        returner _konv_fast(spes, v)
+    }
+    returner _konv_vitskapleg(spes, v)
+}
+
+# Formater `mønster` med argumenta i lista `args` (printf/String.format-stil).
+# Er `args` ikkje ei liste, blir verdien brukt som einaste argument.
+funksjon formater(mønster: tekst, args) -> tekst {
+    la argliste = args
+    hvis _type(args) != "liste" {
+        argliste = [args]
+    }
+    la nargs: heiltall = lengde(argliste)
+    la n: heiltall = lengde(mønster)
+    la deler: liste_tekst = []
+    la i: heiltall = 0
+    la bokstav_start: heiltall = 0
+    la neste_arg: heiltall = 0
+    la førre_arg: heiltall = -1
+    mens i < n {
+        hvis _byte(mønster, i) != 37 {
+            i = i + 1
+        } ellers {
+            hvis i > bokstav_start {
+                legg_til(deler, builtin.slice(mønster, bokstav_start, i))
+            }
+            la start: heiltall = i
+            i = i + 1
+            la spes = _ny_spes()
+            # Argumentindeks "n$" eller relativ "<".
+            la j: heiltall = i
+            mens j < n og _er_siffer(_byte(mønster, j)) {
+                j = j + 1
+            }
+            hvis j > i og j < n og _byte(mønster, j) == 36 {
+                la idx: heiltall = 0
+                la q: heiltall = i
+                mens q < j {
+                    idx = idx * 10 + (_byte(mønster, q) - 48)
+                    q = q + 1
+                }
+                hvis idx < 1 {
+                    kast "FormatFeil: argumentindeks må vere minst 1 i '" + builtin.slice(mønster, start, j + 1) + "'"
+                }
+                spes["indeks"] = idx
+                i = j + 1
+            }
+            # Flagg.
+            la flagg_ferdig: boolsk = usann
+            mens i < n og ikkje flagg_ferdig {
+                la b: heiltall = _byte(mønster, i)
+                hvis b == 45 {
+                    spes["venstre"] = sann
+                } ellers hvis b == 35 {
+                    spes["alt"] = sann
+                } ellers hvis b == 43 {
+                    spes["pluss"] = sann
+                } ellers hvis b == 32 {
+                    spes["mellomrom"] = sann
+                } ellers hvis b == 48 {
+                    spes["nullfyll"] = sann
+                } ellers hvis b == 44 {
+                    spes["gruppe"] = sann
+                } ellers hvis b == 40 {
+                    spes["parentes"] = sann
+                } ellers hvis b == 60 {
+                    spes["relativ"] = sann
+                } ellers {
+                    flagg_ferdig = sann
+                }
+                hvis ikkje flagg_ferdig {
+                    i = i + 1
+                }
+            }
+            # Breidd.
+            hvis i < n og _er_siffer(_byte(mønster, i)) {
+                la w: heiltall = 0
+                mens i < n og _er_siffer(_byte(mønster, i)) {
+                    w = w * 10 + (_byte(mønster, i) - 48)
+                    i = i + 1
+                }
+                spes["breidd"] = w
+            }
+            # Presisjon.
+            hvis i < n og _byte(mønster, i) == 46 {
+                i = i + 1
+                hvis i >= n eller ikkje _er_siffer(_byte(mønster, i)) {
+                    kast "FormatFeil: manglar presisjon etter '.' i '" + builtin.slice(mønster, start, i) + "'"
+                }
+                la pr: heiltall = 0
+                mens i < n og _er_siffer(_byte(mønster, i)) {
+                    pr = pr * 10 + (_byte(mønster, i) - 48)
+                    i = i + 1
+                }
+                spes["presisjon"] = pr
+            }
+            hvis i >= n {
+                kast "FormatFeil: ufullstendig formatspesifikasjon '" + builtin.slice(mønster, start, n) + "'"
+            }
+            la kb: heiltall = _byte(mønster, i)
+            la konv: tekst = builtin.slice(mønster, i, i + 1)
+            i = i + 1
+            la spes_tekst: tekst = builtin.slice(mønster, start, i)
+            hvis kb >= 65 og kb <= 90 {
+                la liten: tekst = builtin.chr(kb + 32)
+                hvis liten == "s" eller liten == "x" eller liten == "b" eller liten == "c" eller liten == "e" {
+                    spes["stor"] = sann
+                    konv = liten
+                } ellers {
+                    kast "FormatFeil: ukjend konvertering '" + spes_tekst + "'"
+                }
+            }
+            hvis ikkje (konv == "s" eller konv == "d" eller konv == "i" eller konv == "x" eller konv == "o" eller konv == "b" eller konv == "c" eller konv == "f" eller konv == "e" eller konv == "n" eller konv == "%") {
+                kast "FormatFeil: ukjend konvertering '" + spes_tekst + "'"
+            }
+            spes["konv"] = konv
+            _valider(spes, spes_tekst)
+            hvis konv == "n" {
+                legg_til(deler, "\n")
+            } ellers hvis konv == "%" {
+                legg_til(deler, _juster(spes, "%"))
+            } ellers {
+                la ai: heiltall = 0
+                hvis spes["indeks"] > 0 {
+                    ai = spes["indeks"] - 1
+                } ellers hvis spes["relativ"] {
+                    ai = førre_arg
+                    hvis ai < 0 {
+                        kast "FormatFeil: '%<' utan eit førre argument i '" + spes_tekst + "'"
+                    }
+                } ellers {
+                    ai = neste_arg
+                    neste_arg = neste_arg + 1
+                }
+                hvis ai >= nargs {
+                    kast "FormatFeil: manglar argument " + tekst(ai + 1) + " for '" + spes_tekst + "' (fekk " + tekst(nargs) + ")"
+                }
+                førre_arg = ai
+                legg_til(deler, _konverter(spes, argliste[ai]))
+            }
+            bokstav_start = i
+        }
+    }
+    hvis n > bokstav_start {
+        legg_til(deler, builtin.slice(mønster, bokstav_start, n))
+    }
+    returner builtin.join(deler, "")
+}
+
+# printf: skriv den formaterte teksten (utan ekstra linjeskift; bruk %n).
+funksjon skrivf(mønster: tekst, args) -> heiltall {
+    skriv(formater(mønster, args))
+    returner 0
+}
