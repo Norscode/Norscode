@@ -21,7 +21,9 @@ bruk selfhost.native_execution.pe_emitter som pe
 // Linux x86-64-systemkallnummer som Windows-målet emulerer (delmengd; resten fail-closed).
 funksjon NR_READ() -> heiltall { returner 0 }
 funksjon NR_WRITE() -> heiltall { returner 1 }
+funksjon NR_MPROTECT() -> heiltall { returner 10 }
 funksjon NR_EXIT() -> heiltall { returner 60 }
+funksjon NR_CLOCK_GETTIME() -> heiltall { returner 228 }
 funksjon NR_GETRANDOM() -> heiltall { returner 318 }
 funksjon OSTAB_LEN() -> heiltall { returner 512 }
 
@@ -33,9 +35,12 @@ funksjon os_importar() {
 }
 // RtlGenRandom bur eigentleg i ADVAPI32/SystemFunction036; kernel32 vidareeksporterer henne
 // ikkje. W1 brukar difor ADVAPI32 for getrandom (sett inn under). Hald kernel32-lista rein.
+// VirtualProtect = mprotect (GC-vaktside, PAGE_NOACCESS); GetSystemTimePreciseAsFileTime =
+// clock_gettime. Fleire (GetCommandLineW/… for argv) kjem når _start får full argv-syntese.
 funksjon os_importar_full() {
     returner [
-        ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess"]],
+        ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
+            "VirtualProtect", "GetSystemTimePreciseAsFileTime"]],
         ["ADVAPI32.dll", ["SystemFunction036"]]
     ]
 }
@@ -159,6 +164,108 @@ funksjon emit_enosys(a) -> heiltall {
     asm.mov_is(a, asm.RAX(), 0 - 38)
     asm.ret(a)
     returner 0
+}
+
+// ── OS-rutine: read(fd, buf, len) ─────────────────────────────────────────────
+// Linux: rdi=fd, rsi=buf, rdx=len → rax=lesne byte (eller −errno). Spegling av os_write.
+funksjon emit_read(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_read")
+    prolog(a)
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())    // fd
+    asm.cmp_i(a, asm.RCX(), 2)
+    asm.jcc(a, asm.CC_A(), "os_read_handle")
+    asm.mov_is(a, asm.RAX(), 0 - 10)
+    asm.ld(a, asm.R11(), asm.RBP(), S_RDI())
+    asm.sub(a, asm.RAX(), asm.R11())            // rax = -10 - fd (STD_*_HANDLE)
+    asm.mov(a, asm.RCX(), asm.RAX())
+    iat(a, slot, base, "KERNEL32.dll!GetStdHandle")
+    asm.mov(a, asm.RCX(), asm.RAX())
+    asm.jmp(a, "os_read_call")
+    asm.merk(a, "os_read_handle")
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())
+    asm.merk(a, "os_read_call")
+    asm.ld(a, asm.RDX(), asm.RBP(), S_RSI())    // buf
+    asm.ld(a, asm.R8(), asm.RBP(), S_RDX())     // len
+    asm.lea(a, asm.R9(), asm.RSP(), 48)         // &lesne
+    asm.st_i(a, asm.RSP(), 32, 0)               // lpOverlapped = NULL
+    iat(a, slot, base, "KERNEL32.dll!ReadFile")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_read_feil")
+    asm.ld32(a, asm.RAX(), asm.RSP(), 48)       // rax = lesne
+    asm.jmp(a, "os_read_ut")
+    asm.merk(a, "os_read_feil")
+    asm.mov_is(a, asm.RAX(), 0 - 5)             // -EIO
+    asm.merk(a, "os_read_ut")
+    epilog(a)
+    returner 0
+}
+
+// ── OS-rutine: mprotect(addr, len, prot) ──────────────────────────────────────
+// Berre GC-vaktsida kallar denne (prot=PROT_NONE). Windows: VirtualProtect(addr, len,
+// PAGE_NOACCESS=1, &gamal). lpflOldProtect MÅ vere ein gyldig skrivbar peikar (scratch i
+// ramma). Returnerer Linux-form: 0 ved suksess, −EIO elles.
+funksjon emit_mprotect(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_mprotect")
+    prolog(a)
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())    // lpAddress
+    asm.ld(a, asm.RDX(), asm.RBP(), S_RSI())    // dwSize
+    asm.mov_is(a, asm.R8(), 1)                  // flNewProtect = PAGE_NOACCESS
+    asm.lea(a, asm.R9(), asm.RSP(), 48)         // lpflOldProtect (scratch)
+    iat(a, slot, base, "KERNEL32.dll!VirtualProtect")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_mprotect_feil")
+    asm.mov_is(a, asm.RAX(), 0)                 // suksess → 0
+    asm.jmp(a, "os_mprotect_ut")
+    asm.merk(a, "os_mprotect_feil")
+    asm.mov_is(a, asm.RAX(), 0 - 5)             // -EIO
+    asm.merk(a, "os_mprotect_ut")
+    epilog(a)
+    returner 0
+}
+
+// ── OS-rutine: clock_gettime(clk, timespec*) ──────────────────────────────────
+// Linux: rdi=clk (ignorert), rsi=timespec* → fyll {tv_sec, tv_nsec} og returner 0.
+// Windows: GetSystemTimePreciseAsFileTime gjev 100 ns-tikk sidan 1601-01-01. Trekk frå
+// epoke-offset (11644473600 s = 116444736000000000 tikk), del på 10 000 000 → sekund,
+// rest × 100 → nanosekund.
+funksjon emit_clock_gettime(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_clock_gettime")
+    prolog(a)
+    asm.lea(a, asm.RCX(), asm.RSP(), 48)        // &FILETIME (scratch)
+    iat(a, slot, base, "KERNEL32.dll!GetSystemTimePreciseAsFileTime")
+    asm.ld(a, asm.RAX(), asm.RSP(), 48)         // ticks (100 ns sidan 1601)
+    asm.mov_i64(a, asm.R11(), 116444736000000000)
+    asm.sub(a, asm.RAX(), asm.R11())            // rax = unix-100ns
+    asm.xor(a, asm.RDX(), asm.RDX())            // rdx:rax / r11
+    asm.mov_i64(a, asm.R11(), 10000000)
+    asm.div(a, asm.R11())                       // rax=sekund, rdx=rest(100ns)
+    asm.ld(a, asm.RSI(), asm.RBP(), S_RSI())    // timespec*
+    asm.st(a, asm.RSI(), 0, asm.RAX())          // tv_sec
+    asm.mov(a, asm.RAX(), asm.RDX())            // rest
+    asm.mov_i64(a, asm.R11(), 100)
+    asm.mul(a, asm.R11())                       // rax = rest*100 (nanosekund)
+    asm.st(a, asm.RSI(), 8, asm.RAX())          // tv_nsec
+    asm.mov_is(a, asm.RAX(), 0)                 // returner 0
+    epilog(a)
+    returner 0
+}
+
+// Emitter heile OS-rutinesettet i rekkjefølgje inn i assemblarstaten `a` og returnerer
+// tabellen [[linux_nr, etikett], …] so kallaren kan fylle OSTAB. os_enosys er standardfyllet
+// for alle andre slottar. Same rutinar som native_codegen_v2 emitterer inn i .text (W1).
+funksjon emit_os_routines(a, slot, base: heiltall) {
+    emit_write(a, slot, base)
+    emit_read(a, slot, base)
+    emit_exit(a, slot, base)
+    emit_getrandom(a, slot, base)
+    emit_mprotect(a, slot, base)
+    emit_clock_gettime(a, slot, base)
+    emit_enosys(a)
+    returner [
+        [NR_WRITE(), "os_write"], [NR_READ(), "os_read"], [NR_EXIT(), "os_exit"],
+        [NR_GETRANDOM(), "os_getrandom"], [NR_MPROTECT(), "os_mprotect"],
+        [NR_CLOCK_GETTIME(), "os_clock_gettime"]
+    ]
 }
 
 // emit_os_call(a, nr, ostab_va): Windows-form for eit systemkall der Linux hadde

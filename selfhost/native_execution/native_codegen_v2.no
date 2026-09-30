@@ -10,6 +10,11 @@
 bruk selfhost.ncb_serde som serde
 bruk selfhost.native_execution.heap_layout som hl
 bruk selfhost.native_execution.gap_ruter som gr
+// WINDOWS_SEED_PLAN W1: PE32+-container + OS-grensa. Berre nytta når NC_TARGET=windows-x86_64
+// (ER_WINDOWS); Linux-vegen rører aldri desse, so ELF-output held seg byte-identisk.
+bruk selfhost.native_execution.pe_emitter som pe
+bruk selfhost.native_execution.win64_os som win64
+bruk selfhost.native_execution.win64_asm som wasm
 // a12fix: std.desimaltall_tekst i codegen-bunten, so json_parse-atomet i codegen-ELF-en sjølv får
 // den eksakte talkroken (NCB-JSON-konstantar som 2.2250738585072014e-308 las elles som 0.0).
 // Modulen er med i bruk-lukkinga og dermed i .depshash.
@@ -32,13 +37,31 @@ funksjon HOST_ABI_VA() { returner 7798784 } // 0x5f0000
 // miljo_sett/miljo_hent; STACK_LIMIT: initiell rsp − 7 MiB (rekursjonsvakt).
 funksjon ENV_OVERLAY_VA() { returner HOST_ABI_VA() + 4088 }
 funksjon STACK_LIMIT_VA() { returner HOST_ABI_VA() + 4080 }
+// WINDOWS_SEED_PLAN W1: OS-porttabell (OSTAB) på starten av .idata (0x771000, rett etter
+// verts-ABI-sida). Fast VA so emit_os_call() kan bruke han som kompileringstidskonstant
+// gjennom heile runtime-emisjonen (dei 56 syscall-stadene). 512 slottar à 8 B = 4096 B;
+// importkatalogen (IMPORT_VA) ligg rett etter. Berre nytta i windows-x86_64-emisjon.
+funksjon OSTAB_VA() { returner HOST_ABI_VA() + 4096 }        // 0x771000
+funksjon OSTAB_LEN() { returner 512 }
+funksjon IMPORT_VA() { returner OSTAB_VA() + OSTAB_LEN() * 8 } // 0x772000
 // LAMBDA_CAPTURE: capture-ordboka til closuren som ncb_kall-atomet er i ferd med å kalle.
 // Lambda-hjelparen les og nullstiller sloten i prologen (sjå kompiler_fn_v2). Sida
 // er rot for GC-skanninga, men closuren ligg uansett på kallaren sin operandstakk.
 funksjon LAMBDA_CAPTURE_VA() { returner HOST_ABI_VA() + 4072 }
 // Heap-/GC-layouten (HEAP_VA, GC_*, live-map, mark-stakk, cache-område, handler-region)
-// ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen er linux-x86_64.
-funksjon X86_MAL() -> tekst { returner "linux-x86_64" }
+// ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen dekkjer x86-64-måla:
+// linux-x86_64 (standard) og windows-x86_64 (WINDOWS_SEED_PLAN W1). Målet kjem frå NC_TARGET;
+// heap-/VA-layouten er identisk (heap_layout deler han), so berre containeren (PE/ELF), _start
+// og syscall-stadene skil bygga. NB: utan NC_TARGET er dette "linux-x86_64" → Linux-output
+// byte-identisk (paritetsporten). native_target()-konstanten speglar denne strengen.
+funksjon X86_MAL() -> tekst {
+    la t = miljo_hent("NC_TARGET")
+    hvis t == "" eller t == "linux-x86_64" { returner "linux-x86_64" }
+    hvis t == "windows-x86_64" { returner "windows-x86_64" }
+    kast "native_codegen_v2: ukjent NC_TARGET " + t + " (venta linux-x86_64 eller windows-x86_64)"
+}
+// Er dette Windows-målet? Gate for PE-container, _start og syscall-ruting (W1+).
+funksjon ER_WINDOWS() -> boolsk { returner X86_MAL() == "windows-x86_64" }
 // Rå 4 LE-byte av HEAP_VA()+off — for hand-assemblerte instruksjonar som
 // før hardkoda 0x600000-familien; no følgjer dei HEAP_VA (relayout-trygt).
 funksjon _heap_abs4(off: heltall) -> liste { la v = hl.HEAP_VA(X86_MAL()) + off returner [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255] }
@@ -3270,8 +3293,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16
     copy(bytes, [0x31, 0xFF])                             // xor edi,edi (CLOCK_REALTIME)
     copy(bytes, [0x48, 0x89, 0xE6])                       // mov rsi,rsp (timespec*)
-    copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])           // mov eax,228
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 228)                     // call [OSTAB+228*8] → os_clock_gettime
+    } ellers {
+        copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])       // mov eax,228
+        copy(bytes, [0x0F, 0x05])                         // syscall
+    }
     copy(bytes, [0x48, 0x8B, 0x04, 0x24])                 // mov rax,[rsp] (sek)
     copy(bytes, [0x48, 0x69, 0xC0, 0xE8, 0x03, 0x00, 0x00]) // imul rax,rax,1000
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
@@ -3299,8 +3326,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8D, 0x3C, 0x24])                 // igjen: lea rdi,[rsp] (buf)
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])           // mov esi,1 (len)
     copy(bytes, [0x31, 0xD2])                             // xor edx,edx (flags=0)
-    copy(bytes, [0xB8, 0x3E, 0x01, 0x00, 0x00])           // mov eax,318 (getrandom)
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    // W1 bare2-ruting (lengdekritisk: je igjen −24 @nedanfor spenner staden). mov eax,318
+    // (5 B) + syscall (2 B) = 7 B → call [OSTAB+318*8] (7 B). os_getrandom (SystemFunction036)
+    // skriv 1 byte til [rdi] og returnerer 1; retry-sjekken cmp rax,-4 slår aldri til.
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 318)                     // call [OSTAB+318*8] → os_getrandom
+    } ellers {
+        copy(bytes, [0xB8, 0x3E, 0x01, 0x00, 0x00])       // mov eax,318 (getrandom)
+        copy(bytes, [0x0F, 0x05])                         // syscall
+    }
     copy(bytes, [0x48, 0x83, 0xF8, 0xFC])                 // cmp rax,-4 (−EINTR?)
     copy(bytes, [0x74, 0xE8])                             // je igjen (−24)
     copy(bytes, [0x48, 0x83, 0xF8, 0x01])                 // cmp rax,1
@@ -7745,9 +7779,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC6, 0x08])                   // add rsi,0x8
     copy(bytes, [0x48, 0x85, 0xD2])                         // test rdx,rdx
     copy(bytes, [0x7E, 0x19])                               // jle 978
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])             // mov eax,0x1
-    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])             // mov edi,0x1
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    // W1 split-ruting: Windows dropp mov eax,1 (5 B), behald mov edi,1 (fd=stdout), byt
+    // syscall (2 B) med call [OSTAB+1*8] (7 B) → os_write. 5+7 = 12 = 5+5+2, so je/jle-
+    // avstandane (0x29/0x19) som spenner staden held. Linux-greina er byte-identisk.
+    hvis ER_WINDOWS() {
+        copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])         // mov edi,0x1 (fd=stdout)
+        emit_syscall_site(bytes, 1)                         // call [OSTAB+8] → os_write
+    } ellers {
+        copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])         // mov eax,0x1
+        copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])         // mov edi,0x1
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     copy(bytes, [0x7E, 0x08])                               // jle 978
     copy(bytes, [0x48, 0x01, 0xC6])                         // add rsi,rax
@@ -11112,6 +11154,99 @@ funksjon bruker_dynamiske_kall(fns) -> boolsk {
 }
 
 // ─── Hovud-kompilator v2 ─────────────────────────────────────────────────────
+// Windows: call qword [OSTAB + nr*8] = FF 14 25 disp32 (7 B, absolutt SIB-form). Byte-
+// identisk med win64_os.emit_os_call, men mot ei rå byteliste (text) i staden for ein
+// win64_asm-stat, so dei 55 syscall-stadene kan rutast utan å tre assemblaren gjennom.
+// OSTAB ligg på 0x771000 < 4 GiB → disp32 held.
+funksjon emit_syscall_site(text, nr: heltall) -> heiltall {
+    copy(text, [0xFF, 0x14, 0x25])
+    u32(text, OSTAB_VA() + nr * 8)
+    returner 0
+}
+
+// ─── Windows PE32+-container (WINDOWS_SEED_PLAN §2.1, W1) ─────────────────────
+// Same text/data/heap-bytes som ELF-vegen (identiske VA-ar), men pakka som PE32+
+// med samanhengande seksjonar: kvar seksjon sin VirtualSize fyller gapet fram til
+// neste, so .text spenner 0x401000→DATA_VA, .rdata→HOST_ABI_VA, .hostabi éi side,
+// .idata→HEAP_VA og .heap som bss på HEAP_VA. .idata = [OSTAB 4096 B @0x771000]
+// ++ [importkatalog @0x772000]. OS-rutinane (write/read/exit/getrandom/mprotect/
+// clock_gettime + enosys) blir emitterte inn i .text her, og OSTAB blir fylt med
+// VA-ane deira. Berre GC-modus. NCB-traileren blir lagd som overlay, som på ELF.
+funksjon bygg_pe_bilete(entry_va: heltall, text, data_bytes, ncb_json) -> liste {
+    hvis miljo_hent("NORSCODE_GC_ALLOC") != "1" {
+        kast "native_codegen_v2: windows-x86_64 krev NORSCODE_GC_ALLOC=1 (WINDOWS_SEED_PLAN §2.1)"
+    }
+    la image_base: heltall = 4194304                       // 0x400000
+    la heap_va: heltall = hl.HEAP_VA(X86_MAL())
+    la text_rva: heltall = TEXT_VA() - image_base          // 0x1000
+    la rdata_rva: heltall = DATA_VA() - image_base
+    la hostabi_rva: heltall = HOST_ABI_VA() - image_base
+    la idata_rva: heltall = hostabi_rva + 4096             // 0x371000 (VA 0x771000)
+    la heap_rva: heltall = heap_va - image_base
+    la text_vsize: heltall = DATA_VA() - TEXT_VA()
+    la rdata_vsize: heltall = HOST_ABI_VA() - DATA_VA()
+    la idata_vsize: heltall = heap_va - (HOST_ABI_VA() + 4096)
+
+    // Importkatalog/IAT på IMPORT_VA (0x772000), rett etter OSTAB (0x771000, 4096 B).
+    la imp = pe.bygg_importar(win64.os_importar_full(), IMPORT_VA() - image_base)
+
+    // Emitter OS-rutinane inn i .text (bak alt anna) og noter VA-ane deira for OSTAB.
+    la routine_base_va: heltall = TEXT_VA() + lengde(text)
+    la a = wasm.ny()
+    la rutinetabell = win64.emit_os_routines(a, imp["slot"], image_base)
+    la routine_bytes = wasm.ferdig(a)
+    copy(text, routine_bytes)
+    hvis TEXT_VA() + lengde(text) > DATA_VA() {
+        kast "native_codegen_v2: .text (med OS-rutinar) overlappar .rdata"
+    }
+    la lab = a["lab"]
+
+    // OSTAB: OSTAB_LEN slottar à 8 B, alle → os_enosys, så fyll dei implementerte.
+    la enosys_va: heltall = routine_base_va + lab["os_enosys"]
+    la ostab: liste = []
+    la oi: heltall = 0
+    mens oi < win64.OSTAB_LEN() {
+        u64(ostab, enosys_va)
+        oi = oi + 1
+    }
+    la ri: heltall = 0
+    mens ri < lengde(rutinetabell) {
+        la nr: heltall = rutinetabell[ri][0]
+        la etikett: tekst = rutinetabell[ri][1]
+        win64.sett_slot(ostab, nr, routine_base_va + lab[etikett])
+        ri = ri + 1
+    }
+    hvis lengde(ostab) != OSTAB_LEN() * 8 { kast "native_codegen_v2: OSTAB har feil storleik" }
+
+    // .idata = OSTAB (4096 B) ++ importkatalog (på +4096 = IMPORT_VA).
+    la idata_bytes: liste = []
+    copy(idata_bytes, ostab)
+    copy(idata_bytes, imp["bytes"])
+    hvis lengde(idata_bytes) > idata_vsize {
+        kast "native_codegen_v2: PE .idata for lita for OSTAB + importkatalog"
+    }
+
+    la spec = {
+        "image_base": image_base, "entry_rva": entry_va - image_base,
+        "seksjonar": [
+            pe.seksjon(".text", text_rva, text_vsize, text, pe.FLAGG_TEXT()),
+            pe.seksjon(".rdata", rdata_rva, rdata_vsize, data_bytes, pe.FLAGG_RDATA()),
+            pe.seksjon(".hostabi", hostabi_rva, 4096, [], pe.FLAGG_DATA()),
+            pe.seksjon(".idata", idata_rva, idata_vsize, idata_bytes, pe.FLAGG_DATA()),
+            pe.seksjon(".heap", heap_rva, hl.HEAP_SZ(), [], pe.FLAGG_BSS())
+        ],
+        "import_rva": imp["import_rva"], "import_size": imp["import_size"],
+        "iat_rva": imp["iat_rva"], "iat_size": imp["iat_size"],
+        "stack_reserve": 16777216, "stack_commit": 16777216   // 16 MiB reserve==commit
+    }
+    la image = pe.bygg_pe(spec)
+    // legg_innebygd_ncb er container-agnostisk (overlay etter siste rå seksjon), som ELF.
+    hvis miljo_hent("NC_NATIVE_EXTERNAL_EMBED_NCB") != "1" {
+        legg_innebygd_ncb(image, ncb_json)
+    }
+    returner image
+}
+
 funksjon kompiler_v2(ncb_json) {
     native_codegen_trace("parse start")
     // F3.6: ncb_json kan vere JSON-tekst eller binær NCB-tekst (magic 0x93). Binær går
@@ -11367,8 +11502,14 @@ funksjon kompiler_v2(ncb_json) {
         copy(text, [0xBF]) u32(text, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)               // mov edi,vaktside
         copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
         copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
-        copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                         // mov eax,10 (mprotect)
-        copy(text, [0x0F, 0x05])                                           // syscall
+        // W1: Windows → OSTAB[10] = os_mprotect (VirtualProtect PAGE_NOACCESS). edi/esi
+        // urørte; os_mprotect les rdi/rsi. 7 B ↔ 7 B, so vaktprolog-hoppa held.
+        hvis ER_WINDOWS() {
+            emit_syscall_site(text, 10)                                    // call [OSTAB+10*8]
+        } ellers {
+            copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                     // mov eax,10 (mprotect)
+            copy(text, [0x0F, 0x05])                                       // syscall
+        }
     }
     // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
     // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
@@ -11376,6 +11517,20 @@ funksjon kompiler_v2(ncb_json) {
     // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
     copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF)  // lea rax,[r12-7MiB]
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())             // mov [limit],rax
+    hvis ER_WINDOWS() {
+        // W1: Windows-entry har inga startstakk med argc/argv. Minimal tom argv/argc/envp
+        // (fikstur-aksept; full GetCommandLineW-syntese er ein seinare W1-slice). Skriv
+        // eksplisitt argv=0, argc=0 @HOST_ABI_VA og envp → HOST_ABI_VA (peikar på 0-ordet
+        // → tomt miljø, so native_envp/env_get aldri dereferer null). Sett før rt_init_heap
+        // (som bevarer kontrollblokk-slottane), akkurat som Linux-vegen.
+        copy(text, [0x49, 0xBB]) u64(text, argv_store_va)   // mov r11, argv_store_va
+        copy(text, [0x31, 0xC0])                            // xor eax,eax
+        copy(text, [0x49, 0x89, 0x03])                      // mov [r11], rax   (argv = 0)
+        copy(text, [0x49, 0x89, 0x43, 0x08])                // mov [r11+8], rax (argc = 0)
+        copy(text, [0x49, 0xBB]) u64(text, envp_store_va)   // mov r11, envp_store_va
+        copy(text, [0x48, 0xB8]) u64(text, argv_store_va)   // mov rax, argv_store_va
+        copy(text, [0x49, 0x89, 0x03])                      // mov [r11], rax   (envp → &0)
+    } ellers {
     // mov rdi, [r12] = argc
     legg_til(text, 0x49)
     legg_til(text, 0x8B)
@@ -11417,6 +11572,7 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x49)
     legg_til(text, 0x89)
     legg_til(text, 0x13)
+    }
     // and rsp, -16
     legg_til(text, 0x48)
     legg_til(text, 0x83)
@@ -11443,16 +11599,21 @@ funksjon kompiler_v2(ncb_json) {
         // Feilbar tryggleik: kunne ikkje slå opp start-funksjon.
         // I staden for call til 0 (kan gi illegal instruction), avslutt
         // med avgrensa feilstatus.
-        legg_til(text, 0x48)
-        legg_til(text, 0xC7)
-        legg_til(text, 0xC0)
-        u32(text, 60)   // mov rax, 60
-        legg_til(text, 0x48)
-        legg_til(text, 0xC7)
-        legg_til(text, 0xC7)
-        u32(text, 4)    // mov rdi, 4
-        legg_til(text, 0x0F)
-        legg_til(text, 0x05)  // syscall
+        hvis ER_WINDOWS() {
+            legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC7) u32(text, 4)  // mov rdi,4
+            emit_syscall_site(text, 60)   // call [OSTAB+60*8] → os_exit (ExitProcess)
+        } ellers {
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC0)
+            u32(text, 60)   // mov rax, 60
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC7)
+            u32(text, 4)    // mov rdi, 4
+            legg_til(text, 0x0F)
+            legg_til(text, 0x05)  // syscall
+        }
     }
     call_rel32(text, main_va, TEXT_VA())
 
@@ -11479,12 +11640,19 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x8B)
     legg_til(text, 0x78)
     legg_til(text, 0x08)  // mov rdi,[rax+8]
-    legg_til(text, 0x48)
-    legg_til(text, 0xC7)
-    legg_til(text, 0xC0)
-    u32(text, 60) // mov rax, 60
-    legg_til(text, 0x0F)
-    legg_til(text, 0x05)  // syscall
+    // W1: Windows avsluttar via OSTAB[60] = os_exit → ExitProcess(rdi & 255). Siste
+    // instruksjon i _start; ingenting hoppar over han, so lengda er fri. je/jne over
+    // inspeksjonen peikar hit uansett (avstanden deira er uendra).
+    hvis ER_WINDOWS() {
+        emit_syscall_site(text, 60)   // call [OSTAB+60*8]
+    } ellers {
+        legg_til(text, 0x48)
+        legg_til(text, 0xC7)
+        legg_til(text, 0xC0)
+        u32(text, 60) // mov rax, 60
+        legg_til(text, 0x0F)
+        legg_til(text, 0x05)  // syscall
+    }
     native_codegen_trace("post-emit start-prolog ferdig")
 
     // Desimaltall-krokane i to_text/json_stringify (sjå lapp_desimal_tekst_krokar).
@@ -11510,6 +11678,14 @@ funksjon kompiler_v2(ncb_json) {
         kast "native codegen: verts-ABI-segmentet overlappar .heap"
     }
     native_codegen_trace("post-emit segmentgrenser ferdig")
+
+    // WINDOWS_SEED_PLAN W1: Windows-målet pakkar same text/data/heap i ein PE32+
+    // (identiske VA-ar → identisk maskinkode). Gata på ER_WINDOWS så Linux-vegen under
+    // er byte-identisk uendra.
+    hvis ER_WINDOWS() {
+        native_codegen_trace("post-emit windows pe-container")
+        returner bygg_pe_bilete(entry_va, text, data_bytes, ncb_json)
+    }
 
     // Bygg ELF64 med fire segment: RX text, R constants, RW host ABI og RW heap.
     la elf: liste = []
