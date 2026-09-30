@@ -141,7 +141,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Konfig: `datamappe` (absolutt), `brukar_fn` (fullt kvalifisert), `samlingar`, `opphav` (liste over tillatne Origin; tom = same vert), `hemmeleg` (tom = laga og lagra i `synk.hemmeleg`), `maks_dok_per_brukar` (10 000), `maks_ops_per_push` (500), `hlc_grense_ms` (60 000), `pull_grense` (500), `sjekkpunkt_byte` (1 MiB). Andre funksjonar: `synk.status()`, `synk.sjekkpunkt()`, `synk.slett_brukar(uid)`, `synk.ny_epoke()`, `synk.csrf_token(sesjon)` og `synk.csrf_gyldig(sesjon, token)`.
+Konfig: `datamappe` (absolutt), `brukar_fn` (fullt kvalifisert), `samlingar`, `opphav` (liste over tillatne Origin; tom = same vert), `hemmeleg` (tom = laga og lagra i `synk.hemmeleg`), `maks_dok_per_brukar` (10 000), `maks_ops_per_push` (500), `hlc_grense_ms` (60 000), `pull_grense` (500), `sjekkpunkt_byte` (1 MiB). Andre funksjonar: `synk.status()`, `synk.sjekkpunkt()`, `synk.slett_brukar(uid)`, `synk.ny_epoke()`, `synk.csrf_token(sesjon)`, `synk.csrf_gyldig(sesjon, token)` og `synk.opphav_ok(ctx)` (same opphavssjekk som push for appen sine eigne tilstandsendrande ruter, t.d. utlogging; strengare: utan både `Origin` og `Sec-Fetch-Site`, og med `Sec-Fetch-Site: same-site`, blir han avvist).
 
 ### Endepunkt
 
@@ -152,7 +152,7 @@ Konfig: `datamappe` (absolutt), `brukar_fn` (fullt kvalifisert), `samlingar`, `o
 | `GET /_synk/pull?sidan=N&grense=M` | | `{p, epoke, v, meir, endringar:[{v, s, id, dok\|null, hlc, del}]}` med ETag |
 | `GET /_synk/hendingar` | | SSE: `event: v` / `data: <brukaren sin høgaste v>` |
 
-Alle svar er `application/json` med `Cache-Control: no-store` (pull: `private, no-cache` og `Vary: Cookie`). Feil har forma `{p:1, feil:"…"}`:
+Alle svar er `application/json` med `Cache-Control: no-store` (pull i tillegg `Vary: Cookie` og ETag). Pull hadde først `private, no-cache`, men det hindrar ikkje at nettlesaren lagrar svaret i HTTP-cachen på disk (RFC 9111 §5.2.2.4), og då låg alle dokumenta til brukaren på eininga utan at han hadde valt «hugs». 304 kjem likevel, fordi klienten sjølv set `If-None-Match`. Feil har forma `{p:1, feil:"…"}`:
 
 | Status | `feil` | Når |
 |---|---|---|
@@ -170,12 +170,12 @@ Alle svar er `application/json` med `Cache-Control: no-store` (pull: `private, n
 1. Autentisering (401), Content-Type (415), Origin og Sec-Fetch-Site, CSRF-token (403).
 2. Kroppen: ingen rå kontrollteikn og ingen `\u0000`–`\u001f`-escapar utanom tab, LF og CR (`kontrollteikn_ok`), så `json()` treng berre fem erstatningar og alt tenaren sender, er gyldig for `JSON.parse`.
 3. Epoke ulik → 410. Klient eigd av ein annan → 403 `klient_eigar`. `kvittert` > tenaren sin `siste_seq` for klienten → 410 (tenaren er sett attende; klienten tek ny klient-id, startar seq på 1 og sender heile køa).
-4. Op for op: `seq ≤ siste` → `dup`; `seq > siste + 1` → stopp og 409 `hol` (op-ane før holet er lagra); elles valider (`valider_op`), klem HLC-en til no + 60 s, bruk op-en (`bruk_op`), sjekk kvote og storleik etter samanfletting, lagre. Ei ugyldig op blir **brukt opp** (seq går vidare, `res` har `ok:false` og feilkoden), så éi dårleg op ikkje stengjer køa.
+4. Op for op: `seq ≤ siste` → `dup`; `seq > siste + 1` → stopp og 409 `hol` (op-ane før holet er lagra); elles valider (`valider_op`), klem HLC-en til no + 60 s (`hlc_klem_etter`: ei klemd op får alltid ein HLC etter den førre op-en i same push, så to redigeringar av same felt frå ei eining med klokka for fort ikkje får like HLC-ar og blir avgjorde av likskapsregelen i staden for rekkjefølgja), bruk op-en (`bruk_op`), sjekk kvote og storleik etter samanfletting, lagre. Ei ugyldig op blir **brukt opp** (seq går vidare, `res` har `ok:false` og feilkoden), så éi dårleg op ikkje stengjer køa.
 5. Éin `fil_append` med alle journallinjene, sjekkpunkt om journalen er over `sjekkpunkt_byte`, SSE-hending `v` til kanalen `synk:<uid>`.
 
 ### HLC og samanfletting (`std/synk_kjerne.no`)
 
-HLC-en er tekst `"<ms, 15 siffer>:<teljar, 5 siffer>:<node>"`. Med fast breidd er tekstsamanlikning det same som (ms, teljar, node). `hlc_send(lokal, no, node)` og `hlc_motta(lokal, fjern, no, node)` følgjer Kulkarni m.fl.; teljaren går over i neste millisekund etter 99 999. `hlc_klem(h, no, 60000)` set ms ned til no + 60 s.
+HLC-en er tekst `"<ms, 15 siffer>:<teljar, 5 siffer>:<node>"`. Med fast breidd er tekstsamanlikning det same som (ms, teljar, node). `hlc_send(lokal, no, node)` og `hlc_motta(lokal, fjern, no, node)` følgjer Kulkarni m.fl.; teljaren går over i neste millisekund etter 99 999. `hlc_klem(h, no, 60000)` set ms ned til no + 60 s; `hlc_klem_etter(h, no, 60000, førre)` gjer det same, men aukar teljaren når resultatet elles ikkje ville kome etter `førre`.
 
 Eit dokument er `{data, hlc (per felt), del (HLC-en til siste sletting)}`. Siste skrivar vinn **per felt**: eit felt blir skrive når HLC-en til op-en er større enn feltet sin (eller `del` om feltet manglar). Ei sletting set `del` og fjernar alle felt med eldre eller lik HLC, så ei samtidig nyare redigering overlever. Tombstone = ingen felt; pull sender `dok:null` utan HLC per felt, og data er borte frå filene etter neste sjekkpunkt. Ved lik HLC (ein feil klient) vinn den største JSON-verdien, og mot ei sletting vinn slettinga, så resultatet aldri avheng av rekkjefølgja. Same op to gonger endrar ingenting.
 
@@ -282,22 +282,25 @@ Eksisterande testar er grøne etter endringane: alle 25 `tests/test_wasm*.no` (m
 ## Klienten (W9)
 
 Synk-klienten er `std/synk_klient.no` (Norscode, kompilert til WebAssembly), dokumentert i [WASM_KLIENT.md](WASM_KLIENT.md#synk-w9-stdsynk_klientno). Korleis han brukar protokollen:
-- `hallo` før noko lokalt blir vist (på nett): `brukar` (hashen) vel databasen `nc-synk-<16 hex av sha256(brukar)>` og avslører brukarbyte; `epoke`, `csrf`, `hlc` og `tak.ops` blir brukte i push.
+- `hallo` før noko lokalt blir vist (berre når `fetch` ikkje får kontakt i det heile, blir kopien til den som valde «hugs» vist før, ikkje stadfesta): `brukar` (hashen) vel databasen `nc-synk-<16 hex av sha256(brukar)>` og avslører brukarbyte; `epoke`, `csrf`, `hlc` og `tak.ops` blir brukte i push.
 - Utboksa (auto-nøkkel i IndexedDB, eller i minnet utan «hugs») gjev seq = nøkkel − base, så fleire faner kan skrive utan å samordne seq. `kvittert` er den høgaste seq tenaren har stadfesta.
 - `push` i batchar (høgst 100 og `tak.ops`) med `x-nc-csrf`; 200 kvitterer til og med `siste_seq` (avviste op-ar blir melde med `feil` og fjerna frå køa); 409 kvitterer og sender frå `siste_seq + 1`; 410 gjev ny klient-id, seq frå 1, heile køa og full pull (dokument tenaren ikkje sende, blir fjerna etterpå); 401 stoppar og held på køa; 403 `csrf` hentar nytt token éin gong; 403 `klient_eigar` gjev ny klient-id. Køa blir aldri tømd på anna vis.
 - `pull?sidan=<cursor>` side for side til `meir` er `false`, og `If-None-Match` når klienten har ETag-en for same `sidan` (304 = ingenting nytt). Ny `epoke` i pull er som 410.
-- `hendingar` (SSE): hendinga `v` ≠ cursor gjev pull; eit brot gjev polling og gjenoppkopling med backoff (1 … 60 s).
+- `hendingar` (SSE): hendinga `v` ≠ cursor gjev pull; eit brot gjev polling og gjenoppkopling med backoff (1 … 60 s), som blir nullstilt først når straumen har vore oppe i 30 s (tenaren sender `v` straks ved oppkopling, så ein proxy som bryt straumen etter den første hendinga ville elles gje eit forsøk i sekundet).
+- HLC: klienten tek imot HLC-en i hallo, push og pull, og fylgjarfaner får HLC-en til leiarfana på kanalen; ei ny skriving av eit dokument kjem alltid etter den høgaste HLC-en i den synlege kopien.
+- Kvitterte op-ar blir brukte på den lokale `snap` med ein gong, så ei stadfesta skriving blir verande synleg når pullen etterpå feilar.
 
-Testa mot denne tenaren: 18 scenario i same prosess (`tests/test_synk_klient.no`, gjennom `app.dispatch` utan socket), der alle svara frå `/_synk/` òg er sjekka mot lagringsregelen til service workeren (`Cache-Control` er `no-store` eller `private`), og i Chrome mot ein barne-apptenar (`tests/test_synk_klient_chrome.no`, `tests/test_synk_klient_faner.no`). Demoen `examples/wasm_synk/` er ei oppgåveliste under apptenaren med `std/synk.no`.
+Testa mot denne tenaren: 18 scenario i same prosess (`tests/test_synk_klient.no`, gjennom `app.dispatch` utan socket) og 6 til i ein eigen prosess (`tests/test_synk_klient_del2.no`: klokkeskeiv og HLC, kvittering når pullen feilar, «hugs» av med fleire faner, brukarbyte i minnemodus, hallo som feilar med nett, klemming i rekkjefølgje), der alle svara frå `/_synk/` er sjekka mot lagringsregelen til service workeren og krev `Cache-Control: no-store`, og i Chrome mot ein barne-apptenar (`tests/test_synk_klient_chrome.no`, `tests/test_synk_klient_faner.no`). Demoen `examples/wasm_synk/` er ei oppgåveliste under apptenaren med `std/synk.no`.
 
 Funn om tenaren frå klientarbeidet:
 - `/_synk/hendingar` sender `v` med ein gong og etter kvar push som endra noko; ein EventSource i Chrome får det utan eigen gjenoppkopling.
 - Apptenaren sin førespurnad-mellomvare (`forespurnad_mw`) er nok til feilinjeksjon i testar (testappen fjernar den første op-en i ein push og gjev dermed 409).
-- Tenaren reknar HLC-klemma ut frå si eiga klokke; klienten tek imot tenaren sin HLC i hallo og push, så ei treg klokke på eininga tapar ikkje nye skrivingar.
+- Tenaren reknar HLC-klemma ut frå si eiga klokke; klienten tek imot tenaren sin HLC i hallo, push og pull (og fylgjarfaner frå leiarfana), så ei treg klokke på eininga tapar ikkje nye skrivingar. Granskarane fann at fylgjarfaner ikkje fekk HLC-en (ei redigering etter det brukaren såg, tapte i det stille), og at klemminga kunne gje like HLC-ar innanfor ein push; begge er retta og testa i `test_synk_klient_del2`.
 
 ## Gjenstår
 
-- **Klienten:** sjå «Gjenstår» i [WASM_KLIENT.md](WASM_KLIENT.md) (berre Chrome testa, to faner som iframes, service worker saman med synk ikkje køyrd i Chrome, ingen Background Sync, brukarbyte med usynka endringar held den førre databasen).
+- **Klienten:** sjå «Gjenstår» i [WASM_KLIENT.md](WASM_KLIENT.md) (berre Chrome testa, to faner som iframes, service worker saman med synk ikkje køyrd i Chrome, ingen Background Sync, brukarbyte med usynka endringar held den førre databasen, parkerte endringar i minnemodus forsvinn om fana blir lukka, «hugs» av med fleire faner berre testa i VM-benken).
+- **Klemming:** rekkjefølgja blir halden innanfor éin push; to push-ar frå ei eining med klokka meir enn 60 s for fort i same millisekund på tenaren kan framleis få like HLC-ar.
 - **T1:** sesjonsrotasjon, `std/auth.no`/`std/sesjon.no`/`std/csrf.no` er ikkje endra. Synk har eige maskert CSRF-token bunde til sesjonen appen gjev i `brukar_fn`; appen må sjølv gje ein sesjon som går ut. Klienten hentar nytt token éin gong ved 403 `csrf`.
 - **Mellomvare-metadata under `nc run`:** `køyr_ncb` i `selfhost/vm.no` kopierer ikkje `response_middlewares` o.l. inn i VM-en (krev reseed). Apptenaren tek dei frå konfig i mellomtida.
 - **Ytelse:** push kostar 7–8 ms per op med 5 000 dokument (om lag 130 op/s), og eit sjekkpunkt stoppar tenaren om lag 2 s ved 5 000 dokument. Apptenaren er om lag 8 × tregare enn `nc serve` per førespurnad. `poll_many` gav `unknown handle` på macOS-seeden; lykkja les difor kvar socket for seg.
