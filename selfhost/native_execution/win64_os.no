@@ -21,7 +21,11 @@ bruk selfhost.native_execution.pe_emitter som pe
 // Linux x86-64-systemkallnummer som Windows-målet emulerer (delmengd; resten fail-closed).
 funksjon NR_READ() -> heiltall { returner 0 }
 funksjon NR_WRITE() -> heiltall { returner 1 }
+funksjon NR_OPEN() -> heiltall { returner 2 }
+funksjon NR_CLOSE() -> heiltall { returner 3 }
+funksjon NR_LSEEK() -> heiltall { returner 8 }
 funksjon NR_MPROTECT() -> heiltall { returner 10 }
+funksjon NR_ACCESS() -> heiltall { returner 21 }
 funksjon NR_EXIT() -> heiltall { returner 60 }
 funksjon NR_CLOCK_GETTIME() -> heiltall { returner 228 }
 funksjon NR_GETRANDOM() -> heiltall { returner 318 }
@@ -44,7 +48,9 @@ funksjon os_importar_full() {
     returner [
         ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
             "VirtualProtect", "GetSystemTimePreciseAsFileTime",
-            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc"]],
+            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc",
+            "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
+            "CloseHandle", "SetFilePointerEx"]],
         ["ADVAPI32.dll", ["SystemFunction036"]],
         ["SHELL32.dll", ["CommandLineToArgvW"]]
     ]
@@ -337,6 +343,144 @@ funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_
     returner 0
 }
 
+// ── W2 filsystem: access/open/close/lseek (UTF-8-sti → UTF-16 via MultiByteToWideChar) ─
+// Windows-filfunksjonane tek UTF-16-stiar; alle desse konverterer UTF-8-stien (rdi) til
+// ein UTF-16-buffer på ramma (4096 B @ rsp+64) før kernel32-kallet. Returnerer Linux-form.
+
+// os_access(path, mode) → 0 om fila finst, elles -ENOENT. GetFileAttributesW.
+funksjon emit_access(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_access")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 4128)               // shadow[0,32) args[32,64) widebuf@64
+    asm.mov_i32(a, asm.RCX(), 65001)            // CP_UTF8
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RDI())             // utf8 path
+    asm.mov_is(a, asm.R9(), 0 - 1)              // cchMultiByte = -1
+    asm.lea(a, asm.RAX(), asm.RSP(), 64)
+    asm.st(a, asm.RSP(), 32, asm.RAX())         // lpWideCharStr = widebuf
+    asm.st_i(a, asm.RSP(), 40, 2048)            // cchWideChar cap
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    asm.lea(a, asm.RCX(), asm.RSP(), 64)
+    iat(a, slot, base, "KERNEL32.dll!GetFileAttributesW")
+    asm.mov_i32(a, asm.R11(), 4294967295)       // INVALID_FILE_ATTRIBUTES (0xFFFFFFFF, zero-ext)
+    asm.cmp(a, asm.RAX(), asm.R11())
+    asm.jcc(a, asm.CC_E(), "os_access_no")
+    asm.xor(a, asm.RAX(), asm.RAX())            // finst → 0
+    asm.jmp(a, "os_access_ut")
+    asm.merk(a, "os_access_no")
+    asm.mov_is(a, asm.RAX(), 0 - 2)             // -ENOENT
+    asm.merk(a, "os_access_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
+// os_open(path, flags, mode) → HANDLE (som fd) eller -ENOENT. CreateFileW.
+// Flagg-kart: (flags&3)==0 → GENERIC_READ, elles GENERIC_READ|WRITE; O_CREAT(0x40) →
+// CREATE_ALWAYS(2), elles OPEN_EXISTING(3). HANDLE er alltid > 2 (os_read/os_write-modell).
+funksjon emit_open(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_open")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.push(a, asm.RBX())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 4128)
+    asm.mov(a, asm.RBX(), asm.RSI())            // flags (callee-saved over kalla)
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RDI())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.lea(a, asm.RAX(), asm.RSP(), 64)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 2048)
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    // CreateFileW(widebuf, access, share=7, NULL, disposition, NORMAL=0x80, NULL)
+    asm.lea(a, asm.RCX(), asm.RSP(), 64)
+    asm.mov_i32(a, asm.RDX(), 2147483648)       // GENERIC_READ (0x80000000)
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.and_i(a, asm.RAX(), 3)
+    asm.jcc(a, asm.CC_E(), "os_open_acc")
+    asm.mov_i32(a, asm.RDX(), 3221225472)       // GENERIC_READ|WRITE (0xC0000000)
+    asm.merk(a, "os_open_acc")
+    asm.mov_i32(a, asm.R8(), 7)                 // FILE_SHARE_READ|WRITE|DELETE
+    asm.xor(a, asm.R9(), asm.R9())              // lpSecurityAttributes NULL
+    asm.mov_i32(a, asm.R10(), 3)                // OPEN_EXISTING
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.and_i(a, asm.RAX(), 64)                 // O_CREAT?
+    asm.jcc(a, asm.CC_E(), "os_open_disp")
+    asm.mov_i32(a, asm.R10(), 2)                // CREATE_ALWAYS
+    asm.merk(a, "os_open_disp")
+    asm.st(a, asm.RSP(), 32, asm.R10())         // dwCreationDisposition
+    asm.st_i(a, asm.RSP(), 40, 128)             // FILE_ATTRIBUTE_NORMAL
+    asm.st_i(a, asm.RSP(), 48, 0)               // hTemplateFile NULL
+    iat(a, slot, base, "KERNEL32.dll!CreateFileW")
+    asm.cmp_i(a, asm.RAX(), 0 - 1)              // INVALID_HANDLE_VALUE
+    asm.jcc(a, asm.CC_E(), "os_open_fail")
+    asm.jmp(a, "os_open_ut")                    // suksess: rax = HANDLE (fd)
+    asm.merk(a, "os_open_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 2)             // -ENOENT
+    asm.merk(a, "os_open_ut")
+    asm.lea(a, asm.RSP(), asm.RBP(), 0 - 8)     // 1 push (rbx)
+    asm.pop(a, asm.RBX())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
+// os_close(fd) → 0. fd 0/1/2 (std) ikkje lukka; elles CloseHandle(HANDLE).
+funksjon emit_close(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_close")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 32)
+    asm.cmp_i(a, asm.RDI(), 2)
+    asm.jcc(a, asm.CC_BE(), "os_close_ok")      // std-handle: berre 0
+    asm.mov(a, asm.RCX(), asm.RDI())
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.tst(a, asm.RAX(), asm.RAX())            // BOOL (32-bit, zero-ext trygt)
+    asm.jcc(a, asm.CC_E(), "os_close_fail")
+    asm.merk(a, "os_close_ok")
+    asm.xor(a, asm.RAX(), asm.RAX())
+    asm.jmp(a, "os_close_ut")
+    asm.merk(a, "os_close_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 9)             // -EBADF
+    asm.merk(a, "os_close_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
+// os_lseek(fd, offset, whence) → ny posisjon eller -errno. SetFilePointerEx.
+// Linux whence (0/1/2 = SET/CUR/END) == Win dwMoveMethod (FILE_BEGIN/CURRENT/END).
+funksjon emit_lseek(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_lseek")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 48)                 // shadow[0,32) newpos@32
+    asm.mov(a, asm.R9(), asm.RDX())             // dwMoveMethod = whence (før rdx blir klobra)
+    asm.mov(a, asm.RCX(), asm.RDI())            // hFile
+    asm.mov(a, asm.RDX(), asm.RSI())            // liDistanceToMove
+    asm.lea(a, asm.R8(), asm.RSP(), 32)         // lpNewFilePointer
+    iat(a, slot, base, "KERNEL32.dll!SetFilePointerEx")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_lseek_fail")
+    asm.ld(a, asm.RAX(), asm.RSP(), 32)         // ny posisjon
+    asm.jmp(a, "os_lseek_ut")
+    asm.merk(a, "os_lseek_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 29)            // -ESPIPE
+    asm.merk(a, "os_lseek_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
 // Emitter heile OS-rutinesettet i rekkjefølgje inn i assemblarstaten `a` og returnerer
 // tabellen [[linux_nr, etikett], …] so kallaren kan fylle OSTAB. os_enosys er standardfyllet
 // for alle andre slottar. Same rutinar som native_codegen_v2 emitterer inn i .text (W1).
@@ -348,11 +492,17 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
     emit_mprotect(a, slot, base)
     emit_clock_gettime(a, slot, base)
     emit_setup_argv(a, slot, base, argv_store_va, envp_store_va)
+    emit_access(a, slot, base)
+    emit_open(a, slot, base)
+    emit_close(a, slot, base)
+    emit_lseek(a, slot, base)
     emit_enosys(a)
     returner [
         [NR_WRITE(), "os_write"], [NR_READ(), "os_read"], [NR_EXIT(), "os_exit"],
         [NR_GETRANDOM(), "os_getrandom"], [NR_MPROTECT(), "os_mprotect"],
-        [NR_CLOCK_GETTIME(), "os_clock_gettime"], [NR_SETUP_ARGV(), "os_setup_argv"]
+        [NR_CLOCK_GETTIME(), "os_clock_gettime"], [NR_SETUP_ARGV(), "os_setup_argv"],
+        [NR_ACCESS(), "os_access"], [NR_OPEN(), "os_open"], [NR_CLOSE(), "os_close"],
+        [NR_LSEEK(), "os_lseek"]
     ]
 }
 
