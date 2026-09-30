@@ -1,0 +1,417 @@
+# synk_lager.no — lagring for NSP/1-tenaren (std/synk.no): alt i minnet, med ein
+# journal (éi linje per endring, lagt til med fil_append) og eit øyeblikksbilete som
+# blir publisert atomisk (skriv til tmp + native_erstatt_fil_atomisk). Éin skrivar:
+# berre apptenar-prosessen opnar mappa.
+#
+# Kvifor ikkje NorsDB: målt i VM-fastmodus (docs/APPTENAR_SYNK.md) kostar ei
+# NorsDB-innsetjing om lag 5 ms (radkoding per byte i Norscode), eit sjekkpunkt 7 ms per
+# rad og ei opning 2,5 ms per rad. Ved 5 000 dokument blir det 35 s sjekkpunkt og 13 s
+# opning som stoppar heile tenaren. Her er både journallinjer og biletet JSON som blir
+# lese med den native json_parse_raw, og skrive med std/synk_kjerne sin json().
+#
+# Filer i datamappa:
+#   synk.bilete               {"p":1,"gen":g,"epoke","hw","hlc","dok":[...],"klient":{...}}
+#   synk.<g>.journal          linjer "<lengd>\t<json>\n" etter biletet med same g
+#   synk.hemmeleg             løyndomen for CSRF-token (laga ved første start)
+# Ei linje utan linjeskift eller med feil lengd (avbroten skriving) stoppar
+# avspelinga; alt før henne blir brukt.
+#
+# Journallinjer:
+#   {"t":"d","k":nøkkel,"s","id","e":eigar,"v":v,"dok":{data,hlc,del}}   dokument
+#   {"t":"k","k":klient,"e":eigar,"q":seq}                               klient-seq
+#   {"t":"m","hw":hw,"hlc":hlc}                                          metadata
+#   {"t":"x","e":eigar}                                                  brukar sletta
+bruk std.synk_kjerne som k
+bruk std.runtime_filesystem som fs
+
+funksjon _nøkkel(s: tekst, id: tekst, eigar: tekst) -> tekst {
+    returner s + "|" + id + "|" + eigar
+}
+
+funksjon nøkkel(s: tekst, id: tekst, eigar: tekst) -> tekst { returner _nøkkel(s, id, eigar) }
+
+# ─── Opning og avspeling ─────────────────────────────────────────────────────
+
+funksjon _ny(mappe: tekst) -> ordbok {
+    returner {
+        "mappe": mappe,
+        "gen": 0,
+        "epoke": "",
+        "hw": 0,
+        "hlc": "",
+        "dok": {},
+        "klient": {},
+        "brukar": {},
+        "journal_byte": 0,
+        "journal_linjer": 0,
+        "sjekkpunkt": 0
+    }
+}
+
+funksjon _brukar(l: ordbok, eigar: tekst) -> ordbok {
+    la b = l["brukar"]
+    hvis ikkje har_nokkel(b, eigar) {
+        b[eigar] = {"n": 0, "hw": 0, "logg": [], "gamle": 0, "klientar": []}
+    }
+    returner b[eigar]
+}
+
+# Legg dokumentet inn i minnet og i brukarindeksen (logg i v-rekkjefølgje).
+funksjon _set_dok(l: ordbok, nk: tekst, s: tekst, id: tekst, eigar: tekst, v: heltall, d: ordbok) -> heltall {
+    la b = _brukar(l, eigar)
+    hvis har_nokkel(l["dok"], nk) {
+        b["gamle"] = b["gamle"] + 1
+    } ellers {
+        b["n"] = b["n"] + 1
+    }
+    l["dok"][nk] = {"s": s, "id": id, "e": eigar, "v": v, "d": d, "j": ""}
+    legg_til(b["logg"], [v, nk])
+    hvis v > b["hw"] { b["hw"] = v }
+    hvis v > l["hw"] { l["hw"] = v }
+    # Kompakter loggen når over halvparten er utdaterte oppføringar.
+    hvis b["gamle"] > 64 og b["gamle"] * 2 > lengde(b["logg"]) {
+        la ny = []
+        la i = 0
+        la gl = b["logg"]
+        mens i < lengde(gl) {
+            la e = gl[i]
+            hvis har_nokkel(l["dok"], e[1]) og l["dok"][e[1]]["v"] == e[0] { legg_til(ny, e) }
+            i = i + 1
+        }
+        b["logg"] = ny
+        b["gamle"] = 0
+    }
+    returner 0
+}
+
+funksjon _set_klient(l: ordbok, klient: tekst, eigar: tekst, seq: heltall) -> heltall {
+    hvis ikkje har_nokkel(l["klient"], klient) {
+        legg_til(_brukar(l, eigar)["klientar"], klient)
+    }
+    l["klient"][klient] = {"e": eigar, "q": seq}
+    returner 0
+}
+
+funksjon _slett_brukar_minne(l: ordbok, eigar: tekst) -> heltall {
+    hvis ikkje har_nokkel(l["brukar"], eigar) { returner 0 }
+    la b = l["brukar"][eigar]
+    la n = 0
+    la gl = b["logg"]
+    la i = 0
+    mens i < lengde(gl) {
+        la nk = gl[i][1]
+        hvis har_nokkel(l["dok"], nk) {
+            fjern_nokkel(l["dok"], nk)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    la kl = b["klientar"]
+    i = 0
+    mens i < lengde(kl) {
+        hvis har_nokkel(l["klient"], kl[i]) { fjern_nokkel(l["klient"], kl[i]) }
+        i = i + 1
+    }
+    fjern_nokkel(l["brukar"], eigar)
+    returner n
+}
+
+funksjon _bruk_linje(l: ordbok, o: ordbok) -> heltall {
+    la t = o["t"]
+    hvis t == "d" {
+        _set_dok(l, o["k"], o["s"], o["id"], o["e"], o["v"], o["dok"])
+    } ellers hvis t == "k" {
+        _set_klient(l, o["k"], o["e"], o["q"])
+    } ellers hvis t == "m" {
+        hvis o["hw"] > l["hw"] { l["hw"] = o["hw"] }
+        l["hlc"] = k.hlc_maks(l["hlc"], o["hlc"])
+        hvis har_nokkel(o, "epoke") { l["epoke"] = o["epoke"] }
+    } ellers hvis t == "x" {
+        _slett_brukar_minne(l, o["e"])
+    }
+    returner 0
+}
+
+funksjon _journal_sti(l: ordbok) -> tekst {
+    returner l["mappe"] + "/synk." + tekst(l["gen"]) + ".journal"
+}
+
+# Spel av journalen. Gjev talet på linjer som vart brukte.
+funksjon _spel_av(l: ordbok) -> heltall {
+    la sti = _journal_sti(l)
+    hvis ikkje fil_finnes(sti) { returner 0 }
+    la data = fil_les(sti)
+    la n = 0
+    la pos = 0
+    la tot = lengde(data)
+    la linjer = builtin.split(data, "\n")
+    # Siste element er "" når fila sluttar med linjeskift, elles ein avbroten hale.
+    la li = 0
+    mens li < lengde(linjer) - 1 {
+        la linje = linjer[li]
+        la tab = builtin.index_of(linje, "\t")
+        hvis tab <= 0 { bryt }
+        la lt = builtin.slice(linje, 0, tab)
+        hvis ikkje k.trygt_namn(lt, 12) { bryt }
+        la json = builtin.slice(linje, tab + 1, lengde(linje))
+        hvis tekst(lengde(json)) != lt { bryt }
+        _bruk_linje(l, builtin.json_parse_raw(json))
+        n = n + 1
+        pos = pos + lengde(linje) + 1
+        li = li + 1
+    }
+    l["journal_byte"] = pos
+    l["journal_linjer"] = n
+    hvis pos < tot {
+        # Avbroten hale: skriv journalen på nytt utan halen, så nye linjer ikkje hamnar
+        # etter søppel.
+        fil_skriv(sti, builtin.slice(data, 0, pos))
+    }
+    returner n
+}
+
+# Opnar (eller lagar) lageret i `mappe` (absolutt sti, må finnast).
+funksjon opne(mappe: tekst) -> ordbok {
+    la l = _ny(mappe)
+    la bilete = mappe + "/synk.bilete"
+    hvis fil_finnes(bilete) {
+        la b = builtin.json_parse_raw(fil_les(bilete))
+        hvis builtin.type(b) != "ordbok" eller ikkje har_nokkel(b, "gen") { kast "synk_lager: øydelagt bilete " + bilete }
+        l["gen"] = b["gen"]
+        l["epoke"] = b["epoke"]
+        l["hw"] = b["hw"]
+        l["hlc"] = b["hlc"]
+        la dl = b["dok"]
+        la i = 0
+        mens i < lengde(dl) {
+            la o = dl[i]
+            _set_dok(l, _nøkkel(o["s"], o["id"], o["e"]), o["s"], o["id"], o["e"], o["v"], o["dok"])
+            i = i + 1
+        }
+        la kl = b["klient"]
+        la kk = nøkler(kl)
+        i = 0
+        mens i < lengde(kk) {
+            _set_klient(l, kk[i], kl[kk[i]]["e"], kl[kk[i]]["q"])
+            i = i + 1
+        }
+    }
+    _spel_av(l)
+    # Ein journal frå generasjonen før (krasj mellom publisering og sletting) er utdatert.
+    la gammal = mappe + "/synk." + tekst(l["gen"] - 1) + ".journal"
+    hvis l["gen"] > 0 og fil_finnes(gammal) { fil_slett(gammal) }
+    hvis l["epoke"] == "" {
+        l["epoke"] = "e" + builtin.random_hex(6)
+        skriv_linjer(l, [_meta_linje(l, sann)])
+    }
+    returner l
+}
+
+# ─── Skriving ────────────────────────────────────────────────────────────────
+
+funksjon _ramme(json: tekst) -> tekst {
+    returner tekst(lengde(json)) + "\t" + json + "\n"
+}
+
+funksjon dok_linje(nk: tekst, s: tekst, id: tekst, eigar: tekst, v: heltall, d: ordbok) -> tekst {
+    returner "{\"t\":\"d\",\"k\":" + k.json_tekst(nk) + ",\"s\":" + k.json_tekst(s) + ",\"id\":" + k.json_tekst(id) +
+        ",\"e\":" + k.json_tekst(eigar) + ",\"v\":" + tekst(v) + ",\"dok\":" + k.json(d) + "}"
+}
+
+funksjon klient_linje(klient: tekst, eigar: tekst, seq: heltall) -> tekst {
+    returner "{\"t\":\"k\",\"k\":" + k.json_tekst(klient) + ",\"e\":" + k.json_tekst(eigar) + ",\"q\":" + tekst(seq) + "}"
+}
+
+funksjon _meta_linje(l: ordbok, med_epoke: bool) -> tekst {
+    la ut = "{\"t\":\"m\",\"hw\":" + tekst(l["hw"]) + ",\"hlc\":" + k.json_tekst(l["hlc"])
+    hvis med_epoke { ut = ut + ",\"epoke\":" + k.json_tekst(l["epoke"]) }
+    returner ut + "}"
+}
+
+# Legg linjene til journalen i éin operasjon.
+funksjon skriv_linjer(l: ordbok, linjer: liste) -> heltall {
+    hvis lengde(linjer) == 0 { returner 0 }
+    la ut = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        ut = ut + _ramme(linjer[i])
+        i = i + 1
+    }
+    builtin.fil_append(_journal_sti(l), ut)
+    l["journal_byte"] = l["journal_byte"] + lengde(ut)
+    l["journal_linjer"] = l["journal_linjer"] + lengde(linjer)
+    returner lengde(ut)
+}
+
+# Endre eit dokument i minnet. Gjev journallinja (kallaren skriv ho, saman med resten
+# av batchen).
+funksjon sett_dok(l: ordbok, s: tekst, id: tekst, eigar: tekst, d: ordbok) -> ordbok {
+    la nk = _nøkkel(s, id, eigar)
+    la v = l["hw"] + 1
+    _set_dok(l, nk, s, id, eigar, v, d)
+    returner {"v": v, "linje": dok_linje(nk, s, id, eigar, v, d)}
+}
+
+funksjon sett_klient(l: ordbok, klient: tekst, eigar: tekst, seq: heltall) -> tekst {
+    _set_klient(l, klient, eigar, seq)
+    returner klient_linje(klient, eigar, seq)
+}
+
+funksjon meta_linje(l: ordbok) -> tekst {
+    returner _meta_linje(l, usann)
+}
+
+funksjon hent_dok(l: ordbok, s: tekst, id: tekst, eigar: tekst) {
+    la nk = _nøkkel(s, id, eigar)
+    hvis har_nokkel(l["dok"], nk) { returner l["dok"][nk] }
+    returner null
+}
+
+funksjon klient(l: ordbok, klient: tekst) {
+    hvis har_nokkel(l["klient"], klient) { returner l["klient"][klient] }
+    returner null
+}
+
+funksjon brukar_hw(l: ordbok, eigar: tekst) -> heltall {
+    hvis har_nokkel(l["brukar"], eigar) { returner l["brukar"][eigar]["hw"] }
+    returner 0
+}
+
+funksjon brukar_tal(l: ordbok, eigar: tekst) -> heltall {
+    hvis har_nokkel(l["brukar"], eigar) { returner l["brukar"][eigar]["n"] }
+    returner 0
+}
+
+# Endringar for brukaren med v > sidan, høgst `grense`. Gjev {"endringar": [json],
+# "v": siste v i svaret (eller brukar-hw), "meir": bool}.
+funksjon endringar(l: ordbok, eigar: tekst, sidan: heltall, grense: heltall) -> ordbok {
+    hvis ikkje har_nokkel(l["brukar"], eigar) { returner {"endringar": [], "v": 0, "meir": usann} }
+    la b = l["brukar"][eigar]
+    la gl = b["logg"]
+    # Binærsøk etter første oppføring med v > sidan
+    la lo = 0
+    la hi = lengde(gl)
+    mens lo < hi {
+        la mid = (lo + hi) / 2
+        hvis gl[mid][0] <= sidan { lo = mid + 1 } ellers { hi = mid }
+    }
+    la ut = []
+    la siste = sidan
+    la i = lo
+    la meir = usann
+    mens i < lengde(gl) {
+        la e = gl[i]
+        la nk = e[1]
+        hvis har_nokkel(l["dok"], nk) {
+            la r = l["dok"][nk]
+            hvis r["v"] == e[0] {
+                hvis lengde(ut) >= grense {
+                    meir = sann
+                    bryt
+                }
+                hvis r["j"] == "" { r["j"] = k.endring_json(r["v"], r["s"], r["id"], r["d"]) }
+                legg_til(ut, r["j"])
+                siste = r["v"]
+            }
+        }
+        i = i + 1
+    }
+    la v = b["hw"]
+    hvis meir { v = siste }
+    returner {"endringar": ut, "v": v, "meir": meir}
+}
+
+# ─── Sjekkpunkt (atomisk) ────────────────────────────────────────────────────
+
+# Skriv eit nytt bilete av heile tilstanden og byt til ein ny, tom journal:
+#   1. skriv synk.bilete.tmp-<hex> med gen+1;
+#   2. publiser med native_erstatt_fil_atomisk (rename i same mappe);
+#   3. slett den gamle journalen.
+# Krasj før 2: det gamle biletet og journalen gjeld. Krasj etter 2: det nye biletet
+# gjeld, og den nye journalen er tom (den gamle blir sletta ved neste opning).
+funksjon sjekkpunkt(l: ordbok) -> heltall {
+    la gammal = _journal_sti(l)
+    la ny_gen = l["gen"] + 1
+    la delar = ["{\"p\":1,\"gen\":" + tekst(ny_gen) + ",\"epoke\":" + k.json_tekst(l["epoke"]) + ",\"hw\":" + tekst(l["hw"]) +
+                ",\"hlc\":" + k.json_tekst(l["hlc"]) + ",\"dok\":["]
+    la brukarar = nøkler(l["brukar"])
+    la første = sann
+    la bi = 0
+    mens bi < lengde(brukarar) {
+        la gl = l["brukar"][brukarar[bi]]["logg"]
+        la i = 0
+        mens i < lengde(gl) {
+            la e = gl[i]
+            hvis har_nokkel(l["dok"], e[1]) {
+                la r = l["dok"][e[1]]
+                hvis r["v"] == e[0] {
+                    la o = "{\"s\":" + k.json_tekst(r["s"]) + ",\"id\":" + k.json_tekst(r["id"]) + ",\"e\":" + k.json_tekst(r["e"]) +
+                           ",\"v\":" + tekst(r["v"]) + ",\"dok\":" + k.json(r["d"]) + "}"
+                    hvis første { legg_til(delar, o) } ellers { legg_til(delar, "," + o) }
+                    første = usann
+                }
+            }
+            i = i + 1
+        }
+        bi = bi + 1
+    }
+    legg_til(delar, "],\"klient\":{")
+    la kk = nøkler(l["klient"])
+    la i = 0
+    mens i < lengde(kk) {
+        la kr = l["klient"][kk[i]]
+        la o = k.json_tekst(kk[i]) + ":{\"e\":" + k.json_tekst(kr["e"]) + ",\"q\":" + tekst(kr["q"]) + "}"
+        hvis i > 0 { o = "," + o }
+        legg_til(delar, o)
+        i = i + 1
+    }
+    legg_til(delar, "}}")
+    la tmp = "synk.bilete.tmp-" + builtin.random_hex(6)
+    fil_skriv(l["mappe"] + "/" + tmp, builtin.join(delar, ""))
+    la r = fs.native_erstatt_fil_atomisk(l["mappe"], tmp, "synk.bilete")
+    hvis r["status"] != "replaced" {
+        prøv { fil_slett(l["mappe"] + "/" + tmp) } fang (e) { }
+        kast "synk_lager: sjekkpunkt feila: " + tekst(r["status"]) + " " + tekst(r["error"])
+    }
+    l["gen"] = ny_gen
+    l["journal_byte"] = 0
+    l["journal_linjer"] = 0
+    l["sjekkpunkt"] = l["sjekkpunkt"] + 1
+    hvis fil_finnes(gammal) { fil_slett(gammal) }
+    returner 0
+}
+
+# Slett alle data for brukaren (dokument, klientar) og ta eit sjekkpunkt, så dataa
+# forsvinn frå filene òg (ikkje berre frå minnet). Gjev talet på dokument.
+funksjon slett_brukar(l: ordbok, eigar: tekst) -> heltall {
+    la n = _slett_brukar_minne(l, eigar)
+    skriv_linjer(l, ["{\"t\":\"x\",\"e\":" + k.json_tekst(eigar) + "}"])
+    sjekkpunkt(l)
+    returner n
+}
+
+# Ny epoke (etter restore eller ved administrativ nullstilling): alle klientar får 410
+# og synkroniserer på nytt. Klient-seq blir gløymde.
+funksjon ny_epoke(l: ordbok) -> tekst {
+    l["epoke"] = "e" + builtin.random_hex(6)
+    la kk = nøkler(l["klient"])
+    la i = 0
+    mens i < lengde(kk) {
+        fjern_nokkel(l["klient"], kk[i])
+        i = i + 1
+    }
+    la bk = nøkler(l["brukar"])
+    i = 0
+    mens i < lengde(bk) {
+        l["brukar"][bk[i]]["klientar"] = []
+        i = i + 1
+    }
+    sjekkpunkt(l)
+    returner l["epoke"]
+}
+
+funksjon status(l: ordbok) -> ordbok {
+    returner {"dok": lengde(nøkler(l["dok"])), "klientar": lengde(nøkler(l["klient"])), "brukarar": lengde(nøkler(l["brukar"])),
+              "hw": l["hw"], "gen": l["gen"], "journal_byte": l["journal_byte"], "journal_linjer": l["journal_linjer"],
+              "sjekkpunkt": l["sjekkpunkt"], "epoke": l["epoke"]}
+}
