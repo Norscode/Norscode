@@ -1,0 +1,1338 @@
+# apptenar.no — HTTP/1.1-tenar for appar under `nc run` (A6 i app-kjensle-planen)
+#
+# Same ruter, vakter og responskontrakt som `nc serve` (web.route, web.use_guard,
+# {status, body, content_type, etag, headers}), men utan hola i serve-vegen:
+#   - keep-alive, og headerar som kjem i fleire TCP-segment;
+#   - tidsgrenser (header 5 s, ledig tilkopling 5 s, kropp 10 s; SSE er unnateke og får
+#     heartbeat), tak på tilkoplingar (503) og SSE-straumar per kanal (503);
+#   - ikkje-blokkerande socketar: ein ledig socket stoppar ikkje andre klientar;
+#   - rett HEAD (same Content-Length og Content-Type som GET) og 304 for sterk og svak
+#     ETag, lister og «*», med Cache-Control og Vary i 304-svaret;
+#   - response-mellomvare på alle ruter, og ctx frå request-mellomvare blir sendt vidare;
+#   - totale vakter: eit unntak i ei vakt eller ein handlar gjev 500, og tenaren lever;
+#   - headerar utan omsyn til store og små bokstavar (ctx får namna i små bokstavar);
+#   - modulglobalar og tilstand mellom førespurnader (éin langliva prosess);
+#   - Server-Sent Events via apptenar.sse(kanal) og apptenar.send_hending(...).
+#
+# Bruk:
+#   bruk std.apptenar som app
+#   funksjon start() -> heltall {
+#       returner app.lytt({"port": 8080})
+#   }
+#
+# Handlarane køyrer éin om gongen i same tråd (VM-en har éin tråd). Samtidigheita gjeld
+# I/O: mange opne tilkoplingar, ledige keep-alive-socketar og SSE-straumar blir
+# multipleksa i éi lykkje med ikkje-blokkerande les og skriv.
+#
+# Caps: prosessen sin capability-policy gjeld òg for handlarane. Deploy-malen i
+# std/deploy.no (apptenar_miljø) gjev berre disk.read, disk.write og net.tcp, og
+# disk-scope er datamappa. Sjå docs/APPTENAR_SYNK.md.
+#
+# Merk (dagens seedar): `nc run` kopierer route_handlers inn i VM-en, men ikkje
+# lista over mellomvare. Gje difor mellomvaren i konfig ("respons_mw", "forespurnad_mw",
+# "feil_mw") i tillegg til markøren web.response_middleware(). Er metadata-lista
+# ikkje tom (etter ein reseed), blir ho brukt.
+
+bruk std.socket som socket
+
+# ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
+
+la _t: ordbok = {"køyrer": usann, "stopp": usann}
+la _konf: ordbok = {}
+la _kanalar: ordbok = {}
+la _tilk: ordbok = {}
+
+funksjon _abi() -> tekst { returner "norscode-native-network-v1" }
+
+# ─── Konfigurasjon ───────────────────────────────────────────────────────────
+
+funksjon konfig_standard() -> ordbok {
+    returner {
+        "vert": "127.0.0.1",
+        "port": 8080,
+        "maks_tilkoplingar": 64,
+        "maks_sse_per_kanal": 4,
+        "header_ms": 5000,
+        "ledig_ms": 5000,
+        "kropp_ms": 10000,
+        "skriv_ms": 30000,
+        "sse_hb_ms": 25000,
+        "kroppsgrense": 1048576,
+        "kroppsgrenser": {"/_synk/": 262144},
+        "maks_header_byte": 16384,
+        "maks_forespurnader_per_tilkopling": 1000,
+        "maks_ms": 0,
+        "respons_mw": [],
+        "forespurnad_mw": [],
+        "feil_mw": [],
+        "logg": "feil",
+        "klar_melding": sann
+    }
+}
+
+funksjon _konf_frå(k: ordbok) -> ordbok {
+    la c = konfig_standard()
+    la ks = nøkler(k)
+    la i = 0
+    mens i < lengde(ks) {
+        c[ks[i]] = k[ks[i]]
+        i = i + 1
+    }
+    returner c
+}
+
+funksjon _k(namn: tekst) {
+    hvis har_nokkel(_konf, namn) { returner _konf[namn] }
+    returner konfig_standard()[namn]
+}
+
+# ─── Små hjelparar ───────────────────────────────────────────────────────────
+
+funksjon _er_siffer(t: tekst) -> bool {
+    hvis lengde(t) == 0 eller lengde(t) > 18 { returner usann }
+    la i = 0
+    mens i < lengde(t) {
+        la k = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis k < 48 eller k > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _er_int_tekst(v: tekst) -> bool {
+    hvis builtin.starts_with(v, "-") og lengde(v) > 1 { returner _er_siffer(builtin.slice(v, 1, lengde(v))) }
+    returner _er_siffer(v)
+}
+
+# Namn i små bokstavar. Headernamn er korte (grensa er 128 byte), så lower er trygg
+# (Linux-x86-stage0 heng på lower over 256 byte).
+funksjon _liten(t: tekst) -> tekst {
+    hvis lengde(t) > 128 { returner "" }
+    returner builtin.lower(t)
+}
+
+funksjon _logg(nivå: tekst, melding: tekst) -> heltall {
+    la l = tekst(_k("logg"))
+    hvis l == "ingen" { returner 0 }
+    hvis l == "feil" og nivå != "feil" { returner 0 }
+    skriv("APPTENAR " + nivå + " " + melding + "\n")
+    returner 1
+}
+
+# Header i ctx utan omsyn til kasus (ctx["__headers__"] har namna i små bokstavar,
+# men ctx kan òg vere laga av andre, t.d. web.request_context i ein test).
+funksjon header(ctx: ordbok, namn: tekst) -> tekst {
+    hvis ikkje har_nokkel(ctx, "__headers__") { returner "" }
+    la h = ctx["__headers__"]
+    la l = _liten(namn)
+    hvis har_nokkel(h, l) { returner tekst(h[l]) }
+    la ks = nøkler(h)
+    la i = 0
+    mens i < lengde(ks) {
+        hvis _liten(tekst(ks[i])) == l { returner tekst(h[ks[i]]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Rask variant for namn i små bokstavar: ctx frå apptenaren (merkt "__lh__") har berre
+# små bokstavar i headernamna, så eitt oppslag er nok.
+funksjon _h(ctx: ordbok, namn_liten: tekst) -> tekst {
+    hvis har_nokkel(ctx, "__lh__") {
+        la h = ctx["__headers__"]
+        hvis har_nokkel(h, namn_liten) { returner h[namn_liten] }
+        returner ""
+    }
+    returner header(ctx, namn_liten)
+}
+
+funksjon cookie(ctx: ordbok, namn: tekst) -> tekst {
+    la delar = builtin.split(_h(ctx, "cookie"), ";")
+    la i = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        la eq = builtin.index_of(d, "=")
+        hvis eq > 0 og builtin.trim(builtin.slice(d, 0, eq)) == namn {
+            returner builtin.trim(builtin.slice(d, eq + 1, lengde(d)))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# ─── HTTP-dato (RFC 9110 IMF-fixdate) ────────────────────────────────────────
+
+funksjon _to(n: heltall) -> tekst {
+    hvis n < 10 { returner "0" + tekst(n) }
+    returner tekst(n)
+}
+
+funksjon http_dato(ms: heltall) -> tekst {
+    la sek = ms / 1000
+    la dagar = sek / 86400
+    la rest = sek - dagar * 86400
+    la vekedag = (dagar + 4) % 7
+    # civil_from_days (H. Hinnant), dagar >= 0
+    la z = dagar + 719468
+    la era = z / 146097
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = mp + 3
+    hvis mp >= 10 { m = mp - 9 }
+    hvis m <= 2 { y = y + 1 }
+    la dnamn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    la mnamn = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    returner dnamn[vekedag] + ", " + _to(d) + " " + mnamn[m - 1] + " " + tekst(y) + " " +
+        _to(rest / 3600) + ":" + _to((rest % 3600) / 60) + ":" + _to(rest % 60) + " GMT"
+}
+
+funksjon _dato_no() -> tekst {
+    la no = builtin.tid_ms()
+    la s = no / 1000
+    hvis har_nokkel(_t, "dato_s") og _t["dato_s"] == s { returner _t["dato"] }
+    _t["dato_s"] = s
+    _t["dato"] = http_dato(no)
+    returner _t["dato"]
+}
+
+# ─── Tolking av førespurnaden ────────────────────────────────────────────────
+
+funksjon _tolk_query(rå: tekst) -> ordbok {
+    la q = {}
+    hvis rå == "" { returner q }
+    la delar = builtin.split(rå, "&")
+    la i = 0
+    mens i < lengde(delar) {
+        la p = builtin.trim(delar[i])
+        hvis p != "" {
+            la eq = builtin.index_of(p, "=")
+            hvis eq < 0 {
+                q[p] = ""
+            } ellers {
+                q[builtin.trim(builtin.slice(p, 0, eq))] = builtin.trim(builtin.slice(p, eq + 1, lengde(p)))
+            }
+        }
+        i = i + 1
+    }
+    returner q
+}
+
+# Tolkar hovudet (alt før \r\n\r\n). Gjev {"ok": sann, "metode", "mål", "sti", "query",
+# "versjon", "headers" (små bokstavar), "lengd" (Content-Length eller -1), "keep_alive"}
+# eller {"ok": usann, "status": 400/414/431/501/505, "grunn"}.
+funksjon tolk_hovud(hovud: tekst) -> ordbok {
+    la linjer = builtin.split(hovud, "\r\n")
+    la første = linjer[0]
+    hvis lengde(første) > 8192 { returner {"ok": usann, "status": 414, "grunn": "for lang førespurnadslinje"} }
+    la delar = builtin.split(første, " ")
+    hvis lengde(delar) != 3 { returner {"ok": usann, "status": 400, "grunn": "ugyldig førespurnadslinje"} }
+    la metode = delar[0]
+    la mål = delar[1]
+    la versjon = delar[2]
+    hvis metode == "" eller lengde(metode) > 16 { returner {"ok": usann, "status": 400, "grunn": "ugyldig metode"} }
+    hvis versjon != "HTTP/1.1" og versjon != "HTTP/1.0" {
+        hvis builtin.starts_with(versjon, "HTTP/") { returner {"ok": usann, "status": 505, "grunn": "HTTP-versjon"} }
+        returner {"ok": usann, "status": 400, "grunn": "ugyldig versjon"}
+    }
+    hvis ikkje builtin.starts_with(mål, "/") og ikkje (mål == "*" og metode == "OPTIONS") {
+        returner {"ok": usann, "status": 400, "grunn": "ugyldig mål"}
+    }
+    la sti = mål
+    la rå_q = ""
+    la qi = builtin.index_of(mål, "?")
+    hvis qi >= 0 {
+        sti = builtin.slice(mål, 0, qi)
+        rå_q = builtin.slice(mål, qi + 1, lengde(mål))
+    }
+    la h = {}
+    la lengd = -1
+    la te = usann
+    la i = 1
+    hvis lengde(linjer) > 101 { returner {"ok": usann, "status": 431, "grunn": "for mange headerar"} }
+    mens i < lengde(linjer) {
+        la l = linjer[i]
+        hvis l != "" {
+            la k0 = builtin.char_code(builtin.slice(l, 0, 1))
+            hvis k0 == 32 eller k0 == 9 { returner {"ok": usann, "status": 400, "grunn": "obs-fold"} }
+            la kolon = builtin.index_of(l, ":")
+            hvis kolon <= 0 { returner {"ok": usann, "status": 400, "grunn": "ugyldig header"} }
+            la namn_rå = builtin.slice(l, 0, kolon)
+            hvis builtin.index_of(namn_rå, " ") >= 0 eller builtin.index_of(namn_rå, "\t") >= 0 {
+                returner {"ok": usann, "status": 400, "grunn": "mellomrom i headernamn"}
+            }
+            hvis lengde(namn_rå) > 128 { returner {"ok": usann, "status": 431, "grunn": "for langt headernamn"} }
+            la namn = _liten(namn_rå)
+            la verdi = builtin.trim(builtin.slice(l, kolon + 1, lengde(l)))
+            hvis namn == "content-length" {
+                hvis ikkje _er_siffer(verdi) { returner {"ok": usann, "status": 400, "grunn": "ugyldig Content-Length"} }
+                la n = heltall_fra_tekst(verdi)
+                hvis lengd >= 0 og lengd != n { returner {"ok": usann, "status": 400, "grunn": "fleire Content-Length"} }
+                lengd = n
+            }
+            hvis namn == "transfer-encoding" { te = sann }
+            hvis har_nokkel(h, namn) {
+                hvis namn == "cookie" {
+                    h[namn] = tekst(h[namn]) + "; " + verdi
+                } ellers {
+                    h[namn] = tekst(h[namn]) + ", " + verdi
+                }
+            } ellers {
+                h[namn] = verdi
+            }
+        }
+        i = i + 1
+    }
+    hvis te {
+        hvis lengd >= 0 { returner {"ok": usann, "status": 400, "grunn": "både Transfer-Encoding og Content-Length"} }
+        returner {"ok": usann, "status": 501, "grunn": "Transfer-Encoding er ikkje støtta"}
+    }
+    la tilk = ""
+    hvis har_nokkel(h, "connection") { tilk = _liten(tekst(h["connection"])) }
+    la ka = versjon == "HTTP/1.1"
+    hvis builtin.index_of(tilk, "close") >= 0 { ka = usann }
+    hvis versjon == "HTTP/1.0" og builtin.index_of(tilk, "keep-alive") >= 0 { ka = sann }
+    returner {"ok": sann, "metode": metode, "mål": mål, "sti": sti, "query": _tolk_query(rå_q),
+              "versjon": versjon, "headers": h, "lengd": lengd, "keep_alive": ka}
+}
+
+# ctx i same form som nc serve (__method__ i små bokstavar), men headernamna i små bokstavar.
+funksjon ctx_frå(req: ordbok, kropp: tekst) -> ordbok {
+    _t["req_nr"] = _t_int("req_nr") + 1
+    returner {
+        "method": req["metode"],
+        "__method__": _liten(req["metode"]),
+        "__path__": req["sti"],
+        "__query__": req["query"],
+        "__headers__": req["headers"],
+        "__body__": kropp,
+        "__params__": {},
+        "__request_id__": "r" + tekst(_t_int("req_nr")),
+        "__lh__": sann
+    }
+}
+
+funksjon _t_int(namn: tekst) -> heltall {
+    hvis har_nokkel(_t, namn) { returner _t[namn] }
+    returner 0
+}
+
+# ─── Ruter ───────────────────────────────────────────────────────────────────
+
+funksjon _segment(sti: tekst) -> liste {
+    la s = builtin.split(sti, "/")
+    la ut = []
+    la i = 0
+    la n = lengde(s)
+    mens i < n {
+        hvis ikkje ((i == 0 eller i == n - 1) og s[i] == "") { legg_til(ut, s[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Stiparametrar: {namn:int} (heiltal), {namn:type} og {namn} (alt). Gjev null utan treff.
+funksjon sti_match(mønster: tekst, sti: tekst) {
+    la m = _segment(mønster)
+    la s = _segment(sti)
+    hvis lengde(m) != lengde(s) { returner null }
+    la p = {}
+    la i = 0
+    mens i < lengde(m) {
+        la ms = m[i]
+        la v = s[i]
+        hvis builtin.starts_with(ms, "{") og builtin.ends_with(ms, "}") og lengde(ms) > 2 {
+            la inne = builtin.slice(ms, 1, lengde(ms) - 1)
+            la kolon = builtin.index_of(inne, ":")
+            hvis kolon < 0 {
+                p[inne] = v
+            } ellers {
+                la namn = builtin.slice(inne, 0, kolon)
+                la typ = builtin.slice(inne, kolon + 1, lengde(inne))
+                hvis typ == "int" og ikkje _er_int_tekst(v) { returner null }
+                p[namn] = v
+            }
+        } ellers hvis ms != v {
+            returner null
+        }
+        i = i + 1
+    }
+    returner p
+}
+
+funksjon _fullt_namn(namn: tekst) -> tekst {
+    hvis builtin.index_of(namn, ".") >= 0 { returner namn }
+    returner "__main__." + namn
+}
+
+# Rutetabellen frå ncb_route_handlers(), kompilert éin gong: metode i små bokstavar,
+# segmenta i mønsteret, fullt kvalifisert handlar og vakter.
+funksjon _ruter() -> liste {
+    hvis ikkje har_nokkel(_t, "ruter") {
+        la rh = []
+        prøv { rh = ncb_route_handlers() } fang (e) { rh = [] }
+        hvis rh == null { rh = [] }
+        la ut = []
+        la i = 0
+        mens i < lengde(rh) {
+            la spec = tekst(rh[i]["spec"])
+            la delar = builtin.split(spec, " ")
+            hvis lengde(delar) >= 2 {
+                la vakter = []
+                hvis har_nokkel(rh[i], "guards") og rh[i]["guards"] != null {
+                    la g = rh[i]["guards"]
+                    la gi = 0
+                    mens gi < lengde(g) {
+                        legg_til(vakter, _fullt_namn(tekst(g[gi])))
+                        gi = gi + 1
+                    }
+                }
+                la seg = _segment(delar[1])
+                la har_param = builtin.index_of(delar[1], "{") >= 0
+                legg_til(ut, {"m": _liten(delar[0]), "M": builtin.upper(delar[0]), "mønster": delar[1],
+                              "seg": seg, "n": lengde(seg), "param": har_param,
+                              "fn": _fullt_namn(tekst(rh[i]["function"])), "vakter": vakter, "spec": spec})
+            }
+            i = i + 1
+        }
+        _t["ruter"] = ut
+    }
+    returner _t["ruter"]
+}
+
+# Match mot ei kompilert rute. Gjev parametrane eller null.
+funksjon _match(r: ordbok, seg: liste) {
+    hvis r["n"] != lengde(seg) { returner null }
+    hvis ikkje r["param"] {
+        la ms = r["seg"]
+        la i = 0
+        mens i < lengde(ms) {
+            hvis ms[i] != seg[i] { returner null }
+            i = i + 1
+        }
+        returner {}
+    }
+    returner sti_match(r["mønster"], builtin.join(seg, "/"))
+}
+
+funksjon _mw(nøkkel: tekst, konf_nøkkel: tekst) -> liste {
+    la cache = "mw_" + nøkkel
+    hvis har_nokkel(_t, cache) { returner _t[cache] }
+    la l = []
+    prøv { l = ncb_metadata(nøkkel) } fang (e) { l = [] }
+    hvis l == null eller builtin.type(l) != "liste" { l = [] }
+    hvis lengde(l) == 0 {
+        la k = _k(konf_nøkkel)
+        hvis k != null og builtin.type(k) == "liste" { l = k }
+    }
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        la n = tekst(l[i])
+        hvis n != "" { legg_til(ut, _fullt_namn(n)) }
+        i = i + 1
+    }
+    _t[cache] = ut
+    returner ut
+}
+
+# ─── Responskontrakt ─────────────────────────────────────────────────────────
+
+funksjon _status_tekst(s: heltall) -> tekst {
+    hvis s == 200 { returner "OK" }
+    hvis s == 201 { returner "Created" }
+    hvis s == 202 { returner "Accepted" }
+    hvis s == 204 { returner "No Content" }
+    hvis s == 301 { returner "Moved Permanently" }
+    hvis s == 302 { returner "Found" }
+    hvis s == 303 { returner "See Other" }
+    hvis s == 304 { returner "Not Modified" }
+    hvis s == 307 { returner "Temporary Redirect" }
+    hvis s == 308 { returner "Permanent Redirect" }
+    hvis s == 400 { returner "Bad Request" }
+    hvis s == 401 { returner "Unauthorized" }
+    hvis s == 403 { returner "Forbidden" }
+    hvis s == 404 { returner "Not Found" }
+    hvis s == 405 { returner "Method Not Allowed" }
+    hvis s == 408 { returner "Request Timeout" }
+    hvis s == 409 { returner "Conflict" }
+    hvis s == 410 { returner "Gone" }
+    hvis s == 412 { returner "Precondition Failed" }
+    hvis s == 413 { returner "Content Too Large" }
+    hvis s == 414 { returner "URI Too Long" }
+    hvis s == 415 { returner "Unsupported Media Type" }
+    hvis s == 422 { returner "Unprocessable Content" }
+    hvis s == 429 { returner "Too Many Requests" }
+    hvis s == 431 { returner "Request Header Fields Too Large" }
+    hvis s == 500 { returner "Internal Server Error" }
+    hvis s == 501 { returner "Not Implemented" }
+    hvis s == 503 { returner "Service Unavailable" }
+    hvis s == 505 { returner "HTTP Version Not Supported" }
+    returner "Status"
+}
+
+funksjon _er_svar(d) -> bool {
+    returner har_nokkel(d, "status") eller har_nokkel(d, "__status__") eller har_nokkel(d, "body") eller
+        har_nokkel(d, "__body__") eller har_nokkel(d, "headers") eller har_nokkel(d, "__headers__") eller
+        har_nokkel(d, "content_type") eller har_nokkel(d, "__content_type__") eller har_nokkel(d, "__sse__")
+}
+
+funksjon _hent2(d, a: tekst, b: tekst) {
+    hvis har_nokkel(d, a) { returner d[a] }
+    hvis har_nokkel(d, b) { returner d[b] }
+    returner null
+}
+
+# Header frå svaret: toppnøkkel (t.d. "etag", "cache_control") eller headers-ordboka
+# (kva kasus som helst).
+funksjon svar_header(d, topp: tekst, namn: tekst) -> tekst {
+    la v = _hent2(d, topp, "__" + topp + "__")
+    hvis v != null og tekst(v) != "" { returner tekst(v) }
+    la h = _hent2(d, "headers", "__headers__")
+    hvis h == null eller builtin.type(h) != "ordbok" { returner "" }
+    la ks = nøkler(h)
+    la i = 0
+    mens i < lengde(ks) {
+        hvis _liten(tekst(ks[i])) == namn { returner tekst(h[ks[i]]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _utrygg(v: tekst) -> bool {
+    returner builtin.index_of(v, "\r") >= 0 eller builtin.index_of(v, "\n") >= 0 eller builtin.index_of(v, builtin.chr(0)) >= 0
+}
+
+# Gjer handlarsvaret om til ei svarordbok med heiltalsstatus og tekstkropp.
+# Ikkje-ordbok gjev 200 text/plain (tom tekst og null gjev 204).
+funksjon normaliser(svar) -> ordbok {
+    hvis svar == null { returner {"status": 204, "body": ""} }
+    la typ = builtin.type(svar)
+    hvis typ != "ordbok" {
+        la t = tekst(svar)
+        hvis t == "" { returner {"status": 204, "body": ""} }
+        returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": t}
+    }
+    hvis ikkje _er_svar(svar) {
+        returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": tekst(svar)}
+    }
+    la d = {}
+    la ks = nøkler(svar)
+    la i = 0
+    mens i < lengde(ks) {
+        la k = ks[i]
+        hvis k == "__status__" {
+            hvis ikkje har_nokkel(svar, "status") { d["status"] = svar[k] }
+        } ellers hvis k == "__body__" {
+            hvis ikkje har_nokkel(svar, "body") { d["body"] = svar[k] }
+        } ellers hvis k == "__headers__" {
+            hvis ikkje har_nokkel(svar, "headers") { d["headers"] = svar[k] }
+        } ellers {
+            d[k] = svar[k]
+        }
+        i = i + 1
+    }
+    la status = 200
+    hvis har_nokkel(d, "status") {
+        la st = d["status"]
+        la sty = builtin.type(st)
+        hvis sty == "heltall" {
+            status = st
+        } ellers hvis sty == "tekst" og _er_siffer(st) {
+            status = heltall_fra_tekst(st)
+        } ellers {
+            kast "apptenar: ugyldig status i svaret: " + tekst(st)
+        }
+    }
+    hvis status < 100 eller status > 599 { kast "apptenar: ugyldig status i svaret: " + tekst(status) }
+    d["status"] = status
+    la body = ""
+    hvis har_nokkel(d, "body") og d["body"] != null {
+        la b = d["body"]
+        hvis builtin.type(b) == "tekst" { body = b } ellers { body = tekst(b) }
+    }
+    d["body"] = body
+    la har_ct = (har_nokkel(d, "content_type") og tekst(d["content_type"]) != "") eller (har_nokkel(d, "__content_type__") og tekst(d["__content_type__"]) != "")
+    hvis har_nokkel(d, "headers") {
+        la h = d["headers"]
+        hvis h == null eller builtin.type(h) != "ordbok" {
+            fjern_nokkel(d, "headers")
+        } ellers hvis ikkje har_ct {
+            har_ct = svar_header(d, "content_type", "content-type") != ""
+        }
+    }
+    # Same Content-Type for GET og HEAD: standarden blir sett her, ikkje i serialiseringa.
+    hvis ikkje har_ct og body != "" og status != 204 og status != 304 {
+        d["content_type"] = "text/plain; charset=utf-8"
+    }
+    returner d
+}
+
+# If-None-Match mot ETag: svake og sterke ETag er like (svak samanlikning, RFC 9110
+# 13.1.2), lister blir delte på komma, og «*» passar når svaret har ein ETag.
+funksjon etag_passar(inm: tekst, etag: tekst) -> bool {
+    hvis etag == "" { returner usann }
+    la e = builtin.trim(etag)
+    hvis builtin.starts_with(e, "W/") { e = builtin.slice(e, 2, lengde(e)) }
+    la delar = builtin.split(inm, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        hvis d == "*" { returner sann }
+        hvis builtin.starts_with(d, "W/") { d = builtin.slice(d, 2, lengde(d)) }
+        hvis d == e og d != "" { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+# 304 frå eit 200-svar: ETag, Cache-Control, Vary, Content-Location og Expires blir med.
+funksjon ikkje_endra(d: ordbok) -> ordbok {
+    la h = {}
+    la cc = svar_header(d, "cache_control", "cache-control")
+    hvis cc != "" { h["Cache-Control"] = cc }
+    la v = svar_header(d, "vary", "vary")
+    hvis v != "" { h["Vary"] = v }
+    la cl = svar_header(d, "content_location", "content-location")
+    hvis cl != "" { h["Content-Location"] = cl }
+    la ex = svar_header(d, "expires", "expires")
+    hvis ex != "" { h["Expires"] = ex }
+    la r = {"status": 304, "body": "", "headers": h}
+    la e = svar_header(d, "etag", "etag")
+    hvis e != "" { r["etag"] = e }
+    la lm = svar_header(d, "last_modified", "last-modified")
+    hvis lm != "" { r["last_modified"] = lm }
+    returner r
+}
+
+funksjon vilkårsbunde(ctx: ordbok, d: ordbok) -> ordbok {
+    la m = tekst(ctx["__method__"])
+    hvis (m != "get" og m != "head") eller d["status"] != 200 { returner d }
+    la inm = _h(ctx, "if-none-match")
+    hvis inm != "" {
+        hvis etag_passar(inm, svar_header(d, "etag", "etag")) { returner ikkje_endra(d) }
+        returner d
+    }
+    la ims = _h(ctx, "if-modified-since")
+    hvis ims != "" {
+        la lm = svar_header(d, "last_modified", "last-modified")
+        hvis lm != "" og lm == ims { returner ikkje_endra(d) }
+    }
+    returner d
+}
+
+# Toppnøklane i responskontrakten og HTTP-namna deira (same tabell som
+# selfhost/http_response.no, som nc serve brukar). Connection og Transfer-Encoding
+# eig tenaren sjølv (Content-Length blir alltid rekna ut), så dei er ikkje med.
+funksjon _topp_tabell() -> ordbok {
+    hvis har_nokkel(_t, "topp") { returner _t["topp"] }
+    la namn = ["content_type", "Content-Type", "allow", "Allow", "cache_control", "Cache-Control",
+        "location", "Location", "set_cookie", "Set-Cookie", "x_content_type_options", "X-Content-Type-Options",
+        "content_security_policy", "Content-Security-Policy",
+        "content_security_policy_report_only", "Content-Security-Policy-Report-Only",
+        "content_disposition", "Content-Disposition", "etag", "ETag",
+        "access_control_allow_origin", "Access-Control-Allow-Origin", "vary", "Vary",
+        "referrer_policy", "Referrer-Policy", "permissions_policy", "Permissions-Policy",
+        "strict_transport_security", "Strict-Transport-Security", "x_frame_options", "X-Frame-Options",
+        "cross_origin_opener_policy", "Cross-Origin-Opener-Policy",
+        "cross_origin_opener_policy_report_only", "Cross-Origin-Opener-Policy-Report-Only",
+        "cross_origin_resource_policy", "Cross-Origin-Resource-Policy",
+        "cross_origin_resource_policy_report_only", "Cross-Origin-Resource-Policy-Report-Only",
+        "cross_origin_embedder_policy", "Cross-Origin-Embedder-Policy",
+        "cross_origin_embedder_policy_report_only", "Cross-Origin-Embedder-Policy-Report-Only",
+        "x_permitted_cross_domain_policies", "X-Permitted-Cross-Domain-Policies", "link", "Link",
+        "retry_after", "Retry-After", "server", "Server", "last_modified", "Last-Modified",
+        "accept_ranges", "Accept-Ranges", "expires", "Expires", "content_language", "Content-Language",
+        "content_encoding", "Content-Encoding", "pragma", "Pragma", "www_authenticate", "WWW-Authenticate",
+        "proxy_authenticate", "Proxy-Authenticate", "clear_site_data", "Clear-Site-Data",
+        "refresh", "Refresh", "timing_allow_origin", "Timing-Allow-Origin"]
+    la t = {}
+    la i = 0
+    mens i + 1 < lengde(namn) {
+        t[namn[i]] = namn[i + 1]
+        t["__" + namn[i] + "__"] = namn[i + 1]
+        i = i + 2
+    }
+    _t["topp"] = t
+    returner t
+}
+
+funksjon _header_linje(namn: tekst, verdi: tekst) -> tekst {
+    hvis _utrygg(namn) eller _utrygg(verdi) eller builtin.index_of(namn, ":") >= 0 {
+        kast "apptenar: utrygg header " + namn
+    }
+    returner namn + ": " + verdi + "\r\n"
+}
+
+# Serialiserer eit normalisert svar (sjå normaliser) i same form som nc serve, med Date,
+# Connection og Keep-Alive i tillegg. HEAD: same headerar (også Content-Length), utan
+# kropp. Kastar ved CR, LF eller NUL i ein header.
+funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
+    la s = d["status"]
+    la ut = "HTTP/1.1 " + tekst(s) + " " + _status_tekst(s) + "\r\nDate: " + _dato_no() + "\r\n"
+    hvis keep_alive {
+        ut = ut + "Connection: keep-alive\r\nKeep-Alive: timeout=" + tekst(_k("ledig_ms") / 1000) + "\r\n"
+    } ellers {
+        ut = ut + "Connection: close\r\n"
+    }
+    la topp = _topp_tabell()
+    la har_ct = usann
+    la ks = nøkler(d)
+    la i = 0
+    mens i < lengde(ks) {
+        la k = ks[i]
+        hvis har_nokkel(topp, k) {
+            la v = d[k]
+            hvis v != null {
+                la vt = tekst(v)
+                hvis vt != "" {
+                    ut = ut + _header_linje(topp[k], vt)
+                    hvis topp[k] == "Content-Type" { har_ct = sann }
+                }
+            }
+        }
+        i = i + 1
+    }
+    hvis har_nokkel(d, "headers") {
+        la h = d["headers"]
+        la hk = nøkler(h)
+        la j = 0
+        mens j < lengde(hk) {
+            la n = tekst(hk[j])
+            hvis n != "" {
+                la l = _liten(n)
+                hvis ikkje ((l == "content-type" og har_ct) eller l == "content-length" eller l == "connection" eller l == "transfer-encoding" eller l == "keep-alive" eller l == "date") {
+                    ut = ut + _header_linje(n, tekst(h[hk[j]]))
+                }
+            }
+            j = j + 1
+        }
+    }
+    la body = d["body"]
+    hvis s != 204 og s != 304 og ikkje (s >= 100 og s < 200) {
+        ut = ut + "Content-Length: " + tekst(lengde(body)) + "\r\n"
+    }
+    ut = ut + "\r\n"
+    hvis ikkje head og s != 204 og s != 304 { ut = ut + body }
+    returner ut
+}
+
+funksjon _feil(status: heltall, body: tekst) -> ordbok {
+    returner {"status": status, "content_type": "text/plain; charset=utf-8", "body": body,
+              "headers": {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}}
+}
+
+funksjon _køyr_mw_liste(liste_namn: liste, verdi, er_ctx: bool) {
+    la cur = verdi
+    la i = 0
+    mens i < lengde(liste_namn) {
+        la r = builtin.ncb_call_fn(liste_namn[i], cur)
+        hvis r != null og builtin.type(r) == "ordbok" {
+            hvis er_ctx {
+                hvis har_nokkel(r, "__method__") eller har_nokkel(r, "__path__") eller har_nokkel(r, "__headers__") eller har_nokkel(r, "__query__") eller har_nokkel(r, "__body__") eller har_nokkel(r, "__params__") {
+                    cur = r
+                }
+            } ellers hvis _er_svar(r) {
+                cur = r
+            }
+        }
+        i = i + 1
+    }
+    returner cur
+}
+
+funksjon _feil_mw(d: ordbok) -> ordbok {
+    la l = _mw("error_middlewares", "feil_mw")
+    hvis lengde(l) == 0 { returner d }
+    prøv {
+        returner normaliser(_køyr_mw_liste(l, d, usann))
+    } fang (e) {
+        _logg("feil", "feil-mellomvare kasta: " + tekst(e))
+    }
+    returner d
+}
+
+funksjon _respons_mw(d: ordbok) -> ordbok {
+    la l = _mw("response_middlewares", "respons_mw")
+    hvis lengde(l) == 0 { returner d }
+    prøv {
+        returner normaliser(_køyr_mw_liste(l, d, usann))
+    } fang (e) {
+        _logg("feil", "respons-mellomvare kasta: " + tekst(e))
+    }
+    returner d
+}
+
+funksjon _allow(ruter: liste, seg: liste) -> tekst {
+    la sett = {}
+    la ut = []
+    la i = 0
+    mens i < lengde(ruter) {
+        hvis _match(ruter[i], seg) != null {
+            la m = ruter[i]["M"]
+            hvis ikkje har_nokkel(sett, m) {
+                sett[m] = sann
+                legg_til(ut, m)
+            }
+        }
+        i = i + 1
+    }
+    hvis har_nokkel(sett, "GET") og ikkje har_nokkel(sett, "HEAD") { legg_til(ut, "HEAD") }
+    legg_til(ut, "OPTIONS")
+    returner builtin.join(ut, ", ")
+}
+
+# Dispatch av éin førespurnad (same prosess, ingen socket). Gjev ei normalisert
+# svarordbok; SSE gjev {"__sse__": kanal, ...}. Kastar aldri.
+funksjon dispatch(ctx0: ordbok) -> ordbok {
+    la ctx = ctx0
+    la rq = _mw("request_middlewares", "forespurnad_mw")
+    hvis lengde(rq) > 0 {
+        prøv {
+            ctx = _køyr_mw_liste(rq, ctx, sann)
+        } fang (e) {
+            _logg("feil", "request-mellomvare kasta: " + tekst(e))
+            returner _feil_mw(_feil(500, "Intern feil"))
+        }
+    }
+    la metode = tekst(ctx["__method__"])
+    la sti = tekst(ctx["__path__"])
+    hvis (sti == "/helse" eller sti == "/health") og (metode == "get" eller metode == "head") {
+        returner _respons_mw({"status": 200, "content_type": "application/json; charset=utf-8",
+                              "cache_control": "no-store", "body": "{\"ok\":true,\"status\":\"ready\"}"})
+    }
+    la ruter = _ruter()
+    la seg = _segment(sti)
+    la fann_sti = usann
+    la treff = null
+    la treff_p = null
+    la i = 0
+    mens i < lengde(ruter) og treff == null {
+        la r = ruter[i]
+        la p = _match(r, seg)
+        hvis p != null {
+            fann_sti = sann
+            hvis r["m"] == metode {
+                treff = r
+                treff_p = p
+            }
+        }
+        i = i + 1
+    }
+    hvis treff == null og metode == "head" {
+        i = 0
+        mens i < lengde(ruter) og treff == null {
+            la r = ruter[i]
+            hvis r["m"] == "get" {
+                la p = _match(r, seg)
+                hvis p != null {
+                    treff = r
+                    treff_p = p
+                }
+            }
+            i = i + 1
+        }
+    }
+    hvis treff == null {
+        hvis metode == "options" og fann_sti {
+            returner {"status": 204, "body": "", "allow": _allow(ruter, seg)}
+        }
+        hvis fann_sti {
+            la f = _feil(405, "Method Not Allowed")
+            f["allow"] = _allow(ruter, seg)
+            returner _feil_mw(f)
+        }
+        returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
+    }
+    ctx["__params__"] = treff_p
+    # Vakter: totale. Unntak gjev 500 (tenaren lever), alt anna enn sann gjev 403.
+    la vakter = treff["vakter"]
+    la gi = 0
+    mens gi < lengde(vakter) {
+        la vn = vakter[gi]
+        la ok = usann
+        prøv {
+            la gr = builtin.ncb_call_fn(vn, ctx)
+            ok = builtin.type(gr) == "boolsk" og gr
+        } fang (e) {
+            _logg("feil", "vakt " + vn + " kasta på " + metode + " " + sti + ": " + tekst(e))
+            returner _feil_mw(_feil(500, "Intern feil"))
+        }
+        hvis ikkje ok { returner _feil_mw(_feil(403, "Forbidden")) }
+        gi = gi + 1
+    }
+    la fn = treff["fn"]
+    la d = null
+    prøv {
+        la svar = builtin.ncb_call_fn(fn, ctx)
+        hvis svar != null og builtin.type(svar) == "ordbok" og har_nokkel(svar, "__sse__") {
+            hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
+            returner svar
+        }
+        d = normaliser(svar)
+    } fang (e) {
+        _logg("feil", "handlar " + fn + " kasta på " + metode + " " + sti + ": " + tekst(e))
+        returner _feil_mw(_feil(500, "Intern feil"))
+    }
+    d = _respons_mw(d)
+    returner vilkårsbunde(ctx, d)
+}
+
+# Serialiser trygt: ein utrygg header (CR/LF/NUL) gjev 500 i staden.
+funksjon til_http_trygt(d: ordbok, head: bool, keep_alive: bool) -> tekst {
+    prøv {
+        returner til_http(d, head, keep_alive)
+    } fang (e) {
+        _logg("feil", "serialisering feila: " + tekst(e))
+    }
+    returner til_http(_feil(500, "Intern feil"), usann, keep_alive)
+}
+
+# Heile vegen frå rå førespurnad (hovud og kropp) til HTTP-tekst, utan socket. For testar.
+funksjon handsam_rå(rå: tekst) -> tekst {
+    la slutt = builtin.index_of(rå, "\r\n\r\n")
+    hvis slutt < 0 { returner til_http(_feil(400, "Ufullstendig hovud"), usann, usann) }
+    la req = tolk_hovud(builtin.slice(rå, 0, slutt))
+    hvis ikkje req["ok"] { returner til_http(_feil(req["status"], req["grunn"]), usann, usann) }
+    la kropp = builtin.slice(rå, slutt + 4, lengde(rå))
+    la ctx = ctx_frå(req, kropp)
+    la d = dispatch(ctx)
+    hvis har_nokkel(d, "__sse__") { returner "SSE " + tekst(d["__sse__"]) }
+    returner til_http_trygt(d, ctx["__method__"] == "head", req["keep_alive"])
+}
+
+# ─── SSE ─────────────────────────────────────────────────────────────────────
+
+# Handlarsvar som gjer tilkoplinga om til ein SSE-straum på `kanal`. `start` er
+# hendingar som blir sende straks (t.d. "event: v\ndata: 3\n\n").
+funksjon sse(kanal: tekst, start: tekst) -> ordbok {
+    returner {"__sse__": kanal, "__sse_start__": start}
+}
+
+funksjon sse_hending(hending: tekst, data: tekst) -> tekst {
+    la ut = ""
+    hvis hending != "" { ut = "event: " + builtin.replace(builtin.replace(hending, "\r", ""), "\n", "") + "\n" }
+    la linjer = builtin.split(builtin.replace(data, "\r", ""), "\n")
+    la i = 0
+    mens i < lengde(linjer) {
+        ut = ut + "data: " + linjer[i] + "\n"
+        i = i + 1
+    }
+    returner ut + "\n"
+}
+
+funksjon tal_i_kanal(kanal: tekst) -> heltall {
+    hvis ikkje har_nokkel(_kanalar, kanal) { returner 0 }
+    returner lengde(_kanalar[kanal])
+}
+
+# Sender ei hending til alle straumane på kanalen. Gjev talet på mottakarar.
+funksjon send_hending(kanal: tekst, hending: tekst, data: tekst) -> heltall {
+    hvis ikkje har_nokkel(_kanalar, kanal) { returner 0 }
+    la ids = _kanalar[kanal]
+    la melding = sse_hending(hending, data)
+    la n = 0
+    la i = 0
+    mens i < lengde(ids) {
+        la id = tekst(ids[i])
+        hvis har_nokkel(_tilk, id) {
+            la c = _tilk[id]
+            c["ut"] = c["ut"] + melding
+            n = n + 1
+        }
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon _kanal_fjern(kanal: tekst, id: tekst) -> heltall {
+    hvis ikkje har_nokkel(_kanalar, kanal) { returner 0 }
+    la gamle = _kanalar[kanal]
+    la nye = []
+    la i = 0
+    mens i < lengde(gamle) {
+        hvis tekst(gamle[i]) != id { legg_til(nye, gamle[i]) }
+        i = i + 1
+    }
+    hvis lengde(nye) == 0 {
+        fjern_nokkel(_kanalar, kanal)
+    } ellers {
+        _kanalar[kanal] = nye
+    }
+    returner 0
+}
+
+# ─── Tilkoplingar ────────────────────────────────────────────────────────────
+
+funksjon _ny_tilk(h: ordbok, no: heltall) -> ordbok {
+    _t["tilk_nr"] = _t_int("tilk_nr") + 1
+    la id = "t" + tekst(_t["tilk_nr"])
+    la c = {
+        "id": id,
+        "h": h,
+        "rq": {"abi": _abi(), "operation": "read", "handle": h["handle"], "max": "65536"},
+        "inn": "",
+        "ut": "",
+        "fase": "hovud",
+        "frist": no + _k("header_ms"),
+        "nr": 0,
+        "lukk_etter": usann,
+        "kanal": "",
+        "hb": 0,
+        "req": null,
+        "open": sann
+    }
+    _tilk[id] = c
+    returner c
+}
+
+funksjon _lukk(c: ordbok) -> heltall {
+    hvis c["open"] {
+        c["open"] = usann
+        prøv { socket.native_lukk(c["h"]) } fang (e) { }
+        hvis c["kanal"] != "" { _kanal_fjern(c["kanal"], c["id"]) }
+        hvis har_nokkel(_tilk, c["id"]) { fjern_nokkel(_tilk, c["id"]) }
+    }
+    returner 0
+}
+
+# Skriv så mykje av c["ut"] som socketen tek imot. Gjev talet på byte skrivne, -1 ved feil.
+funksjon _skriv_ut(c: ordbok) -> heltall {
+    la ut = c["ut"]
+    hvis ut == "" { returner 0 }
+    la del = ut
+    hvis lengde(del) > 65536 { del = builtin.slice(ut, 0, 65536) }
+    la r = builtin.network_operation({"abi": _abi(), "operation": "write", "handle": c["h"]["handle"], "data": del})
+    la st = tekst(r["status"])
+    hvis st == "ok" {
+        la n = 0
+        la v = r["value"]
+        hvis builtin.type(v) == "heltall" { n = v } ellers { n = heltall_fra_tekst(tekst(v)) }
+        hvis n <= 0 { returner 0 }
+        c["ut"] = builtin.slice(ut, n, lengde(ut))
+        returner n
+    }
+    hvis st == "ventende" { returner 0 }
+    returner -1
+}
+
+funksjon _svar_og_lukk(c: ordbok, status: heltall, grunn: tekst, no: heltall) -> heltall {
+    c["ut"] = c["ut"] + til_http(_feil(status, grunn), usann, usann)
+    c["lukk_etter"] = sann
+    c["fase"] = "skriv"
+    c["frist"] = no + _k("skriv_ms")
+    returner 1
+}
+
+funksjon _kroppsgrense(sti: tekst) -> heltall {
+    la g = _k("kroppsgrense")
+    la gr = _k("kroppsgrenser")
+    hvis gr != null og builtin.type(gr) == "ordbok" {
+        la ks = nøkler(gr)
+        la i = 0
+        mens i < lengde(ks) {
+            hvis builtin.starts_with(sti, tekst(ks[i])) og gr[ks[i]] < g { g = gr[ks[i]] }
+            i = i + 1
+        }
+    }
+    returner g
+}
+
+# Prøv å tolke og handsame ein førespurnad frå bufferen. Gjev 1 ved framgang.
+funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
+    hvis c["fase"] == "hovud" {
+        la slutt = builtin.index_of(c["inn"], "\r\n\r\n")
+        hvis slutt < 0 {
+            hvis lengde(c["inn"]) > _k("maks_header_byte") { returner _svar_og_lukk(c, 431, "For store headerar", no) }
+            returner 0
+        }
+        la req = tolk_hovud(builtin.slice(c["inn"], 0, slutt))
+        c["inn"] = builtin.slice(c["inn"], slutt + 4, lengde(c["inn"]))
+        hvis ikkje req["ok"] { returner _svar_og_lukk(c, req["status"], req["grunn"], no) }
+        la lengd = req["lengd"]
+        hvis lengd < 0 { lengd = 0 }
+        hvis lengd > _kroppsgrense(req["sti"]) { returner _svar_og_lukk(c, 413, "For stor kropp", no) }
+        req["lengd"] = lengd
+        c["req"] = req
+        c["fase"] = "kropp"
+        c["frist"] = no + _k("kropp_ms")
+    }
+    hvis c["fase"] != "kropp" { returner 0 }
+    la req = c["req"]
+    hvis lengde(c["inn"]) < req["lengd"] { returner 0 }
+    la kropp = builtin.slice(c["inn"], 0, req["lengd"])
+    c["inn"] = builtin.slice(c["inn"], req["lengd"], lengde(c["inn"]))
+    c["nr"] = c["nr"] + 1
+    la ka = req["keep_alive"] og c["nr"] < _k("maks_forespurnader_per_tilkopling") og ikkje _t["stopp"]
+    la ctx = ctx_frå(req, kropp)
+    la head = ctx["__method__"] == "head"
+    la d = dispatch(ctx)
+    _t["handsama"] = _t_int("handsama") + 1
+    hvis har_nokkel(d, "__sse__") {
+        la kanal = tekst(d["__sse__"])
+        hvis tal_i_kanal(kanal) >= _k("maks_sse_per_kanal") {
+            c["ut"] = c["ut"] + til_http(_feil(503, "For mange straumar"), usann, usann)
+            c["lukk_etter"] = sann
+            c["fase"] = "skriv"
+            c["frist"] = no + _k("skriv_ms")
+            returner 1
+        }
+        la start = ""
+        hvis har_nokkel(d, "__sse_start__") { start = tekst(d["__sse_start__"]) }
+        c["ut"] = c["ut"] + "HTTP/1.1 200 OK\r\nDate: " + _dato_no() +
+            "\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Accel-Buffering: no\r\nConnection: keep-alive\r\n\r\n" +
+            ": straum\n\n" + start
+        c["fase"] = "sse"
+        c["kanal"] = kanal
+        c["hb"] = no + _k("sse_hb_ms")
+        hvis ikkje har_nokkel(_kanalar, kanal) { _kanalar[kanal] = [] }
+        legg_til(_kanalar[kanal], c["id"])
+        returner 1
+    }
+    c["ut"] = c["ut"] + til_http_trygt(d, head, ka)
+    c["lukk_etter"] = ikkje ka
+    c["fase"] = "skriv"
+    c["frist"] = no + _k("skriv_ms")
+    hvis _k("logg") == "alt" { _logg("info", tekst(d["status"]) + " " + ctx["method"] + " " + ctx["__path__"]) }
+    returner 1
+}
+
+# Eitt steg for éi tilkopling. Gjev talet på framgangar (0 = ingenting skjedde).
+funksjon _steg(c: ordbok, no: heltall) -> heltall {
+    la fram = 0
+    la fase = c["fase"]
+    # Skriv først (svar, SSE-hendingar, heartbeat)
+    hvis c["ut"] != "" {
+        la n = _skriv_ut(c)
+        hvis n < 0 {
+            _lukk(c)
+            returner 1
+        }
+        hvis n > 0 { fram = fram + 1 }
+        hvis fase == "sse" og lengde(c["ut"]) > 1048576 {
+            _logg("feil", "treg SSE-mottakar lukka (" + c["id"] + ")")
+            _lukk(c)
+            returner 1
+        }
+    }
+    hvis fase == "skriv" {
+        hvis c["ut"] == "" {
+            hvis c["lukk_etter"] {
+                _lukk(c)
+                returner 1
+            }
+            c["fase"] = "hovud"
+            c["req"] = null
+            hvis c["inn"] == "" {
+                c["fase"] = "ledig"
+                c["frist"] = no + _k("ledig_ms")
+            } ellers {
+                c["frist"] = no + _k("header_ms")
+            }
+            fram = fram + 1
+            fase = c["fase"]
+        } ellers {
+            hvis no > c["frist"] {
+                _lukk(c)
+                returner 1
+            }
+            returner fram
+        }
+    }
+    # Les
+    la r = builtin.network_operation(c["rq"])
+    la st = tekst(r["status"])
+    hvis st == "ok" {
+        la data = tekst(r["data"])
+        hvis data != "" {
+            fram = fram + 1
+            hvis fase == "sse" {
+                # Klienten skal ikkje sende noko på ein SSE-straum; ignorer.
+                returner fram
+            }
+            c["inn"] = c["inn"] + data
+            hvis fase == "ledig" {
+                c["fase"] = "hovud"
+                c["frist"] = no + _k("header_ms")
+            }
+        }
+    } ellers hvis st == "eof" eller st == "feil" {
+        _lukk(c)
+        returner fram + 1
+    }
+    hvis c["fase"] == "sse" {
+        hvis no >= c["hb"] {
+            c["ut"] = c["ut"] + ": hb\n\n"
+            c["hb"] = no + _k("sse_hb_ms")
+            fram = fram + 1
+        }
+        returner fram
+    }
+    hvis c["fase"] == "hovud" eller c["fase"] == "kropp" {
+        fram = fram + _prøv_førespurnad(c, no)
+        hvis c["fase"] == "skriv" og c["ut"] != "" {
+            la n2 = _skriv_ut(c)
+            hvis n2 < 0 {
+                _lukk(c)
+                returner fram + 1
+            }
+        }
+    }
+    hvis c["open"] og (c["fase"] == "hovud" eller c["fase"] == "kropp" eller c["fase"] == "ledig") og no > c["frist"] {
+        hvis c["fase"] != "ledig" og c["inn"] != "" {
+            # Ufullstendig førespurnad etter fristen: 408 og lukk.
+            c["ut"] = c["ut"] + til_http(_feil(408, "Tidsgrense"), usann, usann)
+            _skriv_ut(c)
+        }
+        _lukk(c)
+        fram = fram + 1
+    }
+    returner fram
+}
+
+funksjon _neste_frist(no: heltall) -> heltall {
+    la f = no + 1000
+    la ks = nøkler(_tilk)
+    la i = 0
+    mens i < lengde(ks) {
+        la c = _tilk[ks[i]]
+        la x = c["frist"]
+        hvis c["fase"] == "sse" { x = c["hb"] }
+        hvis x < f { f = x }
+        i = i + 1
+    }
+    returner f
+}
+
+# ─── Offentleg API ───────────────────────────────────────────────────────────
+
+funksjon stopp() -> heltall {
+    _t["stopp"] = sann
+    returner 0
+}
+
+funksjon status() -> ordbok {
+    la sse = 0
+    la ks = nøkler(_kanalar)
+    la i = 0
+    mens i < lengde(ks) {
+        sse = sse + lengde(_kanalar[ks[i]])
+        i = i + 1
+    }
+    returner {
+        "køyrer": _t["køyrer"],
+        "port": _t_int("port"),
+        "tilkoplingar": lengde(nøkler(_tilk)),
+        "sse": sse,
+        "forespurnader": _t_int("handsama"),
+        "avviste": _t_int("avviste")
+    }
+}
+
+# Nullstill tilstanden (for testar i same prosess).
+funksjon nullstill(konf: ordbok) -> heltall {
+    la ks = nøkler(_konf)
+    la i = 0
+    mens i < lengde(ks) {
+        fjern_nokkel(_konf, ks[i])
+        i = i + 1
+    }
+    la c = _konf_frå(konf)
+    la ck = nøkler(c)
+    i = 0
+    mens i < lengde(ck) {
+        _konf[ck[i]] = c[ck[i]]
+        i = i + 1
+    }
+    la tk = nøkler(_t)
+    i = 0
+    mens i < lengde(tk) {
+        la k = tekst(tk[i])
+        hvis builtin.starts_with(k, "mw_") eller k == "ruter" { fjern_nokkel(_t, k) }
+        i = i + 1
+    }
+    _t["stopp"] = usann
+    returner 0
+}
+
+# Start tenaren og køyr lykkja til stopp() blir kalla (eller "maks_ms" er gått).
+# Skriv «APPTENAR klar <vert>:<port>» når socketen lyttar. Gjev 0, eller 1 om lyttinga feila.
+funksjon lytt(konf: ordbok) -> heltall {
+    nullstill(konf)
+    la l = socket.native_lytt(tekst(_k("vert")), _k("port"), 128)
+    hvis l["status"] != "listening" {
+        skriv("APPTENAR feil: kunne ikkje lytte på " + tekst(_k("vert")) + ":" + tekst(_k("port")) + ": " + tekst(l["error"]) + "\n")
+        returner 1
+    }
+    _t["port"] = heltall_fra_tekst(tekst(l["port"]))
+    _t["køyrer"] = sann
+    hvis _k("klar_melding") {
+        skriv("APPTENAR klar " + tekst(_k("vert")) + ":" + tekst(_t["port"]) + " backend=" + tekst(l["event_backend"]) + "\n")
+    }
+    la aq = {"abi": _abi(), "operation": "accept", "handle": l["handle"]}
+    la start_ms = builtin.tid_ms()
+    la vent = 1
+    mens ikkje _t["stopp"] {
+        la no = builtin.tid_ms()
+        hvis _k("maks_ms") > 0 og no - start_ms > _k("maks_ms") { bryt }
+        la fram = 0
+        # Ta imot nye tilkoplingar (høgst 32 per runde)
+        la ai = 0
+        mens ai < 32 {
+            la a = builtin.network_operation(aq)
+            hvis tekst(a["status"]) != "connected" { bryt }
+            fram = fram + 1
+            hvis lengde(nøkler(_tilk)) >= _k("maks_tilkoplingar") {
+                _t["avviste"] = _t_int("avviste") + 1
+                prøv {
+                    builtin.network_operation({"abi": _abi(), "operation": "write", "handle": a["handle"],
+                        "data": til_http(_feil(503, "For mange tilkoplingar"), usann, usann)})
+                    socket.native_lukk(a)
+                } fang (e) { }
+            } ellers {
+                _ny_tilk(a, no)
+            }
+            ai = ai + 1
+        }
+        la ks = nøkler(_tilk)
+        la i = 0
+        mens i < lengde(ks) {
+            hvis har_nokkel(_tilk, ks[i]) {
+                la c = _tilk[ks[i]]
+                prøv {
+                    fram = fram + _steg(c, no)
+                } fang (e) {
+                    _logg("feil", "tilkopling " + tekst(c["id"]) + ": " + tekst(e))
+                    _lukk(c)
+                }
+            }
+            i = i + 1
+        }
+        hvis fram > 0 {
+            vent = 1
+        } ellers {
+            # Ingenting skjedde: vent på listen-socketen (vaknar straks ved ny tilkopling).
+            la maks = 10
+            hvis lengde(nøkler(_tilk)) == 0 { maks = 200 }
+            la til_frist = _neste_frist(no) - no
+            la v = vent
+            hvis v > til_frist { v = til_frist }
+            hvis v < 1 { v = 1 }
+            socket.native_poll_vent(l, 1, v)
+            hvis vent < maks { vent = vent * 2 }
+            hvis vent > maks { vent = maks }
+        }
+    }
+    la ks2 = nøkler(_tilk)
+    la j = 0
+    mens j < lengde(ks2) {
+        hvis har_nokkel(_tilk, ks2[j]) { _lukk(_tilk[ks2[j]]) }
+        j = j + 1
+    }
+    socket.native_lukk(l)
+    _t["køyrer"] = usann
+    returner 0
+}
