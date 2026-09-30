@@ -1,0 +1,248 @@
+// A0 (app-kjensle): tests/fixtures/app_kjensle_tung.no under ekte `nc serve` i ein
+// barneprosess, med NORSCODE_FAKE_HTTP_REQUESTS (heile HTTP-vegen i nc_main:
+// parse → vakt → handlar → 304-sjekk → response_to_http, utan sokkel).
+//
+// Barnet blir starta via miljøkontrakten (NORSCODE_CMD=serve, NORSCODE_FILE,
+// NORSCODE_ROOT, NC_SERVE_PORT, NC_SERVE_HOST) med eksplisitt, ikkje-arva miljø,
+// so NORSCODE_VM_CI_COMMAND/NORSCODE_CMD frå CI-adapteren ikkje kan vinne.
+//
+// Krav:
+//   - /ekko-cookie med «Cookie: nc_demo=ja» gjev «ja» (header-kasus, feilar på b8e7869)
+//   - /etag-side: nøyaktig éin Cache-Control (no-cache), sterk ETag = etag_av(body), nosniff
+//   - If-None-Match med rett ETag gjev 304, med feil ETag 200
+//   - «Cookie: nc_rtt=abc» mot /vakt gjev 403, og GET / etterpå i same køyring gjev
+//     200: den totale vakta fangar unntaket, so tenaren lever
+//   - svara er byte-identiske i VM_FAST=0 og VM_FAST=1
+// Utdata blir tolka robust mot escapa linjeskift (\n som to teikn, dobbelt på macOS).
+bruk std.runtime.process_abi som process_abi
+bruk std.http_cache som hc
+
+funksjon crlf() -> tekst { returner "\r\n" }
+
+funksjon førespurnad(sti: tekst, ekstra: liste_tekst) -> tekst {
+    la r = "GET " + sti + " HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf()
+    la i: heiltall = 0
+    mens i < lengde(ekstra) {
+        r = r + ekstra[i] + crlf()
+        i = i + 1
+    }
+    returner r + crlf()
+}
+
+// NORSCODE_FAKE_HTTP_REQUESTS skil førespurnader med bokstaveleg «\n» (to teikn).
+funksjon saman(reqs: liste_tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(reqs) {
+        hvis i > 0 { ut = ut + "\\n" }
+        ut = ut + reqs[i]
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon serve_miljø(root: tekst, fast: tekst, reqs: tekst) -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_CMD": "serve",
+        "NORSCODE_FILE": root + "/tests/fixtures/app_kjensle_tung.no",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_ROOT": root,
+        "NC_SERVE_PORT": "48183",
+        "NC_SERVE_HOST": "127.0.0.1",
+        "NORSCODE_FAKE_HTTP_REQUESTS": reqs,
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_VM_FAST": fast,
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": ""
+    }
+}
+
+// Opphev escaping når prosess-ABI-en har levert linjeskift som «\n» (to teikn),
+// eventuelt dobbelt («\\n»). Rå utdata (med ekte linjeskift) blir ikkje rørt.
+funksjon normaliser(t: tekst) -> tekst {
+    la s = t
+    la runde: heiltall = 0
+    mens ikkje builtin.contains(s, "\n") og builtin.contains(s, "\\n") og runde < 3 {
+        s = tekst_erstatt(s, "\\\\", "\\")
+        s = tekst_erstatt(s, "\\r", "\r")
+        s = tekst_erstatt(s, "\\n", "\n")
+        s = tekst_erstatt(s, "\\\"", "\"")
+        s = tekst_erstatt(s, "\\t", "\t")
+        runde = runde + 1
+    }
+    returner s
+}
+
+funksjon køyr_serve(runtime: tekst, root: tekst, fast: tekst, reqs: liste_tekst) -> tekst {
+    la req = process_abi.request(runtime, [], root, "", 600000, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, serve_miljø(root, fast, saman(reqs)))
+    la res = builtin.process_spawn_argv(req)
+    la ut = normaliser(tekst(res["stdout"]))
+    hvis tekst(res["status"]) != "ferdig" eller heltall_fra_tekst(tekst(res["exit_code"])) != 0 {
+        skriv("nc serve (VM_FAST=" + fast + ") feila: status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + "\n")
+        skriv("stdout:\n" + ut + "\nstderr:\n" + tekst(res["stderr"]) + "\n")
+        assert(usann)
+    }
+    returner ut
+}
+
+funksjon tal_forekomstar(t: tekst, nål: tekst) -> heiltall {
+    la n: heiltall = 0
+    la rest = t
+    la p = builtin.index_of(rest, nål)
+    mens p >= 0 {
+        n = n + 1
+        rest = builtin.slice(rest, p + lengde(nål), lengde(rest))
+        p = builtin.index_of(rest, nål)
+    }
+    returner n
+}
+
+// Del utdata i HTTP-svar. Kvart svar: {"status", "body", "h:<namn>" (siste verdi),
+// "n:<namn>" (tal på linjer med det headernamnet)}; namn med små bokstavar.
+funksjon tolk_svar(ut: tekst) -> liste {
+    la svar = []
+    la rest = ut
+    la p = builtin.index_of(rest, "HTTP/1.1 ")
+    mens p >= 0 {
+        rest = builtin.slice(rest, p, lengde(rest))
+        la skil = "\r\n\r\n"
+        la slutt = builtin.index_of(rest, skil)
+        hvis slutt < 0 {
+            skil = "\n\n"
+            slutt = builtin.index_of(rest, skil)
+        }
+        hvis slutt < 0 {
+            skriv("uferdig svar i utdata:\n" + rest + "\n")
+            assert(usann)
+        }
+        la hovud = builtin.slice(rest, 0, slutt)
+        la linjer = builtin.split(hovud, "\n")
+        la s: ordbok_tekst = {}
+        la statuslinje = builtin.trim(linjer[0])
+        s["status"] = builtin.slice(statuslinje, 9, 12)
+        la i: heiltall = 1
+        mens i < lengde(linjer) {
+            la l = builtin.trim(linjer[i])
+            la k = builtin.index_of(l, ":")
+            hvis k > 0 {
+                la namn = tekst_til_liten(builtin.trim(builtin.slice(l, 0, k)))
+                s["h:" + namn] = builtin.trim(builtin.slice(l, k + 1, lengde(l)))
+                la tidlegare: heiltall = 0
+                hvis finnes_nøkkel(s, "n:" + namn) { tidlegare = heltall_fra_tekst(s["n:" + namn]) }
+                s["n:" + namn] = tekst(tidlegare + 1)
+            }
+            i = i + 1
+        }
+        la kropp_start = slutt + lengde(skil)
+        la cl: heiltall = 0
+        hvis finnes_nøkkel(s, "h:content-length") { cl = heltall_fra_tekst(s["h:content-length"]) }
+        s["body"] = builtin.slice(rest, kropp_start, kropp_start + cl)
+        legg_til(svar, s)
+        rest = builtin.slice(rest, kropp_start + cl, lengde(rest))
+        p = builtin.index_of(rest, "HTTP/1.1 ")
+    }
+    returner svar
+}
+
+funksjon hdr(s: ordbok_tekst, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(s, "h:" + namn) { returner s["h:" + namn] }
+    returner ""
+}
+
+funksjon hdr_tal(s: ordbok_tekst, namn: tekst) -> heiltall {
+    hvis finnes_nøkkel(s, "n:" + namn) { returner heltall_fra_tekst(s["n:" + namn]) }
+    returner 0
+}
+
+funksjon sjekk_sekvens(modus: tekst, ut: tekst, etag: tekst) -> heiltall {
+    la svar = tolk_svar(ut)
+    hvis lengde(svar) != 8 {
+        skriv("VM_FAST=" + modus + ": venta 8 svar, fekk " + tekst(lengde(svar)) + ":\n" + ut + "\n")
+    }
+    assert_eq(lengde(svar), 8)
+    // 0: GET /
+    assert_eq(svar[0]["status"], "200")
+    assert_eq(svar[0]["body"], "ok")
+    // 1: /ekko-cookie med «Cookie» (stor forbokstav, som frå ein nettlesar)
+    assert_eq(svar[1]["status"], "200")
+    assert_eq(svar[1]["body"], "ja")
+    // 2: /etag-side
+    la side = svar[2]
+    assert_eq(side["status"], "200")
+    assert_eq(hdr_tal(side, "cache-control"), 1)
+    assert_eq(hdr(side, "cache-control"), "no-cache")
+    assert_eq(hdr_tal(side, "etag"), 1)
+    assert_eq(hdr(side, "etag"), etag)
+    assert_eq(hdr(side, "etag"), hc.etag_av(side["body"]))
+    assert(ikkje builtin.starts_with(hdr(side, "etag"), "W/"))
+    assert_eq(hdr(side, "x-content-type-options"), "nosniff")
+    assert_eq(hdr(side, "content-security-policy"), hc.csp_standard())
+    assert(builtin.contains(side["body"], "data-nc-outlet"))
+    // 3: If-None-Match med rett ETag → 304 utan kropp
+    assert_eq(svar[3]["status"], "304")
+    assert_eq(svar[3]["body"], "")
+    assert_eq(hdr(svar[3], "etag"), etag)
+    // 4: If-None-Match med anna ETag → 200 (porten seier nei)
+    assert_eq(svar[4]["status"], "200")
+    // 5: /vakt med nc_rtt=abc: den totale vakta fangar unntaket → 403
+    assert_eq(svar[5]["status"], "403")
+    // 6: /liste med 50 rader
+    assert_eq(svar[6]["status"], "200")
+    assert_eq(tal_forekomstar(svar[6]["body"], "<tr class="), 50)
+    assert_eq(hdr(svar[6], "etag"), hc.etag_av(svar[6]["body"]))
+    // 7: GET / etter vakt-unntaket: tenaren lever
+    assert_eq(svar[7]["status"], "200")
+    assert_eq(svar[7]["body"], "ok")
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la root = tekst(info["cwd"])
+
+    // Fase 1: hent ETag-en til /etag-side.
+    la ut0 = køyr_serve(runtime, root, "1", [førespurnad("/etag-side", [])])
+    la første = tolk_svar(ut0)
+    assert_eq(lengde(første), 1)
+    la etag = hdr(første[0], "etag")
+    assert(builtin.starts_with(etag, "\""))
+    assert_eq(lengde(etag), 34)
+
+    la reqs: liste_tekst = [
+        førespurnad("/", []),
+        førespurnad("/ekko-cookie", ["Cookie: nc_demo=ja"]),
+        førespurnad("/etag-side", []),
+        førespurnad("/etag-side", ["If-None-Match: " + etag]),
+        førespurnad("/etag-side", ["If-None-Match: \"annan\""]),
+        førespurnad("/vakt", ["Cookie: nc_rtt=abc"]),
+        førespurnad("/liste", []),
+        førespurnad("/", [])
+    ]
+    la ut_std = køyr_serve(runtime, root, "0", reqs)
+    sjekk_sekvens("0", ut_std, etag)
+    la ut_fast = køyr_serve(runtime, root, "1", reqs)
+    sjekk_sekvens("1", ut_fast, etag)
+    // Byte-identitet: fast-modus endrar ikkje semantikken.
+    hvis ut_std != ut_fast {
+        la i: heiltall = 0
+        mens i < lengde(ut_std) og i < lengde(ut_fast) og builtin.slice(ut_std, i, i + 1) == builtin.slice(ut_fast, i, i + 1) {
+            i = i + 1
+        }
+        skriv("VM_FAST=0 og VM_FAST=1 gav ulike svar frå byte " + tekst(i) + " (lengd " + tekst(lengde(ut_std)) + " mot " + tekst(lengde(ut_fast)) + ")\n")
+    }
+    assert_eq(lengde(ut_std), lengde(ut_fast))
+    assert(ut_std == ut_fast)
+    skriv("test_app_kjensle_serve OK\n")
+    returner 0
+}

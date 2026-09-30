@@ -1,0 +1,285 @@
+// Oppgåvetavle — demo for app-kjensle del 1 (std/kvikk.no), heilt utan JavaScript.
+//
+//   ./bin/nc serve examples/app_kjensle.no --port 8080 --host 127.0.0.1
+//   (i produksjon: NORSCODE_VM_FAST=1, sjå docs/APP_KJENSLE.md)
+//
+// Kva som gjer at ho kjennest rask:
+//   - Kvar HTML-side sender `Speculation-Rules: "/_nc/spekulasjon.json?v=…"`.
+//     Chromium hentar reglane og førehandslastar/-viser lenkja brukaren held
+//     peikaren over, so klikket opnar ei ferdig side.
+//   - /_nc/stil.css?v=… har `@view-transition { navigation: auto; }`: sidebyte
+//     glir over i kvarandre i staden for å blinke (av ved prefers-reduced-motion).
+//   - HTML har sterk ETag og `no-cache`, aldri `no-store`: tilbake-knappen kan
+//     bruke bfcache, og ei uendra side kostar eit 304 utan kropp.
+//   - POST /ny svarar 303 (Post/Redirect/Get) ved suksess og 422 med skjemaet
+//     og feilmeldingar ved feil.
+//
+// Ruter:
+//   GET  /_nc/{fil}          reglar og stilark (kvikk.ressurs)
+//   GET  /                   oversikt
+//   GET  /oppgaver           tabell med 50 oppgåver
+//   GET  /oppgave/{id:int}   ei oppgåve (404 utanfor 1–50)
+//   GET  /om                 om demoen
+//   GET  /ny, POST /ny       nytt skjema (303 / 422)
+//   GET  /logg-ut            sideeffekt: verna mot spekulativ henting
+//
+// Demoen lagrar ingenting: modulglobalar og disk er ikkje tilgjengelege for
+// handlarar under nc serve. Sidevisingar blir skrivne til stdout, men ikkje for
+// spekulative førespurnader (Sec-Purpose), so prefetch ikkje blir talt.
+bruk std.web som web
+bruk std.slug som slug
+bruk std.frontend som frontend
+bruk std.kvikk som kvikk
+
+// ─── Oppsett ────────────────────────────────────────────────────────────────
+
+funksjon app_css() -> tekst {
+    la l: liste_tekst = [
+        ":root { color-scheme: light dark; --kant: #8884; --dempa: #777; --aksent: #2f6f4f; }",
+        "body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }",
+        ".shell { max-width: 56rem; margin: 0 auto; padding: 0 1rem; }",
+        ".skip-link { position: absolute; left: -999px; }",
+        ".skip-link:focus { left: 1rem; top: 1rem; }",
+        ".app-header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--kant); }",
+        ".app-header h1 { font-size: 1.25rem; margin: .75rem 0; }",
+        ".app-header__nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 1rem; margin: 0; padding: 0; }",
+        ".app-header__nav a[aria-current=page] { font-weight: 600; text-decoration: none; }",
+        "a { color: var(--aksent); }",
+        ".app-main { padding: 1rem 0 2rem; min-height: 60vh; }",
+        ".app-footer { border-top: 1px solid var(--kant); color: var(--dempa); font-size: .875rem; }",
+        "table { width: 100%; border-collapse: collapse; }",
+        "th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--kant); }",
+        ".status-ferdig { color: var(--dempa); }",
+        ".melding { padding: .5rem .75rem; border: 1px solid var(--aksent); border-radius: 4px; }",
+        ".feil { color: #b3261e; }",
+        "form p { display: grid; gap: .25rem; max-width: 28rem; }",
+        "input, select, button { font: inherit; padding: .35rem .5rem; }",
+        ""
+    ]
+    returner builtin.join(l, "\n")
+}
+
+// Oppsettet blir laga på nytt per førespurnad (ingen globalar under nc serve).
+funksjon fart() -> ordbok_tekst {
+    returner kvikk.med_stil(kvikk.oppsett(), app_css())
+}
+
+// ─── Data (deterministisk, ingen lagring) ───────────────────────────────────
+
+funksjon tal_oppgaver() -> heiltall { returner 50 }
+
+funksjon oppgave(id: heiltall) -> ordbok_tekst {
+    la verb: liste_tekst = ["Skriv", "Test", "Rydd", "Mål", "Les", "Oppdater", "Del", "Planlegg"]
+    la ting: liste_tekst = ["rapporten", "innloggingssida", "bygget", "svartidene", "dokumentasjonen", "avhengnadene", "demoen", "neste veke"]
+    la prioritetar: liste_tekst = ["låg", "middels", "høg"]
+    la o: ordbok_tekst = {}
+    o["id"] = tekst(id)
+    o["tittel"] = verb[id % 8] + " " + ting[(id * 3) % 8]
+    o["prioritet"] = prioritetar[id % 3]
+    o["status"] = "open"
+    hvis id % 4 == 0 { o["status"] = "ferdig" }
+    returner o
+}
+
+// ─── Visning ────────────────────────────────────────────────────────────────
+
+funksjon e(verdi: tekst) -> tekst {
+    returner web.escape_html(verdi)
+}
+
+// Talt berre når ein person faktisk opnar sida, ikkje ved prefetch/prerender.
+funksjon tel_visning(ctx: ordbok_tekst, sti: tekst) -> heiltall {
+    hvis ikkje kvikk.er_spekulativ(ctx) {
+        skriv("sidevising " + sti + "\n")
+    }
+    returner 0
+}
+
+funksjon lenkje(tittel: tekst, href: tekst, aktiv: tekst) -> tekst {
+    hvis href == aktiv { returner frontend.nav_link_aktiv(tittel, href) }
+    returner frontend.nav_link(tittel, href)
+}
+
+funksjon navigasjon(aktiv: tekst) -> tekst {
+    returner frontend.nav_list(
+        lenkje("Oversikt", "/", aktiv)
+        + lenkje("Oppgåver", "/oppgaver", aktiv)
+        + lenkje("Ny oppgåve", "/ny", aktiv)
+        + lenkje("Om", "/om", aktiv)
+        + frontend.nav_link("Logg ut", "/logg-ut")
+    )
+}
+
+funksjon side_html(tittel: tekst, aktiv: tekst, innhald: tekst) -> tekst {
+    la o = fart()
+    returner frontend.layout_app_med_head(
+        "Oppgåvetavle",
+        navigasjon(aktiv),
+        "<h2>" + e(tittel) + "</h2>" + innhald,
+        "Norscode-demo utan JavaScript: Speculation Rules, View Transitions og bfcache.",
+        kvikk.stil_href(o),
+        kvikk.head(o) + "<meta name=\"description\" content=\"" + e(tittel) + "\">"
+    )
+}
+
+funksjon rad(o: ordbok_tekst) -> tekst {
+    returner "<tr class=\"status-" + o["status"] + "\"><td>" + e(o["id"]) + "</td>" +
+        "<td><a href=\"/oppgave/" + e(o["id"]) + "\">" + e(o["tittel"]) + "</a></td>" +
+        "<td>" + e(o["prioritet"]) + "</td><td>" + e(o["status"]) + "</td></tr>"
+}
+
+funksjon skjema_html(tittel: tekst, prioritet: tekst, feil: liste_tekst) -> tekst {
+    la h = ""
+    hvis lengde(feil) > 0 {
+        h = h + "<div class=\"melding feil\" role=\"alert\"><p>Skjemaet har feil:</p><ul>"
+        la i: heiltall = 0
+        mens i < lengde(feil) {
+            h = h + "<li>" + e(feil[i]) + "</li>"
+            i = i + 1
+        }
+        h = h + "</ul></div>"
+    }
+    la valg = ""
+    la prioritetar: liste_tekst = ["låg", "middels", "høg"]
+    la j: heiltall = 0
+    mens j < lengde(prioritetar) {
+        la p = prioritetar[j]
+        la valt = ""
+        hvis p == prioritet { valt = " selected" }
+        valg = valg + "<option value=\"" + e(p) + "\"" + valt + ">" + e(p) + "</option>"
+        j = j + 1
+    }
+    returner h + "<form method=\"post\" action=\"/ny\">" +
+        "<p><label for=\"tittel\">Tittel</label>" +
+        "<input id=\"tittel\" name=\"tittel\" maxlength=\"80\" required value=\"" + e(tittel) + "\"></p>" +
+        "<p><label for=\"prioritet\">Prioritet</label>" +
+        "<select id=\"prioritet\" name=\"prioritet\">" + valg + "</select></p>" +
+        "<p><button type=\"submit\">Legg til</button></p></form>"
+}
+
+// application/x-www-form-urlencoded → ordbok.
+funksjon skjemadata(kropp: tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    hvis kropp == "" { returner ut }
+    la par = builtin.split(kropp, "&")
+    la i: heiltall = 0
+    mens i < lengde(par) {
+        la p = par[i]
+        la k = builtin.index_of(p, "=")
+        hvis k > 0 {
+            la namn = slug.url_decode(tekst_erstatt(builtin.slice(p, 0, k), "+", " "))
+            ut[namn] = slug.url_decode(tekst_erstatt(builtin.slice(p, k + 1, lengde(p)), "+", " "))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon felt(d: ordbok_tekst, namn: tekst) -> tekst {
+    hvis finnes_nøkkel(d, namn) { returner builtin.trim(tekst(d[namn])) }
+    returner ""
+}
+
+// ─── Ruter ──────────────────────────────────────────────────────────────────
+
+funksjon nc_ressurs(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /_nc/{fil:tekst}")
+    returner kvikk.ressurs(ctx, fart())
+}
+
+funksjon oversikt(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /")
+    tel_visning(ctx, "/")
+    la opne: heiltall = 0
+    la i: heiltall = 1
+    mens i <= tal_oppgaver() {
+        hvis oppgave(i)["status"] == "open" { opne = opne + 1 }
+        i = i + 1
+    }
+    la innhald = "<p>" + tekst(opne) + " av " + tekst(tal_oppgaver()) + " oppgåver er opne.</p>" +
+        "<p><a href=\"/oppgaver\">Sjå alle oppgåvene</a> eller <a href=\"/ny\">legg til ei ny</a>.</p>" +
+        "<p>Hald peikaren over ei lenkje: Chromium hentar sida før du klikkar.</p>"
+    returner kvikk.side(ctx, fart(), side_html("Oversikt", "/", innhald))
+}
+
+funksjon oppgaver(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /oppgaver")
+    tel_visning(ctx, "/oppgaver")
+    la melding = ""
+    hvis web.request_query_param(ctx, "lagt_til") == "1" {
+        melding = "<p class=\"melding\" role=\"status\">Oppgåva er motteken. Demoen lagrar ikkje, so lista er uendra.</p>"
+    }
+    la rader = ""
+    la i: heiltall = 1
+    mens i <= tal_oppgaver() {
+        rader = rader + rad(oppgave(i))
+        i = i + 1
+    }
+    la innhald = melding + "<table><thead><tr><th>#</th><th>Tittel</th><th>Prioritet</th><th>Status</th></tr></thead><tbody>" +
+        rader + "</tbody></table>"
+    returner kvikk.side(ctx, fart(), side_html("Oppgåver", "/oppgaver", innhald))
+}
+
+funksjon oppgave_side(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /oppgave/{id:int}")
+    la id = web.request_param_int(ctx, "id")
+    hvis id < 1 eller id > tal_oppgaver() {
+        la ingen = side_html("Fann ikkje oppgåva", "", "<p>Det finst inga oppgåve med nummer " + e(tekst(id)) + ".</p><p><a href=\"/oppgaver\">Tilbake til lista</a></p>")
+        returner kvikk.side_med_status(ctx, fart(), 404, ingen)
+    }
+    tel_visning(ctx, "/oppgave/" + tekst(id))
+    la o = oppgave(id)
+    la forrige = ""
+    hvis id > 1 { forrige = "<a href=\"/oppgave/" + tekst(id - 1) + "\" rel=\"prev\">Førre</a> " }
+    la neste = ""
+    hvis id < tal_oppgaver() { neste = "<a href=\"/oppgave/" + tekst(id + 1) + "\" rel=\"next\">Neste</a>" }
+    la innhald = "<dl><dt>Nummer</dt><dd>" + e(o["id"]) + "</dd>" +
+        "<dt>Prioritet</dt><dd>" + e(o["prioritet"]) + "</dd>" +
+        "<dt>Status</dt><dd>" + e(o["status"]) + "</dd></dl>" +
+        "<p>" + forrige + neste + "</p><p><a href=\"/oppgaver\">Alle oppgåvene</a></p>"
+    returner kvikk.side(ctx, fart(), side_html(o["tittel"], "", innhald))
+}
+
+funksjon om(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /om")
+    tel_visning(ctx, "/om")
+    la innhald = "<p>Oppgåvetavla er skriven i Norscode og sender ingen JavaScript.</p>" +
+        "<ul><li>Speculation Rules kjem som HTTP-header, ikkje som skript.</li>" +
+        "<li>Sidebyte glir over med kryss-dokument View Transitions i CSS.</li>" +
+        "<li>Sidene kan revaliderast (ETag og 304) og ligg i bfcache.</li></ul>" +
+        "<p>Nettlesarar utan støtte lastar sidene vanleg.</p>"
+    returner kvikk.side(ctx, fart(), side_html("Om", "/om", innhald))
+}
+
+funksjon ny_skjema(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /ny")
+    tel_visning(ctx, "/ny")
+    returner kvikk.side(ctx, fart(), side_html("Ny oppgåve", "/ny", skjema_html("", "middels", [])))
+}
+
+funksjon ny_send(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /ny")
+    la d = skjemadata(web.request_body(ctx))
+    la tittel = felt(d, "tittel")
+    la prioritet = felt(d, "prioritet")
+    la feil: liste_tekst = []
+    hvis tittel == "" { legg_til(feil, "Tittel manglar.") }
+    hvis lengde(tittel) > 80 { legg_til(feil, "Tittelen er lengre enn 80 teikn.") }
+    hvis prioritet != "låg" og prioritet != "middels" og prioritet != "høg" {
+        legg_til(feil, "Vel prioritet låg, middels eller høg.")
+        prioritet = "middels"
+    }
+    hvis lengde(feil) > 0 {
+        returner kvikk.side_med_status(ctx, fart(), 422, side_html("Ny oppgåve", "/ny", skjema_html(tittel, prioritet, feil)))
+    }
+    returner kvikk.sjå_anna("/oppgaver?lagt_til=1")
+}
+
+// GET med sideeffekt: unnateke i reglane (utlogging) og i tillegg verna av ei
+// total vakt, so ein spekulativ førespurnad får 403 og aldri loggar ut.
+funksjon logg_ut(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.use_guard("std.kvikk.vakt_ingen_spekulasjon")
+    web.route("GET /logg-ut")
+    skriv("utlogging\n")
+    returner kvikk.sjå_anna("/")
+}
