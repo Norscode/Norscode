@@ -512,13 +512,15 @@ Dette er den einaste milepælen som faktisk erstattar JavaScript i nettlesaren. 
 4. **JS-glue:** minimal, autogenerert brubar for import/eksport.
 5. **DOM-binding:** `dokument.finn(...)`, `element.tekst = ...`, hendingslyttarar som funksjonsverdiar (krev M3).
 6. **Hydrering:** kople til `std/html_islands.no`, som i dag berre sender ut `<script type="module">` mot ein klientruntime som ikkje finst.
-7. **Byggkommando:** `nc bygg-wasm <fil.no> -o app.wasm`.
+7. **Byggkommando:** MVP-emitteren blir køyrd via `nc run tools/nc_bygg_wasm.no` (miljø `NORSCODE_WASM_SRC`/`NORSCODE_WASM_OUT`) — det er IKKJE ein `nc bygg-wasm`-underkommando i `nc_main`.
 
 **Akseptkriterium:** ei side med ein teljarknapp, skriven berre i Norscode, køyrer i Chrome og Firefox utan handskriven JavaScript. Test: `tests/test_wasm_emitter.no` (binærvektorar) + manuell nettlesartest.
 
 **Merknad:** vurder seriøst om dette er verdt det. Server-rendert URL-state (som du alt planlegg) dekker det meste av interaktivitet utan denne milepælen i det heile.
 
-**Status (2026-08-20): EMITTER + NC-MÅL FERDIG.** [std/wasm_binary.no](../std/wasm_binary.no) er ein komplett WASM MVP-binæremitter: magic + versjon + LEB128 (u/s) + type-/funksjon-/eksport-/kode-seksjonar, verifisert BYTE-EKSAKT mot spec og godkjend av `file` (libmagic: "WebAssembly (wasm) binary module version 0x1 (MVP)"). Bytekode-lowering (stack-maskin→stack-maskin) for heiltalsaritmetikk (i32.const/add/sub/mul/div_s) og parametrar (local.get). Wira inn som `nc bygg-wasm <fil.no> [-o ut.wasm]` ([tools/nc_bygg_wasm.no](../tools/nc_bygg_wasm.no)) — kompilerer fila, lowrar kvar heiltals-/parameter-funksjon, hoppar over ikkje-lowrbare (strengar, kontrollflyt, kall). Verifisert ende-til-ende: bygde eit 2-funksjons .wasm frå ei Norscode-fil, godkjend av `file`. Test [tests/test_wasm_binary.no](../tests/test_wasm_binary.no) (seed-rask, byte-eksakt).
+**Status (2026-08-20): EMITTER + NC-MÅL FERDIG.** [std/wasm_binary.no](../std/wasm_binary.no) er ein komplett WASM MVP-binæremitter: magic + versjon + LEB128 (u/s) + type-/funksjon-/eksport-/kode-seksjonar, verifisert BYTE-EKSAKT mot spec og godkjend av `file` (libmagic: "WebAssembly (wasm) binary module version 0x1 (MVP)"). Bytekode-lowering (stack-maskin→stack-maskin) for heiltalsaritmetikk (i32.const/add/sub/mul/div_s) og parametrar (local.get). Køyrd via `nc run tools/nc_bygg_wasm.no` (miljø `NORSCODE_WASM_SRC`/`NORSCODE_WASM_OUT`) ([tools/nc_bygg_wasm.no](../tools/nc_bygg_wasm.no)) — kompilerer fila, lowrar kvar heiltals-/parameter-funksjon, hoppar over ikkje-lowrbare (strengar, kontrollflyt, kall). Det er IKKJE ein `nc bygg-wasm`-underkommando i `nc_main`. Verifisert ende-til-ende: bygde eit 2-funksjons .wasm frå ei Norscode-fil, godkjend av `file`. Test [tests/test_wasm_binary.no](../tests/test_wasm_binary.no) (seed-rask, byte-eksakt).
+
+**Overtatt av Del 2 (2026-09/10):** denne heiltals-MVP-emitteren er superstert av den fulle Norscode→WebAssembly-klienten i [docs/WASM_KLIENT.md](WASM_KLIENT.md) (WasmGC, kontrollflyt, kall, strengar, closures, vertsfunksjonar), køyrd via `NC_WASM_APP=… ./bin/nc run tools/nc_wasm.no`. Ein eigen `nc wasm`-underkommando i `nc_main` er valfri i ein seinare R1-reseed.
 
 **Gjenstår for M12:** kontrollflyt (if/loop/br), lokale variablar, minne/strengar, DOM-binding + JS-glue + hydrering (månadsverk). Emitteren og nc-målet er grunnmuren.
 

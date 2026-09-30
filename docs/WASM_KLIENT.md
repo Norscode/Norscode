@@ -1631,7 +1631,8 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
   - `hent_*` på eit element som ikkje finst, gjev ein JS-feil. Han gjev ikkje tom tekst.
 - **Serve:**
   - Script-taggen utan versjon gjev éin 304 per sidevising. Ein app som vil unngå han, kan importere `klient_data` og bruke `script_tag_versjonert`, men då er han bunden til `build/` igjen.
-  - `csp_wasm` bør flyttast til `std/http_cache.no` når PR #206 er fletta.
+  - **Gjort (W11, PR #206-fletting):** `csp_wasm` er flytta til `std/http_cache.no` og `std/wasm_serve.no::csp_wasm` delegerer no dit (byte-identisk streng). `wasm_serve.csp_standard` er framleis WASM-app-kontrakten (utan `form-action`), som med vilje skil seg frå `http_cache.csp_standard` (som la til `form-action` i #206) — sjå merknaden i `std/http_cache.no::csp_wasm`.
+  - **Gjort (W11, PR #206-fletting):** `examples/wasm_deltakarar/app.no::header` er no ei tynn innpakking rundt `web.request_header` (kasus-uavhengig i #206), i staden for eit eige oppslag. `std/apptenar.no` og `std/synk.no` held sine eigne kasus-uavhengige oppslag med vilje: apptenaren har sin eigen ctx-form (`__headers__` i små bokstavar, `__lh__`-merkt) som ikkje er `web.no`-ctx-en.
   - Modulen ligg som ein tekstliteral i NCB-en til serve-appen, så appen tek like mykje minne som modulen er stor.
 - **Runtime:**
   - `tekst_til_liten`/`tekst_til_store` endrar berre ASCII (paritet med VM-en). Filteret i demoen finn difor ikkje «Åse» på «å».
@@ -1646,9 +1647,12 @@ Tida er målt i sekund med `./bin/nc test` (standard) og `NC_TEST_VM_FAST=1 ./bi
   - Kall av ein fanga closure som `f(x)` inne i ein lambda krev ei endring i kompilatoren (reseed). Til då går det med `ncb_call_fn`.
   - Funksjonsnamn som verdi (`kart(l, dobbel)`) blir `LOAD_NAME` av eit ukjent namn, også i VM-en.
   - Eit kall frå ein lambda til ein funksjon i modulen blir `builtin.<namn>` i VM-en (sett i W4 i `tools/nc_wasm.no`). Difor les lowringa sjølv cachen, i staden for å få ein closure.
-- **Ytelse (W10):**
-  - Tekstfunksjonane lagar eitt utsnitt per byteposisjon.
-  - Handteraren sjekkar typar med tekstsamanlikning.
-  - `ncb_call_fn` samanliknar metodenamn lineært.
-  - Ordbøker har lineære oppslag.
+- **Ytelse og storleik (W10):**
+  - **Alt på plass i lowringa i dag (billige, trygge vinstane):** dødkode-eliminering (berre nåbare funksjonar/atom blir emitterte, `_legg_nåbar`/`nåbar_sett`), typededuplisering (`_type_idx` med `type_nøkkel`) og dedup av datasegment (strengar). Desse held modulane nede utan paritetsrisiko.
+  - **Utsett med vilje (risikabelt/XL, ikkje trygt å gjere utan Chrome-paritetsverifisering i denne omgangen):**
+    - Stackifier/relooper i staden for dispatch-lykkja (`loop`+`br_table`). CFG-en er reduserbar, så det er mogleg, men det er ei stor omskriving av kontrollflyt-emitteringa; ein feil her bryt korpus-paritet (VM vs. nettlesar). Dispatch-lykkja er alltid korrekt.
+    - Lokal typeinferens for unboxa `i64` (lokale som berre er heiltal) og monomorf `+` når begge operandane er kjende tal. Krev ein trygg inferens-pass; feil boksing/unboxing bryt paritet.
+    - Hashtabell i ordbøker (i dag lineære oppslag), typesjekk med tal i staden for tekst, og `ncb_call_fn` med tabelloppslag i staden for lineær metodenamn-samanlikning.
+  - Tekstfunksjonane lagar framleis eitt utsnitt per byteposisjon; handteraren sjekkar typar med tekstsamanlikning; `ncb_call_fn` samanliknar metodenamn lineært; ordbøker har lineære oppslag.
+- **CI og Chrome (W11):** dei headless-Chrome-e2e-stega i WASM-/synk-testane er ikkje-deterministiske under last på CI-lauparane (verkeleg tid mot `--virtual-time-budget`, service-worker-livssyklus, `nc serve` med éi tilkopling om gongen). Ulike testar feila kvar køyring fordi GitHub-lauparane har Chrome førehandsinstallert og testane oppdaga han av seg sjølv. `std/wasm_nettlesar.no::finn_chrome` hoppar difor over auto-oppdaga Chrome på CI (`NC_CI`/`NC_TEST_CI_VERT`), og testane tek si vanlege «SKIP Chrome»-grein: bygg-, serve- og strukturvalideringa (inkl. lastarbudsjett) køyrer framleis, og korpus-paritet mot JavaScriptCore (`jsc`) køyrer framleis på macOS-lauparen. Chrome-e2e er framleis køyrbar overalt — òg på CI — ved å setje `NC_CHROME=<sti>`; utviklaren har køyrt heile Chrome-korpuset lokalt (Chrome 154). `tests/test_wasm_flate.no` er ein ratchet mot committa `.js`/`.wasm`/`.png` og mot at lastarbudsjetta blir heva.
 - **Validator:** subtyping mellom ulike typeindeksar og legacy-unnatak er ikkje støtta.
