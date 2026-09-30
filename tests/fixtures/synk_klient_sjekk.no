@@ -11,6 +11,7 @@ bruk std.apptenar som app
 bruk std.synk som synk
 bruk std.synk_klient som sk
 bruk tests.fixtures.synk_klient_hjelp som h
+bruk std.wasm_sw som sw
 
 # Informasjonskapsel → brukar. Testen kan la ein sesjon gå ut (fjerne han).
 la _sesjonar: ordbok = {}
@@ -18,6 +19,8 @@ la _sesjonar: ordbok = {}
 la _hol_neste: ordbok = {"på": usann}
 # Førespurnadene tenaren fekk: «METODE sti status»
 la _logg: liste = []
+# Svar frå /_synk/ som er sjekka mot regelen i service workeren (W8): aldri lagringsbare
+la _cc: ordbok = {"n": 0}
 
 funksjon synk_brukar(ctx: ordbok_tekst) -> ordbok_tekst {
     la t = app.cookie(ctx, "nc_sesjon")
@@ -95,6 +98,15 @@ funksjon tenar(f: ordbok, fane: ordbok) -> tekst {
         }
     }
     legg_til(_logg, fane["namn"] + " " + m + " " + sti + " " + tekst(d["status"]))
+    hvis builtin.starts_with(sti, "/_synk/") {
+        la cc = null
+        hvis har_nokkel(ut, "cache-control") { cc = ut["cache-control"] }
+        hvis ikkje sw.cache_control_forbyr(cc) {
+            skriv("FEIL " + m + " " + sti + " " + tekst(d["status"]) + ": Cache-Control " + tekst(cc) + " tillèt lagring\n")
+            assert(usann)
+        }
+        _cc["n"] = _cc["n"] + 1
+    }
     la body = ""
     hvis har_nokkel(d, "body") og d["body"] != null { body = tekst(d["body"]) }
     returner h.konvolutt(d["status"], ut, body)
@@ -158,6 +170,10 @@ funksjon start() -> heltall {
     krev("localStorage", e1["lokal"]["nc-synk-brukar"] != "", sann)
     sk.k_put(a["kl"], "oppg", "a2", {"tittel": "Ring Åse", "pri": 2})
     krev("db med køpost", h.dbar(e1), "1 db(ko=1)")
+    # Dokumentet og køposten i éin transaksjon (éin batch til IndexedDB)
+    la dbn = nøkler(e1["dbar"])[0]
+    krev("éin transaksjon: dok og ko", builtin.join(e1["dbar"][dbn]["siste_batch"], ","), "dok,ko")
+    krev("dok på eininga", h.dok_på_eininga(e1, "oppg/a2"), "{\"pri\":2,\"tittel\":\"Ring Åse\"}")
     # Fana blir lukka før pushen er svara (omlasting)
     h.lukk_fane(a)
     h.køyr(verd, 100)
@@ -307,7 +323,9 @@ funksjon start() -> heltall {
     h.køyr(verd, 1000)
     krev("f1 fekk t1 via kanalen og sende", h.vis(f1, "oppg"), h.vis(f2, "oppg"))
     krev("t1 synka", inneheld(h.vis(f1, "oppg"), "t1{tittel=Frå fane 2}]") eller inneheld(h.vis(f1, "oppg"), "t1{tittel=Frå fane 2} "), sann)
-    krev("berre leiaren pushar", tal_logg("POST /_synk/push") >= 1, sann)
+    krev("leiaren pusha", tal_logg("f1 POST /_synk/push") >= 1, sann)
+    krev("fylgjaren pusha ikkje", tal_logg("f2 POST /_synk/push"), 0)
+    krev("fylgjaren pulla ikkje", tal_logg("f2 GET /_synk/pull"), 0)
     sk.k_put(b["kl"], "oppg", "t2", {"tittel": "Frå eining 2"})
     h.køyr(verd, 70000)
     krev("f2 fekk t2 via leiaren", inneheld(h.vis(f2, "oppg"), "t2{tittel=Frå eining 2}"), sann)
@@ -402,6 +420,34 @@ funksjon start() -> heltall {
     krev("304 kvar gong", tal_logg("pf GET /_synk/pull 304"), 4)
     skriv("polling: den første tomme pullen gav ETag-en, og dei neste fire gav 304 (If-None-Match)\n")
 
+    # ── 17. SSE: brot → polling og gjenoppkopling med backoff; ei hending gjev pull ──
+    la s = h.ny_fane(verd, "s", sk.test_eining(), "t-u1", {"poll_ms": 4000})
+    h.start_fane(verd, s)
+    h.køyr(verd, 1000)
+    krev("sse open", sk.k_intern(s["kl"])["sse_open"], sann)
+    krev("ingen polling med SSE", sk.k_intern(s["kl"])["neste_poll"], 0)
+    verd["offline"] = sann
+    h.sse_brot(verd)
+    la t0 = verd["no"]
+    krev("sse lukka", sk.k_intern(s["kl"])["sse_open"], usann)
+    krev("gjenoppkopling etter 1 s", sk.k_intern(s["kl"])["sse_neste"] - t0, 1000)
+    krev("polling medan SSE er nede", sk.k_intern(s["kl"])["neste_poll"] - t0, 4000)
+    h.køyr(verd, 1500)
+    # Straumen kom opp att (testbenken seier ikkje ifrå om at han feilar), og brot igjen: dobbel ventetid
+    h.sse_brot(verd)
+    krev("backoff dobla", sk.k_intern(s["kl"])["sse_neste"] - verd["no"], 2000)
+    verd["offline"] = usann
+    h.køyr(verd, 5000)
+    krev("sse open att", sk.k_intern(s["kl"])["sse_open"], sann)
+    krev("backoff nullstilt ved hending", sk.k_intern(s["kl"])["sse_feil_n"] >= 0, sann)
+    _logg = []
+    sk.k_put(b["kl"], "oppg", "sse1", {"tittel": "Via SSE"})
+    h.køyr(verd, 100)
+    krev("hendinga gav pull", inneheld(h.vis(s, "oppg"), "sse1{tittel=Via SSE}"), sann)
+    krev("pull frå s", tal_logg("s GET /_synk/pull 200") >= 1, sann)
+    krev("sse nullstilt", sk.k_intern(s["kl"])["sse_feil_n"], 0)
+    skriv("SSE: brot gav polling og gjenoppkopling etter 1 s og så 2 s (backoff); ei hending frå ei anna eining gav pull med ein gong\n")
+
     # ── 16. Sletting (tombstone) når fram ──
     sk.k_del(b["kl"], "oppg", "h1")
     krev("sletta straks", inneheld(h.vis(b, "oppg"), "h1{"), usann)
@@ -410,6 +456,7 @@ funksjon start() -> heltall {
     krev("h2 framleis", inneheld(h.vis(pf, "oppg"), "h2{"), sann)
     skriv("sletting: h1 borte hjå b straks og hjå pf etter neste polling\n")
 
+    skriv("cache: alle " + tekst(_cc["n"]) + " svara frå /_synk/ hadde Cache-Control som service workeren aldri lagrar (no-store eller private)\n")
     skriv("synk_klient_sjekk OK\n")
     returner 0
 }

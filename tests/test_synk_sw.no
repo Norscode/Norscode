@@ -1,0 +1,104 @@
+# W9: synk går aldri via cachen til service workeren (W8-reglane i std/wasm_sw.no og
+# std/wasm_pwa.no), for demoen examples/wasm_synk/app.no og for ein app som har gløymt å merkje
+# /_synk/ som privat. Svara frå den ekte tenaren (Cache-Control) er sjekka i
+# tests/fixtures/synk_klient_sjekk.no (test_synk_klient).
+#
+#   - fetch frå sida (hallo, pull, hendingar/SSE, push): planen er «forbi» (ingen respondWith,
+#     aldri lagra) også utan med_privat
+#   - ein navigasjon til /_synk/…: «berre» (berre nettet, aldri lagra, offline-sida utan nett)
+#   - svarmetadata frå NSP/1 (no-store, private, no-cache, 304) kan ikkje lagrast
+#   - app-skal og offline-ruter kan ikkje liggje under /_synk/ (PwaFeil)
+#   - positiv kontroll: app-skalet «/» er nett-først med lagring, og app.wasm?v= er cache først
+bruk std.wasm_sw som sw
+bruk std.wasm_pwa som pwa
+bruk examples.wasm_synk.app som demo
+
+funksjon opphav() -> tekst { returner "http://127.0.0.1:8080" }
+
+funksjon info() -> ordbok {
+    returner {"klient_v": "0123456789ab", "lastar": "(lastar)", "sw_v": "ba9876543210", "sw_lastar": "", "prefiks": "/_nc/"}
+}
+
+funksjon plan(k: ordbok, metode: tekst, sti: tekst, modus: tekst) -> ordbok {
+    returner sw.rute(k, {"m": metode, "u": opphav() + sti, "n": modus, "o": opphav()})
+}
+
+funksjon synk_førespurnader() -> liste {
+    returner [["GET", "/_synk/hallo", "cors"], ["GET", "/_synk/pull?sidan=0&grense=500", "cors"],
+              ["GET", "/_synk/pull?sidan=7&grense=500", "same-origin"], ["GET", "/_synk/hendingar", "cors"],
+              ["POST", "/_synk/push", "cors"], ["HEAD", "/_synk/pull", "cors"]]
+}
+
+funksjon krev_aldri_cache(namn: tekst, k: ordbok) -> heltall {
+    la f = synk_førespurnader()
+    la i = 0
+    mens i < lengde(f) {
+        la p = plan(k, f[i][0], f[i][1], f[i][2])
+        hvis p["k"] != "forbi" eller p["l"] {
+            skriv(namn + ": " + f[i][0] + " " + f[i][1] + " gav planen " + builtin.json_stringify(p) + "\n")
+            assert(usann)
+        }
+        i = i + 1
+    }
+    # Navigasjon (t.d. nokon opnar /_synk/pull i ei fane): berre nettet, aldri lagra
+    la nav = plan(k, "GET", "/_synk/pull?sidan=0", "navigate")
+    assert_eq(nav["k"], "berre")
+    assert(ikkje nav["l"])
+    assert_eq(nav["o"], pwa.offline_sti())
+    returner 0
+}
+
+funksjon start() -> heltall {
+    la k = pwa.sw_konfig(demo.pwa_konfig(), info())
+    assert_eq(sw.valider_konfig(k), "")
+    krev_aldri_cache("demoen", k)
+    # Positiv kontroll: reglane skil (skalet er nett-først og lagrast, modulen er cache først)
+    la skal = plan(k, "GET", "/", "navigate")
+    assert_eq(skal["k"], "nett")
+    assert(skal["l"])
+    la modul = plan(k, "GET", "/_nc/app.wasm?v=0123456789ab", "cors")
+    assert_eq(modul["k"], "cache")
+    skriv("demoen: hallo, pull, hendingar, push og HEAD går forbi workeren, navigasjon til /_synk/ er berre nett; skalet og modulen blir cacha\n")
+
+    # Ein app som har gløymt med_privat("/_synk/"): reglane gjev same resultat
+    la utan = pwa.konfig("Utan", "Utan")
+    pwa.med_skal(utan, "/", "<!doctype html><title>Utan</title>")
+    la k2 = pwa.sw_konfig(utan, info())
+    assert(ikkje sw.er_privat(k2, "/_synk/pull"))
+    krev_aldri_cache("utan med_privat", k2)
+    skriv("utan med_privat(\"/_synk/\"): framleis forbi og aldri lagra\n")
+
+    # Svara frå NSP/1 kan ikkje lagrast (Cache-Control), heller ikkje 304
+    la meta = [{"s": 200, "t": "basic", "r": usann, "c": "no-store"},
+               {"s": 200, "t": "basic", "r": usann, "c": "private, no-cache"},
+               {"s": 304, "t": "basic", "r": usann, "c": "private, no-cache"},
+               {"s": 409, "t": "basic", "r": usann, "c": "no-store"}]
+    la i = 0
+    mens i < lengde(meta) {
+        hvis sw.kan_lagre(meta[i]) {
+            skriv("svarmetadata " + builtin.json_stringify(meta[i]) + " vart rekna som lagringsbart\n")
+            assert(usann)
+        }
+        i = i + 1
+    }
+    assert(sw.kan_lagre({"s": 200, "t": "basic", "r": usann, "c": "no-cache"}))
+    skriv("NSP/1-svar (no-store, private, 304, 409) blir aldri lagra; eit vanleg no-cache-svar kan lagrast (kontroll)\n")
+
+    # App-skal og offline-ruter under /_synk/ blir avviste
+    la feil_k = pwa.konfig("Feil", "Feil")
+    pwa.med_skal(feil_k, "/", "<!doctype html><title>F</title>")
+    pwa.med_offline_rute(feil_k, "/_synk/pull", "{}")
+    la f = builtin.join(pwa.valider(feil_k), "; ")
+    assert(builtin.index_of(f, "NSP/1-rute") >= 0)
+    la kasta = usann
+    prøv {
+        pwa.krev_gyldig(feil_k)
+    } fang (e) {
+        kasta = builtin.starts_with(tekst(e), "PwaFeil:")
+    }
+    assert(kasta)
+    assert_eq(lengde(pwa.valider(demo.pwa_konfig())), 0)
+    skriv("/_synk/ som offline-rute: PwaFeil («" + f + "»)\n")
+    skriv("test_synk_sw OK\n")
+    returner 0
+}
