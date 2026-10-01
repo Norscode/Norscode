@@ -1,0 +1,154 @@
+# Fase 1 (bølgje 2, 1.4) for std/apptenar.no: CORS (allowlist, ingen spegling, preflight),
+# TrustedHost, tryggleiksheaderar på HTML, request-id-propagering og rate limiting
+# (token-bucket per klient, slepp opp etter vindauget). Dogfoodar std/apptest.no.
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.apptest som tk
+
+# ─── Handlarar ───────────────────────────────────────────────────────────────
+
+funksjon h_api(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /api")
+    returner {"ok": sann}
+}
+
+funksjon h_api_post(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /api")
+    returner {"status": 201, "body": "laga"}
+}
+
+funksjon h_side(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /side")
+    returner {"content_type": "text/html; charset=utf-8", "body": "<p>hei</p>"}
+}
+
+funksjon h_json(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /j")
+    returner {"content_type": "application/json; charset=utf-8", "body": "{}"}
+}
+
+# ─── 1.4 CORS ────────────────────────────────────────────────────────────────
+
+funksjon _cors_konf() -> ordbok {
+    returner {"logg": "ingen", "cors": {"origins": ["https://god.eksempel"],
+             "metodar": ["GET", "POST"], "headerar": ["content-type", "authorization"],
+             "credentials": sann, "maks_alder": 600}}
+}
+
+funksjon test_cors_preflight_allowlist() -> heltall {
+    la kl = tk.klient(_cors_konf())
+    la r = tk.options(kl, "/api", {"headerar": {"Origin": "https://god.eksempel",
+           "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}})
+    assert_eq(tk.status(r), 204)
+    assert_eq(tk.header(r, "access-control-allow-origin"), "https://god.eksempel")
+    assert_eq(tk.header(r, "access-control-allow-credentials"), "true")
+    assert_eq(tk.header(r, "access-control-allow-methods"), "GET, POST")
+    assert_eq(tk.header(r, "access-control-allow-headers"), "content-type, authorization")
+    assert_eq(tk.header(r, "access-control-max-age"), "600")
+    assert(builtin.index_of(tk.header(r, "vary"), "Origin") >= 0)
+    skriv("1.4 CORS preflight: allowlista origin får ACAO + metodar + headerar + max-age\n")
+    returner 0
+}
+
+funksjon test_cors_ingen_spegling() -> heltall {
+    la kl = tk.klient(_cors_konf())
+    # Ukjend origin: preflight svarar 204 UTAN Access-Control-*-headerar (ingen spegling).
+    la r = tk.options(kl, "/api", {"headerar": {"Origin": "https://vond.eksempel",
+           "Access-Control-Request-Method": "POST"}})
+    assert_eq(tk.status(r), 204)
+    assert_eq(tk.header(r, "access-control-allow-origin"), "")
+    # Ekte svar med vilkårleg origin: ingen ACAO (speglar ALDRI).
+    la a = tk.get(kl, "/api", {"headerar": {"Origin": "https://vond.eksempel"}})
+    assert_eq(tk.header(a, "access-control-allow-origin"), "")
+    skriv("1.4 CORS: ukjend origin blir ALDRI spegla (preflight og ekte svar)\n")
+    returner 0
+}
+
+funksjon test_cors_ekte_svar() -> heltall {
+    la kl = tk.klient(_cors_konf())
+    la a = tk.get(kl, "/api", {"headerar": {"Origin": "https://god.eksempel"}})
+    assert_eq(tk.status(a), 200)
+    assert_eq(tk.header(a, "access-control-allow-origin"), "https://god.eksempel")
+    assert_eq(tk.header(a, "access-control-allow-credentials"), "true")
+    assert(builtin.index_of(tk.header(a, "vary"), "Origin") >= 0)
+    skriv("1.4 CORS ekte svar: ACAO = allowlista origin (ikkje *), med Vary: Origin\n")
+    returner 0
+}
+
+# ─── 1.4 TrustedHost ─────────────────────────────────────────────────────────
+
+funksjon test_trusted_host() -> heltall {
+    la kl = tk.klient({"logg": "ingen", "trusted_hosts": ["app.eksempel", "*.eksempel"]})
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": {"Host": "app.eksempel"}})), 200)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": {"Host": "api.eksempel"}})), 200)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": {"Host": "ukjend.no"}})), 400)
+    skriv("1.4 TrustedHost: eksakt og *.domene slepp gjennom, ukjend Host gjev 400\n")
+    returner 0
+}
+
+# ─── 1.4 Tryggleiksheaderar på HTML ──────────────────────────────────────────
+
+funksjon test_tryggleik_html() -> heltall {
+    la kl = tk.klient({"logg": "ingen", "tryggleik_html": sann})
+    la h = tk.get(kl, "/side", {})
+    assert_eq(tk.status(h), 200)
+    assert_eq(tk.header(h, "x-content-type-options"), "nosniff")
+    assert(builtin.index_of(tk.header(h, "content-security-policy"), "default-src") >= 0)
+    assert_eq(tk.header(h, "referrer-policy"), "no-referrer")
+    # JSON-svar får IKKJE tryggleiksheaderane (berre HTML).
+    la j = tk.get(kl, "/j", {})
+    assert_eq(tk.header(j, "x-content-type-options"), "")
+    skriv("1.4 tryggleik: nosniff + CSP + referrer-policy på HTML, ikkje på JSON\n")
+    returner 0
+}
+
+# ─── 1.4 Request-id ──────────────────────────────────────────────────────────
+
+funksjon test_request_id() -> heltall {
+    la kl = tk.klient({"logg": "ingen", "request_id": sann})
+    # Propagering: klienten sin X-Request-ID går att i svaret.
+    la r = tk.get(kl, "/api", {"headerar": {"X-Request-ID": "abc-123"}})
+    assert_eq(tk.header(r, "x-request-id"), "abc-123")
+    # Utan: tenaren genererer ein (ikkje tom).
+    la g = tk.get(kl, "/api", {})
+    assert(tk.header(g, "x-request-id") != "")
+    skriv("1.4 request-id: propagert når sendt, generert elles\n")
+    returner 0
+}
+
+# ─── 1.4 Rate limiting (token-bucket per klient) ─────────────────────────────
+
+funksjon _vent_ms(n: heltall) -> heltall {
+    la start = builtin.tid_ms()
+    mens builtin.tid_ms() - start < n { }
+    returner 0
+}
+
+# Vindauge/maks må vere godt over per-kall-overheaden (~20 ms for ein handsam_rå), elles
+# fyllest bøtta att mellom kalla. Burst: maks 3 på 6 s → vindauge/maks = 2 s >> overhead.
+funksjon test_rate_burst_og_per_klient() -> heltall {
+    la kl = tk.klient({"logg": "ingen", "rate": {"maks": 3, "vindauge_ms": 6000}})
+    la ip1 = {"X-Forwarded-For": "1.1.1.1"}
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 200)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 200)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 200)
+    la fjerde = tk.get(kl, "/api", {"headerar": ip1})
+    assert_eq(tk.status(fjerde), 429)
+    assert(tk.header(fjerde, "retry-after") != "")
+    # Per klient: ein annan IP har eiga bøtte.
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": {"X-Forwarded-For": "2.2.2.2"}})), 200)
+    skriv("1.4 rate: token-bucket gjev burst (3), 4. gjev 429 + Retry-After, eiga bøtte per IP\n")
+    returner 0
+}
+
+# Slepp opp: maks 1 på 1,5 s. 1 ok, neste 429, så fyllest bøtta att etter vindauget.
+funksjon test_rate_slepp_opp() -> heltall {
+    la kl = tk.klient({"logg": "ingen", "rate": {"maks": 1, "vindauge_ms": 1500}})
+    la ip1 = {"X-Forwarded-For": "9.9.9.9"}
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 200)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 429)
+    _vent_ms(1700)
+    assert_eq(tk.status(tk.get(kl, "/api", {"headerar": ip1})), 200)
+    skriv("1.4 rate: bøtta fyllest att og slepp opp etter vindauget\n")
+    returner 0
+}

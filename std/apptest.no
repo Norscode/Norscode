@@ -1,0 +1,275 @@
+# apptest.no — in-process testklient for apptenar-appar (Fase 1, 1.5)
+#
+# Som FastAPI sin TestClient: køyrer førespurnader mot apptenaren sin dispatch/handsam_rå
+# UTAN socket. get/post/put/delete/patch med json=, data= (skjema), files= (multipart),
+# eigne headerar, ein cookie-jar som held cookies mellom kall, og lifespan (oppstart/
+# nedstenging). Svaret har status, headerar og json()/tekst() (som hjelpefunksjonar).
+#
+# NB: ikkje std/testklient.no (prosjekt-test-køyraren frå #212). Denne er app-testklienten.
+#
+# Bruk:
+#   bruk std.apptest som test
+#   funksjon test_noko() -> heltall {
+#       la kl = test.klient({"logg": "ingen"})
+#       la r = test.post(kl, "/api", {"json": {"namn": "a"}})
+#       assert_eq(test.status(r), 201)
+#       assert_eq(test.json(r)["id"], 1)
+#       returner 0
+#   }
+
+bruk std.apptenar som _app
+bruk std.apptenar_serde som _serde
+
+# ─── Klient og lifespan ──────────────────────────────────────────────────────
+
+# Lag ein klient og nullstill apptenar-tilstanden med `konf` (same nøklar som app.lytt).
+funksjon klient(konf: ordbok) -> ordbok {
+    _app.nullstill(konf)
+    returner {"cookies": {}, "headerar": {}, "konf": konf}
+}
+
+funksjon _full(namn: tekst) -> tekst {
+    hvis builtin.index_of(namn, ".") >= 0 { returner namn }
+    returner "__main__." + namn
+}
+
+funksjon _arity(fn: tekst) -> heltall {
+    la info = builtin.vm_function_info(fn)
+    hvis tekst(info["finnes"]) != "sann" { returner -1 }
+    returner heltall_fra_tekst(tekst(info["param_count"]))
+}
+
+# Kall ein lifespan-funksjon: 0 argument, eller klienten om han tek eitt.
+funksjon _kall_lifespan(kl: ordbok, fn_namn: tekst) {
+    la fn = _full(fn_namn)
+    la pc = _arity(fn)
+    hvis pc <= 0 { returner builtin.ncb_call_fn(fn) }
+    returner builtin.ncb_call_fn(fn, kl)
+}
+
+# Oppstart (lifespan): kall oppstartsfunksjonen. Returner resultatet.
+funksjon oppstart(kl: ordbok, fn_namn: tekst) {
+    returner _kall_lifespan(kl, fn_namn)
+}
+
+# Nedstenging (lifespan): kall nedstengingsfunksjonen. Returner resultatet.
+funksjon nedstenging(kl: ordbok, fn_namn: tekst) {
+    returner _kall_lifespan(kl, fn_namn)
+}
+
+# Legg til eit fast headerpar på alle vidare førespurnader.
+funksjon sett_header(kl: ordbok, namn: tekst, verdi: tekst) -> heltall {
+    kl["headerar"][namn] = verdi
+    returner 0
+}
+
+# ─── Koding ──────────────────────────────────────────────────────────────────
+
+funksjon _hex2(c: heltall) -> tekst {
+    la d = "0123456789ABCDEF"
+    returner builtin.slice(d, c / 16, c / 16 + 1) + builtin.slice(d, c % 16, c % 16 + 1)
+}
+
+funksjon _url_enc(s: tekst) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        la c = builtin.char_code(ch)
+        la unres = (c >= 48 og c <= 57) eller (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller ch == "-" eller ch == "_" eller ch == "." eller ch == "~"
+        hvis unres { ut = ut + ch } ellers { ut = ut + "%" + _hex2(c) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _form_enc(d: ordbok) -> tekst {
+    la ks = nøkler(d)
+    la ut = ""
+    la i = 0
+    mens i < lengde(ks) {
+        hvis i > 0 { ut = ut + "&" }
+        ut = ut + _url_enc(tekst(ks[i])) + "=" + _url_enc(tekst(d[ks[i]]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _query_streng(d: ordbok) -> tekst {
+    la q = _form_enc(d)
+    hvis q == "" { returner "" }
+    returner "?" + q
+}
+
+# ─── Multipart ───────────────────────────────────────────────────────────────
+
+funksjon _boundary() -> tekst {
+    returner "----nctestboundary" + tekst(builtin.tid_ms())
+}
+
+# Bygg ein multipart/form-data-kropp av skjemafelt (data) og filer. Kvar fil er
+# {"felt", "filnamn", "innhald", "type"(valfri)}.
+funksjon _multipart(boundary: tekst, data: ordbok, files: liste) -> tekst {
+    la ut = ""
+    hvis data != null og builtin.type(data) == "ordbok" {
+        la ks = nøkler(data)
+        la i = 0
+        mens i < lengde(ks) {
+            ut = ut + "--" + boundary + "\r\n"
+            ut = ut + "Content-Disposition: form-data; name=\"" + tekst(ks[i]) + "\"\r\n\r\n"
+            ut = ut + tekst(data[ks[i]]) + "\r\n"
+            i = i + 1
+        }
+    }
+    hvis files != null og builtin.type(files) == "liste" {
+        la j = 0
+        mens j < lengde(files) {
+            la f = files[j]
+            la felt = tekst(f["felt"])
+            la filnamn = tekst(f["filnamn"])
+            la ct = "application/octet-stream"
+            hvis har_nokkel(f, "type") og tekst(f["type"]) != "" { ct = tekst(f["type"]) }
+            ut = ut + "--" + boundary + "\r\n"
+            ut = ut + "Content-Disposition: form-data; name=\"" + felt + "\"; filename=\"" + filnamn + "\"\r\n"
+            ut = ut + "Content-Type: " + ct + "\r\n\r\n"
+            ut = ut + tekst(f["innhald"]) + "\r\n"
+            j = j + 1
+        }
+    }
+    ut = ut + "--" + boundary + "--\r\n"
+    returner ut
+}
+
+# ─── Cookie-jar ──────────────────────────────────────────────────────────────
+
+funksjon _cookie_header(kl: ordbok) -> tekst {
+    la jar = kl["cookies"]
+    la ks = nøkler(jar)
+    hvis lengde(ks) == 0 { returner "" }
+    la delar = []
+    la i = 0
+    mens i < lengde(ks) { legg_til(delar, tekst(ks[i]) + "=" + tekst(jar[ks[i]]))  i = i + 1 }
+    returner builtin.join(delar, "; ")
+}
+
+# Oppdater jar frå Set-Cookie (namn=verdi før første ';').
+funksjon _oppdater_cookies(kl: ordbok, h: ordbok) -> heltall {
+    hvis ikkje har_nokkel(h, "set-cookie") { returner 0 }
+    la sc = tekst(h["set-cookie"])
+    la semi = builtin.index_of(sc, ";")
+    la par = sc
+    hvis semi >= 0 { par = builtin.slice(sc, 0, semi) }
+    la eq = builtin.index_of(par, "=")
+    hvis eq > 0 {
+        la namn = builtin.trim(builtin.slice(par, 0, eq))
+        la verdi = builtin.trim(builtin.slice(par, eq + 1, lengde(par)))
+        kl["cookies"][namn] = verdi
+    }
+    returner 0
+}
+
+# ─── Førespurnad ─────────────────────────────────────────────────────────────
+
+funksjon _parse(rå: tekst) -> ordbok {
+    hvis ikkje builtin.starts_with(rå, "HTTP/") {
+        returner {"status": 0, "headers": {}, "body": rå, "rå": rå}
+    }
+    la slutt = builtin.index_of(rå, "\r\n\r\n")
+    la hoved = builtin.slice(rå, 0, slutt)
+    la linjer = builtin.split(hoved, "\r\n")
+    la status = heltall_fra_tekst(builtin.split(linjer[0], " ")[1])
+    la h = {}
+    la i = 1
+    mens i < lengde(linjer) {
+        la k = builtin.index_of(linjer[i], ":")
+        hvis k > 0 {
+            la namn = builtin.lower(builtin.trim(builtin.slice(linjer[i], 0, k)))
+            la verdi = builtin.trim(builtin.slice(linjer[i], k + 1, lengde(linjer[i])))
+            h[namn] = verdi
+        }
+        i = i + 1
+    }
+    returner {"status": status, "headers": h, "body": builtin.slice(rå, slutt + 4, lengde(rå)), "rå": rå}
+}
+
+# Køyr éin førespurnad. `opp` kan ha: json, data, files, headerar, query.
+funksjon forespurnad(kl: ordbok, metode: tekst, sti: tekst, opp: ordbok) -> ordbok {
+    hvis opp == null { opp = {} }
+    la full_sti = sti
+    hvis har_nokkel(opp, "query") og builtin.type(opp["query"]) == "ordbok" {
+        full_sti = sti + _query_streng(opp["query"])
+    }
+    # Kropp og Content-Type
+    la body = ""
+    la ct = ""
+    hvis har_nokkel(opp, "files") og opp["files"] != null {
+        la b = _boundary()
+        la data = {}
+        hvis har_nokkel(opp, "data") og builtin.type(opp["data"]) == "ordbok" { data = opp["data"] }
+        body = _multipart(b, data, opp["files"])
+        ct = "multipart/form-data; boundary=" + b
+    } ellers hvis har_nokkel(opp, "json") {
+        body = _serde.til_json(opp["json"])
+        ct = "application/json"
+    } ellers hvis har_nokkel(opp, "data") og builtin.type(opp["data"]) == "ordbok" {
+        body = _form_enc(opp["data"])
+        ct = "application/x-www-form-urlencoded"
+    }
+    # Slå saman faste klient-headerar og per-kall-headerar (per-kall vinn). Host blir
+    # handsama særskilt (ein klient kan overstyre han, t.d. for TrustedHost-testar).
+    la alle = {}
+    la faste = kl["headerar"]
+    la fk = nøkler(faste)
+    la fi = 0
+    mens fi < lengde(fk) { alle[tekst(fk[fi])] = tekst(faste[fk[fi]])  fi = fi + 1 }
+    hvis har_nokkel(opp, "headerar") og builtin.type(opp["headerar"]) == "ordbok" {
+        la eh = opp["headerar"]
+        la ek = nøkler(eh)
+        la ei = 0
+        mens ei < lengde(ek) { alle[tekst(ek[ei])] = tekst(eh[ek[ei]])  ei = ei + 1 }
+    }
+    la host = "testserver"
+    la ak = nøkler(alle)
+    la ai = 0
+    mens ai < lengde(ak) {
+        hvis builtin.lower(tekst(ak[ai])) == "host" { host = tekst(alle[ak[ai]]) }
+        ai = ai + 1
+    }
+    # Headerlinjer
+    la linjer = [builtin.upper(metode) + " " + full_sti + " HTTP/1.1", "Host: " + host]
+    hvis ct != "" { legg_til(linjer, "Content-Type: " + ct) }
+    la ck = _cookie_header(kl)
+    hvis ck != "" { legg_til(linjer, "Cookie: " + ck) }
+    la ai2 = 0
+    mens ai2 < lengde(ak) {
+        hvis builtin.lower(tekst(ak[ai2])) != "host" { legg_til(linjer, tekst(ak[ai2]) + ": " + tekst(alle[ak[ai2]])) }
+        ai2 = ai2 + 1
+    }
+    legg_til(linjer, "Content-Length: " + tekst(lengde(body)))
+    la rå = builtin.join(linjer, "\r\n") + "\r\n\r\n" + body
+    la svar_rå = _app.handsam_rå(rå)
+    la res = _parse(svar_rå)
+    _oppdater_cookies(kl, res["headers"])
+    returner res
+}
+
+funksjon get(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "GET", sti, opp) }
+funksjon post(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "POST", sti, opp) }
+funksjon put(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "PUT", sti, opp) }
+funksjon delete(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "DELETE", sti, opp) }
+funksjon patch(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "PATCH", sti, opp) }
+funksjon head(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "HEAD", sti, opp) }
+funksjon options(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok { returner forespurnad(kl, "OPTIONS", sti, opp) }
+
+# ─── Svar-hjelparar ──────────────────────────────────────────────────────────
+
+funksjon status(res: ordbok) -> heltall { returner res["status"] }
+funksjon body_tekst(res: ordbok) -> tekst { returner tekst(res["body"]) }
+funksjon json(res: ordbok) { returner builtin.json_parse(res["body"]) }
+
+funksjon header(res: ordbok, namn: tekst) -> tekst {
+    la h = res["headers"]
+    la l = builtin.lower(namn)
+    hvis har_nokkel(h, l) { returner tekst(h[l]) }
+    returner ""
+}
