@@ -82,11 +82,38 @@ Socketane er `std.socket` sine `native_*` og `network_operation`-forma deira (br
 Same kontrakt som `nc serve` (planen §2): toppnøklane `status`, `body`, `content_type`, `etag` (og dei andre toppnøklane `http_response.no` kjenner, t.d. `cache_control`, `location`), og alle andre headerar i `headers`. Apptenaren serialiserer sjølv (same tabell over toppnøklar som `selfhost/http_response.no`), fordi `http_response.response_to_http` tolka i VM-en kosta 3 ms per svar; eigen serialisering kostar 0,3 ms.
 
 - Ein handlar som returnerer tekst, gjev 200 `text/plain; charset=utf-8`; tom tekst og `null` gjev 204.
+- Ein handlar som returnerer ei **ordbok, liste eller struktur** (utan respons-nøklar) blir serialisert automatisk til JSON med `application/json; charset=utf-8` (Fase 1, sjå «Fase 1: produksjonsveg» under). Ei ferdig respons-ordbok (med `status`/`body`/`headers`/`content_type`/…) verkar som før.
 - Standard Content-Type blir sett før serialiseringa, så GET og HEAD har same Content-Type og Content-Length.
 - CR, LF eller NUL i eit headernamn eller ein headerverdi gjev 500 (ingen headerinjeksjon).
 - `Connection`, `Keep-Alive`, `Transfer-Encoding`, `Content-Length` og `Date` eig tenaren; handlaren sine blir ignorerte.
 - 304 kjem berre frå 200-svar på GET og HEAD. If-None-Match blir samanlikna svakt (`W/` blir fjerna på begge sider), lister blir delte på komma, og `*` passar når svaret har ein ETag. If-Modified-Since krev nøyaktig lik `last_modified` (som `nc serve`). 304-svaret har ETag, Cache-Control, Vary, Content-Location, Expires og Last-Modified. If-Match er ikkje støtta.
 - Apptenaren legg aldri til CORS-headerar.
+
+### Fase 1: produksjonsveg (auto-JSON, feil→status, DI, bakgrunn)
+
+Fase 1 gjer apptenaren FastAPI-liknande. Alt er rein Norscode utanfor `nc_main`-lukkinga: `std/apptenar_serde.no` (serialisering) og `std/apptenar_di.no` (dependency injection). Ingen reseed.
+
+**1.1 Automatisk JSON.** Ein handlar som returnerer ei ordbok, ei liste eller ein struktur (utan respons-nøklar) blir serialisert til JSON med `application/json; charset=utf-8`:
+- interne nøklar som byrjar på `__` (t.d. `__type__` frå ein struktur) blir fjerna, rekursivt;
+- dato/datotid/tidspunkt (ordbøker med nøkkelen `type`) blir ISO-8601;
+- bytes blir base64;
+- ein desimal (fast-punkt) er på VM-nivå berre ei liste `[mantisse, skala]` og kan ikkje skiljast frå ei vanleg liste, så pakk han inn med `app.json_desimal(d)` (rett desimaltal) — og legg rå, ferdig JSON inn med `app.json_rå(tekst)`. Desse to er i `std/apptenar_serde.no`.
+
+**1.1 Feil → status.** Eit kast frå ein handlar (eller ei vakt) blir mappa:
+- `app.http_feil(status, detalj)` / `app.http_feil_med_headers(status, detalj, headers)` → den statusen med JSON-kropp `{"detail": detalj}`;
+- `app.valideringsfeil(melding)` (eller eit kast av ein tekst som byrjar på `ValideringsFeil:`) → 422 i Fase-0-formatet `{"detail":[{type,loc,msg,input}]}` (`web.valideringsfeil_*`);
+- alt anna → 500 «Intern feil» (teksten berre i loggen).
+
+**1.2 Dependency injection.** Namngjeven avhengnadsgraf, same som `web.use_dependency`/`web.dependency`, men no verksam under apptenar (før berre i `web.handle_request`):
+- deps blir cacha per førespurnad (same dep kalla éin gong), også når fleire deps deler ein sub-dep;
+- yield-kontrakt: ein provider som returnerer `{"verdi": v, "rydd": "<fn>"}` gjev `v` til handlaren, og `<fn>` blir kalla (0 eller 1 parameter: verdien) etter svaret, i OMVEND rekkjefølgje;
+- `app.overstyr_avhengigheit(namn, fn)` / `app.fjern_overstyringar()` for test; `app.registrer_avhengigheit(namn, fn)` og `app.registrer_avhengigheit_graf(namn, fn, deps)` for programmatisk graf;
+- globale deps (konfig `globale_deps`) og deps per rute-prefiks (konfig `prefiks_deps`, t.d. `{"/admin": ["krev_admin"]}`) køyrer for sideeffekt (auth, logging) og blir ikkje sende til handlaren.
+- **Aritetskontroll:** talet på parametrar blir sjekka (`vm_function_info`) FØR `builtin.ncb_call_fn` for handlarar, deps, vakter og mellomvare. Ein handlar/dep med feil tal parametrar gjev no ein fangbar feil (500/mappa), ikkje SIGSEGV.
+
+**1.3 Vakter og mellomvare.** Ei vakt kan returnere eit eige svar (t.d. `{"status": 401, "headers": {"www-authenticate": "Bearer"}}`) som kortsluttar; `usann` gjev framleis 403, og eit unntak blir mappa som over. Request-mellomvare kan kortslutte med eit svar (wrap) i tillegg til å sende `ctx` vidare; response-mellomvare køyrer på alle ruter (òg på kortslutta svar).
+
+**1.7 Bakgrunnsoppgåver.** `app.bakgrunn(fn_namn)` og `app.bakgrunn_arg(fn_namn, arg)` legg oppgåver i ein kø som køyrer ETTER at svaret er laga, i tenarløkka, utan trådar (deploy-malen gjev ikkje `thread.spawn`). Oppryddinga frå yield-deps køyrer på same punkt.
 
 ### Mellomvare
 

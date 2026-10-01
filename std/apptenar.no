@@ -34,6 +34,9 @@
 # ikkje tom (etter ein reseed), blir ho brukt.
 
 bruk std.socket som socket
+bruk std.web som _web
+bruk std.apptenar_serde som _serde
+bruk std.apptenar_di som _di
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
@@ -65,6 +68,8 @@ funksjon konfig_standard() -> ordbok {
         "respons_mw": [],
         "forespurnad_mw": [],
         "feil_mw": [],
+        "globale_deps": [],
+        "prefiks_deps": {},
         "logg": "feil",
         "klar_melding": sann
     }
@@ -375,6 +380,8 @@ funksjon _ruter() -> liste {
         la rh = []
         prøv { rh = ncb_route_handlers() } fang (e) { rh = [] }
         hvis rh == null { rh = [] }
+        # Dependency-providerar frå kompilator-metadata (namn -> fullt kvalifisert fn).
+        prøv { _di.sett_providarar(ncb_metadata("dependency_providers")) } fang (e) { }
         la ut = []
         la i = 0
         mens i < lengde(rh) {
@@ -390,11 +397,20 @@ funksjon _ruter() -> liste {
                         gi = gi + 1
                     }
                 }
+                la rute_deps = []
+                hvis har_nokkel(rh[i], "deps") og rh[i]["deps"] != null {
+                    la dd = rh[i]["deps"]
+                    la di2 = 0
+                    mens di2 < lengde(dd) {
+                        legg_til(rute_deps, tekst(dd[di2]))
+                        di2 = di2 + 1
+                    }
+                }
                 la seg = _segment(delar[1])
                 la har_param = builtin.index_of(delar[1], "{") >= 0
                 legg_til(ut, {"m": _liten(delar[0]), "M": builtin.upper(delar[0]), "mønster": delar[1],
                               "seg": seg, "n": lengde(seg), "param": har_param,
-                              "fn": _fullt_namn(tekst(rh[i]["function"])), "vakter": vakter, "spec": spec})
+                              "fn": _fullt_namn(tekst(rh[i]["function"])), "vakter": vakter, "deps": rute_deps, "spec": spec})
             }
             i = i + 1
         }
@@ -512,12 +528,18 @@ funksjon normaliser(svar) -> ordbok {
     hvis svar == null { returner {"status": 204, "body": ""} }
     la typ = builtin.type(svar)
     hvis typ != "ordbok" {
+        # Liste, struktur-liste og bytes → automatisk JSON (1.1); primitivar → text/plain.
+        hvis typ == "liste" eller typ == "bytes" {
+            returner {"status": 200, "content_type": "application/json; charset=utf-8", "body": _serde.til_json(svar)}
+        }
         la t = tekst(svar)
         hvis t == "" { returner {"status": 204, "body": ""} }
         returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": t}
     }
     hvis ikkje _er_svar(svar) {
-        returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": tekst(svar)}
+        # Data-ordbok eller struktur (ingen respons-nøklar) → automatisk JSON (1.1):
+        # interne nøklar ("__type__" m.m.) blir fjerna, dato/tid blir ISO-8601, bytes base64.
+        returner {"status": 200, "content_type": "application/json; charset=utf-8", "body": _serde.til_json(svar)}
     }
     la d = {}
     la ks = nøkler(svar)
@@ -725,11 +747,124 @@ funksjon _feil(status: heltall, body: tekst) -> ordbok {
               "headers": {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}}
 }
 
+# ─── Feil → status (1.1) ─────────────────────────────────────────────────────
+
+# Kast frå ein handlar: HTTPFeil(status, detalj) kortsluttar med status og JSON-kropp
+# {"detail": detalj}; ein tekst "ValideringsFeil: <melding>" gjev 422 med Fase-0-formatet
+# (web.valideringsfeil_*); alt anna gjev 500 «Intern feil» (teksten berre i loggen).
+funksjon http_feil(status: heltall, detalj: tekst) {
+    kast {"__httpfeil__": sann, "status": status, "detalj": detalj, "headers": {}}
+}
+
+funksjon http_feil_med_headers(status: heltall, detalj: tekst, headers: ordbok) {
+    kast {"__httpfeil__": sann, "status": status, "detalj": detalj, "headers": headers}
+}
+
+funksjon valideringsfeil(melding: tekst) {
+    kast "ValideringsFeil: " + melding
+}
+
+funksjon _feil_frå_unntak(e) -> ordbok {
+    hvis e != null og builtin.type(e) == "ordbok" og har_nokkel(e, "__httpfeil__") {
+        la st = 500
+        hvis har_nokkel(e, "status") {
+            la sv = e["status"]
+            hvis builtin.type(sv) == "heltall" { st = sv } ellers hvis _er_siffer(tekst(sv)) { st = heltall_fra_tekst(tekst(sv)) }
+        }
+        la detalj = ""
+        hvis har_nokkel(e, "detalj") { detalj = tekst(e["detalj"]) }
+        la d = {"status": st, "content_type": "application/json; charset=utf-8",
+                "body": "{\"detail\":" + builtin.json_stringify(detalj) + "}"}
+        hvis har_nokkel(e, "headers") og e["headers"] != null og builtin.type(e["headers"]) == "ordbok" og lengde(nøkler(e["headers"])) > 0 {
+            d["headers"] = e["headers"]
+        }
+        returner d
+    }
+    la et = ""
+    hvis e != null og builtin.type(e) == "tekst" { et = e }
+    hvis builtin.starts_with(et, "ValideringsFeil:") {
+        la msg = builtin.trim(builtin.slice(et, 16, lengde(et)))
+        la post = _web.valideringsfeil_post("value_error", ["body"], msg, "")
+        returner {"status": 422, "content_type": "application/json; charset=utf-8",
+                  "body": _web.valideringsfeil_json([post])}
+    }
+    returner _feil(500, "Intern feil")
+}
+
+funksjon _er_ctx(r) -> bool {
+    returner har_nokkel(r, "__method__") eller har_nokkel(r, "__path__") eller har_nokkel(r, "__headers__") eller har_nokkel(r, "__query__") eller har_nokkel(r, "__body__") eller har_nokkel(r, "__params__")
+}
+
+# ─── Bakgrunnsoppgåver (1.7) ─────────────────────────────────────────────────
+
+# Legg til ei oppgåve som køyrer ETTER at svaret er sendt (i apptenar-løkka), utan trådar.
+funksjon bakgrunn(fn_namn: tekst) -> heltall {
+    hvis ikkje har_nokkel(_t, "bg") { _t["bg"] = [] }
+    legg_til(_t["bg"], {"fn": _fullt_namn(fn_namn), "har_arg": usann, "arg": null})
+    returner 0
+}
+
+funksjon bakgrunn_arg(fn_namn: tekst, arg) -> heltall {
+    hvis ikkje har_nokkel(_t, "bg") { _t["bg"] = [] }
+    legg_til(_t["bg"], {"fn": _fullt_namn(fn_namn), "har_arg": sann, "arg": arg})
+    returner 0
+}
+
+# Køyr oppryddinga (yield-deps, omvend rekkjefølgje) og bakgrunnsoppgåvene for den
+# førespurnaden som nett vart svara. Feil her tek ikkje ned tenaren.
+funksjon _etter_svar() -> heltall {
+    prøv { _di.ferdig() } fang (e) { _logg("feil", "opprydding kasta: " + tekst(e)) }
+    hvis har_nokkel(_t, "bg") og lengde(_t["bg"]) > 0 {
+        la kø = _t["bg"]
+        _t["bg"] = []
+        la i = 0
+        mens i < lengde(kø) {
+            prøv {
+                la j = kø[i]
+                hvis j["har_arg"] { _di.kall(j["fn"], [j["arg"]]) } ellers { _di.kall(j["fn"], []) }
+            } fang (e) { _logg("feil", "bakgrunnsoppgåve kasta: " + tekst(e)) }
+            i = i + 1
+        }
+    }
+    returner 0
+}
+
+# Overstyr / registrer avhengnader (test og oppsett). Delegerer til apptenar_di.
+funksjon overstyr_avhengigheit(namn: tekst, fn: tekst) -> heltall { returner _di.overstyr(namn, _fullt_namn(fn)) }
+funksjon fjern_overstyringar() -> heltall { returner _di.fjern_overstyringar() }
+funksjon registrer_avhengigheit(namn: tekst, fn: tekst) -> heltall { returner _di.registrer(namn, _fullt_namn(fn)) }
+funksjon registrer_avhengigheit_graf(namn: tekst, fn: tekst, deps: liste) -> heltall { returner _di.registrer_graf(namn, _fullt_namn(fn), deps) }
+
+funksjon _globale_og_prefiks(sti: tekst) -> liste {
+    la ut = []
+    la g = _k("globale_deps")
+    hvis g != null og builtin.type(g) == "liste" {
+        la i = 0
+        mens i < lengde(g) { legg_til(ut, tekst(g[i]))  i = i + 1 }
+    }
+    la pd = _k("prefiks_deps")
+    hvis pd != null og builtin.type(pd) == "ordbok" {
+        la ks = nøkler(pd)
+        la i = 0
+        mens i < lengde(ks) {
+            hvis builtin.starts_with(sti, tekst(ks[i])) {
+                la liste_d = pd[ks[i]]
+                hvis builtin.type(liste_d) == "liste" {
+                    la j = 0
+                    mens j < lengde(liste_d) { legg_til(ut, tekst(liste_d[j]))  j = j + 1 }
+                }
+            }
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
 funksjon _køyr_mw_liste(liste_namn: liste, verdi, er_ctx: bool) {
     la cur = verdi
     la i = 0
     mens i < lengde(liste_namn) {
-        la r = builtin.ncb_call_fn(liste_namn[i], cur)
+        la r = _di.kall(liste_namn[i], [cur])
         hvis r != null og builtin.type(r) == "ordbok" {
             hvis er_ctx {
                 hvis har_nokkel(r, "__method__") eller har_nokkel(r, "__path__") eller har_nokkel(r, "__headers__") eller har_nokkel(r, "__query__") eller har_nokkel(r, "__body__") eller har_nokkel(r, "__params__") {
@@ -789,14 +924,25 @@ funksjon _allow(ruter: liste, seg: liste) -> tekst {
 # svarordbok; SSE gjev {"__sse__": kanal, ...}. Kastar aldri.
 funksjon dispatch(ctx0: ordbok) -> ordbok {
     la ctx = ctx0
+    _di.start(ctx)
+    _t["bg"] = []
+    # Request-mellomvare (wrap): kan endre ctx som når handlaren, eller kortslutte med
+    # eit eige svar (1.3). Unntak blir mappa (HTTPFeil/ValideringsFeil/500).
     la rq = _mw("request_middlewares", "forespurnad_mw")
-    hvis lengde(rq) > 0 {
+    la mi = 0
+    mens mi < lengde(rq) {
+        la r = null
         prøv {
-            ctx = _køyr_mw_liste(rq, ctx, sann)
+            r = _di.kall(rq[mi], [ctx])
         } fang (e) {
             _logg("feil", "request-mellomvare kasta: " + tekst(e))
-            returner _feil_mw(_feil(500, "Intern feil"))
+            returner _feil_mw(_feil_frå_unntak(e))
         }
+        hvis r != null og builtin.type(r) == "ordbok" {
+            hvis _er_ctx(r) { ctx = r }
+            ellers hvis _er_svar(r) { returner _respons_mw(normaliser(r)) }
+        }
+        mi = mi + 1
     }
     la metode = tekst(ctx["__method__"])
     la sti = tekst(ctx["__path__"])
@@ -848,26 +994,46 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
         returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
     }
     ctx["__params__"] = treff_p
-    # Vakter: totale. Unntak gjev 500 (tenaren lever), alt anna enn sann gjev 403.
+    # Vakter: totale og aritetskontrollerte. Ei vakt kan returnere eit eige svar som
+    # kortsluttar (t.d. 401 + WWW-Authenticate, 1.3). Unntak blir mappa (HTTPFeil →
+    # status, ValideringsFeil → 422, elles 500); tenaren lever. Alt anna enn sann gjev 403.
     la vakter = treff["vakter"]
     la gi = 0
     mens gi < lengde(vakter) {
         la vn = vakter[gi]
-        la ok = usann
+        la gr = null
         prøv {
-            la gr = builtin.ncb_call_fn(vn, ctx)
-            ok = builtin.type(gr) == "boolsk" og gr
+            gr = _di.kall(vn, [ctx])
         } fang (e) {
             _logg("feil", "vakt " + vn + " kasta på " + metode + " " + sti + ": " + tekst(e))
-            returner _feil_mw(_feil(500, "Intern feil"))
+            returner _feil_mw(_feil_frå_unntak(e))
         }
+        hvis gr != null og builtin.type(gr) == "ordbok" og _er_svar(gr) {
+            returner _respons_mw(normaliser(gr))
+        }
+        la ok = builtin.type(gr) == "boolsk" og gr
         hvis ikkje ok { returner _feil_mw(_feil(403, "Forbidden")) }
         gi = gi + 1
+    }
+    # Avhengnader (1.2): globale + prefiks-deps køyrer for sideeffekt (auth, logging o.l.),
+    # rute-deps blir sende til handlaren. Alle er cacha per førespurnad og aritetskontrollerte.
+    prøv {
+        _di.løys_fleire(ctx, _globale_og_prefiks(sti))
+    } fang (e) {
+        _logg("feil", "global/prefiks-avhengnad feila på " + metode + " " + sti + ": " + tekst(e))
+        returner _feil_mw(_feil_frå_unntak(e))
+    }
+    la dep_values = []
+    prøv {
+        dep_values = _di.løys_fleire(ctx, treff["deps"])
+    } fang (e) {
+        _logg("feil", "avhengnad feila på " + metode + " " + sti + ": " + tekst(e))
+        returner _feil_mw(_feil_frå_unntak(e))
     }
     la fn = treff["fn"]
     la d = null
     prøv {
-        la svar = builtin.ncb_call_fn(fn, ctx)
+        la svar = _di.kall_handlar(fn, ctx, dep_values)
         hvis svar != null og builtin.type(svar) == "ordbok" og har_nokkel(svar, "__sse__") {
             hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
             returner svar
@@ -875,7 +1041,7 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
         d = normaliser(svar)
     } fang (e) {
         _logg("feil", "handlar " + fn + " kasta på " + metode + " " + sti + ": " + tekst(e))
-        returner _feil_mw(_feil(500, "Intern feil"))
+        returner _feil_mw(_feil_frå_unntak(e))
     }
     d = _respons_mw(d)
     returner vilkårsbunde(ctx, d)
@@ -900,8 +1066,11 @@ funksjon handsam_rå(rå: tekst) -> tekst {
     la kropp = builtin.slice(rå, slutt + 4, lengde(rå))
     la ctx = ctx_frå(req, kropp)
     la d = dispatch(ctx)
-    hvis har_nokkel(d, "__sse__") { returner "SSE " + tekst(d["__sse__"]) }
-    returner til_http_trygt(d, ctx["__method__"] == "head", req["keep_alive"])
+    hvis har_nokkel(d, "__sse__") { _etter_svar()  returner "SSE " + tekst(d["__sse__"]) }
+    la ut = til_http_trygt(d, ctx["__method__"] == "head", req["keep_alive"])
+    # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga (1.2/1.7).
+    _etter_svar()
+    returner ut
 }
 
 # ─── SSE ─────────────────────────────────────────────────────────────────────
@@ -1077,6 +1246,9 @@ funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
     la head = ctx["__method__"] == "head"
     la d = dispatch(ctx)
     _t["handsama"] = _t_int("handsama") + 1
+    # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga,
+    # i tenarløkka utan trådar (1.2/1.7).
+    _etter_svar()
     hvis har_nokkel(d, "__sse__") {
         la kanal = tekst(d["__sse__"])
         hvis tal_i_kanal(kanal) >= _k("maks_sse_per_kanal") {

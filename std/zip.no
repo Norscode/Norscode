@@ -618,11 +618,405 @@ funksjon _tar_gzip_dekomprimer(data: liste_heltall) -> liste_heltall {
     returner _tar_gzip_dekomprimer_med_grense(data, 536870912)
 }
 
-# Offentleg, prosessfri gzip-byteflyt. Skrivaren brukar gyldige DEFLATE
-# stored-blokker; lesaren avviser andre blokktypekodar fail-closed og
-# kontrollerer både CRC32 og ISIZE før data blir returnerte.
+# ─── Ekte DEFLATE (RFC 1951) i rein Norscode ──────────────────────────────────
+#
+# Skrivaren brukar no FAST HUFFMAN (fixed Huffman) med LZ77-matching over eit
+# 32 KiB vindauge, slik at komprimerbar data faktisk krympar. Lesaren handterer
+# alle tre blokktypar (stored BTYPE=00, fixed BTYPE=01 og dynamic BTYPE=10), så
+# gamle «stored»-gzip-filer dekomprimerer framleis byte-eksakt (bakoverkompat),
+# og straumar frå eksterne zlib/gzip-verktøy (som typisk er dynamic) kan lesast.
+
+# Lengde-/avstandstabellar (RFC 1951 §3.2.5). Indeks 0 = lengdekode 257 osv.
+funksjon _len_base() -> liste_heltall {
+    returner [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43,
+        51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+}
+funksjon _len_extra() -> liste_heltall {
+    returner [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 0]
+}
+funksjon _dist_base() -> liste_heltall {
+    returner [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257,
+        385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+}
+funksjon _dist_extra() -> liste_heltall {
+    returner [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
+        9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+}
+
+# ── Bit-skrivar (LSB-først per byte, slik DEFLATE pakkar) ──
+funksjon _bw_bits(out: liste_heltall, st: liste_heltall, v: heiltall, n: heiltall) {
+    la buf = st[0] | (v << st[1])
+    la cnt = st[1] + n
+    mens cnt >= 8 {
+        legg_til(out, buf & 255)
+        buf = buf >> 8
+        cnt = cnt - 8
+    }
+    st[0] = buf
+    st[1] = cnt
+}
+
+# Huffman-kodar pakkast MSB-først; reverser difor bitane før LSB-skriving.
+funksjon _bw_kode(out: liste_heltall, st: liste_heltall, kode: heiltall, n: heiltall) {
+    la r = 0
+    la k = kode
+    la i = 0
+    mens i < n {
+        r = (r << 1) | (k & 1)
+        k = k >> 1
+        i = i + 1
+    }
+    _bw_bits(out, st, r, n)
+}
+
+funksjon _bw_flush(out: liste_heltall, st: liste_heltall) {
+    hvis st[1] > 0 {
+        legg_til(out, st[0] & 255)
+        st[0] = 0
+        st[1] = 0
+    }
+}
+
+# Fast Huffman literal/lengde-symbol (RFC 1951 §3.2.6).
+funksjon _bw_litlen(out: liste_heltall, st: liste_heltall, sym: heiltall) {
+    hvis sym <= 143 {
+        _bw_kode(out, st, 48 + sym, 8)
+    } ellers hvis sym <= 255 {
+        _bw_kode(out, st, 400 + (sym - 144), 9)
+    } ellers hvis sym <= 279 {
+        _bw_kode(out, st, sym - 256, 7)
+    } ellers {
+        _bw_kode(out, st, 192 + (sym - 280), 8)
+    }
+}
+
+funksjon _match_len(data: liste_heltall, a: heiltall, b: heiltall, maks: heiltall) -> heiltall {
+    la l = 0
+    mens l < maks og data[a + l] == data[b + l] { l = l + 1 }
+    returner l
+}
+
+funksjon _finn_len_sym(L: heiltall, lb: liste_heltall) -> heiltall {
+    la idx = 28
+    mens idx > 0 og lb[idx] > L { idx = idx - 1 }
+    returner idx
+}
+
+funksjon _finn_dist_sym(D: heiltall, db: liste_heltall) -> heiltall {
+    la idx = 29
+    mens idx > 0 og db[idx] > D { idx = idx - 1 }
+    returner idx
+}
+
+# DEFLATE-straum: eitt fast-Huffman blokk (BFINAL=1, BTYPE=01) med LZ77.
+funksjon _deflate_fiks(data: liste_heltall) -> liste_heltall {
+    la out: liste_heltall = []
+    la st: liste_heltall = [0, 0]
+    la n = lengde(data)
+    la lb = _len_base()
+    la le = _len_extra()
+    la db = _dist_base()
+    la de = _dist_extra()
+    # Blokkhovud: BFINAL=1 (bit0), BTYPE=01 (bit1-2) → verdi 3 over 3 bitar.
+    _bw_bits(out, st, 3, 3)
+    # LZ77 hash-kjede over 3-byte-prefiks, 32 KiB vindauge.
+    la head: liste_heltall = []
+    la hi = 0
+    mens hi < 32768 { legg_til(head, -1) hi = hi + 1 }
+    la prev: liste_heltall = []
+    hi = 0
+    mens hi < n { legg_til(prev, -1) hi = hi + 1 }
+    la i = 0
+    mens i < n {
+        hvis i + 3 <= n {
+            la hh = ((data[i] << 10) ^ (data[i + 1] << 5) ^ data[i + 2]) & 32767
+            la j = head[hh]
+            la best_len = 0
+            la best_dist = 0
+            la kjede = 0
+            mens j >= 0 og kjede < 128 og (i - j) <= 32768 {
+                la maks = n - i
+                hvis maks > 258 { maks = 258 }
+                la ml = _match_len(data, i, j, maks)
+                hvis ml > best_len {
+                    best_len = ml
+                    best_dist = i - j
+                    hvis ml == maks { kjede = 128 }
+                }
+                j = prev[j]
+                kjede = kjede + 1
+            }
+            prev[i] = head[hh]
+            head[hh] = i
+            hvis best_len >= 3 {
+                la lsym = _finn_len_sym(best_len, lb)
+                _bw_litlen(out, st, 257 + lsym)
+                _bw_bits(out, st, best_len - lb[lsym], le[lsym])
+                la dsym = _finn_dist_sym(best_dist, db)
+                _bw_kode(out, st, dsym, 5)
+                _bw_bits(out, st, best_dist - db[dsym], de[dsym])
+                la k = i + 1
+                la slutt = i + best_len
+                mens k < slutt {
+                    hvis k + 3 <= n {
+                        la hk = ((data[k] << 10) ^ (data[k + 1] << 5) ^ data[k + 2]) & 32767
+                        prev[k] = head[hk]
+                        head[hk] = k
+                    }
+                    k = k + 1
+                }
+                i = i + best_len
+            } ellers {
+                _bw_litlen(out, st, data[i])
+                i = i + 1
+            }
+        } ellers {
+            _bw_litlen(out, st, data[i])
+            i = i + 1
+        }
+    }
+    _bw_litlen(out, st, 256)
+    _bw_flush(out, st)
+    returner out
+}
+
+# ── Bit-lesar ──
+funksjon _br_bit(data: liste_heltall, rd: liste_heltall) -> heiltall {
+    hvis rd[2] == 0 {
+        hvis rd[0] >= lengde(data) { returner 0 }
+        rd[1] = data[rd[0]]
+        rd[0] = rd[0] + 1
+        rd[2] = 8
+    }
+    la b = rd[1] & 1
+    rd[1] = rd[1] >> 1
+    rd[2] = rd[2] - 1
+    returner b
+}
+
+funksjon _br_bits(data: liste_heltall, rd: liste_heltall, n: heiltall) -> heiltall {
+    la v = 0
+    la i = 0
+    mens i < n {
+        v = v | (_br_bit(data, rd) << i)
+        i = i + 1
+    }
+    returner v
+}
+
+# Bygg kanonisk Huffman-dekodar frå kodelengder → [counts, symbols].
+funksjon _huff_bygg(lengder: liste_heltall) -> liste_heltall {
+    la maxbits = 0
+    la i = 0
+    mens i < lengde(lengder) {
+        hvis lengder[i] > maxbits { maxbits = lengder[i] }
+        i = i + 1
+    }
+    la counts: liste_heltall = []
+    la c = 0
+    mens c <= maxbits { legg_til(counts, 0) c = c + 1 }
+    i = 0
+    mens i < lengde(lengder) {
+        counts[lengder[i]] = counts[lengder[i]] + 1
+        i = i + 1
+    }
+    counts[0] = 0
+    la offs: liste_heltall = []
+    c = 0
+    mens c <= maxbits { legg_til(offs, 0) c = c + 1 }
+    la sum = 0
+    la l = 1
+    mens l <= maxbits {
+        offs[l] = sum
+        sum = sum + counts[l]
+        l = l + 1
+    }
+    la symbols: liste_heltall = []
+    la s2 = 0
+    mens s2 < sum { legg_til(symbols, 0) s2 = s2 + 1 }
+    i = 0
+    mens i < lengde(lengder) {
+        hvis lengder[i] != 0 {
+            symbols[offs[lengder[i]]] = i
+            offs[lengder[i]] = offs[lengder[i]] + 1
+        }
+        i = i + 1
+    }
+    returner [counts, symbols]
+}
+
+funksjon _huff_dekod(data: liste_heltall, rd: liste_heltall, tre: liste_heltall) -> heiltall {
+    la counts = tre[0]
+    la symbols = tre[1]
+    la code = 0
+    la first = 0
+    la index = 0
+    la len = 1
+    la maxbits = lengde(counts) - 1
+    mens len <= maxbits {
+        code = code | _br_bit(data, rd)
+        la cnt = counts[len]
+        hvis code - first < cnt {
+            returner symbols[index + (code - first)]
+        }
+        index = index + cnt
+        first = (first + cnt) << 1
+        code = code << 1
+        len = len + 1
+    }
+    returner -1
+}
+
+funksjon _fiks_trær() -> liste_heltall {
+    la litl: liste_heltall = []
+    la s = 0
+    mens s < 288 {
+        hvis s <= 143 { legg_til(litl, 8) }
+        ellers hvis s <= 255 { legg_til(litl, 9) }
+        ellers hvis s <= 279 { legg_til(litl, 7) }
+        ellers { legg_til(litl, 8) }
+        s = s + 1
+    }
+    la distl: liste_heltall = []
+    s = 0
+    mens s < 30 { legg_til(distl, 5) s = s + 1 }
+    returner [_huff_bygg(litl), _huff_bygg(distl)]
+}
+
+funksjon _dyn_trær(data: liste_heltall, rd: liste_heltall) -> liste_heltall {
+    la hlit = _br_bits(data, rd, 5) + 257
+    la hdist = _br_bits(data, rd, 5) + 1
+    la hclen = _br_bits(data, rd, 4) + 4
+    la ordre: liste_heltall = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    la cl_lengder: liste_heltall = []
+    la i = 0
+    mens i < 19 { legg_til(cl_lengder, 0) i = i + 1 }
+    i = 0
+    mens i < hclen {
+        cl_lengder[ordre[i]] = _br_bits(data, rd, 3)
+        i = i + 1
+    }
+    la cl_tre = _huff_bygg(cl_lengder)
+    la alle: liste_heltall = []
+    la totalt = hlit + hdist
+    mens lengde(alle) < totalt {
+        la sym = _huff_dekod(data, rd, cl_tre)
+        hvis sym < 0 { returner [] }
+        hvis sym < 16 {
+            legg_til(alle, sym)
+        } ellers hvis sym == 16 {
+            hvis lengde(alle) == 0 { returner [] }
+            la gjenta = _br_bits(data, rd, 2) + 3
+            la forrige = alle[lengde(alle) - 1]
+            la j = 0
+            mens j < gjenta { legg_til(alle, forrige) j = j + 1 }
+        } ellers hvis sym == 17 {
+            la gjenta = _br_bits(data, rd, 3) + 3
+            la j = 0
+            mens j < gjenta { legg_til(alle, 0) j = j + 1 }
+        } ellers {
+            la gjenta = _br_bits(data, rd, 7) + 11
+            la j = 0
+            mens j < gjenta { legg_til(alle, 0) j = j + 1 }
+        }
+    }
+    la lit_l: liste_heltall = []
+    i = 0
+    mens i < hlit { legg_til(lit_l, alle[i]) i = i + 1 }
+    la dist_l: liste_heltall = []
+    i = 0
+    mens i < hdist { legg_til(dist_l, alle[hlit + i]) i = i + 1 }
+    returner [_huff_bygg(lit_l), _huff_bygg(dist_l)]
+}
+
+# Full DEFLATE-dekodar: stored + fixed + dynamic. maks_ut vernar mot bombe.
+funksjon _inflate(data: liste_heltall, start: heiltall, maks_ut: heiltall) -> liste_heltall {
+    la rd: liste_heltall = [start, 0, 0]
+    la ut: liste_heltall = []
+    la lb = _len_base()
+    la le = _len_extra()
+    la db = _dist_base()
+    la de = _dist_extra()
+    la ferdig = usann
+    mens ikkje ferdig {
+        la bfinal = _br_bit(data, rd)
+        la btype = _br_bits(data, rd, 2)
+        hvis bfinal == 1 { ferdig = sann }
+        hvis btype == 0 {
+            rd[2] = 0
+            hvis rd[0] + 4 > lengde(data) { returner [] }
+            la len = data[rd[0]] + (data[rd[0] + 1] << 8)
+            la nlen = data[rd[0] + 2] + (data[rd[0] + 3] << 8)
+            rd[0] = rd[0] + 4
+            hvis (len ^ 65535) != nlen { returner [] }
+            hvis rd[0] + len > lengde(data) { returner [] }
+            hvis lengde(ut) + len > maks_ut { returner [] }
+            la i = 0
+            mens i < len {
+                legg_til(ut, data[rd[0] + i])
+                i = i + 1
+            }
+            rd[0] = rd[0] + len
+        } ellers hvis btype == 1 eller btype == 2 {
+            la trær = _fiks_trær()
+            hvis btype == 2 { trær = _dyn_trær(data, rd) }
+            hvis lengde(trær) < 2 { returner [] }
+            la lit_tre = trær[0]
+            la dist_tre = trær[1]
+            la slutt = usann
+            mens ikkje slutt {
+                la sym = _huff_dekod(data, rd, lit_tre)
+                hvis sym < 0 { returner [] }
+                hvis sym == 256 {
+                    slutt = sann
+                } ellers hvis sym < 256 {
+                    hvis lengde(ut) + 1 > maks_ut { returner [] }
+                    legg_til(ut, sym)
+                } ellers {
+                    la li = sym - 257
+                    hvis li >= lengde(lb) { returner [] }
+                    la length = lb[li] + _br_bits(data, rd, le[li])
+                    la dsym = _huff_dekod(data, rd, dist_tre)
+                    hvis dsym < 0 eller dsym >= lengde(db) { returner [] }
+                    la dist = db[dsym] + _br_bits(data, rd, de[dsym])
+                    hvis dist > lengde(ut) { returner [] }
+                    hvis lengde(ut) + length > maks_ut { returner [] }
+                    la kopi_start = lengde(ut) - dist
+                    la k = 0
+                    mens k < length {
+                        legg_til(ut, ut[kopi_start + k])
+                        k = k + 1
+                    }
+                }
+            }
+        } ellers {
+            returner []
+        }
+    }
+    returner ut
+}
+
+# Offentleg, prosessfri gzip-byteflyt. Skrivaren brukar fast-Huffman DEFLATE
+# (LZ77 + RFC 1951); lesaren handterer stored/fixed/dynamic blokker.
+# Lesaren kontrollerer både CRC32 og ISIZE før data blir returnerte.
 funksjon gzip_komprimer_bytes(buffer) {
-    returner bytes.fra_liste(_tar_gzip_bytes(bytes.til_liste(buffer)))
+    la data = bytes.til_liste(buffer)
+    la out: liste_heltall = [31, 139, 8, 0, 0, 0, 0, 0, 0, 255]
+    la payload = _deflate_fiks(data)
+    la p = 0
+    mens p < lengde(payload) { legg_til(out, payload[p]) p = p + 1 }
+    la crc = _tar_crc32(data)
+    legg_til(out, crc & 255)
+    legg_til(out, (crc >> 8) & 255)
+    legg_til(out, (crc >> 16) & 255)
+    legg_til(out, (crc >> 24) & 255)
+    la storleik = lengde(data)
+    legg_til(out, storleik & 255)
+    legg_til(out, (storleik >> 8) & 255)
+    legg_til(out, (storleik >> 16) & 255)
+    legg_til(out, (storleik >> 24) & 255)
+    returner bytes.fra_liste(out)
 }
 
 funksjon gzip_dekomprimer_bytes(buffer) {
@@ -635,7 +1029,7 @@ funksjon gzip_dekomprimer_bytes_med_grense(buffer, maks_ut: heiltall) {
     hvis lengde(rå) < 18 eller rå[0] != 31 eller rå[1] != 139 eller rå[2] != 8 eller rå[3] != 0 {
         returner bytes.tom()
     }
-    la ut = _tar_gzip_dekomprimer_med_grense(rå, maks_ut)
+    la ut = _inflate(rå, 10, maks_ut)
     la n = lengde(rå)
     la crc = rå[n - 8] + (rå[n - 7] << 8) + (rå[n - 6] << 16) + (rå[n - 5] << 24)
     la isize = rå[n - 4] + (rå[n - 3] << 8) + (rå[n - 2] << 16) + (rå[n - 1] << 24)
