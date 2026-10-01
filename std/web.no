@@ -87,6 +87,220 @@ funksjon request_query_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
     returner heltall_fra_tekst(request_query_param(ctx, nøkkel))
 }
 
+// ─── Fase 0.6: tolerant parameter-tolking (utan reseed) ──────────────────────
+// FastAPI/Starlette tolkar query-parametrar mildt. VM-speilet
+// builtin.web.request_query_bool kjende berre true/sann; desse std-funksjonane
+// skuggar det for web.-kall og dekkjer heile settet (FA-016/017/018/051).
+
+// Kasus-uavhengig boolsk tolking. sanne: 1/true/sann/yes/ja/on.
+// usanne: 0/false/usann/no/nei/off. Alt anna → fallback.
+funksjon _tolk_bool(verdi: tekst, fallback: boolsk) -> boolsk {
+    la v = _ascii_lower(builtin.trim(verdi))
+    hvis v == "1" eller v == "true" eller v == "sann" eller v == "yes" eller v == "ja" eller v == "on" { returner sann }
+    hvis v == "0" eller v == "false" eller v == "usann" eller v == "no" eller v == "nei" eller v == "off" { returner usann }
+    returner fallback
+}
+
+// Sjekk om teksten er eit gyldig desimaltal (valfritt forteikn, siffer, éin
+// desimalpunkt). builtin.desimaltall gjev stilt 0 på ugyldig inndata, so vi må
+// validere sjølve for å kunne skilje "0" frå feil.
+funksjon _er_desimal(verdi: tekst) -> boolsk {
+    la s = builtin.trim(verdi)
+    la n = lengde(s)
+    hvis n == 0 { returner usann }
+    la i: heiltall = 0
+    la c0 = builtin.slice(s, 0, 1)
+    hvis c0 == "-" eller c0 == "+" { i = 1 }
+    la siffer: heiltall = 0
+    la punkt: heiltall = 0
+    mens i < n {
+        la c = builtin.slice(s, i, i + 1)
+        la code = builtin.char_code(c)
+        hvis code >= 48 og code <= 57 { siffer = siffer + 1 }
+        ellers hvis c == "." { punkt = punkt + 1 }
+        ellers { returner usann }
+        i = i + 1
+    }
+    returner siffer > 0 og punkt <= 1
+}
+
+// Tolerant boolsk query-parameter. Manglande/ukjend verdi → usann.
+funksjon request_query_bool(ctx: ordbok_tekst, nøkkel: tekst) -> boolsk {
+    returner _tolk_bool(request_query_param(ctx, nøkkel), usann)
+}
+
+// Boolsk query-parameter med eksplisitt standardverdi.
+funksjon request_query_bool_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: boolsk) -> boolsk {
+    la v = request_query_param(ctx, nøkkel)
+    hvis v == "" { returner fallback }
+    returner _tolk_bool(v, fallback)
+}
+
+// Desimaltal-query. Kastar ValideringsFeil på ugyldig (som request_query_int).
+funksjon request_query_float(ctx: ordbok_tekst, nøkkel: tekst) -> desimaltall {
+    la v = request_query_param(ctx, nøkkel)
+    hvis ikkje _er_desimal(v) {
+        kast "ValideringsFeil: ugyldig desimaltal for query-felt '" + nøkkel + "': " + v
+    }
+    returner builtin.desimaltall(builtin.trim(v))
+}
+
+// Desimaltal-query med standardverdi. Manglande/ugyldig → fallback.
+funksjon request_query_float_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: desimaltall) -> desimaltall {
+    la v = request_query_param(ctx, nøkkel)
+    hvis ikkje _er_desimal(v) { returner fallback }
+    returner builtin.desimaltall(builtin.trim(v))
+}
+
+// Heiltals-query med standardverdi. Manglande/ugyldig → fallback (ingen 500).
+funksjon request_query_int_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: heltall) -> heltall {
+    la v = request_query_param(ctx, nøkkel)
+    hvis v == "" { returner fallback }
+    prøv {
+        returner heltall_fra_tekst(builtin.trim(v))
+    } fang (e) {
+        returner fallback
+    }
+    returner fallback
+}
+
+// Rå query-verdi som kommadelt liste (FA-018). Under nc serve kollapsar
+// parse_query gjentekne nøklar til siste verdi, so ekte repeterte nøklar
+// (?x=1&x=2) krev at rå query-streng blir teke vare på i ctx — det er ei
+// reseed-endring i selfhost/nc_main.no. Inntil då støttar denne hjelparen
+// kommalister (?x=1,2,3), som er den vanlege no-reseed-konvensjonen.
+funksjon request_query_list(ctx: ordbok_tekst, nøkkel: tekst) -> liste<tekst> {
+    la v = request_query_param(ctx, nøkkel)
+    hvis v == "" { returner [] }
+    la deler = builtin.split(v, ",")
+    la ut: liste<tekst> = []
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la d = builtin.trim(deler[i])
+        hvis d != "" { legg_til(ut, d) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ─── Fase 0.6: application/x-www-form-urlencoded ─────────────────────────────
+
+// Dekod éin form-/URL-komponent: %XX → byte, + → mellomrom.
+funksjon _url_decode_komponent(verdi: tekst) -> tekst {
+    la n = lengde(verdi)
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < n {
+        la c = builtin.slice(verdi, i, i + 1)
+        hvis c == "%" og i + 2 < n {
+            la h1 = builtin.slice(verdi, i + 1, i + 2)
+            la h2 = builtin.slice(verdi, i + 2, i + 3)
+            la k1 = _hex_siffer_verdi(h1)
+            la k2 = _hex_siffer_verdi(h2)
+            hvis k1 >= 0 og k2 >= 0 {
+                ut = ut + builtin.chr(k1 * 16 + k2)
+                i = i + 3
+            } ellers {
+                ut = ut + c
+                i = i + 1
+            }
+        } ellers hvis c == "+" {
+            ut = ut + " "
+            i = i + 1
+        } ellers {
+            ut = ut + c
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+// Verdien til eitt hex-siffer, eller -1 om det ikkje er hex.
+funksjon _hex_siffer_verdi(c: tekst) -> heiltall {
+    la code = builtin.char_code(c)
+    hvis code >= 48 og code <= 57 { returner code - 48 }
+    hvis code >= 97 og code <= 102 { returner code - 87 }
+    hvis code >= 65 og code <= 70 { returner code - 55 }
+    returner -1
+}
+
+funksjon _content_type_er_form(ctx: ordbok_tekst) -> boolsk {
+    la ct = request_header(ctx, "content-type")
+    hvis ct == "" { returner usann }
+    la base = ct
+    la semi = builtin.index_of(ct, ";")
+    hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
+    base = _ascii_lower(builtin.trim(base))
+    returner base == "application/x-www-form-urlencoded"
+}
+
+// Parse urlencoded-kropp til felt. Content-Type må vere
+// application/x-www-form-urlencoded, elles tom ordbok. Siste verdi vinn per
+// felt (FastAPI Form()-semantikk for enkeltfelt); bruk request_form_list for
+// alle verdiane.
+funksjon request_form(ctx: ordbok_tekst) -> ordbok_tekst {
+    la felt: ordbok_tekst = {}
+    hvis ikkje _content_type_er_form(ctx) { returner felt }
+    la body = request_body(ctx)
+    hvis body == "" { returner felt }
+    la par = builtin.split(body, "&")
+    la i: heiltall = 0
+    mens i < lengde(par) {
+        la p = par[i]
+        hvis p != "" {
+            la eq = builtin.index_of(p, "=")
+            hvis eq >= 0 {
+                la k = _url_decode_komponent(builtin.slice(p, 0, eq))
+                la v = _url_decode_komponent(builtin.slice(p, eq + 1, lengde(p)))
+                felt[k] = v
+            } ellers {
+                felt[_url_decode_komponent(p)] = ""
+            }
+        }
+        i = i + 1
+    }
+    returner felt
+}
+
+funksjon request_form_field(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
+    la f = request_form(ctx)
+    hvis finnes_nøkkel(f, nøkkel) { returner tekst(f[nøkkel]) }
+    returner ""
+}
+
+funksjon request_form_field_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> tekst {
+    la v = request_form_field(ctx, nøkkel)
+    hvis v == "" { returner fallback }
+    returner v
+}
+
+// Alle verdiane til eit felt (fleirverdifelt a=1&a=2 → ["1","2"]).
+funksjon request_form_list(ctx: ordbok_tekst, nøkkel: tekst) -> liste<tekst> {
+    la ut: liste<tekst> = []
+    hvis ikkje _content_type_er_form(ctx) { returner ut }
+    la body = request_body(ctx)
+    hvis body == "" { returner ut }
+    la par = builtin.split(body, "&")
+    la i: heiltall = 0
+    mens i < lengde(par) {
+        la p = par[i]
+        hvis p != "" {
+            la eq = builtin.index_of(p, "=")
+            la k = ""
+            la v = ""
+            hvis eq >= 0 {
+                k = _url_decode_komponent(builtin.slice(p, 0, eq))
+                v = _url_decode_komponent(builtin.slice(p, eq + 1, lengde(p)))
+            } ellers {
+                k = _url_decode_komponent(p)
+            }
+            hvis k == nøkkel { legg_til(ut, v) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
 // HTTP-headernamn skil ikkje mellom store og små bokstavar (RFC 9110 §5.1).
 // nc serve legg headerane i ctx slik klienten sende dei («Cookie», «If-None-Match»),
 // web.request_context og HTTP/2-proxyar gjev små bokstavar: slå opp direkte først,
