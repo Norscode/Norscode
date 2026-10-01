@@ -40,17 +40,20 @@ funksjon _extract_boundary(content_type: tekst) -> tekst {
 }
 
 funksjon _parse_multipart(body: tekst, boundary: tekst) -> liste<ordbok_tekst> {
-    # Parse body using boundary
+    # Parse body using boundary. Behald rekkefølgje og duplikat (fleire
+    # verdiar per feltnamn), slik at list-felt kan hentast med get_values.
     la parts: liste<ordbok_tekst> = []
 
     la delimiter = "--" + boundary
     la deler = builtin.split(body, delimiter)
 
-    la i: heltall = 1  // Skip first empty part
-    mens i < lengde(deler) - 1 {
+    la i: heltall = 1  // Hopp over tom del før første boundary
+    mens i < lengde(deler) {
         la part = deler[i]
 
-        hvis lengde(builtin.trim(part)) > 0 {
+        // Avsluttande boundary er "--" (evt. med CRLF). Hopp over tomme/avslutning.
+        la trimmed = builtin.trim(part)
+        hvis trimmed != "" og trimmed != "--" og ikkje tekst_starter_med(trimmed, "--") {
             la parsed = _parse_part(part)
             hvis har_nokkel(parsed, "name") {
                 legg_til(parts, parsed)
@@ -64,28 +67,43 @@ funksjon _parse_multipart(body: tekst, boundary: tekst) -> liste<ordbok_tekst> {
 }
 
 funksjon _parse_part(part: tekst) -> ordbok_tekst {
-    # Parse individual part headers and content
+    # Parse individual part headers and content.
+    # Finn tom linje (CRLF CRLF) mellom header og innhald, og behald innhaldet
+    # byte-eksakt (slice, ikkje trim) slik at 0x00/0xFF og binære bytes overlever.
     la result: ordbok_tekst = {}
 
-    la linjer = builtin.split(part, "\r\n")
-    hvis lengde(linjer) < 2 { returner result }
+    la sep: tekst = "\r\n\r\n"
+    la seplen: heltall = 4
+    la split_idx = builtin.index_of(part, sep)
+    hvis split_idx < 0 {
+        // Fallback for LF-berre kroppar
+        sep = "\n\n"
+        seplen = 2
+        split_idx = builtin.index_of(part, sep)
+    }
+    hvis split_idx < 0 { returner result }
 
-    // Find empty line separating headers from content
-    la header_end: heltall = 0
-    la i: heltall = 0
-    mens i < lengde(linjer) {
-        hvis builtin.trim(linjer[i]) == "" {
-            header_end = i
-            i = lengde(linjer)  // Break
-        }
-        i = i + 1
+    la headers_str = builtin.slice(part, 0, split_idx)
+    la content = builtin.slice(part, split_idx + seplen, lengde(part))
+
+    // Strip nøyaktig éin avsluttande CRLF/LF (skiljet før neste boundary).
+    // Ingen generell trim — det ville øydelagt binære bytes.
+    hvis tekst_slutter_med(content, "\r\n") {
+        content = builtin.slice(content, 0, lengde(content) - 2)
+    } ellers hvis tekst_slutter_med(content, "\n") {
+        content = builtin.slice(content, 0, lengde(content) - 1)
     }
 
-    // Parse headers
-    i = 0
-    mens i < header_end {
-        la header_line = linjer[i]
-        hvis tekst_starter_med(tekst_til_liten(header_line), "content-disposition") {
+    // Parse headerar
+    la linjer = builtin.split(headers_str, "\r\n")
+    hvis lengde(linjer) <= 1 {
+        linjer = builtin.split(headers_str, "\n")
+    }
+    la i: heltall = 0
+    mens i < lengde(linjer) {
+        la header_line = builtin.trim(linjer[i])
+        la lav = tekst_til_liten(header_line)
+        hvis tekst_starter_med(lav, "content-disposition") {
             la disposition = _parse_disposition(header_line)
             la nøklar = nøkler(disposition)
             la j: heltall = 0
@@ -93,25 +111,13 @@ funksjon _parse_part(part: tekst) -> ordbok_tekst {
                 result[nøklar[j]] = disposition[nøklar[j]]
                 j = j + 1
             }
-        }
-
-        hvis tekst_starter_med(tekst_til_liten(header_line), "content-type") {
+        } ellers hvis tekst_starter_med(lav, "content-type") {
             result["content_type"] = _extract_header_value(header_line)
         }
-
         i = i + 1
     }
 
-    // Extract content
-    i = header_end + 1
-    la content: tekst = ""
-    mens i < lengde(linjer) {
-        content = content + linjer[i]
-        hvis i < lengde(linjer) - 1 { content = content + "\n" }
-        i = i + 1
-    }
-
-    result["content"] = builtin.trim(content)
+    result["content"] = content
     returner result
 }
 
@@ -245,6 +251,44 @@ funksjon get_form_fields(parts: liste<ordbok_tekst>) -> ordbok_tekst {
         i = i + 1
     }
 
+    returner fields
+}
+
+funksjon get_values(parts: liste<ordbok_tekst>, field_name: tekst) -> liste<tekst> {
+    # Hent ALLE verdiar for eit (ikkje-fil) feltnamn — fleire verdiar per namn (liste).
+    la ut: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(parts) {
+        la part = parts[i]
+        hvis ikkje har_nokkel(part, "filename") og har_nokkel(part, "name") og part["name"] == field_name {
+            legg_til(ut, part["content"])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon get_form_fields_multi(parts: liste<ordbok_tekst>) -> ordbok {
+    # Som get_form_fields, men kvart feltnamn kartlegg til ei LISTE av verdiar,
+    # slik at gjentekne feltnamn (t.d. avkryssingsboksar) ikkje overskriv kvarandre.
+    la fields: ordbok = {}
+    la i: heltall = 0
+    mens i < lengde(parts) {
+        la part = parts[i]
+        hvis ikkje har_nokkel(part, "filename") og har_nokkel(part, "name") {
+            la name = part["name"]
+            hvis har_nokkel(fields, name) {
+                la eks = fields[name]
+                legg_til(eks, part["content"])
+                fields[name] = eks
+            } ellers {
+                la ny: liste<tekst> = []
+                legg_til(ny, part["content"])
+                fields[name] = ny
+            }
+        }
+        i = i + 1
+    }
     returner fields
 }
 
