@@ -1,0 +1,307 @@
+# jwt.no — JSON Web Tokens for Norscode (Fase 0.11)
+#
+# Byggjer på eksisterande krypto-primitiv:
+#   HS256  → sha256.hmac_sha256_bytes
+#   EdDSA  → ed25519 (Ed25519)
+#   ES256  → ecdsa_p256 (P-256 / secp256r1) + bigint
+#
+# Alle feil er fangbare: funksjonane kastar tekst som startar med "JwtFeil: ".
+# verify_* sjekkar at header sin alg samsvarer med forventa algoritme (hindrar
+# alg-forvirring, t.d. "none" eller bytte frå ES256 til HS256).
+#
+# Bruk:
+#   la t = jwt.sign_hs256("{\"sub\":\"ada\",\"exp\":1999999999}", "hemmeleg")
+#   la payload = jwt.verify_hs256(t, "hemmeleg")           // kastar JwtFeil ved avvik
+#   jwt.valider_claims(payload, "min-utsteder", "min-aud") // exp/nbf/iss/aud
+
+bruk std.sha256 som sha
+bruk std.base64 som base64
+bruk std.json som json
+bruk std.ed25519 som ed25519
+bruk std.ecdsa_p256 som ecdsa
+bruk std.bigint som bn
+
+# ─── Byte-/base64url-hjelparar ───────────────────────────────────────────────
+
+funksjon _utf8(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis c < 128 {
+            legg_til(ut, c)
+        } ellers hvis c < 2048 {
+            legg_til(ut, 192 + (c / 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers hvis c < 65536 {
+            legg_til(ut, 224 + (c / 4096))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers {
+            legg_til(ut, 240 + (c / 262144))
+            legg_til(ut, 128 + ((c / 4096) % 64))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _b64url_bytes(bytes: liste_heiltall) -> tekst {
+    la b = base64.kod_bytes(bytes)
+    la r = tekst_erstatt(b, "+", "-")
+    r = tekst_erstatt(r, "/", "_")
+    r = tekst_erstatt(r, "=", "")
+    returner r
+}
+
+funksjon _b64url_tekst(s: tekst) -> tekst {
+    returner _b64url_bytes(_utf8(s))
+}
+
+funksjon _b64url_til_bytes(s: tekst) -> liste_heiltall {
+    la r = tekst_erstatt(s, "-", "+")
+    r = tekst_erstatt(r, "_", "/")
+    la rest: heiltall = lengde(r) % 4
+    hvis rest == 2 { r = r + "==" }
+    ellers hvis rest == 3 { r = r + "=" }
+    prøv { returner base64.dekod_bytes(r) } fang (e) { kast "JwtFeil: ugyldig base64url" }
+    returner []
+}
+
+funksjon _bytes_til_tekst(bytes: liste_heiltall) -> tekst {
+    // Enkel dekoding (UTF-8 → tekst) via base64-round-trip er unødvendig; vi
+    // byggjer teksten frå kodepunkt. For JWT er payload JSON (for det meste ASCII).
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < lengde(bytes) {
+        la b = bytes[i]
+        hvis b < 128 {
+            ut = ut + builtin.chr(b)
+            i = i + 1
+        } ellers hvis b < 224 {
+            la c = (b - 192) * 64 + (bytes[i + 1] - 128)
+            ut = ut + builtin.chr(c)
+            i = i + 2
+        } ellers hvis b < 240 {
+            la c = (b - 224) * 4096 + (bytes[i + 1] - 128) * 64 + (bytes[i + 2] - 128)
+            ut = ut + builtin.chr(c)
+            i = i + 3
+        } ellers {
+            la c = (b - 240) * 262144 + (bytes[i + 1] - 128) * 4096 + (bytes[i + 2] - 128) * 64 + (bytes[i + 3] - 128)
+            ut = ut + builtin.chr(c)
+            i = i + 4
+        }
+    }
+    returner ut
+}
+
+funksjon _header_json(alg: tekst) -> tekst {
+    returner "{\"alg\":\"" + alg + "\",\"typ\":\"JWT\"}"
+}
+
+funksjon _signeringsinput(alg: tekst, payload_json: tekst) -> tekst {
+    returner _b64url_tekst(_header_json(alg)) + "." + _b64url_tekst(payload_json)
+}
+
+funksjon _konstant_lik_bytes(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    la n = lengde(a)
+    hvis lengde(b) > n { n = lengde(b) }
+    la skil: heiltall = lengde(a) - lengde(b)
+    hvis skil < 0 { skil = 0 - skil }
+    la i: heiltall = 0
+    mens i < n {
+        la ca: heiltall = 0
+        hvis i < lengde(a) { ca = a[i] }
+        la cb: heiltall = 0
+        hvis i < lengde(b) { cb = b[i] }
+        la d = ca - cb
+        skil = skil + (d * d)
+        i = i + 1
+    }
+    returner skil == 0
+}
+
+# ─── Token-oppdeling ─────────────────────────────────────────────────────────
+
+funksjon _deler(token: tekst) -> liste_tekst {
+    la d = builtin.split(token, ".")
+    hvis lengde(d) != 3 { kast "JwtFeil: token må ha tre delar" }
+    returner d
+}
+
+funksjon header_alg(token: tekst) -> tekst {
+    la d = _deler(token)
+    la hdr = _bytes_til_tekst(_b64url_til_bytes(d[0]))
+    hvis ikkje json_vel_forma(hdr) { kast "JwtFeil: ugyldig header" }
+    la o = json.parse(hdr)
+    returner json.hent_tekst(o, "alg")
+}
+
+funksjon decode_payload(token: tekst) -> tekst {
+    la d = _deler(token)
+    returner _bytes_til_tekst(_b64url_til_bytes(d[1]))
+}
+
+# Minimal, trygg velforma-sjekk (unngår å sende søppel til native parser).
+funksjon json_vel_forma(s: tekst) -> boolsk {
+    la o = json.parse(s)
+    // json.parse gjev {} ved tomt/ugyldig; krev at det startar som objekt
+    la t = builtin.trim(s)
+    hvis lengde(t) == 0 { returner usann }
+    returner builtin.slice(t, 0, 1) == "{"
+}
+
+# ─── HS256 ───────────────────────────────────────────────────────────────────
+
+funksjon sign_hs256(payload_json: tekst, hemmeleg: tekst) -> tekst {
+    la si = _signeringsinput("HS256", payload_json)
+    la sig = sha.hmac_sha256_bytes(_utf8(hemmeleg), _utf8(si))
+    returner si + "." + _b64url_bytes(sig)
+}
+
+funksjon verify_hs256(token: tekst, hemmeleg: tekst) -> tekst {
+    la d = _deler(token)
+    la hdr = _bytes_til_tekst(_b64url_til_bytes(d[0]))
+    hvis json.hent_tekst(json.parse(hdr), "alg") != "HS256" { kast "JwtFeil: forventa alg HS256" }
+    la si = d[0] + "." + d[1]
+    la forventa = sha.hmac_sha256_bytes(_utf8(hemmeleg), _utf8(si))
+    la faktisk = _b64url_til_bytes(d[2])
+    hvis ikkje _konstant_lik_bytes(forventa, faktisk) { kast "JwtFeil: ugyldig signatur" }
+    returner _bytes_til_tekst(_b64url_til_bytes(d[1]))
+}
+
+# ─── EdDSA (Ed25519) ─────────────────────────────────────────────────────────
+# seed = 32-byte privat frø (liste_heiltall). pub = 32-byte offentleg nøkkel.
+
+funksjon public_key_eddsa(seed: liste_heiltall) -> liste_heiltall {
+    returner ed25519.public_key(seed)
+}
+
+funksjon sign_eddsa(payload_json: tekst, seed: liste_heiltall) -> tekst {
+    la si = _signeringsinput("EdDSA", payload_json)
+    la sig = ed25519.sign(seed, _utf8(si))
+    returner si + "." + _b64url_bytes(sig)
+}
+
+funksjon verify_eddsa(token: tekst, pub: liste_heiltall) -> tekst {
+    la d = _deler(token)
+    la hdr = _bytes_til_tekst(_b64url_til_bytes(d[0]))
+    hvis json.hent_tekst(json.parse(hdr), "alg") != "EdDSA" { kast "JwtFeil: forventa alg EdDSA" }
+    la si = d[0] + "." + d[1]
+    la sig = _b64url_til_bytes(d[2])
+    hvis ikkje ed25519.verify(pub, _utf8(si), sig) { kast "JwtFeil: ugyldig signatur" }
+    returner _bytes_til_tekst(_b64url_til_bytes(d[1]))
+}
+
+# ─── ES256 (P-256 / secp256r1, SHA-256) ──────────────────────────────────────
+# d = 32-byte privat skalar. qx/qy = 32-byte offentlege koordinatar (liste_heiltall).
+
+funksjon sign_es256(payload_json: tekst, d: liste_heiltall) -> tekst {
+    la si = _signeringsinput("ES256", payload_json)
+    la hash = _sha256_bytes(si)
+    la rs = ecdsa.ecdsa_sign(d, hash)
+    hvis tekst(rs["status"]) != "ok" { kast "JwtFeil: ES256-signering feila" }
+    // ecdsa_sign returnerer r/s som ferdige 32-byte big-endian-lister (ikkje
+    // bigint-limbar), so dei skal brukast direkte — ikkje køyrast gjennom
+    // bn.til_bytes ein gong til (det ville tolke bytane som limbar → korrupt sig).
+    la r32 = rs["r"]
+    la s32 = rs["s"]
+    la sig: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 32 { legg_til(sig, r32[i]) i = i + 1 }
+    i = 0
+    mens i < 32 { legg_til(sig, s32[i]) i = i + 1 }
+    returner si + "." + _b64url_bytes(sig)
+}
+
+funksjon verify_es256(token: tekst, qx: liste_heiltall, qy: liste_heiltall) -> tekst {
+    la d = _deler(token)
+    la hdr = _bytes_til_tekst(_b64url_til_bytes(d[0]))
+    hvis json.hent_tekst(json.parse(hdr), "alg") != "ES256" { kast "JwtFeil: forventa alg ES256" }
+    la si = d[0] + "." + d[1]
+    la sig = _b64url_til_bytes(d[2])
+    hvis lengde(sig) != 64 { kast "JwtFeil: ES256-signatur må vere 64 byte" }
+    la r_b: liste_heiltall = []
+    la s_b: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 32 { legg_til(r_b, sig[i]) i = i + 1 }
+    i = 32
+    mens i < 64 { legg_til(s_b, sig[i]) i = i + 1 }
+    la hash_bn = bn.fra_bytes(_sha256_bytes(si))
+    hvis ikkje ecdsa.ecdsa_verify(bn.fra_bytes(qx), bn.fra_bytes(qy), hash_bn, bn.fra_bytes(r_b), bn.fra_bytes(s_b)) {
+        kast "JwtFeil: ugyldig signatur"
+    }
+    returner _bytes_til_tekst(_b64url_til_bytes(d[1]))
+}
+
+funksjon _sha256_bytes(s: tekst) -> liste_heiltall {
+    la hex = sha.hash(s)
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i + 1 < lengde(hex) {
+        la hi = builtin.index_of("0123456789abcdef", builtin.slice(hex, i, i + 1))
+        la lo = builtin.index_of("0123456789abcdef", builtin.slice(hex, i + 1, i + 2))
+        legg_til(ut, hi * 16 + lo)
+        i = i + 2
+    }
+    returner ut
+}
+
+# ─── Claims-validering ───────────────────────────────────────────────────────
+# Kastar JwtFeil om exp er passert, nbf ikkje nådd, eller iss/aud ikkje samsvarer.
+# forventa_iss/forventa_aud = "" tyder «ikkje sjekk».
+
+funksjon _no_sekund() -> heiltall {
+    prøv { returner builtin.now_ms() / 1000 } fang (e) { }
+    returner 0
+}
+
+funksjon valider_claims(payload_json: tekst, forventa_iss: tekst, forventa_aud: tekst) -> boolsk {
+    la o = json.parse(payload_json)
+    la no = _no_sekund()
+
+    hvis har_nokkel(o, "exp") {
+        la exp = heltall_fra_tekst(tekst(o["exp"]))
+        hvis exp > 0 og no >= exp { kast "JwtFeil: token er utløpt (exp)" }
+    }
+
+    hvis har_nokkel(o, "nbf") {
+        la nbf = heltall_fra_tekst(tekst(o["nbf"]))
+        hvis nbf > 0 og no < nbf { kast "JwtFeil: token er ikkje gyldig enno (nbf)" }
+    }
+
+    hvis forventa_iss != "" {
+        hvis tekst(o["iss"]) != forventa_iss { kast "JwtFeil: feil utsteder (iss)" }
+    }
+
+    hvis forventa_aud != "" {
+        hvis har_nokkel(o, "aud") og tekst(o["aud"]) == forventa_aud { returner sann }
+        prøv {
+            la liste_aud = json.hent_array_tekst(o, "aud")
+            la i: heiltall = 0
+            mens i < lengde(liste_aud) {
+                hvis liste_aud[i] == forventa_aud { returner sann }
+                i = i + 1
+            }
+        } fang (e) { }
+        kast "JwtFeil: feil mottakar (aud)"
+    }
+    returner sann
+}
+
+funksjon verify_hs256_claims(token: tekst, hemmeleg: tekst, forventa_iss: tekst, forventa_aud: tekst) -> tekst {
+    la payload = verify_hs256(token, hemmeleg)
+    valider_claims(payload, forventa_iss, forventa_aud)
+    returner payload
+}
+
+funksjon status() -> ordbok_tekst {
+    returner {
+        "modul": "std.jwt",
+        "algoritmar": "HS256,EdDSA,ES256",
+        "claims": "exp,nbf,iss,aud",
+        "feil": "JwtFeil (fangbar)"
+    }
+}
