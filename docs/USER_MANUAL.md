@@ -394,12 +394,17 @@ Dette er grunnmur for vidare daemon/runtime-arbeid. Modulane er ikkje meint som 
 
 Serverlaget har same standardflyt som moderne web-rammeverk:
 
+> **⚠️ Merk (fase 0, 2026-10).** Fleire av punkta under skildrar idealet eller
+> `web.handle_request`-vegen (tester), ikkje alltid produksjonsvegen `nc serve`. Målt i
+> dag: `content-type` er ikkje alltid trygg, og **feilsvar frå `nc serve` (404/500) er
+> `text/plain` med rå tekst — ikkje JSON**. Sjå `notat/fastapi_analyse.md` kapittel 5.
+
 - `GET`, `HEAD` og `OPTIONS` blir handtert gjennom same rute-kontrakt.
-- JSON- og tekstsvar får trygg `content-type` når appen ikkje set han sjølv.
+- JSON- og tekstsvar bør få trygg `content-type` når appen ikkje set han sjølv (ikkje alltid oppfylt under `nc serve`).
 - Vanlege svar kan lagast direkte med `response_html`, `response_text_plain`, `response_redirect_found`, `response_redirect_see_other` og `response_no_content`.
 - Ekstra responsheaderar kan leggjast på med `response_with_header`.
-- Feilsvar frå serverruta er JSON (`{"error": ...}`) og passar API-klientar.
-- Produksjonsheaders blir lagt på av servermotoren: `x-content-type-options`, `referrer-policy`, `x-frame-options`, `cache-control` og `server`.
+- Feilsvar via `web.response_error` er JSON (`{"error": ...}`); men `nc serve` sine eigne 404/500 er i dag `text/plain`.
+- Produksjonsheaders kan leggjast på med streng web-finalisering (sjå under); dei blir **ikkje** lagt på automatisk av servermotoren for alle ruter.
 - Streng web-finalisering kan brukast med `response_finalize_strict` og `response_finalize_strict_cors`, som i tillegg legg på HSTS, CSP, Permissions-Policy, cross-origin-isolering og `x-permitted-cross-domain-policies`.
 - `x-request-id` blir ført vidare når klienten sender han, elles blir han generert.
 - CORS/preflight svarer med `allow`, `access-control-allow-methods` og `access-control-allow-headers`.

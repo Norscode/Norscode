@@ -1,7 +1,16 @@
 # Norscode HTTP Server — Production Ready Status
 
 **Date:** 2026-06-14  
-**Status:** ✅ 100% PRODUCTION READY
+**Status:** ⚠️ HISTORISK / UTDATERT — ikkje 100 % produksjonsklar
+
+> **⚠️ HISTORISK / UTDATERT (fase 0, 2026-10).** Påstanden om «100 % PRODUCTION READY»
+> stemmer ikkje. Sjå den etterprøvde gapanalysen i `notat/fastapi_analyse.md` (kapittel 1 og
+> 5). Konkret feil i dette dokumentet: HTTP-tenaren er **rein Norscode** med native socket —
+> det finst ingen `tools/nc_serve.py`, ingen `src/builtins_socket.c` og inga Python-avhengnad.
+> `--workers` blir ignorert (éin prosess, éin tråd), `--python`/`--native` finst ikkje.
+> Tala «1000 req/s» o.l. gjeld berre med `NORSCODE_VM_FAST=1`. Handlarane under `nc serve` har
+> i dag korkje disk, env eller globalar, og éi feilforma JSON eller ein fleirparameter-handlar
+> kan ta ned tenaren.
 
 ---
 

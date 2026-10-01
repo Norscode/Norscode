@@ -256,13 +256,13 @@ For API-versjonering og migrasjonsnotater, se [docs/API_VERSIONING.md](./API_VER
 
 For middleware og hooks, se [examples/web_middleware.no](../examples/web_middleware.no).
 
-For lokal serverkjøring, bruk `norcode serve examples/web_routes.no --reload` eller en egen webapp-fil du vil kjøre i dev-modus.
+For lokal serverkjøring, bruk `nc serve examples/web_routes.no --host 0.0.0.0 --port 8000` (det finst ingen `--reload`/dev-modus i dag).
 
-For reverse proxy-oppsett, bruk `norcode serve ... --proxy-headers --trusted-proxy <proxy-ip>` og les forwarded headers via `web.request_header()`.
+For reverse proxy-oppsett finst det ingen `--proxy-headers`/`--trusted-proxy`-flagg på `nc serve`; set opp nginx (sjå `std/deploy.no generer_nginx`) og les forwarded headers via `web.request_header()`.
 
-For browser-klienter og CORS, bruk `norcode serve ... --cors-origin https://app.example.com` eller la standard-CORS stå på for en enkel API-flate.
+For browser-klienter og CORS finst det ingen `--cors-origin`-flagg; bruk CORS-mellomvare i `std/mw.no` i appen din.
 
-For enkel rate limiting og brute-force-beskyttelse, bruk `norcode serve ... --rate-limit-requests 120 --rate-limit-window 60`.
+For rate limiting finst det ingen `--rate-limit-*`-flagg på `nc serve`; bruk hjelparane i `std/mw.no`/`std/cache.no` i appen (merk: måle-funna i `notat/fastapi_analyse.md` viser hol her).
 
 For containeroppsett og volum-basert kjøring, se [docs/CONTAINER.md](./CONTAINER.md).
 For systemd-oppsett på Linux, se [docs/SYSTEMD.md](./SYSTEMD.md) og [deploy/norscode.service](../deploy/norscode.service).
