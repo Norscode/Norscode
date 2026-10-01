@@ -1,0 +1,202 @@
+// Fase 1.9-regresjon: «skjema som data»-modellar (std/modell.no).
+//
+// Dekker: nøsta modell, alias, constraints (lengd/gt/lt/ge/le), pattern, enum,
+// extra=forbid, påkravd vs standard, typekonvertering (tekst→int/float/bool/dato),
+// binding frå ctx (query + body), 422-detail med rett loc, serialisering
+// (by_alias/exclude/exclude_none) og JSON Schema til OpenAPI. UTF-8/kodepunkt-lengd.
+//
+// Mutasjonsprov (at testen FEILAR før implementasjonen): sjå kommentar nedst.
+
+bruk std.modell som m
+bruk std.synk_kjerne som sk
+bruk std.web som web
+
+// Finn fyrste feil-post med gjeven loc-sti (som JSON-liste) og returner "type"-koden.
+funksjon _feiltype_for_loc(res: ordbok, loc_json: tekst) -> tekst {
+    la feil = res["feil"]
+    la i = 0
+    mens i < lengde(feil) {
+        la post = builtin.json_parse_raw(feil[i])
+        hvis sk.json(post["loc"]) == loc_json { returner tekst(post["type"]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _tal_feil(res: ordbok) -> heltall {
+    returner lengde(res["feil"])
+}
+
+funksjon _bygg_person() -> ordbok {
+    la adr = m.ny_modell()
+    m.legg(adr, m.lengd(m.felt("gate", "tekst"), 1, 50))
+    m.legg(adr, m.mønster(m.felt("postnr", "tekst"), "[0-9][0-9][0-9][0-9]"))
+
+    la person = m.forby_ekstra(m.ny_modell())
+    m.legg(person, m.lengd(m.felt("namn", "tekst"), 2, 10))
+    m.legg(person, m.le(m.ge(m.felt("alder", "heltall"), 0), 150))
+    m.legg(person, m.eit_av(m.felt("rolle", "tekst"), ["admin", "bruker"]))
+    // alias: wire-namn "addr", internt "adresse"
+    m.legg(person, m.nøsta(m.alias(m.felt("adresse", "modell"), "addr"), adr))
+    m.legg(person, m.standard(m.felt("aktiv", "bool"), sann))
+    // eksludert frå serialisering (t.d. hemmeleg)
+    m.legg(person, m.ekskluder(m.valfri(m.felt("hemmeleg", "tekst"))))
+    returner person
+}
+
+funksjon start() -> heltall {
+    la person = _bygg_person()
+
+    // ── 1. Gyldig body ──────────────────────────────────────────────────────
+    la g = builtin.json_parse_raw("{\"namn\":\"Øyvind\",\"alder\":30,\"rolle\":\"admin\",\"addr\":{\"gate\":\"Storgata\",\"postnr\":\"0123\"}}")
+    la r1 = m.valider(person, g)
+    assert_eq(r1["gyldig"], sann)
+    la v1 = r1["verdiar"]
+    assert_eq(v1["namn"], "Øyvind")
+    assert_eq(v1["alder"], 30)
+    assert_eq(builtin.type(v1["alder"]), "heltall")
+    assert_eq(v1["aktiv"], sann)            // standardverdi fylt inn
+    assert_eq(v1["adresse"]["postnr"], "0123")
+
+    // ── 2. Fleire ugyldige felt på éin gong, rett loc + type ─────────────────
+    la u = builtin.json_parse_raw("{\"namn\":\"AltForLangtNamn\",\"alder\":200,\"rolle\":\"x\",\"addr\":{\"gate\":\"\",\"postnr\":\"12\"},\"ekstra\":1}")
+    la r2 = m.valider(person, u)
+    assert_eq(r2["gyldig"], usann)
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"namn\"]"), "string_too_long")
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"alder\"]"), "less_than_equal")
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"rolle\"]"), "enum")
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"addr\",\"gate\"]"), "string_too_short")
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"addr\",\"postnr\"]"), "string_pattern_mismatch")
+    assert_eq(_feiltype_for_loc(r2, "[\"body\",\"ekstra\"]"), "extra_forbidden")
+
+    // ── 3. Manglande påkravd + feil type ─────────────────────────────────────
+    la u2 = builtin.json_parse_raw("{\"alder\":\"ikkje-tal\",\"rolle\":\"admin\",\"addr\":{\"gate\":\"G\",\"postnr\":\"0000\"}}")
+    la r3 = m.valider(person, u2)
+    assert_eq(r3["gyldig"], usann)
+    assert_eq(_feiltype_for_loc(r3, "[\"body\",\"namn\"]"), "missing")
+    assert_eq(_feiltype_for_loc(r3, "[\"body\",\"alder\"]"), "int_parsing")
+
+    // ── 4. gt/lt (under grensa) ──────────────────────────────────────────────
+    la skaar = m.ny_modell()
+    m.legg(skaar, m.lt(m.gt(m.felt("verdi", "desimaltall"), 0.0), 1.0))
+    assert_eq(m.valider(skaar, builtin.json_parse_raw("{\"verdi\":0.5}"))["gyldig"], sann)
+    la r4 = m.valider(skaar, builtin.json_parse_raw("{\"verdi\":0.0}"))
+    assert_eq(r4["gyldig"], usann)
+    assert_eq(_feiltype_for_loc(r4, "[\"body\",\"verdi\"]"), "greater_than")
+    assert_eq(m.valider(skaar, builtin.json_parse_raw("{\"verdi\":1.0}"))["gyldig"], usann)
+
+    // ── 5. Typekonvertering frå tekst (query/form-stil): int/float/bool/dato ──
+    la konv = m.ny_modell()
+    m.legg(konv, m.felt("n", "heltall"))
+    m.legg(konv, m.felt("f", "desimaltall"))
+    m.legg(konv, m.felt("b", "bool"))
+    m.legg(konv, m.felt("d", "dato"))
+    la cd: ordbok_tekst = {}
+    cd["n"] = "42"
+    cd["f"] = "3.14"
+    cd["b"] = "true"
+    cd["d"] = "2024-02-29"        // skotår – gyldig
+    la rk = m.valider_med_rot(konv, cd, "query")
+    assert_eq(rk["gyldig"], sann)
+    assert_eq(rk["verdiar"]["n"], 42)
+    assert_eq(builtin.type(rk["verdiar"]["n"]), "heltall")
+    assert_eq(rk["verdiar"]["b"], sann)
+    assert_eq(rk["verdiar"]["d"], "2024-02-29")
+    // ugyldig dato (29. feb i ikkje-skotår)
+    la cd2: ordbok_tekst = {}
+    cd2["n"] = "1"
+    cd2["f"] = "1.0"
+    cd2["b"] = "nei"
+    cd2["d"] = "2023-02-29"
+    la rk2 = m.valider_med_rot(konv, cd2, "query")
+    assert_eq(rk2["gyldig"], usann)
+    assert_eq(_feiltype_for_loc(rk2, "[\"query\",\"b\"]"), "bool_parsing")
+    assert_eq(_feiltype_for_loc(rk2, "[\"query\",\"d\"]"), "date_parsing")
+
+    // ── 6. Binding frå ctx (body) via bind_json ─────────────────────────────
+    la hdr: ordbok_tekst = {}
+    hdr["content-type"] = "application/json"
+    la ctx = web.request_context("POST", "/person", {}, hdr, "{\"namn\":\"Åse\",\"alder\":40,\"rolle\":\"bruker\",\"addr\":{\"gate\":\"Vei\",\"postnr\":\"9999\"}}")
+    la rb = m.bind_json(person, ctx)
+    assert_eq(rb["gyldig"], sann)
+    assert_eq(rb["verdiar"]["namn"], "Åse")
+
+    // ── 7. Binding frå ctx (query) via bind_query ────────────────────────────
+    la q: ordbok_tekst = {}
+    q["n"] = "7"
+    q["f"] = "2.5"
+    q["b"] = "0"
+    q["d"] = "2020-01-15"
+    la ctxq = web.request_context("GET", "/x", q, {}, "")
+    la rq = m.bind_query(konv, ctxq)
+    assert_eq(rq["gyldig"], sann)
+    assert_eq(rq["verdiar"]["n"], 7)
+    assert_eq(rq["verdiar"]["b"], usann)
+
+    // ── 8. Serialisering: by_alias, exclude (felt-nivå), exclude_none ────────
+    la ut_alias = m.til_ordbok(person, v1, {"by_alias": sann})
+    assert_eq(har_nokkel(ut_alias, "addr"), sann)       // alias brukt
+    assert_eq(har_nokkel(ut_alias, "adresse"), usann)
+    assert_eq(har_nokkel(ut_alias, "hemmeleg"), usann)  // ekskludert
+    la ut_std = m.til_ordbok(person, v1, {})
+    assert_eq(har_nokkel(ut_std, "adresse"), sann)      // utan by_alias: internt namn
+
+    // exclude_none: null-verdi skal falle bort
+    la en = m.ny_modell()
+    m.legg(en, m.valfri(m.felt("a", "tekst")))
+    m.legg(en, m.valfri(m.felt("b", "tekst")))
+    la verdiar_en: ordbok = {}
+    verdiar_en["a"] = "x"
+    verdiar_en["b"] = null
+    la ut_en = m.til_ordbok(en, verdiar_en, {"exclude_none": sann})
+    assert_eq(har_nokkel(ut_en, "a"), sann)
+    assert_eq(har_nokkel(ut_en, "b"), usann)
+
+    // ── 9. JSON Schema (OpenAPI-additivt) ────────────────────────────────────
+    la schema = m.json_schema(person)
+    assert_eq(schema["type"], "object")
+    assert_eq(schema["additionalProperties"], usann)    // extra=forbid
+    la props = schema["properties"]
+    assert_eq(props["namn"]["type"], "string")
+    assert_eq(props["namn"]["minLength"], 2)
+    assert_eq(props["namn"]["maxLength"], 10)
+    assert_eq(props["alder"]["type"], "integer")
+    assert_eq(props["alder"]["minimum"], 0)
+    assert_eq(props["alder"]["maximum"], 150)
+    assert_eq(sk.json(props["rolle"]["enum"]), "[\"admin\",\"bruker\"]")
+    assert_eq(props["addr"]["type"], "object")          // nøsta via alias-namn
+    assert_eq(props["addr"]["properties"]["postnr"]["pattern"], "[0-9][0-9][0-9][0-9]")
+    assert_eq(props["aktiv"]["type"], "boolean")
+    assert_eq(props["aktiv"]["default"], sann)
+    // required inneheld påkravde utan standard, med wire-namn
+    la req_json = sk.json(schema["required"])
+    assert_eq(builtin.index_of(req_json, "\"namn\"") >= 0, sann)
+    assert_eq(builtin.index_of(req_json, "\"addr\"") >= 0, sann)
+    assert_eq(builtin.index_of(req_json, "\"aktiv\"") >= 0, usann)   // har standard
+
+    // ── 10. UTF-8 / kodepunkt-lengd (IKKJE byte) ────────────────────────────
+    la kl = m.ny_modell()
+    m.legg(kl, m.lengd(m.felt("t", "tekst"), 1, 3))
+    // "æøå" = 6 byte, men 3 kodepunkt → gyldig (byte-telling ville avvist)
+    assert_eq(m.valider(kl, builtin.json_parse_raw("{\"t\":\"æøå\"}"))["gyldig"], sann)
+    // "æøåx" = 4 kodepunkt → for langt
+    la rl = m.valider(kl, builtin.json_parse_raw("{\"t\":\"æøåx\"}"))
+    assert_eq(rl["gyldig"], usann)
+    assert_eq(_feiltype_for_loc(rl, "[\"body\",\"t\"]"), "string_too_long")
+
+    // ── 11. 422-respons-objekt ───────────────────────────────────────────────
+    la resp = m.valideringsfeil_respons(r2)
+    assert_eq(web.response_status(resp), 422)
+    assert_eq(web.response_header(resp, "content-type"), "application/json; charset=utf-8")
+    // body skal vere gyldig {detail:[...]}
+    assert_eq(builtin.index_of(web.response_body(resp), "\"detail\":[") >= 0, sann)
+
+    skriv("test_modell OK")
+    returner 0
+}
+
+// MUTASJONSPROV (manuelt, for å prove at testen fangar regresjon):
+//   - Endra _kp_lengd til å returnere lengde(s) (byte) → punkt 10 feilar.
+//   - Fjern extra=forbid-blokka i _valider_inn → punkt 2 (extra_forbidden) feilar.
+//   - Gjer _dato_ok alltid sann → punkt 5 (date_parsing) feilar.
+//   - Fjern standard-utfylling i _valider_inn → punkt 1 (aktiv) feilar.
