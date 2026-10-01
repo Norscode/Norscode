@@ -1,0 +1,382 @@
+# docs_side.no — JS-fri, interaktiv API-dokumentasjonsside (Fase 1, punkt 1.10)
+#
+# Genererer ei HTML-side frå same metadata som OpenAPI-generatoren
+# (builtin.ncb_route_handlers + oppsett), UTAN JavaScript. Endepunkt grupperte
+# etter tags, med metode, sti, parametrar, request-body-skjema, responsar og
+# modell-skjema (components/schemas via oppsett["modellar"] + $ref via
+# oppsett["rute_modell"], same wiring som web.openapi_json_med).
+#
+# «Prøv»-funksjonen er eit reint HTML-skjema som POST-ar til ei in-process
+# dispatch-rute (prov_dispatch → web.handle_request). Den er AV som standard
+# (produksjon) og berre PÅ når dev-flagget er sant. CSRF-vern via
+# dobbel-innsending (skjult felt + cookie), samanlikna i konstant tid.
+#
+# Rutene /docs (HTML) og /openapi.json (skjema) kan ein app registrere; dei er
+# alt skjulte frå sjølve skjemaet (web._openapi_er_docs_rute, PR #212).
+#
+# Merknad: me rendrar ikkje frå den serialiserte openapi-JSON-strengen fordi
+# builtin.json_parse ikkje byggjer nøsta strukturar att; me les metadata direkte.
+#
+# VIKTIG: ingen handskriven JavaScript nokon stad. Rein HTML + CSS.
+
+bruk std.web som web
+bruk std.html som h
+bruk std.csrf som csrf
+bruk std.kvikk som kvikk
+
+# ─── Konstantar ──────────────────────────────────────────────────────────────
+
+funksjon prov_sti() -> tekst { returner "/_docs/prov" }
+
+funksjon skjema_json(oppsett: ordbok) -> tekst {
+    returner web.openapi_json_med(oppsett)
+}
+
+# ─── Introspeksjon (speglar web.openapi_json_med) ─────────────────────────────
+
+funksjon _stor(m: tekst) -> tekst {
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens i < lengde(m) {
+        la c = m[i]
+        la code = builtin.char_code(c)
+        hvis code >= 97 og code <= 122 { ut = ut + builtin.chr(code - 32) }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _liten(m: tekst) -> tekst {
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens i < lengde(m) {
+        la c = m[i]
+        la code = builtin.char_code(c)
+        hvis code >= 65 og code <= 90 { ut = ut + builtin.chr(code + 32) }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _i_liste(l, verdi: tekst) -> boolsk {
+    la i: heltall = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == verdi { returner sant }
+        i = i + 1
+    }
+    returner usann
+}
+
+# {id:int} → {id}
+funksjon _norm_path(raw_path: tekst) -> tekst {
+    la segs = builtin.split(raw_path, "/")
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens i < lengde(segs) {
+        la seg = segs[i]
+        la norm = seg
+        hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+            la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+            la c = builtin.index_of(inner, ":")
+            hvis c > 0 { norm = "{" + builtin.slice(inner, 0, c) + "}" }
+        }
+        hvis i == 0 { ut = norm }
+        ellers { ut = ut + "/" + norm }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Path-parametrar frå mønsteret {namn} / {namn:type} som liste av ordbok.
+funksjon _path_params(raw_path: tekst) {
+    la segs = builtin.split(raw_path, "/")
+    la ut = []
+    la i: heltall = 0
+    mens i < lengde(segs) {
+        la seg = segs[i]
+        hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+            la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+            la navn = inner
+            la typ = "tekst"
+            la c = builtin.index_of(inner, ":")
+            hvis c > 0 {
+                navn = builtin.slice(inner, 0, c)
+                typ = builtin.slice(inner, c + 1, lengde(inner))
+            }
+            legg_til(ut, {"name": navn, "in": "path", "type": typ, "required": sant})
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _op_id(fn: tekst) -> tekst {
+    la f = fn
+    hvis tekst_starter_med(f, "__main__.") { f = builtin.slice(f, 9, lengde(f)) }
+    returner builtin.replace(f, ".", "_")
+}
+
+funksjon _tag(fn: tekst) -> tekst {
+    la deler = builtin.split(fn, ".")
+    hvis lengde(deler) < 2 { returner "standard" }
+    la modul_sist = deler[lengde(deler) - 2]
+    hvis modul_sist == "__main__" { returner "standard" }
+    returner modul_sist
+}
+
+funksjon _er_docs_rute(norm_path: tekst) -> boolsk {
+    returner norm_path == "/openapi.json" eller norm_path == "/docs" eller norm_path == "/redoc"
+}
+
+# ─── Skjema-rendring ───────────────────────────────────────────────────────────
+
+funksjon _ref_namn(rf: tekst) -> tekst {
+    la deler = builtin.split(rf, "/")
+    hvis lengde(deler) > 0 { returner deler[lengde(deler) - 1] }
+    returner rf
+}
+
+# Rendrar eit JSON-skjemaobjekt (ordbok frå modell.json_schema): properties-tabell.
+funksjon _render_props(skjema) -> tekst {
+    hvis skjema == null { returner "" }
+    hvis ikkje finnes_nøkkel(skjema, "properties") {
+        la ty: tekst = ""
+        hvis finnes_nøkkel(skjema, "type") { ty = tekst(skjema["type"]) }
+        hvis ty == "" { returner "" }
+        returner "<p class=\"skjema-type\">type: <code>" + h.escape(ty) + "</code></p>"
+    }
+    la props = skjema["properties"]
+    la req = []
+    hvis finnes_nøkkel(skjema, "required") { req = skjema["required"] }
+    la navn_liste = nøkler(props)
+    la ut = "<table class=\"felt\"><thead><tr><th>Felt</th><th>Type</th><th>Påkravd</th></tr></thead><tbody>"
+    la i: heltall = 0
+    mens i < lengde(navn_liste) {
+        la felt_namn = tekst(navn_liste[i])
+        la fs = props[felt_namn]
+        la typ: tekst = ""
+        hvis finnes_nøkkel(fs, "type") { typ = tekst(fs["type"]) }
+        hvis finnes_nøkkel(fs, "format") { typ = typ + " (" + tekst(fs["format"]) + ")" }
+        la pakravd = hvis _i_liste(req, felt_namn) da "ja" ellers "nei"
+        ut = ut + "<tr><td><code>" + h.escape(felt_namn) + "</code></td><td>" + h.escape(typ) + "</td><td>" + pakravd + "</td></tr>"
+        i = i + 1
+    }
+    returner ut + "</tbody></table>"
+}
+
+# Modell-referert skjema: viser modellnamnet (som i $ref) og felttabellen.
+funksjon _render_modell(navn: tekst, modellar: ordbok) -> tekst {
+    la ut = "<p class=\"ref\">Modell: <code>" + h.escape(navn) + "</code></p>"
+    hvis finnes_nøkkel(modellar, navn) { ut = ut + _render_props(modellar[navn]) }
+    returner ut
+}
+
+funksjon _render_params(params) -> tekst {
+    hvis lengde(params) == 0 { returner "" }
+    la ut = "<h4>Parametrar</h4><table class=\"param\"><thead><tr><th>Namn</th><th>I</th><th>Type</th><th>Påkravd</th></tr></thead><tbody>"
+    la i: heltall = 0
+    mens i < lengde(params) {
+        la p = params[i]
+        la nm = hvis finnes_nøkkel(p, "name") da tekst(p["name"]) ellers ""
+        la inn = hvis finnes_nøkkel(p, "in") da tekst(p["in"]) ellers ""
+        la typ = hvis finnes_nøkkel(p, "type") da tekst(p["type"]) ellers "string"
+        la req = hvis (finnes_nøkkel(p, "required") og p["required"] == sant) da "ja" ellers "nei"
+        ut = ut + "<tr><td><code>" + h.escape(nm) + "</code></td><td>" + h.escape(inn) + "</td><td>" + h.escape(typ) + "</td><td>" + req + "</td></tr>"
+        i = i + 1
+    }
+    returner ut + "</tbody></table>"
+}
+
+# «Prøv»-skjema: reint HTML, POST til in-process dispatch. Skjult CSRF-felt.
+funksjon _render_prov(metode: tekst, sti: tekst, csrf_token: tekst) -> tekst {
+    la ut = "<details class=\"prov\"><summary>Prøv</summary>"
+    ut = ut + "<form class=\"provform\" method=\"post\" action=\"" + h.escape(prov_sti()) + "\">"
+    ut = ut + "<input type=\"hidden\" name=\"" + h.escape(csrf.felt_namn()) + "\" value=\"" + h.escape(csrf_token) + "\">"
+    ut = ut + "<label>Metode <input type=\"text\" name=\"__metode\" value=\"" + h.escape(metode) + "\"></label>"
+    ut = ut + "<label>Sti <input type=\"text\" name=\"__sti\" value=\"" + h.escape(sti) + "\"></label>"
+    ut = ut + "<label>Request-kropp (JSON) <textarea name=\"__kropp\" rows=\"5\"></textarea></label>"
+    ut = ut + "<button type=\"submit\">Send</button>"
+    ut = ut + "</form></details>"
+    returner ut
+}
+
+funksjon _css() -> tekst {
+    la base = "body{font-family:system-ui,-apple-system,sans-serif;margin:0;color:#1a1a1a;background:#fafafa;line-height:1.5}"
+    base = base + ".app-header{padding:1.5rem;background:#1b2b40;color:#fff}"
+    base = base + ".app-header h1{margin:0 0 .25rem}.app-header a{color:#9ad}"
+    base = base + "main{max-width:60rem;margin:0 auto;padding:1rem}"
+    base = base + "section.tag{margin:1.5rem 0}section.tag>h2{border-bottom:2px solid #1b2b40;padding-bottom:.25rem}"
+    base = base + "article.ep{background:#fff;border:1px solid #ddd;border-radius:6px;padding:1rem;margin:1rem 0}"
+    base = base + ".m{font-weight:700;padding:.1rem .4rem;border-radius:4px;color:#fff}"
+    base = base + ".m-get{background:#2d7}.m-post{background:#27d}.m-put{background:#d92}.m-delete{background:#d33}.m-patch{background:#92d}"
+    base = base + "table{border-collapse:collapse;width:100%;margin:.5rem 0}th,td{border:1px solid #e0e0e0;padding:.3rem .5rem;text-align:left}"
+    base = base + "th{background:#f0f2f5}code{background:#f0f2f5;padding:.1rem .3rem;border-radius:3px}"
+    base = base + "pre.eks{background:#f6f8fa;padding:.5rem;border-radius:4px;overflow:auto}"
+    base = base + "details.prov{margin-top:.75rem;border-top:1px dashed #ccc;padding-top:.5rem}"
+    base = base + ".provform label{display:block;margin:.4rem 0}.provform input,.provform textarea{width:100%;box-sizing:border-box}"
+    base = base + ".provform button{margin-top:.5rem;padding:.4rem 1rem;background:#1b2b40;color:#fff;border:0;border-radius:4px}"
+    prøv { returner kvikk.overgang_css() + "\n" + base } fang (e) { }
+    returner base
+}
+
+# ─── Hovud-rendrar ─────────────────────────────────────────────────────────────
+
+# side_html: full HTML-dokumentasjonsside frå oppsett. dev=sant slår på
+# «Prøv»-skjema (av i produksjon). csrf_token blir lagt i kvart Prøv-skjema.
+funksjon side_html(oppsett: ordbok, dev: boolsk, csrf_token: tekst) -> tekst {
+    la tittel = hvis finnes_nøkkel(oppsett, "tittel") da tekst(oppsett["tittel"]) ellers "Norscode API"
+    la versjon = hvis finnes_nøkkel(oppsett, "versjon") da tekst(oppsett["versjon"]) ellers "0.1.0"
+
+    la modellar: ordbok = {}
+    hvis finnes_nøkkel(oppsett, "modellar") { modellar = oppsett["modellar"] }
+    la rute_modell: ordbok = {}
+    hvis finnes_nøkkel(oppsett, "rute_modell") { rute_modell = oppsett["rute_modell"] }
+    la tag_desc: ordbok = {}
+    hvis finnes_nøkkel(oppsett, "tags") { tag_desc = oppsett["tags"] }
+    la eksempel: ordbok = {}
+    hvis finnes_nøkkel(oppsett, "eksempel") { eksempel = oppsett["eksempel"] }
+
+    la rh = builtin.ncb_route_handlers()
+    la tag_rekkje = []
+    la tag_html: ordbok = {}
+
+    la i: heltall = 0
+    mens i < lengde(rh) {
+        la handler = rh[i]
+        la spec = tekst(handler["spec"])
+        la deler = builtin.split(spec, " ")
+        hvis lengde(deler) >= 2 {
+            la raw_path = deler[1]
+            la norm_path = _norm_path(raw_path)
+            hvis ikkje _er_docs_rute(norm_path) {
+                la metode = _liten(deler[0])
+                la stor = _stor(deler[0])
+                la fn = tekst(handler["function"])
+                la op_id = _op_id(fn)
+                la tag = _tag(fn)
+                hvis ikkje _i_liste(tag_rekkje, tag) { legg_til(tag_rekkje, tag) }
+
+                la eh = "<article class=\"ep\"><h3><span class=\"m m-" + h.escape(metode) + "\">" + h.escape(stor) + "</span> <code>" + h.escape(norm_path) + "</code></h3>"
+                eh = eh + "<p class=\"opid\">operationId: <code>" + h.escape(op_id) + "</code></p>"
+
+                # Parametrar: path + query.
+                la params = _path_params(raw_path)
+                la qp = handler["query_params"]
+                la qi: heltall = 0
+                mens qi < lengde(qp) {
+                    legg_til(params, {"name": tekst(qp[qi]), "in": "query", "type": "string", "required": usann})
+                    qi = qi + 1
+                }
+                eh = eh + _render_params(params)
+
+                # Request-body: modell ($ref) eller body_fields.
+                la rm_req = ""
+                la rm_resp = ""
+                hvis finnes_nøkkel(rute_modell, op_id) {
+                    la rr = rute_modell[op_id]
+                    hvis finnes_nøkkel(rr, "request") { rm_req = tekst(rr["request"]) }
+                    hvis finnes_nøkkel(rr, "respons") { rm_resp = tekst(rr["respons"]) }
+                }
+                la bf = handler["body_fields"]
+                hvis rm_req != "" {
+                    eh = eh + "<h4>Request-body</h4>" + _render_modell(rm_req, modellar)
+                } ellers hvis lengde(bf) > 0 {
+                    eh = eh + "<h4>Request-body</h4><table class=\"felt\"><thead><tr><th>Felt</th><th>Type</th></tr></thead><tbody>"
+                    la bi: heltall = 0
+                    mens bi < lengde(bf) {
+                        eh = eh + "<tr><td><code>" + h.escape(tekst(bf[bi])) + "</code></td><td>string</td></tr>"
+                        bi = bi + 1
+                    }
+                    eh = eh + "</tbody></table>"
+                }
+                hvis finnes_nøkkel(eksempel, op_id) {
+                    eh = eh + "<p>Eksempel:</p><pre class=\"eks\">" + h.escape(tekst(eksempel[op_id])) + "</pre>"
+                }
+
+                # Responsar.
+                eh = eh + "<h4>Responsar</h4>"
+                eh = eh + "<div class=\"resp\"><strong>200</strong> OK"
+                hvis rm_resp != "" { eh = eh + _render_modell(rm_resp, modellar) }
+                eh = eh + "</div>"
+                la errs = handler["error_responses"]
+                la ei: heltall = 0
+                mens ei < lengde(errs) {
+                    la er = errs[ei]
+                    eh = eh + "<div class=\"resp\"><strong>" + h.escape(tekst(er["status"])) + "</strong> " + h.escape(tekst(er["message"])) + "</div>"
+                    ei = ei + 1
+                }
+                la guards = handler["guards"]
+                hvis lengde(guards) > 0 {
+                    eh = eh + "<div class=\"resp\"><strong>401</strong> Ikkje autentisert</div><div class=\"resp\"><strong>403</strong> Forbudt</div>"
+                }
+
+                # «Prøv» berre i dev.
+                hvis dev { eh = eh + _render_prov(stor, norm_path, csrf_token) }
+                eh = eh + "</article>"
+
+                hvis finnes_nøkkel(tag_html, tag) { tag_html[tag] = tag_html[tag] + eh }
+                ellers { tag_html[tag] = eh }
+            }
+        }
+        i = i + 1
+    }
+
+    # Bygg body.
+    la body = "<header class=\"app-header\"><h1>" + h.escape(tittel) + "</h1><p>Versjon " + h.escape(versjon) + "</p>"
+    hvis finnes_nøkkel(oppsett, "beskriving") { body = body + "<p>" + h.escape(tekst(oppsett["beskriving"])) + "</p>" }
+    body = body + "<p><a href=\"/openapi.json\">openapi.json</a></p></header><main>"
+    hvis dev { body = body + "<p class=\"dev-merke\">Utviklingsmodus: «Prøv» er på.</p>" }
+    la si: heltall = 0
+    mens si < lengde(tag_rekkje) {
+        la tg = tag_rekkje[si]
+        hvis finnes_nøkkel(tag_html, tg) {
+            body = body + "<section class=\"tag\"><h2>" + h.escape(tg) + "</h2>"
+            hvis finnes_nøkkel(tag_desc, tg) { body = body + "<p>" + h.escape(tekst(tag_desc[tg])) + "</p>" }
+            body = body + tag_html[tg] + "</section>"
+        }
+        si = si + 1
+    }
+    body = body + "</main>"
+
+    returner "<!doctype html><html lang=\"nn\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>" + h.escape(tittel) + "</title><style>" + _css() + "</style></head><body>" + body + "</body></html>"
+}
+
+# ─── Ruter som ein app kan registrere ─────────────────────────────────────────
+
+# Full respons for /docs: genererer CSRF-token, set cookie (for Prøv) og rendrar.
+funksjon docs_respons(oppsett: ordbok, dev: boolsk) -> ordbok_tekst {
+    la token = csrf.generer_token()
+    la html = side_html(oppsett, dev, token)
+    la resp = web.response_html(200, html)
+    hvis dev { resp = web.response_set_cookie(resp, csrf.cookie(token)) }
+    returner resp
+}
+
+# Full respons for /openapi.json.
+funksjon skjema_respons(oppsett: ordbok) -> ordbok_tekst {
+    returner web.response_builder(200, {"content-type": "application/json; charset=utf-8"}, web.openapi_json_med(oppsett))
+}
+
+# In-process dispatch for «Prøv». AV som standard (dev=usann → 404).
+funksjon prov_dispatch(ctx: ordbok_tekst, dev: boolsk) -> ordbok_tekst {
+    hvis ikkje dev {
+        returner web.response_builder(404, {"content-type": "text/plain; charset=utf-8"}, "Prøv er av i produksjon")
+    }
+    la felt = web.request_form(ctx)
+    la token_form = hvis finnes_nøkkel(felt, csrf.felt_namn()) da tekst(felt[csrf.felt_namn()]) ellers ""
+    la token_cookie = web.request_cookie(ctx, csrf.cookie_namn())
+    hvis token_form == "" eller token_cookie == "" eller ikkje csrf.konstant_lik(token_form, token_cookie) {
+        returner web.response_builder(403, {"content-type": "text/plain; charset=utf-8"}, "Ugyldig CSRF")
+    }
+    la metode = hvis finnes_nøkkel(felt, "__metode") da tekst(felt["__metode"]) ellers "GET"
+    la sti = hvis finnes_nøkkel(felt, "__sti") da tekst(felt["__sti"]) ellers "/"
+    la kropp = hvis finnes_nøkkel(felt, "__kropp") da tekst(felt["__kropp"]) ellers ""
+    la mål_ctx = web.request_context(metode, sti, {}, {"content-type": "application/json"}, kropp)
+    la resp = web.handle_request(mål_ctx)
+    la status = web.response_status(resp)
+    la kroppsvar = web.response_body(resp)
+    la html = "<!doctype html><html lang=\"nn\"><head><meta charset=\"utf-8\"><title>Prøv-svar</title></head><body><h1>Svar</h1><p>Status: " + h.escape(tekst_fra_heltall(status)) + "</p><pre>" + h.escape(kroppsvar) + "</pre><p><a href=\"/docs\">Tilbake</a></p></body></html>"
+    returner web.response_html(200, html)
+}
