@@ -1,0 +1,198 @@
+# apptenar_di.no — dependency injection for apptenar (Fase 1, 1.2)
+#
+# Namngjeven avhengnadsgraf med cache per førespurnad (same dep blir kalla éin gong),
+# yield-kontrakt {verdi, rydd} med opprydding i OMVEND rekkjefølgje etter at svaret er
+# sendt, globale deps og deps per rute-prefiks (styrt frå apptenar-konfig), og
+# overstyr() for test. All kalling går gjennom aritetskontroll (vm_function_info) FØR
+# builtin.ncb_call_fn, så ein handlar/dep/vakt med feil tal parametrar gjev ein fangbar
+# feil i staden for SIGSEGV.
+#
+# Ein dep-provider er ein funksjon som tek ctx (og eventuelt verdiane til sine eigne
+# nøste deps) og gjev ein verdi, eller {"verdi": v, "rydd": "<fn>"} for eit yield-dep.
+# rydd-funksjonen blir kalla etter svaret (0 eller 1 parameter: verdien).
+
+# ─── Tilstand ──────────────────────────────────────────────────────────────────
+
+la _reg: ordbok = {}          # namn -> {"fn": tekst, "deps": liste}
+la _over: ordbok = {}         # namn -> fn (test-overstyring)
+la _prov: ordbok = {}         # namn -> fn (frå kompilator-metadata dependency_providers)
+la _req: ordbok = {"cache": {}, "resolving": {}, "cleanups": []}
+
+# ─── Registrering og overstyring ────────────────────────────────────────────────
+
+funksjon registrer(namn: tekst, fn: tekst) -> heltall {
+    _reg[namn] = {"fn": fn, "deps": []}
+    returner 0
+}
+
+funksjon registrer_graf(namn: tekst, fn: tekst, deps: liste) -> heltall {
+    _reg[namn] = {"fn": fn, "deps": deps}
+    returner 0
+}
+
+funksjon overstyr(namn: tekst, fn: tekst) -> heltall {
+    _over[namn] = fn
+    returner 0
+}
+
+funksjon fjern_overstyringar() -> heltall {
+    la ks = nøkler(_over)
+    la i = 0
+    mens i < lengde(ks) { fjern_nokkel(_over, ks[i])  i = i + 1 }
+    returner 0
+}
+
+funksjon nullstill() -> heltall {
+    la a = nøkler(_reg)
+    la i = 0
+    mens i < lengde(a) { fjern_nokkel(_reg, a[i])  i = i + 1 }
+    la b = nøkler(_prov)
+    i = 0
+    mens i < lengde(b) { fjern_nokkel(_prov, b[i])  i = i + 1 }
+    fjern_overstyringar()
+    start({})
+    returner 0
+}
+
+funksjon sett_providarar(map) -> heltall {
+    la b = nøkler(_prov)
+    la i = 0
+    mens i < lengde(b) { fjern_nokkel(_prov, b[i])  i = i + 1 }
+    hvis map != null og builtin.type(map) == "ordbok" {
+        la ks = nøkler(map)
+        i = 0
+        mens i < lengde(ks) { _prov[ks[i]] = tekst(map[ks[i]])  i = i + 1 }
+    }
+    returner 0
+}
+
+# ─── Aritetskontroll og kalling ─────────────────────────────────────────────────
+
+funksjon arity(fn: tekst) -> heltall {
+    la info = builtin.vm_function_info(fn)
+    hvis tekst(info["finnes"]) != "sann" { returner -1 }
+    returner heltall_fra_tekst(tekst(info["param_count"]))
+}
+
+# Arity-kontrollert kall. args er den fulle lista av posisjonelle argument.
+funksjon kall(fn: tekst, args: liste) {
+    la pc = arity(fn)
+    hvis pc < 0 { kast "AritetsFeil: ukjend funksjon " + fn }
+    hvis pc != lengde(args) {
+        kast "AritetsFeil: " + fn + " krev " + tekst(pc) + " parametrar, fekk " + tekst(lengde(args))
+    }
+    la n = lengde(args)
+    hvis n == 0 { returner builtin.ncb_call_fn(fn) }
+    hvis n == 1 { returner builtin.ncb_call_fn(fn, args[0]) }
+    hvis n == 2 { returner builtin.ncb_call_fn(fn, args[0], args[1]) }
+    hvis n == 3 { returner builtin.ncb_call_fn(fn, args[0], args[1], args[2]) }
+    hvis n == 4 { returner builtin.ncb_call_fn(fn, args[0], args[1], args[2], args[3]) }
+    hvis n == 5 { returner builtin.ncb_call_fn(fn, args[0], args[1], args[2], args[3], args[4]) }
+    hvis n == 6 { returner builtin.ncb_call_fn(fn, args[0], args[1], args[2], args[3], args[4], args[5]) }
+    kast "AritetsFeil: for mange parametrar (" + tekst(n) + ") for " + fn
+}
+
+# ─── Per-førespurnad-livssyklus ─────────────────────────────────────────────────
+
+funksjon start(ctx) -> heltall {
+    _req["cache"] = {}
+    _req["resolving"] = {}
+    _req["cleanups"] = []
+    returner 0
+}
+
+funksjon _prov_fn(namn: tekst) -> tekst {
+    hvis har_nokkel(_over, namn) { returner tekst(_over[namn]) }
+    hvis har_nokkel(_reg, namn) { returner tekst(_reg[namn]["fn"]) }
+    hvis har_nokkel(_prov, namn) { returner tekst(_prov[namn]) }
+    returner "__main__." + namn
+}
+
+funksjon _prov_deps(namn: tekst) -> liste {
+    hvis har_nokkel(_over, namn) { returner [] }
+    hvis har_nokkel(_reg, namn) { returner _reg[namn]["deps"] }
+    returner []
+}
+
+# Løys éin dep ved namn (rekursivt, cacha per førespurnad). Kastar fangbar feil ved
+# syklus, ukjend provider eller aritetsfeil.
+funksjon løys(ctx, namn: tekst) {
+    hvis har_nokkel(_req["cache"], namn) { returner _req["cache"][namn]["verdi"] }
+    hvis har_nokkel(_req["resolving"], namn) { kast "AvhengnadsFeil: syklus i avhengnadsgraf ved " + namn }
+    _req["resolving"][namn] = sann
+    la deps = _prov_deps(namn)
+    la dep_vals = []
+    la i = 0
+    mens i < lengde(deps) {
+        legg_til(dep_vals, løys(ctx, tekst(deps[i])))
+        i = i + 1
+    }
+    la fn = _prov_fn(namn)
+    la pc = arity(fn)
+    hvis pc < 0 {
+        fjern_nokkel(_req["resolving"], namn)
+        kast "AvhengnadsFeil: ukjend provider " + fn + " for dep " + namn
+    }
+    la args = [ctx]
+    la j = 0
+    mens j < lengde(dep_vals) og (1 + j) < pc { legg_til(args, dep_vals[j])  j = j + 1 }
+    hvis pc != lengde(args) {
+        fjern_nokkel(_req["resolving"], namn)
+        kast "AritetsFeil: provider " + fn + " for dep " + namn + " krev " + tekst(pc) + " parametrar"
+    }
+    la r = kall(fn, args)
+    la verdi = r
+    hvis r != null og builtin.type(r) == "ordbok" og har_nokkel(r, "verdi") og har_nokkel(r, "rydd") {
+        verdi = r["verdi"]
+        legg_til(_req["cleanups"], {"fn": tekst(r["rydd"]), "verdi": verdi})
+    }
+    _req["cache"][namn] = {"verdi": verdi}
+    fjern_nokkel(_req["resolving"], namn)
+    returner verdi
+}
+
+funksjon løys_fleire(ctx, namn_liste: liste) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(namn_liste) {
+        legg_til(ut, løys(ctx, tekst(namn_liste[i])))
+        i = i + 1
+    }
+    returner ut
+}
+
+# Kall ein handlar med ctx + så mange av dep_values som handlaren tek imot (ctx først).
+# Arity-kontrollert: ein handlar som krev fleire argument enn tilgjengeleg gjev fangbar feil.
+funksjon kall_handlar(fn: tekst, ctx, dep_values: liste) {
+    la pc = arity(fn)
+    hvis pc < 0 { kast "AritetsFeil: ukjend handlar " + fn }
+    hvis pc == 0 { returner kall(fn, []) }
+    la n_dep = pc - 1
+    hvis n_dep > lengde(dep_values) {
+        kast "AritetsFeil: handlar " + fn + " krev " + tekst(pc) + " parametrar, men berre " + tekst(1 + lengde(dep_values)) + " er tilgjengelege"
+    }
+    la args = [ctx]
+    la i = 0
+    mens i < n_dep { legg_til(args, dep_values[i])  i = i + 1 }
+    returner kall(fn, args)
+}
+
+# Køyr oppryddinga (yield-deps) i OMVEND rekkjefølgje. Ein rydd-feil blir svelgd
+# (teardown skal ikkje ta ned svaret). Gjev talet på rydd-funksjonar som vart kalla.
+funksjon ferdig() -> heltall {
+    la cl = _req["cleanups"]
+    la n = 0
+    la i = lengde(cl) - 1
+    mens i >= 0 {
+        prøv {
+            la rf = tekst(cl[i]["fn"])
+            la pc = arity(rf)
+            hvis pc == 1 { kall(rf, [cl[i]["verdi"]]) }
+            ellers hvis pc == 0 { kall(rf, []) }
+            n = n + 1
+        } fang (e) { }
+        i = i - 1
+    }
+    _req["cleanups"] = []
+    returner n
+}
