@@ -140,6 +140,21 @@ Windows i CI.
 Estimat: W0–W2 er éi–to økter kvar; W3/W4 to–tre; W5 éi; W6 er den største (tre–fem);
 W7 éi. Kring 8 milepælar / 12–18 økter til promoterbar seed.
 
+## 3f. Status (2026-10-01) — VERIFISERT PÅ EKTE WINDOWS (GitHub Actions grøn)
+
+* Workflow `.github/workflows/windows-native-verify.yml` + fikstur `tests/windows_native/`:
+  ubuntu byggjer fikstur-PE-ane + nc_main.exe via Norscode-codegen (cg1) med LINID-port;
+  **windows-latest køyrer dei på EKTE Windows**. Run 36819849216 GRØN:
+  `[WIN-OK] hei exit=42 … tidrand exit=17`, og `nc_main.exe version → "Norscode 0.1.0"`.
+  Exitkodane kan ikkje forfalskast → ekte Windows-stadfesting av OSTAB→kernel32-vegen.
+* **wine≠Windows-felle funnen og fiksa av det ekte steget:** import av WaitOnAddress/
+  WakeByAddressAll frå KERNEL32 gav STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) ved lasting på
+  ekte Windows (dei er api-set/kernelbase, ikkje kernel32; wine hadde dei). Fiks: os_importar_full
+  importerer berre det ein implementert rutine kallar.
+* **Att for 100 % native Windows-seed:** W6-attestasjon (SChannel/IOCP/AppContainer) + W7
+  stage0-promotering (erstatte C-æra `e03f820a`, krev identisk hash); ekte threads/getdents.
+  Codegen-vegen er no verifisert på ekte Windows — det var det wine ikkje kunne.
+
 ## 3e. Status (2026-10-01) — ALLE syscalls ruta; Windows-nc fullstendig kompilator
 
 * **0 rå Linux-syscall att i Windows-PE-en.** Alle ~55 syscall-stader i native_codegen_v2
