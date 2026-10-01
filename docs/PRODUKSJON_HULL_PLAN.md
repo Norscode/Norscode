@@ -9,7 +9,7 @@ Sjølvstendigheita/språket er i praksis i mål: `selvstendighet L1–L6` BESTÅ
 
 Tre ting i den opphavlege hòl-tabellen var utdaterte og er korrigerte her:
 - **`std.mail_server` er alt STABIL** (`std/stdlib_status.no:38`, `std/mail_server.no:530`) — ikkje eksperimentell.
-- **`./bin/nc serve` er rein Norscode** via `selfhost/serve_runner.no` med native socket — ingen Python (`tools/nc_serve.py` finst ikkje).
+- **`./bin/nc serve` er rein Norscode** via `selfhost/nc_main.no` (`nc_serve`) med native socket — ingen Python (`tools/nc_serve.py` finst ikkje; `selfhost/serve_runner.no` finst, men blir ikkje brukt av serve-kommandoen).
 - **Multi-site finst alt** i `std/https_front.no` (SNI/Host-basert per-domene-ruting, 421 fail-closed).
 - Den gamle «løpsk rekursjon på djupe HTML-sider»-blokkeringa er **løyst** (djupgrense 256→4096, opptil 16384; `docs/STATUS.md:180`).
 

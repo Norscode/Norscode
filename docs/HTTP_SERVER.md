@@ -457,12 +457,12 @@ curl http://localhost:8000/api/info
 | Innebygd HTTP-server | ✅ | ✅ (Uvicorn) |
 | REST-rammeverk | ✅ | ✅ |
 | Async | ⏳ Planlagt | ✅ |
-| Typing | ✅ Tvunget | ⚠️ Optional |
+| Typing | ⚠️ Delvis (ikkje handheva ved køyring) | ⚠️ Optional |
 | Ytelse | Høg (kompilert) | Moderat (tolket) |
 | Startup | ~50ms | ~100ms |
 | Dependencies | 0 | 10+ pakker |
 
-**Konklusjon:** Norscode er **klar for produksjon** for enkle og moderate API-ar. Bruk FastAPI for komplekse, async-tunge arbeidsmengder.
+**Konklusjon:** Norscode `nc serve` passar enkle API-ar, men har dokumenterte hol i produksjonsvegen (sjå `notat/fastapi_analyse.md` kap. 1): handlarane har korkje disk, env eller globalar, typar blir ikkje handheva ved køyring, og ei feilforma JSON eller ein fleirparameter-handlar kan ta ned tenaren. Bruk FastAPI for komplekse, async-tunge arbeidsmengder.
 
 ---
 
