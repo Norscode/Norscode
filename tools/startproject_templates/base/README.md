@@ -22,7 +22,7 @@ Kommandoar:
 - `./bin/nc run manage.no migrate`
 - `./bin/nc run manage.no status`
 - `./bin/nc run manage.no test`
-- `./bin/nc serve app.no --port 8080`
+- `./bin/nc serve app.no --host 0.0.0.0 --port 8080`
 - `./bin/nc startapp users`
 
 Dokumentasjon i prosjektet:
