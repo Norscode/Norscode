@@ -1871,113 +1871,280 @@ funksjon safe_slug(tekst_verdi: tekst) -> tekst {
 
 # ─── OpenAPI ───────────────────────────────────────────────────────────────────
 
-funksjon _openapi_schema(type_namn: tekst) -> tekst {
-    hvis type_namn == "heltall" eller type_namn == "int" { returner "{\"type\": \"integer\"}" }
-    hvis type_namn == "boolsk" eller type_namn == "bool" { returner "{\"type\": \"boolean\"}" }
-    hvis type_namn == "ordbok_heltall" { returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"integer\"}}" }
-    hvis type_namn == "ordbok_tekst" { returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}" }
-    hvis type_namn == "ordbok" eller tekst_starter_med(type_namn, "ordbok<") {
-        returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}}"
+// Fase 0.9: JSON-escape ein strengverdi for trygg innbaking i generert skjema.
+// Utan dette gav t.d. ein tittel med " ugyldig JSON (FA-094).
+funksjon _json_escape(verdi: tekst) -> tekst {
+    la ut: tekst = ""
+    la i: heiltall = 0
+    la n = lengde(verdi)
+    mens i < n {
+        la c = builtin.slice(verdi, i, i + 1)
+        la code = builtin.char_code(c)
+        hvis c == "\"" { ut = ut + "\\\"" }
+        ellers hvis c == "\\" { ut = ut + "\\\\" }
+        ellers hvis code == 10 { ut = ut + "\\n" }
+        ellers hvis code == 13 { ut = ut + "\\r" }
+        ellers hvis code == 9 { ut = ut + "\\t" }
+        ellers hvis code < 32 {
+            la hexd = "0123456789abcdef"
+            la hi = code / 16
+            la lo = code - hi * 16
+            ut = ut + "\\u00" + builtin.slice(hexd, hi, hi + 1) + builtin.slice(hexd, lo, lo + 1)
+        }
+        ellers { ut = ut + c }
+        i = i + 1
     }
-    returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}"
+    returner ut
 }
 
-funksjon _openapi_example(type_namn: tekst) -> tekst {
-    hvis type_namn == "heltall" eller type_namn == "int" { returner "1" }
-    hvis type_namn == "boolsk" eller type_namn == "bool" { returner "true" }
-    hvis type_namn == "ordbok" eller tekst_starter_med(type_namn, "ordbok<") {
-        returner "{\"verdi\": {\"verdi\": \"eksempel\"}}"
-    }
-    returner "{\"verdi\": \"eksempel\"}"
+// JSON-skjema for ein skalar path-param-type.
+funksjon _openapi_type_schema(type_namn: tekst) -> tekst {
+    hvis type_namn == "int" eller type_namn == "heltall" { returner "{\"type\":\"integer\"}" }
+    hvis type_namn == "float" eller type_namn == "desimaltall" { returner "{\"type\":\"number\"}" }
+    hvis type_namn == "bool" eller type_namn == "boolsk" { returner "{\"type\":\"boolean\"}" }
+    returner "{\"type\":\"string\"}"
 }
 
-funksjon openapi_json(tittel: tekst, versjon: tekst) -> tekst {
+// Normaliser sti: {id:int} → {id} (OpenAPI path-mal utan type-annotasjon).
+funksjon _openapi_norm_path(raw_path: tekst) -> tekst {
+    la segs = builtin.split(raw_path, "/")
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < lengde(segs) {
+        la seg = segs[i]
+        la norm = seg
+        hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+            la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+            la c = builtin.index_of(inner, ":")
+            hvis c > 0 { norm = "{" + builtin.slice(inner, 0, c) + "}" }
+        }
+        hvis i == 0 { ut = norm }
+        ellers { ut = ut + "/" + norm }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Bygg in:path-parameterfragment frå rute-mønsteret {namn} / {namn:type}.
+funksjon _openapi_path_params(raw_path: tekst) -> tekst {
+    la segs = builtin.split(raw_path, "/")
+    la frag: tekst = ""
+    la i: heiltall = 0
+    mens i < lengde(segs) {
+        la seg = segs[i]
+        hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+            la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+            la navn = inner
+            la typ = "tekst"
+            la c = builtin.index_of(inner, ":")
+            hvis c > 0 {
+                navn = builtin.slice(inner, 0, c)
+                typ = builtin.slice(inner, c + 1, lengde(inner))
+            }
+            la p = "{\"name\":\"" + _json_escape(navn) + "\",\"in\":\"path\",\"required\":true,\"schema\":" + _openapi_type_schema(typ) + "}"
+            hvis frag == "" { frag = p } ellers { frag = frag + "," + p }
+        }
+        i = i + 1
+    }
+    returner frag
+}
+
+// Unik operationId frå modul-kvalifisert funksjonsnamn: __main__.x → x,
+// std.rest.index → std_rest_index. Kallaren sikrar unikskap på tvers.
+funksjon _openapi_operation_id(funksjonsnamn: tekst) -> tekst {
+    la f = funksjonsnamn
+    hvis tekst_starter_med(f, "__main__.") { f = builtin.slice(f, 9, lengde(f)) }
+    returner builtin.replace(f, ".", "_")
+}
+
+// Tag = siste modul-ledd i funksjonsnamnet (gruppering per modul). __main__ → "standard".
+funksjon _openapi_tag(funksjonsnamn: tekst) -> tekst {
+    la deler = builtin.split(funksjonsnamn, ".")
+    hvis lengde(deler) < 2 { returner "standard" }
+    la modul_sist = deler[lengde(deler) - 2]
+    hvis modul_sist == "__main__" { returner "standard" }
+    returner modul_sist
+}
+
+// True for dokumentasjonsrutene som skal skjulast frå skjemaet.
+funksjon _openapi_er_docs_rute(norm_path: tekst) -> boolsk {
+    returner norm_path == "/openapi.json" eller norm_path == "/docs" eller norm_path == "/redoc"
+}
+
+funksjon _openapi_resp_json(parsed_verdi, fallback: tekst) -> tekst {
+    prøv { returner builtin.json_skriv(parsed_verdi) } fang (e) { }
+    returner fallback
+}
+
+// FA-094/096/098/099/102/103: metadata-drive OpenAPI 3.1-generator.
+// oppsett: ordbok med valfrie nøklar «tittel», «versjon», «beskriving»,
+// «tags» (ordbok tag→beskriving) og «eksempel» (ordbok operationId→rå JSON
+// for requestBody-eksempel).
+funksjon openapi_json_med(oppsett: ordbok) -> tekst {
+    la tittel: tekst = "Norscode API"
+    hvis finnes_nøkkel(oppsett, "tittel") { tittel = tekst(oppsett["tittel"]) }
+    la versjon: tekst = "0.1.0"
+    hvis finnes_nøkkel(oppsett, "versjon") { versjon = tekst(oppsett["versjon"]) }
+
     la rh = ncb_route_handlers()
-    la paths: tekst = ""
+    // Grupper operasjonar per normalisert sti (GET+POST på same sti i eitt path-item).
+    la path_ops: ordbok_tekst = {}
+    la path_order: liste<tekst> = []
+    la id_seen: ordbok_tekst = {}
+    la tag_order: liste<tekst> = []
+    la tag_seen: ordbok_tekst = {}
     la har_security: boolsk = usann
+
     la i: heltall = 0
     mens i < lengde(rh) {
         la handler = rh[i]
-        la spec: tekst = handler["spec"]
+        la spec: tekst = tekst(handler["spec"])
         la deler = builtin.split(spec, " ")
         hvis lengde(deler) >= 2 {
-            // Normaliser sti: fjern type-annotasjonar frå path params ({id:int} → {id})
             la raw_path: tekst = deler[1]
-            la path_segs = builtin.split(raw_path, "/")
-            la norm_path: tekst = ""
-            la psi: heltall = 0
-            mens psi < lengde(path_segs) {
-                la seg: tekst = path_segs[psi]
-                la norm_seg: tekst = seg
-                hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
-                    la inner = builtin.slice(seg, 1, lengde(seg) - 1)
-                    la c = builtin.index_of(inner, ":")
-                    hvis c > 0 { norm_seg = "{" + builtin.slice(inner, 0, c) + "}" }
-                }
-                hvis psi == 0 { norm_path = norm_seg }
-                ellers { norm_path = norm_path + "/" + norm_seg }
-                psi = psi + 1
+            la norm_path: tekst = _openapi_norm_path(raw_path)
+            hvis _openapi_er_docs_rute(norm_path) {
+                i = i + 1
+                fortsett
             }
-            la path: tekst = norm_path
             la method: tekst = tekst_til_liten(deler[0])
-            // Bygg parameters (query params)
+            la funksjonsnamn: tekst = tekst(handler["function"])
+
+            // Unik operationId frå modul+funksjon.
+            la base_id = _openapi_operation_id(funksjonsnamn)
+            la op_id = base_id
+            la dupctr = 2
+            mens finnes_nøkkel(id_seen, op_id) {
+                op_id = base_id + "_" + tekst(dupctr)
+                dupctr = dupctr + 1
+            }
+            id_seen[op_id] = "1"
+
+            // Tag per modul.
+            la tag = _openapi_tag(funksjonsnamn)
+            hvis ikkje finnes_nøkkel(tag_seen, tag) {
+                tag_seen[tag] = "1"
+                legg_til(tag_order, tag)
+            }
+
+            // Parametrar: path (frå mønster) + query (frå metadata).
+            la params_json: tekst = _openapi_path_params(raw_path)
             la qp = handler["query_params"]
-            la params_json: tekst = ""
             la pi: heltall = 0
             mens pi < lengde(qp) {
-                la p: tekst = "{\"name\":\"" + qp[pi] + "\",\"in\":\"query\",\"schema\":{\"type\":\"string\"}}"
+                la p: tekst = "{\"name\":\"" + _json_escape(tekst(qp[pi])) + "\",\"in\":\"query\",\"schema\":{\"type\":\"string\"}}"
                 hvis params_json == "" { params_json = p } ellers { params_json = params_json + "," + p }
                 pi = pi + 1
             }
-            // Bygg requestBody (body fields)
+
+            // requestBody (body-felt).
             la bf = handler["body_fields"]
             la body_schema: tekst = ""
             la bi: heltall = 0
             mens bi < lengde(bf) {
-                la f: tekst = "\"" + bf[bi] + "\":{\"type\":\"string\"}"
+                la f: tekst = "\"" + _json_escape(tekst(bf[bi])) + "\":{\"type\":\"string\"}"
                 hvis body_schema == "" { body_schema = f } ellers { body_schema = body_schema + "," + f }
                 bi = bi + 1
             }
-            la op: tekst = "{\"operationId\":\"" + handler["operation_id"] + "\""
+
+            la op: tekst = "{\"operationId\":\"" + _json_escape(op_id) + "\",\"tags\":[\"" + _json_escape(tag) + "\"]"
             hvis params_json != "" { op = op + ",\"parameters\":[" + params_json + "]" }
-            hvis body_schema != "" { op = op + ",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{" + body_schema + "}}}}}" }
-            // Guards → security + error responses
-            la guards2 = handler["guards"]
+            hvis body_schema != "" {
+                // Eksempel på requestBody frå oppsett["eksempel"][op_id] dersom gjeve.
+                la body_example: tekst = ""
+                hvis finnes_nøkkel(oppsett, "eksempel") {
+                    la eks = oppsett["eksempel"]
+                    hvis finnes_nøkkel(eks, op_id) { body_example = ",\"example\":" + tekst(eks[op_id]) }
+                }
+                op = op + ",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{" + body_schema + "}}" + body_example + "}}}"
+            }
+
+            // Respons: bruk response_schema/response_example frå NCB-metadata (FA-050).
+            la resp_schema: tekst = _openapi_resp_json(handler["response_schema"], "{\"type\":\"string\"}")
+            la resp_example: tekst = _openapi_resp_json(handler["response_example"], "\"eksempel\"")
+            la responses_json: tekst = "\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\":" + resp_schema + ",\"example\":" + resp_example + "}}}"
+
             la errs = handler["error_responses"]
-            // Response schema frå NCB response_type → web_type_til_schema-stil
-            la resp_type: tekst = tekst(handler["response_type"])
-            la resp_schema: tekst = _openapi_schema(resp_type)
-            la resp_example: tekst = _openapi_example(resp_type)
-            la responses_json: tekst = "\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\": " + resp_schema + ",\"example\": " + resp_example + "}}}"
             la eri: heltall = 0
             mens eri < lengde(errs) {
                 la er = errs[eri]
                 la sc: tekst = tekst(er["status"])
-                la sm: tekst = tekst(er["message"])
+                la sm: tekst = _json_escape(tekst(er["message"]))
                 responses_json = responses_json + ",\"" + sc + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
                 eri = eri + 1
             }
+
+            la guards2 = handler["guards"]
             hvis lengde(guards2) > 0 {
                 op = op + ",\"security\":[{\"bearerAuth\":[]}]"
                 responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"},\"403\":{\"description\":\"Forbudt\"}"
                 har_security = sann
             }
-            // Alltid inkluder responses-seksjonen
-            op = op + ",\"responses\":{" + responses_json + "}"
-            op = op + "}"
-            la entry: tekst = "\"" + path + "\":{\"" + method + "\":" + op + "}"
-            hvis paths == "" { paths = entry }
-            ellers { paths = paths + "," + entry }
+            op = op + ",\"responses\":{" + responses_json + "}}"
+
+            // Slå saman i path-item for denne stien.
+            la method_entry = "\"" + method + "\":" + op
+            hvis finnes_nøkkel(path_ops, norm_path) {
+                path_ops[norm_path] = path_ops[norm_path] + "," + method_entry
+            } ellers {
+                path_ops[norm_path] = method_entry
+                legg_til(path_order, norm_path)
+            }
         }
         i = i + 1
     }
+
+    // Bygg paths-objektet i rekkefølgje.
+    la paths: tekst = ""
+    la poi: heltall = 0
+    mens poi < lengde(path_order) {
+        la pth = path_order[poi]
+        la entry = "\"" + _json_escape(pth) + "\":{" + path_ops[pth] + "}"
+        hvis paths == "" { paths = entry } ellers { paths = paths + "," + entry }
+        poi = poi + 1
+    }
+
+    // info-objekt med valfri beskriving.
+    la info: tekst = "\"title\":\"" + _json_escape(tittel) + "\",\"version\":\"" + _json_escape(versjon) + "\""
+    hvis finnes_nøkkel(oppsett, "beskriving") {
+        info = info + ",\"description\":\"" + _json_escape(tekst(oppsett["beskriving"])) + "\""
+    }
+
+    // Topp-nivå tags med valfri beskriving frå oppsett["tags"].
+    la tags_json: tekst = ""
+    la ti: heltall = 0
+    mens ti < lengde(tag_order) {
+        la tg = tag_order[ti]
+        la te = "{\"name\":\"" + _json_escape(tg) + "\""
+        hvis finnes_nøkkel(oppsett, "tags") {
+            la tmap = oppsett["tags"]
+            hvis finnes_nøkkel(tmap, tg) { te = te + ",\"description\":\"" + _json_escape(tekst(tmap[tg])) + "\"" }
+        }
+        te = te + "}"
+        hvis tags_json == "" { tags_json = te } ellers { tags_json = tags_json + "," + te }
+        ti = ti + 1
+    }
+
     la components: tekst = ""
     hvis har_security {
         components = ",\"components\":{\"securitySchemes\":{\"bearerAuth\":{\"type\":\"http\",\"scheme\":\"bearer\",\"bearerFormat\":\"JWT\"}}}"
     }
-    returner "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"" + tittel + "\",\"version\":\"" + versjon + "\"},\"paths\":{" + paths + "}" + components + "}"
+
+    la ut: tekst = "{\"openapi\":\"3.1.0\",\"info\":{" + info + "},\"paths\":{" + paths + "}"
+    hvis tags_json != "" { ut = ut + ",\"tags\":[" + tags_json + "]" }
+    ut = ut + components + "}"
+    returner ut
 }
 
+funksjon openapi_json(tittel: tekst, versjon: tekst) -> tekst {
+    la oppsett: ordbok = {}
+    oppsett["tittel"] = tittel
+    oppsett["versjon"] = versjon
+    returner openapi_json_med(oppsett)
+}
+
+// JS-fri dokumentasjonsside: ingen CDN-/ekstern JS (i tråd med sjølvstende).
+// Ei rikare, interaktiv men framleis JS-fri docs-side kjem i Fase 1 (punkt 1.10).
 funksjon docs_html(tittel: tekst, versjon: tekst) -> tekst {
     la spec = openapi_json(tittel, versjon)
     returner "<!doctype html><html><head><title>" + tittel + "</title></head><body><h1>" + tittel + "</h1><pre>" + spec + "</pre></body></html>"
