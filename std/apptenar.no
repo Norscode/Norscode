@@ -37,6 +37,9 @@ bruk std.socket som socket
 bruk std.web som _web
 bruk std.apptenar_serde som _serde
 bruk std.apptenar_di som _di
+bruk std.apptenar_cors som _cors
+bruk std.apptenar_statisk som _statisk
+bruk std.http_cache som _hc
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
@@ -70,6 +73,13 @@ funksjon konfig_standard() -> ordbok {
         "feil_mw": [],
         "globale_deps": [],
         "prefiks_deps": {},
+        "trusted_hosts": [],
+        "cors": null,
+        "rate": null,
+        "tryggleik_html": usann,
+        "request_id": usann,
+        "tilgangslogg": usann,
+        "statisk": null,
         "logg": "feil",
         "klar_melding": sann
     }
@@ -920,12 +930,236 @@ funksjon _allow(ruter: liste, seg: liste) -> tekst {
     returner builtin.join(ut, ", ")
 }
 
+# ─── Kant-funksjonar (1.4): TrustedHost, rate, CORS, request-id, tryggleik, logg ──
+
+# TrustedHost: avvis Host-headerar utanfor allowlista (400). Tom allowlist = av. Støttar
+# eksakt treff og "*.domene" (matchar eitt eller fleire ledd). "*" åleine = tillat alt.
+funksjon _vert_passar(mønster: tekst, vert: tekst) -> bool {
+    hvis mønster == "*" { returner sann }
+    hvis mønster == vert { returner sann }
+    hvis builtin.starts_with(mønster, "*.") {
+        la suff = builtin.slice(mønster, 1, lengde(mønster))   # ".domene"
+        hvis builtin.ends_with(vert, suff) og lengde(vert) > lengde(suff) { returner sann }
+    }
+    returner usann
+}
+
+funksjon _trusted_host_feil(ctx: ordbok) {
+    la liste_v = _k("trusted_hosts")
+    hvis liste_v == null eller builtin.type(liste_v) != "liste" eller lengde(liste_v) == 0 { returner null }
+    la host = _liten(_h(ctx, "host"))
+    la i = 0
+    mens i < lengde(liste_v) {
+        hvis _vert_passar(_liten(tekst(liste_v[i])), host) { returner null }
+        i = i + 1
+    }
+    returner _feil(400, "Invalid host header")
+}
+
+# Rate limiting: token-bucket per klient (modulglobal tilstand i _t). Nøkkelen kjem frå
+# dei konfigurerte headerane (standard X-Forwarded-For/X-Real-IP), elles éin delt bøtte.
+# Konfig: {"maks": N, "vindauge_ms": W, "nøkkel_headerar": [...]}.
+funksjon _rate_nøkkel(ctx: ordbok, rk: ordbok) -> tekst {
+    la hs = ["x-forwarded-for", "x-real-ip"]
+    hvis har_nokkel(rk, "nøkkel_headerar") og builtin.type(rk["nøkkel_headerar"]) == "liste" { hs = rk["nøkkel_headerar"] }
+    la i = 0
+    mens i < lengde(hs) {
+        la v = _h(ctx, _liten(tekst(hs[i])))
+        hvis v != "" {
+            # X-Forwarded-For kan vere ei liste; bruk første ledd (klienten).
+            la komma = builtin.index_of(v, ",")
+            hvis komma >= 0 { v = builtin.trim(builtin.slice(v, 0, komma)) }
+            returner v
+        }
+        i = i + 1
+    }
+    returner "anon"
+}
+
+funksjon _rate_feil(ctx: ordbok) {
+    la rk = _k("rate")
+    hvis rk == null eller builtin.type(rk) != "ordbok" { returner null }
+    la maks = 0
+    hvis har_nokkel(rk, "maks") { maks = rk["maks"] }
+    la vindauge = 0
+    hvis har_nokkel(rk, "vindauge_ms") { vindauge = rk["vindauge_ms"] }
+    hvis maks <= 0 eller vindauge <= 0 { returner null }
+    la key = _rate_nøkkel(ctx, rk)
+    la no = builtin.tid_ms()
+    hvis ikkje har_nokkel(_t, "rate_buckets") { _t["rate_buckets"] = {} }
+    la bk = _t["rate_buckets"]
+    la full = maks * vindauge
+    la e = null
+    hvis har_nokkel(bk, key) { e = bk[key] } ellers { e = {"T": full, "sist": no} }
+    la elapsed = no - e["sist"]
+    hvis elapsed < 0 { elapsed = 0 }
+    la T = e["T"] + elapsed * maks
+    hvis T > full { T = full }
+    e["sist"] = no
+    hvis T >= vindauge {
+        e["T"] = T - vindauge
+        bk[key] = e
+        returner null
+    }
+    e["T"] = T
+    bk[key] = e
+    la mangel = vindauge - T
+    la retry_s = (mangel + maks - 1) / maks / 1000
+    hvis retry_s < 1 { retry_s = 1 }
+    _t["avviste"] = _t_int("avviste") + 1
+    returner {"status": 429, "content_type": "application/json; charset=utf-8",
+              "body": "{\"detail\":\"For mange førespurnader\"}",
+              "headers": {"retry-after": tekst(retry_s), "x-content-type-options": "nosniff", "cache-control": "no-store"}}
+}
+
+# CORS-preflight (OPTIONS + Origin + Access-Control-Request-Method). Gjev 204 med
+# Access-Control-*-headerar for ein allowlista origin, elles null (vanleg handsaming).
+funksjon _cors_preflight(ctx: ordbok) {
+    la ck = _k("cors")
+    hvis ck == null eller builtin.type(ck) != "ordbok" { returner null }
+    la origin = _h(ctx, "origin")
+    la metode = tekst(ctx["__method__"])
+    la acrm = _h(ctx, "access-control-request-method")
+    hvis ikkje _cors.er_preflight(metode, origin, acrm) { returner null }
+    returner _cors.preflight_svar(ck, origin, _h(ctx, "access-control-request-headers"))
+}
+
+# Køyr dei tidlege kant-kontrollane i rekkjefølgje. Gjev eit kortslutningssvar eller null.
+funksjon _tidleg_kant(ctx: ordbok) {
+    la th = _trusted_host_feil(ctx)
+    hvis th != null { returner th }
+    la rl = _rate_feil(ctx)
+    hvis rl != null { returner rl }
+    la pf = _cors_preflight(ctx)
+    hvis pf != null { returner pf }
+    returner null
+}
+
+# Set request-id i ctx: propager X-Request-ID frå førespurnaden når han finst og er trygg,
+# elles behald den genererte (frå ctx_frå). Berre når "request_id" er på.
+funksjon _sett_request_id(ctx: ordbok) -> heltall {
+    hvis ikkje _k("request_id") { returner 0 }
+    la inn = _h(ctx, "x-request-id")
+    hvis inn != "" og lengde(inn) <= 200 og ikkje _utrygg(inn) { ctx["__request_id__"] = inn }
+    returner 0
+}
+
+# Set ein header i d["headers"] (små bokstavar) berre når han ikkje alt finst (nokon kasus)
+# og ikkje er sett som toppnøkkel.
+funksjon _sett_h_mangl(d: ordbok, namn_liten: tekst, verdi: tekst) -> heltall {
+    hvis svar_header(d, namn_liten, namn_liten) != "" { returner 0 }
+    la topp = _topp_tabell()
+    hvis har_nokkel(topp, namn_liten) og har_nokkel(d, namn_liten) og tekst(d[namn_liten]) != "" { returner 0 }
+    la h = {}
+    hvis har_nokkel(d, "headers") og builtin.type(d["headers"]) == "ordbok" { h = d["headers"] }
+    h[namn_liten] = verdi
+    d["headers"] = h
+    returner 0
+}
+
+# Legg "Origin" til Vary utan å skrive over.
+funksjon _legg_vary(d: ordbok, ledd: tekst) -> heltall {
+    la før = svar_header(d, "vary", "vary")
+    hvis før == "" { returner _sett_h_mangl(d, "vary", ledd) }
+    la delar = builtin.split(før, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis _liten(builtin.trim(delar[i])) == _liten(ledd) eller builtin.trim(delar[i]) == "*" { returner 0 }
+        i = i + 1
+    }
+    la h = {}
+    hvis har_nokkel(d, "headers") og builtin.type(d["headers"]) == "ordbok" { h = d["headers"] }
+    h["vary"] = før + ", " + ledd
+    d["headers"] = h
+    returner 0
+}
+
+# Etterbehandling av eit svar: CORS-headerar for ekte svar, tryggleiksheaderar på
+# HTML-svar, og X-Request-ID. Idempotent (set berre det som manglar).
+funksjon _ferdigstill(ctx: ordbok, d: ordbok) -> ordbok {
+    # CORS på ekte svar (ikkje preflight — det er alt handsama).
+    la ck = _k("cors")
+    hvis ck != null og builtin.type(ck) == "ordbok" {
+        la origin = _h(ctx, "origin")
+        hvis origin != "" og _cors.origin_tillaten(ck, origin) {
+            la ch = _cors.aktuelle_headerar(ck, origin)
+            la cks = nøkler(ch)
+            la i = 0
+            mens i < lengde(cks) {
+                hvis tekst(cks[i]) == "vary" { _legg_vary(d, tekst(ch[cks[i]])) }
+                ellers { _sett_h_mangl(d, tekst(cks[i]), tekst(ch[cks[i]])) }
+                i = i + 1
+            }
+        }
+    }
+    # Tryggleiksheaderar på HTML-svar.
+    hvis _k("tryggleik_html") {
+        la ct = svar_header(d, "content_type", "content-type")
+        hvis builtin.starts_with(_liten(ct), "text/html") {
+            _sett_h_mangl(d, "x-content-type-options", "nosniff")
+            _sett_h_mangl(d, "content-security-policy", _hc.csp_standard())
+            _sett_h_mangl(d, "referrer-policy", "no-referrer")
+        }
+    }
+    # X-Request-ID.
+    hvis _k("request_id") {
+        la rid = ""
+        hvis har_nokkel(ctx, "__request_id__") { rid = tekst(ctx["__request_id__"]) }
+        hvis rid != "" og ikkje _utrygg(rid) { _sett_h_mangl(d, "x-request-id", rid) }
+    }
+    returner d
+}
+
+# Strukturert tilgangslogg: ei linje per førespurnad (metode, sti, status, ms, rid).
+funksjon _tilgangslogg(ctx: ordbok, start_ms: heltall, d: ordbok) -> heltall {
+    hvis ikkje _k("tilgangslogg") { returner 0 }
+    la ms = builtin.tid_ms() - start_ms
+    la status = 0
+    hvis har_nokkel(d, "status") { status = d["status"] }
+    la rid = ""
+    hvis har_nokkel(ctx, "__request_id__") { rid = tekst(ctx["__request_id__"]) }
+    skriv("APPTENAR access method=" + tekst(ctx["__method__"]) + " path=" + tekst(ctx["__path__"]) +
+          " status=" + tekst(status) + " ms=" + tekst(ms) + " rid=" + rid + "\n")
+    returner 0
+}
+
+# Statiske filer og SPA-fallback (1.6). Gjev eit normalisert, vilkårsbunde svar (304 når
+# ETag/Last-Modified matchar) eller null (ingen statisk konfig / inga treffande fil).
+funksjon _statisk_fallback(ctx: ordbok, metode: tekst, sti: tekst, fann_sti: bool) {
+    la ks = _k("statisk")
+    hvis ks == null eller builtin.type(ks) != "ordbok" { returner null }
+    la r = null
+    prøv { r = _statisk.tilby(ks, ctx) } fang (e) { _logg("feil", "statisk kasta: " + tekst(e))  returner null }
+    hvis r != null { returner vilkårsbunde(ctx, normaliser(r)) }
+    # SPA-fallback berre for ukjende stiar (ikkje under statisk-prefikset).
+    la s = null
+    prøv { s = _statisk.spa(ks, ctx) } fang (e) { _logg("feil", "spa kasta: " + tekst(e))  returner null }
+    hvis s != null { returner vilkårsbunde(ctx, normaliser(s)) }
+    returner null
+}
+
 # Dispatch av éin førespurnad (same prosess, ingen socket). Gjev ei normalisert
-# svarordbok; SSE gjev {"__sse__": kanal, ...}. Kastar aldri.
+# svarordbok; SSE gjev {"__sse__": kanal, ...}. Kastar aldri. Køyrer kant-funksjonane
+# (1.4): TrustedHost og rate før rutinga, CORS-preflight, og CORS/tryggleik/request-id/
+# tilgangslogg etter at svaret er laga.
 funksjon dispatch(ctx0: ordbok) -> ordbok {
+    la ctx = ctx0
+    la start_ms = builtin.tid_ms()
+    _sett_request_id(ctx)
+    la d = _rut(ctx, start_ms)
+    hvis builtin.type(d) == "ordbok" og har_nokkel(d, "__sse__") { returner d }
+    d = _ferdigstill(ctx, d)
+    _tilgangslogg(ctx, start_ms, d)
+    returner d
+}
+
+funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     la ctx = ctx0
     _di.start(ctx)
     _t["bg"] = []
+    # Tidlege kant-kontrollar (1.4): TrustedHost (400), rate (429), CORS-preflight (204).
+    la kant = _tidleg_kant(ctx)
+    hvis kant != null { returner kant }
     # Request-mellomvare (wrap): kan endre ctx som når handlaren, eller kortslutte med
     # eit eige svar (1.3). Unntak blir mappa (HTTPFeil/ValideringsFeil/500).
     la rq = _mw("request_middlewares", "forespurnad_mw")
@@ -991,6 +1225,9 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
             f["allow"] = _allow(ruter, seg)
             returner _feil_mw(f)
         }
+        # Statiske filer og SPA-fallback (1.6): berre når ingen rute matcha.
+        la st = _statisk_fallback(ctx, metode, sti, fann_sti)
+        hvis st != null { returner st }
         returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
     }
     ctx["__params__"] = treff_p
@@ -1429,7 +1666,7 @@ funksjon nullstill(konf: ordbok) -> heltall {
     i = 0
     mens i < lengde(tk) {
         la k = tekst(tk[i])
-        hvis builtin.starts_with(k, "mw_") eller k == "ruter" { fjern_nokkel(_t, k) }
+        hvis builtin.starts_with(k, "mw_") eller k == "ruter" eller k == "rate_buckets" { fjern_nokkel(_t, k) }
         i = i + 1
     }
     _t["stopp"] = usann
