@@ -1,12 +1,17 @@
 # nc serve — Norscode HTTP Server Quickstart
 
-✅ **HTTP-serveren er nå operative!**
+✅ **HTTP-serveren køyrer.**
+
+> **Merk (fase 0, 2026-10).** Tenaren er **rein Norscode** med native socket — det er
+> **ingen** Python-avhengnad (eldre påstand om «Python 3.6+» stemmer ikkje). Miljøvariablane
+> `NORSCODE_PORT`/`NORSCODE_HOST`/`NORSCODE_WORKERS` blir **ikkje** lesne; bruk flagga
+> `--host`/`--port` (`--workers` blir ignorert). Døme med `std.httpserver` blir aldri servert
+> (stubb). Sjå `notat/fastapi_analyse.md` for full, etterprøvd status.
 
 ## Kva er fiksa?
 
 - ✅ `nc serve` kommando fungerer
-- ✅ Python-basert HTTP-server (krev Python 3.6+)
-- ✅ Mock REST API (test)
+- ✅ HTTP-server i rein Norscode (ingen Python)
 - ✅ Request-logging
 - ✅ CORS-support
 
@@ -90,24 +95,14 @@ curl http://localhost:3000/
 
 ## Konfigurering
 
-Bruk **miljøvariabler:**
+Bruk **CLI-flagg** (miljøvariablane `NORSCODE_PORT`/`NORSCODE_HOST`/`NORSCODE_WORKERS`
+blir **ikkje** lesne):
 
 ```bash
-# Set port
-NORSCODE_PORT=9000 nc serve app.no
-
-# Set host
-NORSCODE_HOST=0.0.0.0 nc serve app.no
-
-# Set workers
-NORSCODE_WORKERS=8 nc serve app.no
+nc serve app.no --host 0.0.0.0 --port 9000
 ```
 
-Eller **CLI-flagg:**
-
-```bash
-nc serve app.no --port 9000 --host 0.0.0.0 --workers 8
-```
+`--workers` blir i dag ignorert (éin prosess, éin tråd).
 
 ## Hjelp
 
@@ -119,15 +114,13 @@ nc serve --help
 
 | Feature | Status |
 |---------|--------|
-| HTTP-server | ✅ FERDIG |
-| Mock API | ✅ FERDIG |
-| Request parsing | ✅ FERDIG |
-| JSON response | ✅ FERDIG |
-| CORS | ✅ FERDIG |
-| Error handling | ✅ FERDIG |
-| Path parameterar | ⏳ Neste |
-| Async handlers | ⏳ Neste |
-| TLS/HTTPS | ⏳ Neste |
+| HTTP-server | ✅ Fungerer (`nc serve`, rein Norscode) |
+| Request parsing | ✅ Fungerer |
+| CORS | ⚠️ Delvis (preflight manglar ACAO; sjå analysen) |
+| Error handling | ⚠️ Delvis (500/404 er `text/plain`, ikkje JSON) |
+| Path parameterar | ⚠️ Delvis (`{id:int}` verkar; utan type 404, ingen 422) |
+| Async handlers | ⚠️ Delvis (kompilerer, men køyrer synkront) |
+| TLS/HTTPS | ❌ Ikkje i `nc serve` |
 
 ## Framtida
 

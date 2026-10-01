@@ -373,11 +373,11 @@ With TLS:        3,000 req/s
 | Feature | Norscode | FastAPI | Winner |
 |---------|----------|---------|--------|
 | VM Integration | ✅ Native | ❌ N/A | Norscode |
-| OpenAPI Auto | ✅ Yes | ✅ Yes | Tie |
+| OpenAPI Auto | ⚠️ Delvis (tom under `nc serve`) | ✅ Yes | FastAPI |
 | File Uploads | ✅ Yes | ✅ Yes | Tie |
-| TLS/HTTPS | ✅ Native | ✅ Uvicorn | Tie |
+| TLS/HTTPS | ⚠️ Ikkje i `nc serve` | ✅ Uvicorn | FastAPI |
 | Async/Await | 🔄 Planned | ✅ Native | FastAPI |
-| Type Safety | ✅ Enforced | ⚠️ Optional | Norscode |
+| Type Safety | ⚠️ Ikkje handheva ved køyring | ⚠️ Optional | — |
 | Performance | 2x faster | 1x | Norscode |
 | Dependencies | 0 | 10+ | Norscode |
 

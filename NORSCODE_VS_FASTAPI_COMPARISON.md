@@ -1,5 +1,14 @@
 # Norscode vs FastAPI — Sammenligning
 
+> **⚠️ HISTORISK / UTDATERT (fase 0, 2026-10).** Dette dokumentet skildrar ein betre og
+> dels annan tilstand enn det som faktisk verkar i produksjonsvegen (`nc serve`). Sjå den
+> etterprøvde gapanalysen i `notat/fastapi_analyse.md` (særleg kapittel 1 og 5) for kva som
+> verkeleg er på plass. Fleire ✅-merke nedanfor er for optimistiske. Målt tilstand: `async`
+> køyrer synkront, typar og felttypar blir **ikkje** handheva ved køyring, `std.httpserver`
+> og WebSocket-tenaren er stubbar, OpenAPI/Swagger er tom eller ugyldig under `nc serve`, og
+> `rest.viewset`/`rest.til_json` samt fleire std-modular krasja (manglande `builtin.tekst_saman`).
+> Ytingstala er heller ikkje målte mot FastAPI på same maskin.
+
 ## Oversikt
 
 | Aspekt | Norscode | FastAPI |
