@@ -1,0 +1,600 @@
+# modell.no — «skjema som data»-modellar for Norscode (Pydantic-ekvivalent).
+#
+# Fase 1.9 (sjå docs/fastapi_analyse 1.9, FA-021/025/026/034/035/038-043/050/052/055/056/072).
+#
+# EI feltdefinisjon (Norscode-data, ikkje typehint — statisk typesjekk er framleis
+# opt-in/reseed) blir brukt til ALT: binding frå path/query/body/form, validering,
+# serialisering (alias/exclude/by_alias/exclude_none) og JSON Schema til OpenAPI.
+#
+# Ein modell er ein ordbok:
+#   {"felt": liste<feltdef>, "extra": "tillat" | "forbid"}
+# Ein feltdef er ein ordbok med "namn", "type" og valfrie avgrensingar.
+#
+# Typar: "tekst", "heltall", "desimaltall", "bool", "dato" (ISO YYYY-MM-DD),
+#        "modell" (nøsta, "nøsta"=undermodell), "liste" ("element"=feltdef for kvart element).
+#
+# Bruk:
+#   bruk std.modell som m
+#   la person = m.ny_modell()
+#   m.legg(person, m.felt("namn", "tekst")   |> m.lengd(1, 100))
+#   m.legg(person, m.felt("alder", "heltall") |> m.ge(0) |> m.le(150))
+#   ... (utan |> : m.lengd(m.felt("namn","tekst"), 1, 100))
+#   la res = m.bind_json(person, ctx)
+#   hvis res["gyldig"] { la v = res["verdiar"] } ellers { returner m.valideringsfeil_respons(res) }
+
+bruk std.web som web
+bruk std.synk_kjerne som sk
+bruk std.regex som rx
+
+# ─── Kodepunkt-lengd (UTF-8, ikkje byte) ──────────────────────────────────────
+# lengde() og split("","") er byte-baserte i Norscode; validering av min/max skal
+# telje Unicode-kodepunkt (æøå = 1 kvar), så vi tel leiande bytes (ikkje 10xxxxxx).
+
+funksjon _kp_lengd(s: tekst) -> heltall {
+    la n = lengde(s)
+    la i = 0
+    la tal = 0
+    mens i < n {
+        la b = builtin.char_code(builtin.slice(s, i, i + 1)) % 256
+        hvis b < 128 eller b >= 192 { tal = tal + 1 }
+        i = i + 1
+    }
+    returner tal
+}
+
+# ─── Modell- og feltkonstruktørar ─────────────────────────────────────────────
+
+funksjon ny_modell() -> ordbok {
+    returner {"felt": [], "extra": "tillat"}
+}
+
+# extra=forbid: ukjende nøklar i data gjev ein "extra_forbidden"-feil.
+funksjon forby_ekstra(modell: ordbok) -> ordbok {
+    modell["extra"] = "forbid"
+    returner modell
+}
+
+funksjon legg(modell: ordbok, feltdef: ordbok) -> ordbok {
+    legg_til(modell["felt"], feltdef)
+    returner modell
+}
+
+# Grunnfelt. Påkravd som standard; set standard()/valfri() for å endre.
+funksjon felt(namn: tekst, type: tekst) -> ordbok {
+    la f: ordbok = {}
+    f["namn"] = namn
+    f["type"] = type
+    f["påkravd"] = sann
+    f["har_standard"] = usann
+    returner f
+}
+
+# ─── Fluente setjarar (muterer og returnerer feltdef) ─────────────────────────
+
+funksjon valfri(f: ordbok) -> ordbok {
+    f["påkravd"] = usann
+    returner f
+}
+
+# Standardverdi ved manglande felt (impliserer valfri).
+funksjon standard(f: ordbok, verdi) -> ordbok {
+    f["har_standard"] = sann
+    f["standard"] = verdi
+    f["påkravd"] = usann
+    returner f
+}
+
+# Wire-namn ut (serialisering med by_alias) og inn (binding les alias om det finst).
+funksjon alias(f: ordbok, a: tekst) -> ordbok {
+    f["alias"] = a
+    returner f
+}
+
+funksjon ekskluder(f: ordbok) -> ordbok {
+    f["exclude"] = sann
+    returner f
+}
+
+# Kodepunkt-lengd for tekst. -1 = uavgrensa.
+funksjon lengd(f: ordbok, min_len: heltall, maks_len: heltall) -> ordbok {
+    f["min_len"] = min_len
+    f["maks_len"] = maks_len
+    returner f
+}
+
+funksjon gt(f: ordbok, v) -> ordbok { f["gt"] = v  returner f }
+funksjon ge(f: ordbok, v) -> ordbok { f["ge"] = v  returner f }
+funksjon lt(f: ordbok, v) -> ordbok { f["lt"] = v  returner f }
+funksjon le(f: ordbok, v) -> ordbok { f["le"] = v  returner f }
+
+funksjon mønster(f: ordbok, p: tekst) -> ordbok {
+    f["pattern"] = p
+    returner f
+}
+
+funksjon eit_av(f: ordbok, val: liste) -> ordbok {
+    f["enum"] = val
+    returner f
+}
+
+# Nøsta modell for type "modell".
+funksjon nøsta(f: ordbok, undermodell: ordbok) -> ordbok {
+    f["nøsta"] = undermodell
+    returner f
+}
+
+# Elementdefinisjon for type "liste".
+funksjon element(f: ordbok, elementfelt: ordbok) -> ordbok {
+    f["element"] = elementfelt
+    returner f
+}
+
+# ─── Interne hjelparar ────────────────────────────────────────────────────────
+
+funksjon _wire_namn(f: ordbok) -> tekst {
+    hvis har_nokkel(f, "alias") { returner tekst(f["alias"]) }
+    returner tekst(f["namn"])
+}
+
+funksjon _er_siffer_tekst(t: tekst) -> bool {
+    hvis lengde(t) == 0 { returner usann }
+    la i = 0
+    la start = 0
+    hvis builtin.slice(t, 0, 1) == "-" {
+        hvis lengde(t) == 1 { returner usann }
+        start = 1
+    }
+    i = start
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c < 48 eller c > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _er_desimal_tekst(t: tekst) -> bool {
+    hvis lengde(t) == 0 { returner usann }
+    la i = 0
+    la start = 0
+    la prikkar = 0
+    hvis builtin.slice(t, 0, 1) == "-" {
+        hvis lengde(t) == 1 { returner usann }
+        start = 1
+    }
+    i = start
+    la siffer = 0
+    mens i < lengde(t) {
+        la ch = builtin.slice(t, i, i + 1)
+        hvis ch == "." {
+            prikkar = prikkar + 1
+        } ellers {
+            la c = builtin.char_code(ch)
+            hvis c < 48 eller c > 57 { returner usann }
+            siffer = siffer + 1
+        }
+        i = i + 1
+    }
+    hvis prikkar > 1 eller siffer == 0 { returner usann }
+    returner sann
+}
+
+# Tal som desimaltall (for samanlikning gt/lt). Godtek heltall og desimaltall.
+funksjon _som_tal(v) -> desimaltall {
+    la t = builtin.type(v)
+    hvis t == "heltall" { returner builtin.desimaltall(tekst(v)) }
+    hvis t == "desimaltall" { returner v }
+    returner builtin.desimaltall(tekst(v))
+}
+
+# Gyldig ISO-dato YYYY-MM-DD (kalenderkorrekt).
+funksjon _dato_ok(t: tekst) -> bool {
+    hvis lengde(t) != 10 { returner usann }
+    hvis builtin.slice(t, 4, 5) != "-" eller builtin.slice(t, 7, 8) != "-" { returner usann }
+    la s_år = builtin.slice(t, 0, 4)
+    la s_mnd = builtin.slice(t, 5, 7)
+    la s_dag = builtin.slice(t, 8, 10)
+    hvis ikkje _er_siffer_tekst(s_år) eller ikkje _er_siffer_tekst(s_mnd) eller ikkje _er_siffer_tekst(s_dag) { returner usann }
+    la mnd = builtin.heltall_fra_tekst(s_mnd)
+    la dag = builtin.heltall_fra_tekst(s_dag)
+    la år = builtin.heltall_fra_tekst(s_år)
+    hvis mnd < 1 eller mnd > 12 eller dag < 1 { returner usann }
+    la lengder: liste = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    la maks = lengder[mnd - 1]
+    hvis mnd == 2 og ((år % 4 == 0 og år % 100 != 0) eller år % 400 == 0) { maks = 29 }
+    hvis dag > maks { returner usann }
+    returner sann
+}
+
+funksjon _post(feil: liste, kode: tekst, loc: liste, msg: tekst, input: tekst) {
+    legg_til(feil, web.valideringsfeil_post(kode, loc, msg, input))
+}
+
+# Konverter ein råverdi til feltet sin type. Returnerer {"ok","verdi"}; ved feil
+# vert ein post lagd til `feil`.
+funksjon _konverter(f: ordbok, råverdi, loc: liste, feil: liste) -> ordbok {
+    la type = tekst(f["type"])
+    la rt = builtin.type(råverdi)
+    la inn = tekst(råverdi)
+
+    hvis type == "tekst" {
+        hvis rt == "tekst" { returner {"ok": sann, "verdi": råverdi} }
+        _post(feil, "string_type", loc, "Forventa tekst", inn)
+        returner {"ok": usann}
+    }
+
+    hvis type == "heltall" {
+        hvis rt == "heltall" { returner {"ok": sann, "verdi": råverdi} }
+        hvis rt == "tekst" {
+            la s = builtin.trim(råverdi)
+            hvis _er_siffer_tekst(s) { returner {"ok": sann, "verdi": builtin.heltall_fra_tekst(s)} }
+            _post(feil, "int_parsing", loc, "Kan ikkje tolke som heiltal", inn)
+            returner {"ok": usann}
+        }
+        _post(feil, "int_type", loc, "Forventa heiltal", inn)
+        returner {"ok": usann}
+    }
+
+    hvis type == "desimaltall" {
+        hvis rt == "desimaltall" { returner {"ok": sann, "verdi": råverdi} }
+        hvis rt == "heltall" { returner {"ok": sann, "verdi": builtin.desimaltall(tekst(råverdi))} }
+        hvis rt == "tekst" {
+            la s = builtin.trim(råverdi)
+            hvis _er_desimal_tekst(s) { returner {"ok": sann, "verdi": builtin.desimaltall(s)} }
+            _post(feil, "float_parsing", loc, "Kan ikkje tolke som desimaltal", inn)
+            returner {"ok": usann}
+        }
+        _post(feil, "float_type", loc, "Forventa desimaltal", inn)
+        returner {"ok": usann}
+    }
+
+    hvis type == "bool" {
+        hvis rt == "boolsk" { returner {"ok": sann, "verdi": råverdi} }
+        hvis rt == "tekst" {
+            la s = builtin.lower(builtin.trim(råverdi))
+            hvis s == "true" eller s == "sann" eller s == "1" { returner {"ok": sann, "verdi": sann} }
+            hvis s == "false" eller s == "usann" eller s == "0" { returner {"ok": sann, "verdi": usann} }
+            _post(feil, "bool_parsing", loc, "Kan ikkje tolke som boolsk", inn)
+            returner {"ok": usann}
+        }
+        _post(feil, "bool_type", loc, "Forventa boolsk", inn)
+        returner {"ok": usann}
+    }
+
+    hvis type == "dato" {
+        hvis rt != "tekst" {
+            _post(feil, "date_type", loc, "Forventa dato (tekst)", inn)
+            returner {"ok": usann}
+        }
+        la s = builtin.trim(råverdi)
+        hvis _dato_ok(s) { returner {"ok": sann, "verdi": s} }
+        _post(feil, "date_parsing", loc, "Forventa dato på forma YYYY-MM-DD", inn)
+        returner {"ok": usann}
+    }
+
+    hvis type == "modell" {
+        hvis rt != "ordbok" {
+            _post(feil, "model_type", loc, "Forventa objekt", inn)
+            returner {"ok": usann}
+        }
+        la undermodell = f["nøsta"]
+        la under = _valider_inn(undermodell, råverdi, loc, feil)
+        returner {"ok": under["ok"], "verdi": under["verdiar"]}
+    }
+
+    hvis type == "liste" {
+        hvis rt != "liste" {
+            _post(feil, "list_type", loc, "Forventa liste", inn)
+            returner {"ok": usann}
+        }
+        la elementdef = f["element"]
+        la ut: liste = []
+        la alt_ok = sann
+        la i = 0
+        mens i < lengde(råverdi) {
+            la eloc: liste = []
+            la j = 0
+            mens j < lengde(loc) { legg_til(eloc, loc[j])  j = j + 1 }
+            legg_til(eloc, tekst(i))
+            la ev = _valider_felt_verdi(elementdef, råverdi[i], eloc, feil)
+            hvis ev["ok"] { legg_til(ut, ev["verdi"]) } ellers { alt_ok = usann }
+            i = i + 1
+        }
+        returner {"ok": alt_ok, "verdi": ut}
+    }
+
+    # Ukjend type: ta imot som-er.
+    returner {"ok": sann, "verdi": råverdi}
+}
+
+# Valider avgrensingar på ein allereie konvertert verdi.
+funksjon _sjekk_avgrensingar(f: ordbok, verdi, loc: liste, feil: liste) -> bool {
+    la type = tekst(f["type"])
+    la ok = sann
+    la inn = tekst(verdi)
+
+    hvis type == "tekst" {
+        la klen = _kp_lengd(verdi)
+        hvis har_nokkel(f, "min_len") og f["min_len"] >= 0 og klen < f["min_len"] {
+            _post(feil, "string_too_short", loc, "Minst " + tekst(f["min_len"]) + " teikn", inn)
+            ok = usann
+        }
+        hvis har_nokkel(f, "maks_len") og f["maks_len"] >= 0 og klen > f["maks_len"] {
+            _post(feil, "string_too_long", loc, "Høgst " + tekst(f["maks_len"]) + " teikn", inn)
+            ok = usann
+        }
+        hvis har_nokkel(f, "pattern") {
+            la tok = rx.kompiler(tekst(f["pattern"]))
+            la treff = rx.fullsamsvar(tok, verdi)
+            hvis ikkje rx.er_samsvar(treff) {
+                _post(feil, "string_pattern_mismatch", loc, "Passar ikkje mønsteret " + tekst(f["pattern"]), inn)
+                ok = usann
+            }
+        }
+    }
+
+    hvis type == "heltall" eller type == "desimaltall" {
+        la tv = _som_tal(verdi)
+        hvis har_nokkel(f, "gt") og ikkje (tv > _som_tal(f["gt"])) {
+            _post(feil, "greater_than", loc, "Må vera større enn " + tekst(f["gt"]), inn)
+            ok = usann
+        }
+        hvis har_nokkel(f, "ge") og ikkje (tv >= _som_tal(f["ge"])) {
+            _post(feil, "greater_than_equal", loc, "Må vera minst " + tekst(f["ge"]), inn)
+            ok = usann
+        }
+        hvis har_nokkel(f, "lt") og ikkje (tv < _som_tal(f["lt"])) {
+            _post(feil, "less_than", loc, "Må vera mindre enn " + tekst(f["lt"]), inn)
+            ok = usann
+        }
+        hvis har_nokkel(f, "le") og ikkje (tv <= _som_tal(f["le"])) {
+            _post(feil, "less_than_equal", loc, "Må vera høgst " + tekst(f["le"]), inn)
+            ok = usann
+        }
+    }
+
+    hvis har_nokkel(f, "enum") {
+        la val = f["enum"]
+        la funne = usann
+        la vj = sk.json(verdi)
+        la i = 0
+        mens i < lengde(val) {
+            hvis sk.json(val[i]) == vj { funne = sann }
+            i = i + 1
+        }
+        hvis ikkje funne {
+            _post(feil, "enum", loc, "Må vera ein av dei tillatne verdiane", inn)
+            ok = usann
+        }
+    }
+
+    returner ok
+}
+
+# Valider éin feltverdi (konvertering + avgrensingar). loc er full sti til verdien.
+funksjon _valider_felt_verdi(f: ordbok, råverdi, loc: liste, feil: liste) -> ordbok {
+    la k = _konverter(f, råverdi, loc, feil)
+    hvis ikkje k["ok"] { returner {"ok": usann} }
+    la avg = _sjekk_avgrensingar(f, k["verdi"], loc, feil)
+    hvis ikkje avg { returner {"ok": usann} }
+    returner {"ok": sann, "verdi": k["verdi"]}
+}
+
+# Valider data mot modell. loc_prefix er stien fram hit (t.d. ["body"]).
+# Returnerer {"ok": bool, "verdiar": ordbok}. Feil vert lagde til `feil`.
+funksjon _valider_inn(modell: ordbok, data: ordbok, loc_prefix: liste, feil: liste) -> ordbok {
+    la verdiar: ordbok = {}
+    la alt_ok = sann
+    la felt_liste = modell["felt"]
+    la kjende: ordbok = {}
+
+    la i = 0
+    mens i < lengde(felt_liste) {
+        la f = felt_liste[i]
+        la namn = tekst(f["namn"])
+        la wire = _wire_namn(f)
+        kjende[wire] = sann
+
+        la loc: liste = []
+        la j = 0
+        mens j < lengde(loc_prefix) { legg_til(loc, loc_prefix[j])  j = j + 1 }
+        legg_til(loc, wire)
+
+        hvis har_nokkel(data, wire) {
+            la ev = _valider_felt_verdi(f, data[wire], loc, feil)
+            hvis ev["ok"] { verdiar[namn] = ev["verdi"] } ellers { alt_ok = usann }
+        } ellers {
+            hvis f["har_standard"] {
+                verdiar[namn] = f["standard"]
+            } ellers hvis f["påkravd"] {
+                _post(feil, "missing", loc, "Påkravd felt manglar", "")
+                alt_ok = usann
+            }
+        }
+        i = i + 1
+    }
+
+    # extra=forbid: ukjende nøklar i data gjev feil.
+    hvis tekst(modell["extra"]) == "forbid" {
+        la dk = nøkler(data)
+        la k = 0
+        mens k < lengde(dk) {
+            la nk = tekst(dk[k])
+            hvis ikkje har_nokkel(kjende, nk) {
+                la loc2: liste = []
+                la j2 = 0
+                mens j2 < lengde(loc_prefix) { legg_til(loc2, loc_prefix[j2])  j2 = j2 + 1 }
+                legg_til(loc2, nk)
+                _post(feil, "extra_forbidden", loc2, "Ukjent felt er ikkje tillate", tekst(data[nk]))
+                alt_ok = usann
+            }
+            k = k + 1
+        }
+    }
+
+    returner {"ok": alt_ok, "verdiar": verdiar}
+}
+
+# ─── Offentleg validering ─────────────────────────────────────────────────────
+
+# Valider ferdig data (ordbok) mot modell med vald loc-rot ("body"/"query"/...).
+# Returnerer {"gyldig": bool, "verdiar": ordbok, "feil": liste<tekst>}.
+funksjon valider_med_rot(modell: ordbok, data: ordbok, loc_rot: tekst) -> ordbok {
+    la feil: liste = []
+    la res = _valider_inn(modell, data, [loc_rot], feil)
+    returner {"gyldig": res["ok"], "verdiar": res["verdiar"], "feil": feil}
+}
+
+funksjon valider(modell: ordbok, data: ordbok) -> ordbok {
+    returner valider_med_rot(modell, data, "body")
+}
+
+# ─── Binding frå web-førespurnad (kallar web.request_*, endrar ikkje web.no) ────
+
+# Binding frå JSON-kropp. Serve-trygg: sjekkar Content-Type + gyldig JSON fyrst.
+# Returnerer {"gyldig","verdiar","feil"} ELLER {"gyldig":usann,"respons":<422>} når
+# sjølve JSON-en er ugyldig (bruk bind_json_streng om du vil ha 422 direkte alltid).
+funksjon bind_json(modell: ordbok, ctx: ordbok_tekst) -> ordbok {
+    la r = web.request_json_resultat(ctx)
+    hvis r["ok"] == "usann" {
+        returner {"gyldig": usann, "verdiar": {}, "feil": [], "respons": r["respons"]}
+    }
+    returner valider_med_rot(modell, r["data"], "body")
+}
+
+# Binding frå query-parametrar (alle verdiar er tekst → konvertering gjeld).
+funksjon bind_query(modell: ordbok, ctx: ordbok_tekst) -> ordbok {
+    returner valider_med_rot(modell, web.request_query(ctx), "query")
+}
+
+# Binding frå form-felt (application/x-www-form-urlencoded eller multipart).
+funksjon bind_form(modell: ordbok, ctx: ordbok_tekst) -> ordbok {
+    returner valider_med_rot(modell, web.request_form(ctx), "body")
+}
+
+# Binding frå path-parametrar.
+funksjon bind_path(modell: ordbok, ctx: ordbok_tekst) -> ordbok {
+    returner valider_med_rot(modell, web.request_params(ctx), "path")
+}
+
+# ─── 422-respons ──────────────────────────────────────────────────────────────
+
+funksjon er_gyldig(res: ordbok) -> bool {
+    returner res["gyldig"]
+}
+
+funksjon verdiar(res: ordbok) -> ordbok {
+    returner res["verdiar"]
+}
+
+# {detail:[{type,loc,msg,input}]} som tekst (Fase 0-formatet).
+funksjon valideringsfeil_json(res: ordbok) -> tekst {
+    returner web.valideringsfeil_json(res["feil"])
+}
+
+funksjon valideringsfeil_respons(res: ordbok) -> ordbok_tekst {
+    hvis har_nokkel(res, "respons") { returner res["respons"] }
+    returner web.valideringsfeil_respons(res["feil"], 422)
+}
+
+# ─── Serialisering ────────────────────────────────────────────────────────────
+#
+# Val (ordbok, alle valfrie):
+#   "by_alias"     : bruk wire-namn (alias) som nøkkel ut
+#   "exclude_none" : hopp over felt med null-verdi
+# Felt-nivå "exclude" tek alltid feltet ut.
+
+funksjon til_ordbok(modell: ordbok, verdiar: ordbok, val: ordbok) -> ordbok {
+    la by_alias = har_nokkel(val, "by_alias") og val["by_alias"]
+    la excl_none = har_nokkel(val, "exclude_none") og val["exclude_none"]
+    la ut: ordbok = {}
+    la felt_liste = modell["felt"]
+    la i = 0
+    mens i < lengde(felt_liste) {
+        la f = felt_liste[i]
+        la namn = tekst(f["namn"])
+        hvis har_nokkel(f, "exclude") og f["exclude"] { i = i + 1  fortsett }
+        hvis ikkje har_nokkel(verdiar, namn) { i = i + 1  fortsett }
+        la v = verdiar[namn]
+        hvis excl_none og builtin.type(v) == "ingenting" { i = i + 1  fortsett }
+
+        la ut_namn = namn
+        hvis by_alias { ut_namn = _wire_namn(f) }
+
+        # Nøsta modell: rekursiv serialisering med same val.
+        hvis tekst(f["type"]) == "modell" og builtin.type(v) == "ordbok" {
+            ut[ut_namn] = til_ordbok(f["nøsta"], v, val)
+        } ellers {
+            ut[ut_namn] = v
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon til_json(modell: ordbok, verdiar: ordbok, val: ordbok) -> tekst {
+    returner sk.json(til_ordbok(modell, verdiar, val))
+}
+
+# ─── JSON Schema (OpenAPI-additivt; endrar ikkje openapi-generatoren) ──────────
+
+funksjon _type_schema(f: ordbok) -> ordbok {
+    la type = tekst(f["type"])
+    la s: ordbok = {}
+
+    hvis type == "tekst" {
+        s["type"] = "string"
+        hvis har_nokkel(f, "min_len") og f["min_len"] >= 0 { s["minLength"] = f["min_len"] }
+        hvis har_nokkel(f, "maks_len") og f["maks_len"] >= 0 { s["maxLength"] = f["maks_len"] }
+        hvis har_nokkel(f, "pattern") { s["pattern"] = f["pattern"] }
+    } ellers hvis type == "heltall" {
+        s["type"] = "integer"
+    } ellers hvis type == "desimaltall" {
+        s["type"] = "number"
+    } ellers hvis type == "bool" {
+        s["type"] = "boolean"
+    } ellers hvis type == "dato" {
+        s["type"] = "string"
+        s["format"] = "date"
+    } ellers hvis type == "modell" {
+        returner json_schema(f["nøsta"])
+    } ellers hvis type == "liste" {
+        s["type"] = "array"
+        s["items"] = _type_schema(f["element"])
+        returner s
+    } ellers {
+        s["type"] = "string"
+    }
+
+    hvis type == "heltall" eller type == "desimaltall" {
+        hvis har_nokkel(f, "gt") { s["exclusiveMinimum"] = f["gt"] }
+        hvis har_nokkel(f, "ge") { s["minimum"] = f["ge"] }
+        hvis har_nokkel(f, "lt") { s["exclusiveMaximum"] = f["lt"] }
+        hvis har_nokkel(f, "le") { s["maximum"] = f["le"] }
+    }
+
+    hvis har_nokkel(f, "enum") { s["enum"] = f["enum"] }
+    hvis har_nokkel(f, "har_standard") og f["har_standard"] { s["default"] = f["standard"] }
+    returner s
+}
+
+# JSON Schema-objekt for OpenAPI (components/schemas-innhald). Wire-namn (alias) ut.
+funksjon json_schema(modell: ordbok) -> ordbok {
+    la props: ordbok = {}
+    la required: liste = []
+    la felt_liste = modell["felt"]
+    la i = 0
+    mens i < lengde(felt_liste) {
+        la f = felt_liste[i]
+        la wire = _wire_namn(f)
+        props[wire] = _type_schema(f)
+        hvis f["påkravd"] og ikkje (har_nokkel(f, "har_standard") og f["har_standard"]) {
+            legg_til(required, wire)
+        }
+        i = i + 1
+    }
+    la s: ordbok = {"type": "object", "properties": props}
+    hvis lengde(required) > 0 { s["required"] = required }
+    hvis tekst(modell["extra"]) == "forbid" { s["additionalProperties"] = usann }
+    returner s
+}
