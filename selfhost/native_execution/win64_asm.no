@@ -1,0 +1,425 @@
+// selfhost/native_execution/win64_asm.no — liten x86-64-assemblar for Windows-målet (W0/W1).
+//
+// Handskrivne byte-lister med handrekna hoppavstandar er den største feilkjelda i codegenen.
+// Ny Windows-kode (PE-demo, OS-rutinane bak IAT) blir difor skriven mot denne assemblaren:
+// etikettar + rel32-fiksar (jcc/jmp/call/lea rip), og generelle koda for dei få
+// instruksjonsformene rutinane treng. Alle minneoperandar brukar [base + disp32] (mod=10),
+// med SIB for rsp/r12 — lengre enn naudsynt, men utan spesialtilfelle.
+//
+// Registernummer: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8–r15 8–15.
+// Kode som blir laga her er posisjonsuavhengig (berre relative hopp og RIP-relative
+// etikettar); absolutte adresser kjem berre inn som eksplisitte operandar (call [abs32]).
+
+funksjon RAX() -> heiltall { returner 0 }
+funksjon RCX() -> heiltall { returner 1 }
+funksjon RDX() -> heiltall { returner 2 }
+funksjon RBX() -> heiltall { returner 3 }
+funksjon RSP() -> heiltall { returner 4 }
+funksjon RBP() -> heiltall { returner 5 }
+funksjon RSI() -> heiltall { returner 6 }
+funksjon RDI() -> heiltall { returner 7 }
+funksjon R8() -> heiltall { returner 8 }
+funksjon R9() -> heiltall { returner 9 }
+funksjon R10() -> heiltall { returner 10 }
+funksjon R11() -> heiltall { returner 11 }
+funksjon R12() -> heiltall { returner 12 }
+funksjon R13() -> heiltall { returner 13 }
+funksjon R14() -> heiltall { returner 14 }
+funksjon R15() -> heiltall { returner 15 }
+
+// Tilstandskodar for jcc (0F 80+cc).
+funksjon CC_E() -> heiltall { returner 4 }
+funksjon CC_NE() -> heiltall { returner 5 }
+funksjon CC_B() -> heiltall { returner 2 }
+funksjon CC_AE() -> heiltall { returner 3 }
+funksjon CC_BE() -> heiltall { returner 6 }
+funksjon CC_A() -> heiltall { returner 7 }
+funksjon CC_L() -> heiltall { returner 12 }
+funksjon CC_GE() -> heiltall { returner 13 }
+funksjon CC_LE() -> heiltall { returner 14 }
+funksjon CC_G() -> heiltall { returner 15 }
+funksjon CC_S() -> heiltall { returner 8 }
+funksjon CC_NS() -> heiltall { returner 9 }
+
+funksjon ny() {
+    returner {"b": [], "lab": {}, "fix": [], "n": 0}
+}
+
+funksjon b(a, v: heiltall) -> heiltall {
+    legg_til(a["b"], v & 255)
+    returner 0
+}
+
+funksjon bs(a, vs) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(vs) {
+        legg_til(a["b"], vs[i] & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon d32(a, v: heiltall) -> heiltall {
+    b(a, v)
+    b(a, v >> 8)
+    b(a, v >> 16)
+    b(a, v >> 24)
+    returner 0
+}
+
+funksjon d64(a, v: heiltall) -> heiltall {
+    d32(a, v & 0xFFFFFFFF)
+    d32(a, (v >> 32) & 0xFFFFFFFF)
+    returner 0
+}
+
+funksjon pos(a) -> heiltall { returner lengde(a["b"]) }
+
+// ── Etikettar ───────────────────────────────────────────────────────────────
+funksjon ny_etikett(a, prefiks: tekst) -> tekst {
+    a["n"] = a["n"] + 1
+    returner prefiks + "#" + tekst_fra_heltall(a["n"])
+}
+
+funksjon merk(a, namn: tekst) -> heiltall {
+    hvis finnes_nøkkel(a["lab"], namn) { kast "win64_asm: etikett definert to gonger: " + namn }
+    a["lab"][namn] = lengde(a["b"])
+    returner 0
+}
+
+// rel32-felt som skal peike på `namn` (relativt til slutten av feltet).
+funksjon rel32_til(a, namn: tekst) -> heiltall {
+    legg_til(a["fix"], [lengde(a["b"]), namn])
+    d32(a, 0)
+    returner 0
+}
+
+funksjon ferdig(a) {
+    la fx = a["fix"]
+    la i: heiltall = 0
+    mens i < lengde(fx) {
+        la p: heiltall = fx[i][0]
+        la namn: tekst = fx[i][1]
+        hvis ikkje finnes_nøkkel(a["lab"], namn) { kast "win64_asm: udefinert etikett " + namn }
+        la rel: heiltall = a["lab"][namn] - (p + 4)
+        la v: heiltall = rel & 0xFFFFFFFF
+        a["b"][p] = v & 255
+        a["b"][p + 1] = (v >> 8) & 255
+        a["b"][p + 2] = (v >> 16) & 255
+        a["b"][p + 3] = (v >> 24) & 255
+        i = i + 1
+    }
+    returner a["b"]
+}
+
+// ── Koding ──────────────────────────────────────────────────────────────────
+funksjon rex(a, w: heiltall, r: heiltall, x: heiltall, bb: heiltall, tving: boolsk) -> heiltall {
+    la v: heiltall = 0x40
+    hvis w != 0 { v = v | 8 }
+    hvis r >= 8 { v = v | 4 }
+    hvis x >= 8 { v = v | 2 }
+    hvis bb >= 8 { v = v | 1 }
+    hvis v != 0x40 eller tving { b(a, v) }
+    returner 0
+}
+
+// ModRM for [base + disp32] med reg-feltet `reg`.
+funksjon mem(a, reg: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    b(a, 0x80 | ((reg & 7) << 3) | (base & 7))
+    hvis (base & 7) == 4 { b(a, 0x24) }
+    d32(a, disp & 0xFFFFFFFF)
+    returner 0
+}
+
+funksjon rr(a, reg: heiltall, rm: heiltall) -> heiltall {
+    b(a, 0xC0 | ((reg & 7) << 3) | (rm & 7))
+    returner 0
+}
+
+// mov dst, src (64-bit)
+funksjon mov(a, dst: heiltall, src: heiltall) -> heiltall {
+    rex(a, 1, src, 0, dst, usann)
+    b(a, 0x89)
+    rr(a, src, dst)
+    returner 0
+}
+
+// mov dst, imm64 (movabs)
+funksjon mov_i64(a, dst: heiltall, v: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0xB8 + (dst & 7))
+    d64(a, v)
+    returner 0
+}
+
+// mov dst32, imm32 (nullutvida til 64 bit)
+funksjon mov_i32(a, dst: heiltall, v: heiltall) -> heiltall {
+    rex(a, 0, 0, 0, dst, usann)
+    b(a, 0xB8 + (dst & 7))
+    d32(a, v & 0xFFFFFFFF)
+    returner 0
+}
+
+// mov dst, sign-utvida imm32 (48 C7 /0)
+funksjon mov_is(a, dst: heiltall, v: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0xC7)
+    rr(a, 0, dst)
+    d32(a, v & 0xFFFFFFFF)
+    returner 0
+}
+
+// mov dst, [base+disp] (64-bit)
+funksjon ld(a, dst: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    rex(a, 1, dst, 0, base, usann)
+    b(a, 0x8B)
+    mem(a, dst, base, disp)
+    returner 0
+}
+
+// mov [base+disp], src (64-bit)
+funksjon st(a, base: heiltall, disp: heiltall, src: heiltall) -> heiltall {
+    rex(a, 1, src, 0, base, usann)
+    b(a, 0x89)
+    mem(a, src, base, disp)
+    returner 0
+}
+
+// mov dst32, [base+disp] (32-bit last, nullutvida)
+funksjon ld32(a, dst: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    rex(a, 0, dst, 0, base, usann)
+    b(a, 0x8B)
+    mem(a, dst, base, disp)
+    returner 0
+}
+
+// mov dword [base+disp], src32
+funksjon st32(a, base: heiltall, disp: heiltall, src: heiltall) -> heiltall {
+    rex(a, 0, src, 0, base, usann)
+    b(a, 0x89)
+    mem(a, src, base, disp)
+    returner 0
+}
+
+// movzx dst, word [base+disp]
+funksjon ld16(a, dst: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    rex(a, 1, dst, 0, base, usann)
+    bs(a, [0x0F, 0xB7])
+    mem(a, dst, base, disp)
+    returner 0
+}
+
+// movzx dst, byte [base+disp]
+funksjon ld8(a, dst: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    rex(a, 1, dst, 0, base, usann)
+    bs(a, [0x0F, 0xB6])
+    mem(a, dst, base, disp)
+    returner 0
+}
+
+// mov byte [base+disp], src8 (REX alltid, so sil/dil/… er gyldige)
+funksjon st8(a, base: heiltall, disp: heiltall, src: heiltall) -> heiltall {
+    rex(a, 0, src, 0, base, sann)
+    b(a, 0x88)
+    mem(a, src, base, disp)
+    returner 0
+}
+
+// mov word [base+disp], src16
+funksjon st16(a, base: heiltall, disp: heiltall, src: heiltall) -> heiltall {
+    b(a, 0x66)
+    rex(a, 0, src, 0, base, usann)
+    b(a, 0x89)
+    mem(a, src, base, disp)
+    returner 0
+}
+
+// mov qword [base+disp], sign-utvida imm32
+funksjon st_i(a, base: heiltall, disp: heiltall, v: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, base, usann)
+    b(a, 0xC7)
+    mem(a, 0, base, disp)
+    d32(a, v & 0xFFFFFFFF)
+    returner 0
+}
+
+// mov byte [base+disp], imm8
+funksjon st8_i(a, base: heiltall, disp: heiltall, v: heiltall) -> heiltall {
+    rex(a, 0, 0, 0, base, usann)
+    b(a, 0xC6)
+    mem(a, 0, base, disp)
+    b(a, v)
+    returner 0
+}
+
+// lea dst, [base+disp]
+funksjon lea(a, dst: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    rex(a, 1, dst, 0, base, usann)
+    b(a, 0x8D)
+    mem(a, dst, base, disp)
+    returner 0
+}
+
+// lea dst, [rip + etikett]
+funksjon lea_etikett(a, dst: heiltall, namn: tekst) -> heiltall {
+    rex(a, 1, dst, 0, 0, usann)
+    b(a, 0x8D)
+    b(a, 0x05 | ((dst & 7) << 3))
+    rel32_til(a, namn)
+    returner 0
+}
+
+// ALU dst, src: op = 0 add, 1 or, 4 and, 5 sub, 6 xor, 7 cmp
+funksjon alu(a, op: heiltall, dst: heiltall, src: heiltall) -> heiltall {
+    rex(a, 1, src, 0, dst, usann)
+    b(a, (op << 3) | 1)
+    rr(a, src, dst)
+    returner 0
+}
+
+// ALU dst, imm32 (sign-utvida)
+funksjon alu_i(a, op: heiltall, dst: heiltall, v: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0x81)
+    rr(a, op, dst)
+    d32(a, v & 0xFFFFFFFF)
+    returner 0
+}
+
+funksjon add(a, dst: heiltall, src: heiltall) -> heiltall { returner alu(a, 0, dst, src) }
+funksjon sub(a, dst: heiltall, src: heiltall) -> heiltall { returner alu(a, 5, dst, src) }
+funksjon cmp(a, dst: heiltall, src: heiltall) -> heiltall { returner alu(a, 7, dst, src) }
+funksjon xor(a, dst: heiltall, src: heiltall) -> heiltall { returner alu(a, 6, dst, src) }
+funksjon add_i(a, dst: heiltall, v: heiltall) -> heiltall { returner alu_i(a, 0, dst, v) }
+funksjon sub_i(a, dst: heiltall, v: heiltall) -> heiltall { returner alu_i(a, 5, dst, v) }
+funksjon and_i(a, dst: heiltall, v: heiltall) -> heiltall { returner alu_i(a, 4, dst, v) }
+funksjon cmp_i(a, dst: heiltall, v: heiltall) -> heiltall { returner alu_i(a, 7, dst, v) }
+
+// test a, b (64-bit)
+funksjon tst(a, x: heiltall, y: heiltall) -> heiltall {
+    rex(a, 1, y, 0, x, usann)
+    b(a, 0x85)
+    rr(a, y, x)
+    returner 0
+}
+
+// imul dst, src
+funksjon imul(a, dst: heiltall, src: heiltall) -> heiltall {
+    rex(a, 1, dst, 0, src, usann)
+    bs(a, [0x0F, 0xAF])
+    rr(a, dst, src)
+    returner 0
+}
+
+// mul src (rdx:rax = rax * src, usigna)
+funksjon mul(a, src: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, src, usann)
+    b(a, 0xF7)
+    rr(a, 4, src)
+    returner 0
+}
+
+// div src (rax = rdx:rax / src, rdx = rest, usigna)
+funksjon div(a, src: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, src, usann)
+    b(a, 0xF7)
+    rr(a, 6, src)
+    returner 0
+}
+
+funksjon neg(a, dst: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0xF7)
+    rr(a, 3, dst)
+    returner 0
+}
+
+// shl/shr dst, imm8
+funksjon shl_i(a, dst: heiltall, n: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0xC1)
+    rr(a, 4, dst)
+    b(a, n)
+    returner 0
+}
+
+funksjon shr_i(a, dst: heiltall, n: heiltall) -> heiltall {
+    rex(a, 1, 0, 0, dst, usann)
+    b(a, 0xC1)
+    rr(a, 5, dst)
+    b(a, n)
+    returner 0
+}
+
+funksjon push(a, r: heiltall) -> heiltall {
+    hvis r >= 8 { b(a, 0x41) }
+    b(a, 0x50 + (r & 7))
+    returner 0
+}
+
+funksjon pop(a, r: heiltall) -> heiltall {
+    hvis r >= 8 { b(a, 0x41) }
+    b(a, 0x58 + (r & 7))
+    returner 0
+}
+
+funksjon ret(a) -> heiltall { returner b(a, 0xC3) }
+funksjon int3(a) -> heiltall { returner b(a, 0xCC) }
+
+// call qword [abs32] — IAT-slot eller OS-porttabell (fast ImageBase, ingen relokering).
+funksjon call_abs(a, adresse: heiltall) -> heiltall {
+    bs(a, [0xFF, 0x14, 0x25])
+    d32(a, adresse)
+    returner 0
+}
+
+// jmp qword [abs32 + idx*8]
+funksjon jmp_tabell(a, idx: heiltall, adresse: heiltall) -> heiltall {
+    rex(a, 0, 0, idx, 0, usann)
+    bs(a, [0xFF, 0x24, 0xC5 | ((idx & 7) << 3)])
+    d32(a, adresse)
+    returner 0
+}
+
+funksjon call_etikett(a, namn: tekst) -> heiltall {
+    b(a, 0xE8)
+    rel32_til(a, namn)
+    returner 0
+}
+
+funksjon jmp(a, namn: tekst) -> heiltall {
+    b(a, 0xE9)
+    rel32_til(a, namn)
+    returner 0
+}
+
+funksjon jcc(a, cc: heiltall, namn: tekst) -> heiltall {
+    b(a, 0x0F)
+    b(a, 0x80 + cc)
+    rel32_til(a, namn)
+    returner 0
+}
+
+// movdqu [base+disp], xmmN  /  movdqu xmmN, [base+disp]
+funksjon st_xmm(a, base: heiltall, disp: heiltall, x: heiltall) -> heiltall {
+    b(a, 0xF3)
+    rex(a, 0, x, 0, base, usann)
+    bs(a, [0x0F, 0x7F])
+    mem(a, x, base, disp)
+    returner 0
+}
+
+funksjon ld_xmm(a, x: heiltall, base: heiltall, disp: heiltall) -> heiltall {
+    b(a, 0xF3)
+    rex(a, 0, x, 0, base, usann)
+    bs(a, [0x0F, 0x6F])
+    mem(a, x, base, disp)
+    returner 0
+}
+
+// Inline data (t.d. UTF-16-strengar) bak ein etikett.
+funksjon data(a, namn: tekst, vs) -> heiltall {
+    merk(a, namn)
+    bs(a, vs)
+    returner 0
+}

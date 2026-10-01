@@ -10,6 +10,11 @@
 bruk selfhost.ncb_serde som serde
 bruk selfhost.native_execution.heap_layout som hl
 bruk selfhost.native_execution.gap_ruter som gr
+// WINDOWS_SEED_PLAN W1: PE32+-container + OS-grensa. Berre nytta når NC_TARGET=windows-x86_64
+// (ER_WINDOWS); Linux-vegen rører aldri desse, so ELF-output held seg byte-identisk.
+bruk selfhost.native_execution.pe_emitter som pe
+bruk selfhost.native_execution.win64_os som win64
+bruk selfhost.native_execution.win64_asm som wasm
 // a12fix: std.desimaltall_tekst i codegen-bunten, so json_parse-atomet i codegen-ELF-en sjølv får
 // den eksakte talkroken (NCB-JSON-konstantar som 2.2250738585072014e-308 las elles som 0.0).
 // Modulen er med i bruk-lukkinga og dermed i .depshash.
@@ -32,13 +37,31 @@ funksjon HOST_ABI_VA() { returner 7798784 } // 0x5f0000
 // miljo_sett/miljo_hent; STACK_LIMIT: initiell rsp − 7 MiB (rekursjonsvakt).
 funksjon ENV_OVERLAY_VA() { returner HOST_ABI_VA() + 4088 }
 funksjon STACK_LIMIT_VA() { returner HOST_ABI_VA() + 4080 }
+// WINDOWS_SEED_PLAN W1: OS-porttabell (OSTAB) på starten av .idata (0x771000, rett etter
+// verts-ABI-sida). Fast VA so emit_os_call() kan bruke han som kompileringstidskonstant
+// gjennom heile runtime-emisjonen (dei 56 syscall-stadene). 512 slottar à 8 B = 4096 B;
+// importkatalogen (IMPORT_VA) ligg rett etter. Berre nytta i windows-x86_64-emisjon.
+funksjon OSTAB_VA() { returner HOST_ABI_VA() + 4096 }        // 0x771000
+funksjon OSTAB_LEN() { returner 512 }
+funksjon IMPORT_VA() { returner OSTAB_VA() + OSTAB_LEN() * 8 } // 0x772000
 // LAMBDA_CAPTURE: capture-ordboka til closuren som ncb_kall-atomet er i ferd med å kalle.
 // Lambda-hjelparen les og nullstiller sloten i prologen (sjå kompiler_fn_v2). Sida
 // er rot for GC-skanninga, men closuren ligg uansett på kallaren sin operandstakk.
 funksjon LAMBDA_CAPTURE_VA() { returner HOST_ABI_VA() + 4072 }
 // Heap-/GC-layouten (HEAP_VA, GC_*, live-map, mark-stakk, cache-område, handler-region)
-// ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen er linux-x86_64.
-funksjon X86_MAL() -> tekst { returner "linux-x86_64" }
+// ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen dekkjer x86-64-måla:
+// linux-x86_64 (standard) og windows-x86_64 (WINDOWS_SEED_PLAN W1). Målet kjem frå NC_TARGET;
+// heap-/VA-layouten er identisk (heap_layout deler han), so berre containeren (PE/ELF), _start
+// og syscall-stadene skil bygga. NB: utan NC_TARGET er dette "linux-x86_64" → Linux-output
+// byte-identisk (paritetsporten). native_target()-konstanten speglar denne strengen.
+funksjon X86_MAL() -> tekst {
+    la t = miljo_hent("NC_TARGET")
+    hvis t == "" eller t == "linux-x86_64" { returner "linux-x86_64" }
+    hvis t == "windows-x86_64" { returner "windows-x86_64" }
+    kast "native_codegen_v2: ukjent NC_TARGET " + t + " (venta linux-x86_64 eller windows-x86_64)"
+}
+// Er dette Windows-målet? Gate for PE-container, _start og syscall-ruting (W1+).
+funksjon ER_WINDOWS() -> boolsk { returner X86_MAL() == "windows-x86_64" }
 // Rå 4 LE-byte av HEAP_VA()+off — for hand-assemblerte instruksjonar som
 // før hardkoda 0x600000-familien; no følgjer dei HEAP_VA (relayout-trygt).
 funksjon _heap_abs4(off: heltall) -> liste { la v = hl.HEAP_VA(X86_MAL()) + off returner [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255] }
@@ -3013,22 +3036,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2 (stderr)
     copy(bytes, [0x48, 0x89, 0xE6])                // mov rsi,rsp
     copy(bytes, [0xBA, 0x1B, 0x00, 0x00, 0x00])    // mov edx,27
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]) // write
+    emit_sys_clean7(bytes, 1) // write
     copy(bytes, [0x48, 0x8B, 0x4B, 0x08])          // mov rcx,[rbx+8] (strdata)
     copy(bytes, [0x48, 0x85, 0xC9])                // test rcx,rcx
     copy(bytes, [0x74, 0x17])                      // jz .nl (+23)
     copy(bytes, [0x48, 0x8B, 0x11])                // mov rdx,[rcx] (len)
     copy(bytes, [0x48, 0x8D, 0x71, 0x08])          // lea rsi,[rcx+8]
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]) // write   (3+4+5+7 = 19 … +4 = 23)
+    emit_sys_clean7(bytes, 1) // write   (3+4+5+7 = 19 … +4 = 23)
     copy(bytes, [0x90, 0x90, 0x90, 0x90])          // nop-pad til .nl
     copy(bytes, [0xC6, 0x04, 0x24, 0x0A])          // .nl: mov byte[rsp],10
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
     copy(bytes, [0x48, 0x89, 0xE6])                // mov rsi,rsp
     copy(bytes, [0xBA, 0x01, 0x00, 0x00, 0x00])    // mov edx,1
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]) // write
+    emit_sys_clean7(bytes, 1) // write
     copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])    // mov edi,1
-    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]) // exit(1)
+    emit_sys_clean7(bytes, 60) // exit(1)
 
     // ── index_get_safe(rdi=container, rsi=nøkkel) → rax ─────────────────────────
     // Delt rutine (eitt eksemplar; inline per INDEX_GET-site sprengde .text i full
@@ -3173,9 +3196,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la ff_done = lengde(bytes)
     patch_jump(bytes, ff_skip, ff_done)
     copy(bytes, [0xC6, 0x07, 0x00])                       // NUL
-    copy(bytes, [0xB8, 0x15, 0x00, 0x00, 0x00])           // mov eax,21 (access)
-    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
-    copy(bytes, [0x31, 0xF6, 0x0F, 0x05])                 // xor esi,esi; syscall
+    // W2 split-ruting (lengdenøytral 12 B, ingen handkoda hopp spenner staden): dropp
+    // mov eax,21, behald mov rdi,rsp + xor esi,esi, byt syscall med OSTAB[21] → os_access.
+    hvis ER_WINDOWS() {
+        copy(bytes, [0x48, 0x89, 0xE7])                   // mov rdi,rsp (sti)
+        copy(bytes, [0x31, 0xF6])                         // xor esi,esi
+        emit_syscall_site(bytes, 21)                      // call [OSTAB+21*8] → os_access
+    } ellers {
+        copy(bytes, [0xB8, 0x15, 0x00, 0x00, 0x00])       // mov eax,21 (access)
+        copy(bytes, [0x48, 0x89, 0xE7])                   // mov rdi,rsp
+        copy(bytes, [0x31, 0xF6, 0x0F, 0x05])             // xor esi,esi; syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     copy(bytes, [0x0F, 0x94, 0xC0])                       // sete al
     copy(bytes, [0x48, 0x0F, 0xB6, 0xF8])                 // movzx rdi,al
@@ -3214,18 +3245,19 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la fs_done = lengde(bytes)
     patch_jump(bytes, fs_skip, fs_done)
     copy(bytes, [0xC6, 0x07, 0x00])                       // NUL
-    copy(bytes, [0xB8, 0x57, 0x00, 0x00, 0x00])           // mov eax,87 (unlink)
+    // W2: unlink (split; patch_jump-hopp auto-justerer, so berre Linux-byte-identitet krevst).
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x57, 0x00, 0x00, 0x00]) }  // mov eax,87 (unlink)
     copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 87) } ellers { copy(bytes, [0x0F, 0x05]) }  // → os_unlink
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     la fs_ok1 = emit_je_placeholder(bytes)                // unlink OK → sann
     // VM-en (remove(3)) slettar òg ein TOM katalog (std.filops.slett_tre stolar på
     // det som fallback). unlink → EISDIR(-21) → prøv rmdir(#84).
     copy(bytes, [0x48, 0x83, 0xF8, 0xEB])                 // cmp rax,-21
     la fs_fail1 = emit_jcc_placeholder(bytes, 0x85)       // jne usann
-    copy(bytes, [0xB8, 0x54, 0x00, 0x00, 0x00])           // mov eax,84 (rmdir)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x54, 0x00, 0x00, 0x00]) }  // mov eax,84 (rmdir)
     copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 84) } ellers { copy(bytes, [0x0F, 0x05]) }  // → os_rmdir
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     la fs_fail2 = emit_jcc_placeholder(bytes, 0x85)       // jne usann
     la fs_okl = lengde(bytes)
@@ -3270,8 +3302,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16
     copy(bytes, [0x31, 0xFF])                             // xor edi,edi (CLOCK_REALTIME)
     copy(bytes, [0x48, 0x89, 0xE6])                       // mov rsi,rsp (timespec*)
-    copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])           // mov eax,228
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 228)                     // call [OSTAB+228*8] → os_clock_gettime
+    } ellers {
+        copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])       // mov eax,228
+        copy(bytes, [0x0F, 0x05])                         // syscall
+    }
     copy(bytes, [0x48, 0x8B, 0x04, 0x24])                 // mov rax,[rsp] (sek)
     copy(bytes, [0x48, 0x69, 0xC0, 0xE8, 0x03, 0x00, 0x00]) // imul rax,rax,1000
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
@@ -3299,8 +3335,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8D, 0x3C, 0x24])                 // igjen: lea rdi,[rsp] (buf)
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])           // mov esi,1 (len)
     copy(bytes, [0x31, 0xD2])                             // xor edx,edx (flags=0)
-    copy(bytes, [0xB8, 0x3E, 0x01, 0x00, 0x00])           // mov eax,318 (getrandom)
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    // W1 bare2-ruting (lengdekritisk: je igjen −24 @nedanfor spenner staden). mov eax,318
+    // (5 B) + syscall (2 B) = 7 B → call [OSTAB+318*8] (7 B). os_getrandom (SystemFunction036)
+    // skriv 1 byte til [rdi] og returnerer 1; retry-sjekken cmp rax,-4 slår aldri til.
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 318)                     // call [OSTAB+318*8] → os_getrandom
+    } ellers {
+        copy(bytes, [0xB8, 0x3E, 0x01, 0x00, 0x00])       // mov eax,318 (getrandom)
+        copy(bytes, [0x0F, 0x05])                         // syscall
+    }
     copy(bytes, [0x48, 0x83, 0xF8, 0xFC])                 // cmp rax,-4 (−EINTR?)
     copy(bytes, [0x74, 0xE8])                             // je igjen (−24)
     copy(bytes, [0x48, 0x83, 0xF8, 0x01])                 // cmp rax,1
@@ -4122,10 +4165,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0x04, 0x24])                 // mov [rsp],rax (tv_sec)
     copy(bytes, [0x48, 0x69, 0xD2, 0x40, 0x42, 0x0F, 0x00]) // imul rdx,rdx,1000000
     copy(bytes, [0x48, 0x89, 0x54, 0x24, 0x08])           // mov [rsp+8],rdx (tv_nsec)
-    copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00])           // mov eax,35 (nanosleep)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00]) }  // mov eax,35 (nanosleep)
     copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
     copy(bytes, [0x31, 0xF6])                             // xor esi,esi
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 35) } ellers { copy(bytes, [0x0F, 0x05]) }  // → os_nanosleep
     la vs_negl = lengde(bytes)
     patch_jump(bytes, vs_neg, vs_negl)
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
@@ -4285,10 +4328,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la fls_done = lengde(bytes)
     patch_jump(bytes, fls_skip, fls_done)
     copy(bytes, [0xC6, 0x07, 0x00])                       // NUL
-    copy(bytes, [0xB8, 0x04, 0x00, 0x00, 0x00])           // mov eax,4 (stat)
-    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp (sti)
-    copy(bytes, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x0F, 0x00, 0x00]) // lea rsi,[rsp+0xF00]
-    copy(bytes, [0x0F, 0x05])                             // syscall
+    // W2 stat (split, lengdenøytral 18 B): dropp mov eax,4, behald mov rdi,rsp + lea rsi,
+    // byt syscall med OSTAB[4] → os_stat (fyller st_mode). Ingen handkoda hopp spenner staden.
+    hvis ER_WINDOWS() {
+        copy(bytes, [0x48, 0x89, 0xE7])                   // mov rdi,rsp (sti)
+        copy(bytes, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x0F, 0x00, 0x00]) // lea rsi,[rsp+0xF00] (statbuf)
+        emit_syscall_site(bytes, 4)                       // call [OSTAB+4*8] → os_stat
+    } ellers {
+        copy(bytes, [0xB8, 0x04, 0x00, 0x00, 0x00])       // mov eax,4 (stat)
+        copy(bytes, [0x48, 0x89, 0xE7])                   // mov rdi,rsp (sti)
+        copy(bytes, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x0F, 0x00, 0x00]) // lea rsi,[rsp+0xF00]
+        copy(bytes, [0x0F, 0x05])                         // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     la fls_bad4 = emit_jcc_placeholder(bytes, 0x85)       // jne bad (stat feila)
     copy(bytes, [0x8B, 0x84, 0x24, 0x18, 0x0F, 0x00, 0x00]) // mov eax,[rsp+0xF18] (st_mode)
@@ -4460,7 +4511,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
     copy(bytes, [0xBE, 0x41, 0x04, 0x00, 0x00])           // mov esi,0x441
     copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])           // mov edx,0644
-    copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]) // open
+    emit_sys_clean7(bytes, 2) // open
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     la fa_bad2 = emit_jcc_placeholder(bytes, 0x88)        // js bad
     copy(bytes, [0x48, 0x89, 0xC3])                       // mov rbx,rax (fd)
@@ -4475,7 +4526,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x85, 0xD2])                       // test rdx,rdx
     la fa_cl3 = emit_je_placeholder(bytes)
     copy(bytes, [0x48, 0x89, 0xDF])                       // mov rdi,rbx
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]) // write
+    emit_sys_clean7(bytes, 1) // write
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
     la fa_cl4 = emit_jcc_placeholder(bytes, 0x8E)         // jle close
     copy(bytes, [0x48, 0x01, 0xC6])                       // add rsi,rax
@@ -4485,7 +4536,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la fa_close = lengde(bytes)
     patch_jump(bytes, fa_cl1, fa_close) patch_jump(bytes, fa_cl2, fa_close) patch_jump(bytes, fa_cl3, fa_close) patch_jump(bytes, fa_cl4, fa_close)
     copy(bytes, [0x48, 0x89, 0xDF])                       // mov rdi,rbx
-    copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05]) // close
+    emit_sys_clean7(bytes, 3) // close
     la fa_bad = lengde(bytes)
     patch_jump(bytes, fa_bad1, fa_bad) patch_jump(bytes, fa_bad2, fa_bad)
     copy(bytes, [0x48, 0x81, 0xC4, 0x00, 0x10, 0x00, 0x00]) // add rsp,4096
@@ -4993,31 +5044,31 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xEC, 0x10])           // sub rsp,16
     copy(bytes, [0x48, 0x89, 0x04, 0x24])           // mov [rsp],rax (tv_sec)
     copy(bytes, [0x48, 0x89, 0x54, 0x24, 0x08])     // mov [rsp+8],rdx (tv_nsec)
-    copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00])     // mov eax,35 (nanosleep)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00]) }  // mov eax,35
     copy(bytes, [0x48, 0x89, 0xE7])                 // mov rdi,rsp
     copy(bytes, [0x31, 0xF6])                       // xor esi,esi
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 35) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])           // add rsp,16
     copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (cond-addr)
     copy(bytes, [0xF0, 0x49, 0xFF, 0x04, 0x24])     // lock inc qword [r12] (auk sekvens)
-    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202 (futex)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202
     copy(bytes, [0x4C, 0x89, 0xE7])                 // mov rdi,r12
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1 (FUTEX_WAKE)
     copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
     la td_done = lengde(bytes)
     patch_jump(bytes, td_cancel_done, td_done)
     patch_jump(bytes, td_zero_done, td_done)
     patch_jump(bytes, td_jne_done2, td_done)
     copy(bytes, [0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00]) // mov qword [rbx+8],1 (done)
-    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202
     copy(bytes, [0x48, 0x8D, 0x7B, 0x08])           // lea rdi,[rbx+8]
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1
     copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
-    copy(bytes, [0x0F, 0x05])                       // syscall
-    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])     // mov eax,60 (exit)
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00]) }  // mov eax,60
     copy(bytes, [0x31, 0xFF])                       // xor edi,edi
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 60) } ellers { copy(bytes, [0x0F, 0x05]) }
 
     // thread_spawn_native(flags, stack_top, deskriptor) → boksa barne-tid.
     // clone(2) rått: barnet held fram etter syscall med rsp=stack_top; vi legg
@@ -5027,11 +5078,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (stack_top)
     copy(bytes, [0x48, 0x8B, 0x52, 0x08])           // mov rdx,[rdx+8] (deskriptor)
     copy(bytes, [0x48, 0x89, 0x56, 0xF0])           // mov [rsi-16],rdx
-    copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00])     // mov eax,56 (clone)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00]) }  // mov eax,56 (clone)
     copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx (ptid)
     copy(bytes, [0x4D, 0x31, 0xD2])                 // xor r10,r10 (ctid)
     copy(bytes, [0x4D, 0x31, 0xC0])                 // xor r8,r8 (tls)
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    // clone → OSTAB[56] = os_enosys (grøne trådar = W4; CreateThread ≠ clone-modell). Rutar
+    // so ingen rå syscall står att; thread_spawn feilar reint (rax=-38) på Windows.
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 56) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x48, 0x85, 0xC0])                 // test rax,rax
     la ts_parent = emit_jcc_placeholder(bytes, 0x85) // jnz .parent
     copy(bytes, [0x48, 0x8B, 0x7C, 0x24, 0xF0])     // mov rdi,[rsp-16] (deskriptor)
@@ -7745,9 +7798,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC6, 0x08])                   // add rsi,0x8
     copy(bytes, [0x48, 0x85, 0xD2])                         // test rdx,rdx
     copy(bytes, [0x7E, 0x19])                               // jle 978
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])             // mov eax,0x1
-    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])             // mov edi,0x1
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    // W1 split-ruting: Windows dropp mov eax,1 (5 B), behald mov edi,1 (fd=stdout), byt
+    // syscall (2 B) med call [OSTAB+1*8] (7 B) → os_write. 5+7 = 12 = 5+5+2, so je/jle-
+    // avstandane (0x29/0x19) som spenner staden held. Linux-greina er byte-identisk.
+    hvis ER_WINDOWS() {
+        copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])         // mov edi,0x1 (fd=stdout)
+        emit_syscall_site(bytes, 1)                         // call [OSTAB+8] → os_write
+    } ellers {
+        copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])         // mov eax,0x1
+        copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])         // mov edi,0x1
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     copy(bytes, [0x7E, 0x08])                               // jle 978
     copy(bytes, [0x48, 0x01, 0xC6])                         // add rsi,rax
@@ -7771,56 +7832,97 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
     copy(bytes, [0xF3, 0xA4])                               // rep movs BYTE PTR es:[rdi],BYTE PTR ds:[rsi]
     copy(bytes, [0xC6, 0x07, 0x00])                         // mov BYTE PTR [rdi],0x0
-    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
-    copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])             // mov eax,0x2
-    copy(bytes, [0x31, 0xF6])                               // xor esi,esi
-    copy(bytes, [0x31, 0xD2])                               // xor edx,edx
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp (sti)
+    // W2 open (split, lengdenøytral 11 B): dropp mov eax,2, behald xor esi/xor edx, call OSTAB[2].
+    hvis ER_WINDOWS() {
+        copy(bytes, [0x31, 0xF6])                           // xor esi,esi (O_RDONLY)
+        copy(bytes, [0x31, 0xD2])                           // xor edx,edx (mode)
+        emit_syscall_site(bytes, 2)                         // call [OSTAB+2*8] → os_open
+    } ellers {
+        copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])         // mov eax,0x2
+        copy(bytes, [0x31, 0xF6])                           // xor esi,esi
+        copy(bytes, [0x31, 0xD2])                           // xor edx,edx
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
-    copy(bytes, [0x0F, 0x88, 0x84, 0x00, 0x00, 0x00])       // js a45
+    // js a45 spenner read-staden (7846): +3 i Windows-modus (0x84 → 0x87).
+    hvis ER_WINDOWS() {
+        copy(bytes, [0x0F, 0x88, 0x87, 0x00, 0x00, 0x00])   // js a45 (+3)
+    } ellers {
+        copy(bytes, [0x0F, 0x88, 0x84, 0x00, 0x00, 0x00])   // js a45
+    }
     copy(bytes, [0x48, 0x89, 0xC3])                         // mov rbx,rax
     copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
     copy(bytes, [0x31, 0xF6])                               // xor esi,esi
-    copy(bytes, [0xBA, 0x02, 0x00, 0x00, 0x00])             // mov edx,0x2
-    copy(bytes, [0xB8, 0x08, 0x00, 0x00, 0x00])             // mov eax,0x8
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0xBA, 0x02, 0x00, 0x00, 0x00])             // mov edx,0x2 (SEEK_END)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 8)                         // call [OSTAB+8*8] → os_lseek
+    } ellers {
+        copy(bytes, [0xB8, 0x08, 0x00, 0x00, 0x00])         // mov eax,0x8
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x49, 0x89, 0xC4])                         // mov r12,rax
     copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
     copy(bytes, [0x31, 0xF6])                               // xor esi,esi
-    copy(bytes, [0x31, 0xD2])                               // xor edx,edx
-    copy(bytes, [0xB8, 0x08, 0x00, 0x00, 0x00])             // mov eax,0x8
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x31, 0xD2])                               // xor edx,edx (SEEK_SET)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 8)                         // call [OSTAB+8*8] → os_lseek
+    } ellers {
+        copy(bytes, [0xB8, 0x08, 0x00, 0x00, 0x00])         // mov eax,0x8
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x4D, 0x85, 0xE4])                         // test r12,r12
-    copy(bytes, [0x7E, 0x50])                               // jle a3b
+    // jle a3b spenner read-staden: +3 (0x50 → 0x53).
+    hvis ER_WINDOWS() {
+        copy(bytes, [0x7E, 0x53])                           // jle a3b (+3)
+    } ellers {
+        copy(bytes, [0x7E, 0x50])                           // jle a3b
+    }
     copy(bytes, [0x4C, 0x89, 0xE7])                         // mov rdi,r12
     call_rel32(bytes, atomics["str_new"], TEXT_VA())                // call X_a_str_new
     copy(bytes, [0x49, 0x89, 0xC5])                         // mov r13,rax
     copy(bytes, [0x49, 0x89, 0xD6])                         // mov r14,rdx
     copy(bytes, [0x4D, 0x85, 0xE4])                         // test r12,r12
-    copy(bytes, [0x7E, 0x1A])                               // jle a18
-    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0x4C, 0x89, 0xF6])                         // mov rsi,r14
-    copy(bytes, [0x4C, 0x89, 0xE2])                         // mov rdx,r12
-    copy(bytes, [0x31, 0xC0])                               // xor eax,eax
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    // jle a18 spenner read-staden: +3 (0x1A → 0x1D).
+    hvis ER_WINDOWS() { copy(bytes, [0x7E, 0x1D]) } ellers { copy(bytes, [0x7E, 0x1A]) }  // jle a18
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx (fd)
+    copy(bytes, [0x4C, 0x89, 0xF6])                         // mov rsi,r14 (buf)
+    copy(bytes, [0x4C, 0x89, 0xE2])                         // mov rdx,r12 (len)
+    // read (bare2): xor eax,eax + syscall (4 B) → call [OSTAB+0] (7 B, +3). Dei fire
+    // spennande hoppa (js/jle/jle/jmp) er justerte ±3. os_read les rdi/rsi/rdx.
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 0)                         // call [OSTAB+0] → os_read
+    } ellers {
+        copy(bytes, [0x31, 0xC0])                           // xor eax,eax
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
-    copy(bytes, [0x7E, 0x08])                               // jle a18
+    copy(bytes, [0x7E, 0x08])                               // jle a18 (etter read; uendra)
     copy(bytes, [0x49, 0x01, 0xC6])                         // add r14,rax
     copy(bytes, [0x49, 0x29, 0xC4])                         // sub r12,rax
-    copy(bytes, [0xEB, 0xE1])                               // jmp 9f9
+    // jmp 9f9 (bakover over read): magnitude +3 (0xE1 = −31 → 0xDE = −34).
+    hvis ER_WINDOWS() { copy(bytes, [0xEB, 0xDE]) } ellers { copy(bytes, [0xEB, 0xE1]) }  // jmp 9f9
     copy(bytes, [0x49, 0x8B, 0x45, 0x08])                   // mov rax,QWORD PTR [r13+0x8]
     copy(bytes, [0x48, 0x8D, 0x48, 0x08])                   // lea rcx,[rax+0x8]
     copy(bytes, [0x49, 0x29, 0xCE])                         // sub r14,rcx
     copy(bytes, [0x4C, 0x89, 0x30])                         // mov QWORD PTR [rax],r14
     copy(bytes, [0x42, 0xC6, 0x44, 0x30, 0x08, 0x00])       // mov BYTE PTR [rax+r14*1+0x8],0x0
-    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])             // mov eax,0x3
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx (fd)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 3)                         // call [OSTAB+3*8] → os_close
+    } ellers {
+        copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])         // mov eax,0x3
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x4C, 0x89, 0xE8])                         // mov rax,r13
     copy(bytes, [0xEB, 0x13])                               // jmp a4e
-    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])             // mov eax,0x3
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx (fd)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 3)                         // call [OSTAB+3*8] → os_close
+    } ellers {
+        copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])         // mov eax,0x3
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x31, 0xFF])                               // xor edi,edi
     copy(bytes, [0x31, 0xF6])                               // xor esi,esi
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())                      // call X_RT_STR_RAW
@@ -7845,11 +7947,19 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
     copy(bytes, [0xF3, 0xA4])                               // rep movs BYTE PTR es:[rdi],BYTE PTR ds:[rsi]
     copy(bytes, [0xC6, 0x07, 0x00])                         // mov BYTE PTR [rdi],0x0
-    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
-    copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])             // mov eax,0x2
-    copy(bytes, [0xBE, 0x41, 0x02, 0x00, 0x00])             // mov esi,0x241
-    copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])             // mov edx,0x1a4
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp (sti)
+    // W2 open-for-skriv (split, lengdenøytral 17 B): flags=0x241 (O_WRONLY|O_CREAT|O_TRUNC)
+    // → os_open GENERIC_R|W + CREATE_ALWAYS; mode 0x1a4 ignorert på Windows.
+    hvis ER_WINDOWS() {
+        copy(bytes, [0xBE, 0x41, 0x02, 0x00, 0x00])         // mov esi,0x241 (flags)
+        copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])         // mov edx,0x1a4 (mode)
+        emit_syscall_site(bytes, 2)                         // call [OSTAB+2*8] → os_open
+    } ellers {
+        copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])         // mov eax,0x2
+        copy(bytes, [0xBE, 0x41, 0x02, 0x00, 0x00])         // mov esi,0x241
+        copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])         // mov edx,0x1a4
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     // open feila (katalog, manglande mappe, ingen løyve): kast, som C-seeden gjorde.
     // Før hoppa rutinen stille til retur 0, so lagring.lagre(".") «lukkast».
@@ -7862,17 +7972,25 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC6, 0x08])                   // add rsi,0x8
     copy(bytes, [0x48, 0x85, 0xD2])                         // test rdx,rdx
     copy(bytes, [0x7E, 0x17])                               // jle acf
-    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])             // mov eax,0x1
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx (fd/HANDLE)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 1)                         // call [OSTAB+1*8] → os_write
+    } ellers {
+        copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])         // mov eax,0x1
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     copy(bytes, [0x7E, 0x08])                               // jle acf
     copy(bytes, [0x48, 0x01, 0xC6])                         // add rsi,rax
     copy(bytes, [0x48, 0x29, 0xC2])                         // sub rdx,rax
     copy(bytes, [0xEB, 0xE4])                               // jmp ab3
-    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])             // mov eax,0x3
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx (fd/HANDLE)
+    hvis ER_WINDOWS() {
+        emit_syscall_site(bytes, 3)                         // call [OSTAB+3*8] → os_close
+    } ellers {
+        copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])         // mov eax,0x3
+        copy(bytes, [0x0F, 0x05])                           // syscall
+    }
     copy(bytes, [0x31, 0xC0])                               // xor eax,eax
     copy(bytes, [0x48, 0x81, 0xC4, 0x00, 0x10, 0x00, 0x00]) // add rsp,0x1000
     copy(bytes, [0x41, 0x5C])                               // pop r12
@@ -7917,10 +8035,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xF3, 0xA4])                               // rep movs BYTE PTR es:[rdi],BYTE PTR ds:[rsi]
     copy(bytes, [0xC6, 0x07, 0x00])                         // mov BYTE PTR [rdi],0x0
     copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
-    copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])             // mov eax,0x2
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00]) }  // mov eax,2
     copy(bytes, [0xBE, 0x41, 0x02, 0x00, 0x00])             // mov esi,0x241
     copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])             // mov edx,0x1a4
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 2) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     copy(bytes, [0x78, 0x70])                               // js ba4
     copy(bytes, [0x48, 0x89, 0xC3])                         // mov rbx,rax
@@ -7946,16 +8064,16 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x85, 0xD2])                         // test rdx,rdx
     copy(bytes, [0x7E, 0xC0])                               // jle b43
     copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])             // mov eax,0x1
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00]) }  // mov eax,1
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 1) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
     copy(bytes, [0x7E, 0x08])                               // jle b9a
     copy(bytes, [0x48, 0x01, 0xC6])                         // add rsi,rax
     copy(bytes, [0x48, 0x29, 0xC2])                         // sub rdx,rax
     copy(bytes, [0xEB, 0xE4])                               // jmp b7e
     copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
-    copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])             // mov eax,0x3
-    copy(bytes, [0x0F, 0x05])                               // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00]) }  // mov eax,3
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 3) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x31, 0xC0])                               // xor eax,eax
     copy(bytes, [0x48, 0x81, 0xC4, 0x00, 0x20, 0x00, 0x00]) // add rsp,0x2000
     copy(bytes, [0x41, 0x5F])                               // pop r15
@@ -8734,11 +8852,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2 (stderr)
     copy(bytes, [0x48, 0xBE]) u64(bytes, gp_msg_va) // movabs rsi,msg
     copy(bytes, [0xBA]) u32(bytes, lengde(gp_msg)) // mov edx,len
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])    // mov eax,1 (write)
-    copy(bytes, [0x0F, 0x05])                      // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00]) }  // mov eax,1
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 1) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0xBF, 0xC6, 0x00, 0x00, 0x00])    // mov edi,198
-    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])    // mov eax,60 (exit)
-    copy(bytes, [0x0F, 0x05])                      // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00]) }  // mov eax,60
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 60) } ellers { copy(bytes, [0x0F, 0x05]) }
 
     // ── GC (iv): KONSERVATIV ROT-SKANN + DFS-mark (gc_mark_roots) ────────────────
     // gc_mark_roots() -> boksa mark-teljar. Nullstill bitmap; scan [rsp+8, stack_base)
@@ -9241,14 +9359,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la mk_tonext1 = emit_jne_placeholder(bytes)   // jne next
     copy(bytes, [0x4D, 0x39, 0xC1])               // cmp r9, r8
     la mk_tonext2 = emit_je_placeholder(bytes)    // je next (leiande '/')
-    copy(bytes, [
-        0x41, 0xC6, 0x01, 0x00,                   // mov byte [r9], 0  (temp NUL)
-        0xB8, 0x53, 0x00, 0x00, 0x00,             // mov eax, 83
-        0x4C, 0x89, 0xC7,                         // mov rdi, r8
-        0xBE, 0xFF, 0x01, 0x00, 0x00,             // mov esi, 0x1FF (0777)
-        0x0F, 0x05,                               // syscall
-        0x41, 0xC6, 0x01, 0x2F                    // mov byte [r9], '/' (restore)
-    ])
+    copy(bytes, [0x41, 0xC6, 0x01, 0x00])         // mov byte [r9], 0  (temp NUL)
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x53, 0x00, 0x00, 0x00]) }  // mov eax, 83
+    copy(bytes, [0x4C, 0x89, 0xC7, 0xBE, 0xFF, 0x01, 0x00, 0x00])  // mov rdi,r8; mov esi,0x1FF
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 83) } ellers { copy(bytes, [0x0F, 0x05]) }  // → os_mkdir
+    copy(bytes, [0x41, 0xC6, 0x01, 0x2F])         // mov byte [r9], '/' (restore)
     la mk_next = lengde(bytes)
     patch_jump(bytes, mk_tonext1, mk_next)
     patch_jump(bytes, mk_tonext2, mk_next)
@@ -9258,13 +9373,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     legg_til(bytes, (mk_scan - (mk_jmp + 2)) & 255)
     la mk_final = lengde(bytes)
     patch_jump(bytes, mk_tofinal, mk_final)
-    copy(bytes, [
-        0xB8, 0x53, 0x00, 0x00, 0x00,             // mov eax, 83
-        0x4C, 0x89, 0xC7,                         // mov rdi, r8
-        0xBE, 0xFF, 0x01, 0x00, 0x00,             // mov esi, 0x1FF
-        0x0F, 0x05,                               // syscall
-        0x48, 0x89, 0xC7                          // mov rdi, rax  (resultat)
-    ])
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x53, 0x00, 0x00, 0x00]) }  // mov eax, 83
+    copy(bytes, [0x4C, 0x89, 0xC7, 0xBE, 0xFF, 0x01, 0x00, 0x00])  // mov rdi,r8; mov esi,0x1FF
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 83) } ellers { copy(bytes, [0x0F, 0x05]) }  // → os_mkdir
+    copy(bytes, [0x48, 0x89, 0xC7])               // mov rdi, rax  (resultat)
     call_rel32(bytes, RT_INT(), TEXT_VA())        // rsp≡0 mod 16 her → aligna
     copy(bytes, [
         0x48, 0x89, 0xEC,                         // mov rsp, rbp
@@ -9307,11 +9419,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
     copy(bytes, [0x48, 0xBE]) u64(bytes, oom_msg_va) // movabs rsi,msg
     copy(bytes, [0xBA]) u32(bytes, lengde(oom_msg_bytes)) // mov edx,len
-    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])    // mov eax,1 (write)
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00]) }  // mov eax,1
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 1) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0xBF, 0xC7, 0x00, 0x00, 0x00])    // mov edi,199
-    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])    // mov eax,60 (exit)
-    copy(bytes, [0x0F, 0x05])                       // syscall
+    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00]) }  // mov eax,60
+    hvis ER_WINDOWS() { emit_syscall_site(bytes, 60) } ellers { copy(bytes, [0x0F, 0x05]) }
     // ── Safepoint-stub v4 (2026-09-24, bump-ratchet-fiks) ──
     // GC-modus: collect når ALLOKERTE bytes sidan siste collect ([HEAP+32], talde av
     // gc_alloc16/gc_alloc_var på både fri-liste- og bump-vegen) ≥ port_dyn, ELLER bump ≥
@@ -10414,7 +10526,7 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         la dr_bad1 = emit_je_placeholder(buf)
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (sti)
         copy(buf, [0xBE, 0x00, 0x00, 0x09, 0x00])                    // mov esi,0x90000 (O_DIRECTORY|O_CLOEXEC)
-        copy(buf, [0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05])        // open
+        emit_sys_clean7(buf, 2)        // open
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la dr_bad2 = emit_jcc_placeholder(buf, 0x88)                 // js bad
         copy(buf, [0x49, 0x89, 0xC4])                                // mov r12,rax (fd)
@@ -10424,7 +10536,7 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x4C, 0x89, 0xE7])                                // mov rdi,r12
         copy(buf, [0x48, 0x8D, 0xB4, 0x24]) u32(buf, 4096)           // lea rsi,[rsp+4096]
         copy(buf, [0xBA, 0x00, 0x80, 0x00, 0x00])                    // mov edx,32768
-        copy(buf, [0xB8, 0xD9, 0x00, 0x00, 0x00, 0x0F, 0x05])        // getdents64
+        emit_sys_clean7(buf, 217)        // getdents64
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la dr_end = emit_jcc_placeholder(buf, 0x8E)                  // jle .end (0 eller feil)
         copy(buf, [0x48, 0x8D, 0x9C, 0x24]) u32(buf, 4096)           // lea rbx,[rsp+4096] (cur)
@@ -10483,7 +10595,7 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         la dr_endl = lengde(buf)                                     // .end:
         patch_jump(buf, dr_end, dr_endl)
         copy(buf, [0x4C, 0x89, 0xE7])                                // mov rdi,r12
-        copy(buf, [0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05])        // close
+        emit_sys_clean7(buf, 3)        // close
         copy(buf, [0x4C, 0x89, 0xEF])                                // mov rdi,r13
         copy(buf, [0x4C, 0x89, 0xF6])                                // mov rsi,r14
         copy(buf, [0x4C, 0x29, 0xEE])                                // sub rsi,r13 (len)
@@ -10522,13 +10634,16 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         la st_bad1 = emit_je_placeholder(buf)
         copy(buf, [0xB8, 0x06, 0x00, 0x00, 0x00])                    // mov eax,6 (lstat)
         copy(buf, [0x4D, 0x85, 0xE4])                                // test r12,r12
-        copy(buf, [0x74, 0x0D])                                      // je +13 (null → lstat)
+        // W2: dei to je-a hoppar over mov eax,4-override til mov rdi,rsp. På Windows blir
+        // mov eax,4 droppa (−5 B), so offsettane må ned 5 (0x0D→0x08, 0x05→0x00) for å lande
+        // rett. (Windows skil ikkje lstat/stat: begge → OSTAB[4]=os_stat.)
+        hvis ER_WINDOWS() { copy(buf, [0x74, 0x08]) } ellers { copy(buf, [0x74, 0x0D]) }  // je (null → lstat)
         copy(buf, [0x49, 0x83, 0x7C, 0x24, 0x08, 0x00])              // cmp qword [r12+8],0
-        copy(buf, [0x74, 0x05])                                      // je +5
-        copy(buf, [0xB8, 0x04, 0x00, 0x00, 0x00])                    // mov eax,4 (stat)
+        hvis ER_WINDOWS() { copy(buf, [0x74, 0x00]) } ellers { copy(buf, [0x74, 0x05]) }  // je
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8, 0x04, 0x00, 0x00, 0x00]) }  // mov eax,4
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp
         copy(buf, [0x48, 0x8D, 0xB4, 0x24]) u32(buf, 4096)           // lea rsi,[rsp+4096]
-        copy(buf, [0x0F, 0x05])                                      // syscall
+        hvis ER_WINDOWS() { emit_syscall_site(buf, 4) } ellers { copy(buf, [0x0F, 0x05]) }
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la st_bad2 = emit_jcc_placeholder(buf, 0x85)                 // jne bad
         copy(buf, [0x4C, 0x8D, 0xAC, 0x24]) u32(buf, 4096)           // lea r13,[rsp+4096]
@@ -10580,9 +10695,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x75, 0x09])                                      // jne +9
         copy(buf, [0x48, 0xC7, 0xC0, 0xEA, 0xFF, 0xFF, 0xFF])        // mov rax,-22 (EINVAL) (7 B)
         copy(buf, [0xEB, 0x0A])                                      // jmp +10 (2 B)
-        copy(buf, [0xB8]) u32(buf, u_nr)                             // mov eax,nr (5 B)
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8]) u32(buf, u_nr) }  // mov eax,nr (5 B)
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (3 B)
-        copy(buf, [0x0F, 0x05])                                      // syscall (2 B)
+        hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0x25]) u32(buf, OSTAB_VA() + u_nr * 8) } ellers { copy(buf, [0x0F, 0x05]) }  // → OSTAB[u_nr]
         copy(buf, [0x48, 0x89, 0xC7])                                // mov rdi,rax
         call_rel32(buf, RT_INT(), code_va)
         copy(buf, [0x48, 0x89, 0xEC, 0x5D])                          // mov rsp,rbp; pop rbp
@@ -10604,10 +10719,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x75, 0x09])                                      // jne +9
         copy(buf, [0x48, 0xC7, 0xC0, 0xEA, 0xFF, 0xFF, 0xFF])        // mov rax,-22 (7 B)
         copy(buf, [0xEB, 0x0D])                                      // jmp +13 (2 B)
-        copy(buf, [0xB8, 0x5A, 0x00, 0x00, 0x00])                    // mov eax,90 (5)
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8, 0x5A, 0x00, 0x00, 0x00]) }  // mov eax,90
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (3)
         copy(buf, [0x48, 0x89, 0xDE])                                // mov rsi,rbx (3)
-        copy(buf, [0x0F, 0x05])                                      // syscall (2)
+        hvis ER_WINDOWS() { emit_syscall_site(buf, 90) } ellers { copy(buf, [0x0F, 0x05]) }
         copy(buf, [0x48, 0x89, 0xC7])                                // mov rdi,rax
         call_rel32(buf, RT_INT(), code_va)
         copy(buf, [0x48, 0x8D, 0x65, 0xF8, 0x5B, 0x5D])              // lea rsp,[rbp-8]; pop rbx; pop rbp
@@ -10634,10 +10749,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         call_rel32(buf, atomic_vas["cstr_to"], code_va)
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la r_bad2 = emit_je_placeholder(buf)
-        copy(buf, [0xB8]) u32(buf, r_nr)                             // mov eax,nr
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8]) u32(buf, r_nr) }  // mov eax,nr (rename 82 / symlink 88)
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (a)
         copy(buf, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x10, 0x00, 0x00])  // lea rsi,[rsp+4096] (b)
-        copy(buf, [0x0F, 0x05])                                      // syscall
+        hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0x25]) u32(buf, OSTAB_VA() + r_nr * 8) } ellers { copy(buf, [0x0F, 0x05]) }  // → OSTAB[r_nr] (82=os_rename, 88=enosys)
         la r_ok = emit_jmp_placeholder(buf)
         la r_badl = lengde(buf)
         patch_jump(buf, r_bad1, r_badl) patch_jump(buf, r_bad2, r_badl)
@@ -10697,16 +10812,28 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 512) legg_til(buf, 0x00)      // mov byte[r12+512],0
         copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 1536) legg_til(buf, 0x00)     // mov byte[r12+1536],0
         // uname(r12)
-        copy(buf, [0xB8, 0x3F, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xE7, 0x0F, 0x05])   // mov eax,63; mov rdi,r12; syscall
+        hvis ER_WINDOWS() {
+            copy(buf, [0x4C, 0x89, 0xE7]) emit_syscall_site(buf, 63)                // mov rdi,r12; → os_uname
+        } ellers {
+            copy(buf, [0xB8, 0x3F, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xE7, 0x0F, 0x05]) // mov eax,63; mov rdi,r12; syscall
+        }
         // getcwd(r12+512, 1024)
-        copy(buf, [0xB8, 0x4F, 0x00, 0x00, 0x00])                                  // mov eax,79
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8, 0x4F, 0x00, 0x00, 0x00]) }       // mov eax,79
         copy(buf, [0x49, 0x8D, 0xBC, 0x24]) u32(buf, 512)                          // lea rdi,[r12+512]
-        copy(buf, [0xBE, 0x00, 0x04, 0x00, 0x00, 0x0F, 0x05])                      // mov esi,1024; syscall
+        hvis ER_WINDOWS() {
+            copy(buf, [0xBE, 0x00, 0x04, 0x00, 0x00]) emit_syscall_site(buf, 79)    // mov esi,1024; → os_getcwd
+        } ellers {
+            copy(buf, [0xBE, 0x00, 0x04, 0x00, 0x00, 0x0F, 0x05])                  // mov esi,1024; syscall
+        }
         // readlink(r12+2400, r12+1536, 1023) → rax=len; NUL-terminer
-        copy(buf, [0xB8, 0x59, 0x00, 0x00, 0x00])                                  // mov eax,89
+        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8, 0x59, 0x00, 0x00, 0x00]) }       // mov eax,89
         copy(buf, [0x49, 0x8D, 0xBC, 0x24]) u32(buf, 2400)                         // lea rdi,[r12+2400]
         copy(buf, [0x49, 0x8D, 0xB4, 0x24]) u32(buf, 1536)                         // lea rsi,[r12+1536]
-        copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00, 0x0F, 0x05])                      // mov edx,1023; syscall
+        hvis ER_WINDOWS() {
+            copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00]) emit_syscall_site(buf, 89)    // mov edx,1023; → os_readlink
+        } ellers {
+            copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00, 0x0F, 0x05])                  // mov edx,1023; syscall
+        }
         copy(buf, [0x48, 0x85, 0xC0, 0x78, 0x04])                                  // test rax,rax; js +4
         copy(buf, [0xC6, 0x04, 0x06, 0x00])                                        // mov byte[rsi+rax],0
         // fire C-strengar → NcVal-slot [r12+2496+8*i]: sysname@0, machine@260, cwd@512, exe@1536
@@ -10752,9 +10879,12 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         }
         // Linux x86-64 clock_gettime(CLOCK_REALTIME) til epoch-millisekund.
         copy(buf, [0x48, 0x83, 0xEC, 0x10])
-        copy(buf, [0x48, 0xC7, 0xC0])
-        u32(buf, 228)
-        copy(buf, [0x31, 0xFF, 0x48, 0x89, 0xE6, 0x0F, 0x05])
+        hvis ikkje ER_WINDOWS() { copy(buf, [0x48, 0xC7, 0xC0]) u32(buf, 228) }     // mov rax,228
+        hvis ER_WINDOWS() {
+            copy(buf, [0x31, 0xFF, 0x48, 0x89, 0xE6]) emit_syscall_site(buf, 228)   // xor edi; mov rsi,rsp; → os_clock_gettime
+        } ellers {
+            copy(buf, [0x31, 0xFF, 0x48, 0x89, 0xE6, 0x0F, 0x05])
+        }
         copy(buf, [0x48, 0x69, 0x3C, 0x24])
         u32(buf, 1000)
         copy(buf, [0x48, 0x8B, 0x44, 0x24, 0x08, 0x31, 0xD2])
@@ -10792,9 +10922,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x48, 0x89, 0x54, 0x24, 0x08])         // mov [rsp+8],rdx (tv_nsec)
         copy(buf, [0x48, 0x89, 0xE7])                     // mov rdi,rsp
         copy(buf, [0x31, 0xF6])                           // xor esi,esi
-        copy(buf, [0x48, 0xC7, 0xC0])                     // mov rax,35 (nanosleep)
-        u32(buf, 35)
-        copy(buf, [0x0F, 0x05])                           // syscall
+        hvis ikkje ER_WINDOWS() { copy(buf, [0x48, 0xC7, 0xC0]) u32(buf, 35) }  // mov rax,35 (nanosleep)
+        // lengdenøytral (7+2): call(7) + 2 nop = mov rax,35(7) + syscall(2)
+        hvis ER_WINDOWS() { emit_syscall_site(buf, 35) copy(buf, [0x90, 0x90]) } ellers { copy(buf, [0x0F, 0x05]) }  // → os_nanosleep
         copy(buf, [0x48, 0x83, 0xC4, 0x10])               // add rsp,16
         copy(buf, [0x31, 0xFF])                           // xor edi,edi
         call_rel32(buf, RT_INT(), code_va)
@@ -10891,7 +11021,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x31, 0xF6, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x73, 0x08])       // rsi = a2
         copy(buf, [0x31, 0xFF, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x7B, 0x08])       // rdi = a1
         copy(buf, [0x31, 0xC0, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x43, 0x08])       // rax = nr
-        copy(buf, [0x0F, 0x05])                                                                         // syscall
+        // generisk sys6: nr i rax (runtime) → register-indeksert OSTAB-kall [OSTAB + rax*8]
+        // (FF 14 C5 disp32). Straight-line-atom (dei inline je +4 er innanfor kvar arg-load).
+        hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0xC5]) u32(buf, OSTAB_VA()) } ellers { copy(buf, [0x0F, 0x05]) }  // syscall
         copy(buf, [0x48, 0x89, 0xC7])                                                                   // mov rdi, rax
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)                                                                             // push rax
@@ -11112,6 +11244,113 @@ funksjon bruker_dynamiske_kall(fns) -> boolsk {
 }
 
 // ─── Hovud-kompilator v2 ─────────────────────────────────────────────────────
+// Windows: call qword [OSTAB + nr*8] = FF 14 25 disp32 (7 B, absolutt SIB-form). Byte-
+// identisk med win64_os.emit_os_call, men mot ei rå byteliste (text) i staden for ein
+// win64_asm-stat, so dei 55 syscall-stadene kan rutast utan å tre assemblaren gjennom.
+// OSTAB ligg på 0x771000 < 4 GiB → disp32 held.
+funksjon emit_syscall_site(text, nr: heltall) -> heiltall {
+    copy(text, [0xFF, 0x14, 0x25])
+    u32(text, OSTAB_VA() + nr * 8)
+    returner 0
+}
+
+// Rein clean7-syscall-stad (mov eax,nr; syscall = 7 B samanhengande) → lengdenøytral OSTAB-
+// ruting. Linux-greina er byte-identisk med den opphavlege copy()-en. Trygt for alle clean7-
+// stader uansett spennande hopp (7 ↔ 7). Berre den samanhengande 7 B-forma finst på urura
+// stader (mine ruter brukar splitta form), so replace_all mot forma treffer ikkje ruta kode.
+funksjon emit_sys_clean7(buf, nr: heltall) -> heiltall {
+    hvis ER_WINDOWS() {
+        emit_syscall_site(buf, nr)
+    } ellers {
+        copy(buf, [0xB8, nr & 255, (nr >> 8) & 255, (nr >> 16) & 255, (nr >> 24) & 255, 0x0F, 0x05])
+    }
+    returner 0
+}
+
+// ─── Windows PE32+-container (WINDOWS_SEED_PLAN §2.1, W1) ─────────────────────
+// Same text/data/heap-bytes som ELF-vegen (identiske VA-ar), men pakka som PE32+
+// med samanhengande seksjonar: kvar seksjon sin VirtualSize fyller gapet fram til
+// neste, so .text spenner 0x401000→DATA_VA, .rdata→HOST_ABI_VA, .hostabi éi side,
+// .idata→HEAP_VA og .heap som bss på HEAP_VA. .idata = [OSTAB 4096 B @0x771000]
+// ++ [importkatalog @0x772000]. OS-rutinane (write/read/exit/getrandom/mprotect/
+// clock_gettime + enosys) blir emitterte inn i .text her, og OSTAB blir fylt med
+// VA-ane deira. Berre GC-modus. NCB-traileren blir lagd som overlay, som på ELF.
+funksjon bygg_pe_bilete(entry_va: heltall, text, data_bytes, ncb_json) -> liste {
+    hvis miljo_hent("NORSCODE_GC_ALLOC") != "1" {
+        kast "native_codegen_v2: windows-x86_64 krev NORSCODE_GC_ALLOC=1 (WINDOWS_SEED_PLAN §2.1)"
+    }
+    la image_base: heltall = 4194304                       // 0x400000
+    la heap_va: heltall = hl.HEAP_VA(X86_MAL())
+    la text_rva: heltall = TEXT_VA() - image_base          // 0x1000
+    la rdata_rva: heltall = DATA_VA() - image_base
+    la hostabi_rva: heltall = HOST_ABI_VA() - image_base
+    la idata_rva: heltall = hostabi_rva + 4096             // 0x371000 (VA 0x771000)
+    la heap_rva: heltall = heap_va - image_base
+    la text_vsize: heltall = DATA_VA() - TEXT_VA()
+    la rdata_vsize: heltall = HOST_ABI_VA() - DATA_VA()
+    la idata_vsize: heltall = heap_va - (HOST_ABI_VA() + 4096)
+
+    // Importkatalog/IAT på IMPORT_VA (0x772000), rett etter OSTAB (0x771000, 4096 B).
+    la imp = pe.bygg_importar(win64.os_importar_full(), IMPORT_VA() - image_base)
+
+    // Emitter OS-rutinane inn i .text (bak alt anna) og noter VA-ane deira for OSTAB.
+    la routine_base_va: heltall = TEXT_VA() + lengde(text)
+    la a = wasm.ny()
+    la rutinetabell = win64.emit_os_routines(a, imp["slot"], image_base,
+        HOST_ABI_VA(), hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET())
+    la routine_bytes = wasm.ferdig(a)
+    copy(text, routine_bytes)
+    hvis TEXT_VA() + lengde(text) > DATA_VA() {
+        kast "native_codegen_v2: .text (med OS-rutinar) overlappar .rdata"
+    }
+    la lab = a["lab"]
+
+    // OSTAB: OSTAB_LEN slottar à 8 B, alle → os_enosys, så fyll dei implementerte.
+    la enosys_va: heltall = routine_base_va + lab["os_enosys"]
+    la ostab: liste = []
+    la oi: heltall = 0
+    mens oi < win64.OSTAB_LEN() {
+        u64(ostab, enosys_va)
+        oi = oi + 1
+    }
+    la ri: heltall = 0
+    mens ri < lengde(rutinetabell) {
+        la nr: heltall = rutinetabell[ri][0]
+        la etikett: tekst = rutinetabell[ri][1]
+        win64.sett_slot(ostab, nr, routine_base_va + lab[etikett])
+        ri = ri + 1
+    }
+    hvis lengde(ostab) != OSTAB_LEN() * 8 { kast "native_codegen_v2: OSTAB har feil storleik" }
+
+    // .idata = OSTAB (4096 B) ++ importkatalog (på +4096 = IMPORT_VA).
+    la idata_bytes: liste = []
+    copy(idata_bytes, ostab)
+    copy(idata_bytes, imp["bytes"])
+    hvis lengde(idata_bytes) > idata_vsize {
+        kast "native_codegen_v2: PE .idata for lita for OSTAB + importkatalog"
+    }
+
+    la spec = {
+        "image_base": image_base, "entry_rva": entry_va - image_base,
+        "seksjonar": [
+            pe.seksjon(".text", text_rva, text_vsize, text, pe.FLAGG_TEXT()),
+            pe.seksjon(".rdata", rdata_rva, rdata_vsize, data_bytes, pe.FLAGG_RDATA()),
+            pe.seksjon(".hostabi", hostabi_rva, 4096, [], pe.FLAGG_DATA()),
+            pe.seksjon(".idata", idata_rva, idata_vsize, idata_bytes, pe.FLAGG_DATA()),
+            pe.seksjon(".heap", heap_rva, hl.HEAP_SZ(), [], pe.FLAGG_BSS())
+        ],
+        "import_rva": imp["import_rva"], "import_size": imp["import_size"],
+        "iat_rva": imp["iat_rva"], "iat_size": imp["iat_size"],
+        "stack_reserve": 16777216, "stack_commit": 16777216   // 16 MiB reserve==commit
+    }
+    la image = pe.bygg_pe(spec)
+    // legg_innebygd_ncb er container-agnostisk (overlay etter siste rå seksjon), som ELF.
+    hvis miljo_hent("NC_NATIVE_EXTERNAL_EMBED_NCB") != "1" {
+        legg_innebygd_ncb(image, ncb_json)
+    }
+    returner image
+}
+
 funksjon kompiler_v2(ncb_json) {
     native_codegen_trace("parse start")
     // F3.6: ncb_json kan vere JSON-tekst eller binær NCB-tekst (magic 0x93). Binær går
@@ -11367,8 +11606,14 @@ funksjon kompiler_v2(ncb_json) {
         copy(text, [0xBF]) u32(text, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)               // mov edi,vaktside
         copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
         copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
-        copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                         // mov eax,10 (mprotect)
-        copy(text, [0x0F, 0x05])                                           // syscall
+        // W1: Windows → OSTAB[10] = os_mprotect (VirtualProtect PAGE_NOACCESS). edi/esi
+        // urørte; os_mprotect les rdi/rsi. 7 B ↔ 7 B, so vaktprolog-hoppa held.
+        hvis ER_WINDOWS() {
+            emit_syscall_site(text, 10)                                    // call [OSTAB+10*8]
+        } ellers {
+            copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                     // mov eax,10 (mprotect)
+            copy(text, [0x0F, 0x05])                                       // syscall
+        }
     }
     // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
     // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
@@ -11376,6 +11621,13 @@ funksjon kompiler_v2(ncb_json) {
     // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
     copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF)  // lea rax,[r12-7MiB]
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())             // mov [limit],rax
+    hvis ER_WINDOWS() {
+        // W1: Windows-entry har inga startstakk. os_setup_argv (OSTAB[NR_SETUP_ARGV]=500)
+        // syntetiserer argv frå GetCommandLineW og skriv {argv**, argc} @argv_store_va (+8)
+        // og envp → null-slot (tomt miljø) @envp_store_va. Køyrer FØR rt_init_heap (som
+        // bevarer kontrollblokk-slottane), akkurat som Linux-vegen les stakken.
+        emit_syscall_site(text, 500)                        // call [OSTAB+500*8] → os_setup_argv
+    } ellers {
     // mov rdi, [r12] = argc
     legg_til(text, 0x49)
     legg_til(text, 0x8B)
@@ -11417,6 +11669,7 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x49)
     legg_til(text, 0x89)
     legg_til(text, 0x13)
+    }
     // and rsp, -16
     legg_til(text, 0x48)
     legg_til(text, 0x83)
@@ -11443,16 +11696,21 @@ funksjon kompiler_v2(ncb_json) {
         // Feilbar tryggleik: kunne ikkje slå opp start-funksjon.
         // I staden for call til 0 (kan gi illegal instruction), avslutt
         // med avgrensa feilstatus.
-        legg_til(text, 0x48)
-        legg_til(text, 0xC7)
-        legg_til(text, 0xC0)
-        u32(text, 60)   // mov rax, 60
-        legg_til(text, 0x48)
-        legg_til(text, 0xC7)
-        legg_til(text, 0xC7)
-        u32(text, 4)    // mov rdi, 4
-        legg_til(text, 0x0F)
-        legg_til(text, 0x05)  // syscall
+        hvis ER_WINDOWS() {
+            legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC7) u32(text, 4)  // mov rdi,4
+            emit_syscall_site(text, 60)   // call [OSTAB+60*8] → os_exit (ExitProcess)
+        } ellers {
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC0)
+            u32(text, 60)   // mov rax, 60
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC7)
+            u32(text, 4)    // mov rdi, 4
+            legg_til(text, 0x0F)
+            legg_til(text, 0x05)  // syscall
+        }
     }
     call_rel32(text, main_va, TEXT_VA())
 
@@ -11479,12 +11737,19 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x8B)
     legg_til(text, 0x78)
     legg_til(text, 0x08)  // mov rdi,[rax+8]
-    legg_til(text, 0x48)
-    legg_til(text, 0xC7)
-    legg_til(text, 0xC0)
-    u32(text, 60) // mov rax, 60
-    legg_til(text, 0x0F)
-    legg_til(text, 0x05)  // syscall
+    // W1: Windows avsluttar via OSTAB[60] = os_exit → ExitProcess(rdi & 255). Siste
+    // instruksjon i _start; ingenting hoppar over han, so lengda er fri. je/jne over
+    // inspeksjonen peikar hit uansett (avstanden deira er uendra).
+    hvis ER_WINDOWS() {
+        emit_syscall_site(text, 60)   // call [OSTAB+60*8]
+    } ellers {
+        legg_til(text, 0x48)
+        legg_til(text, 0xC7)
+        legg_til(text, 0xC0)
+        u32(text, 60) // mov rax, 60
+        legg_til(text, 0x0F)
+        legg_til(text, 0x05)  // syscall
+    }
     native_codegen_trace("post-emit start-prolog ferdig")
 
     // Desimaltall-krokane i to_text/json_stringify (sjå lapp_desimal_tekst_krokar).
@@ -11510,6 +11775,14 @@ funksjon kompiler_v2(ncb_json) {
         kast "native codegen: verts-ABI-segmentet overlappar .heap"
     }
     native_codegen_trace("post-emit segmentgrenser ferdig")
+
+    // WINDOWS_SEED_PLAN W1: Windows-målet pakkar same text/data/heap i ein PE32+
+    // (identiske VA-ar → identisk maskinkode). Gata på ER_WINDOWS så Linux-vegen under
+    // er byte-identisk uendra.
+    hvis ER_WINDOWS() {
+        native_codegen_trace("post-emit windows pe-container")
+        returner bygg_pe_bilete(entry_va, text, data_bytes, ncb_json)
+    }
 
     // Bygg ELF64 med fire segment: RX text, R constants, RW host ABI og RW heap.
     la elf: liste = []
@@ -11847,8 +12120,8 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
         copy(text, [0xBF]) u32(text, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)               // mov edi,vaktside
         copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
         copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
-        copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                         // mov eax,10 (mprotect)
-        copy(text, [0x0F, 0x05])                                           // syscall
+        hvis ikkje ER_WINDOWS() { copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00]) }  // mov eax,10
+        hvis ER_WINDOWS() { emit_syscall_site(text, 10) } ellers { copy(text, [0x0F, 0x05]) }
     }
     copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF) // lea rax,[r12-7MiB]
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())           // mov [stakk-grense],rax
