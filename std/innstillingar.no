@@ -1,18 +1,29 @@
 # innstillingar.no — Konfigurasjonssystem for Norscode
-# Django settings.py-ekvivalent
+# pydantic-settings / Django settings.py-ekvivalent
 #
-# Støttar tre kjelder, i prioritert rekkefølge:
-#   1. Miljøvariablar  (NORSCODE_APP_*)
-#   2. innstillingar.toml / innstillingar.json i prosjektrota
-#   3. Hardkoda standardar
+# Kjelder, i prioritert rekkefølge (høgast vinn):
+#   1. Miljøvariablar     (prefiks NORSCODE_APP_<NØKKEL>, elles bart <NØKKEL>)
+#   2. Secrets-mappe      (ei fil per nøkkel: <secrets_dir>/<NØKKEL>)
+#   3. innstillingar.toml / innstillingar.json / KEY=VALUE i prosjektrota
+#   4. Hardkoda standardar
+#
+# Miljø VINN difor alltid over fil (motsett av den gamle åtferda). Vilkårlege
+# nøklar er støtta: både fila og miljøet kan definere kva nøkkel som helst, og
+# oppslag av ein nøkkel som berre finst i miljøet fungerer utan at han er
+# førehandsregistrert.
+#
+# Typa skjema (streng validering, kastar feil ved ugyldig verdi i staden for
+# stille fallback): hent_int_streng / hent_float_streng / hent_bool_streng og
+# valider_skjema(s, {"PORT": "int", "DEBUG": "bool", ...}).
 #
 # Bruk:
 #   bruk std.innstillingar som cfg
 #
 #   la s = cfg.last("innstillingar.toml")
-#   la port = cfg.hent_int(s, "SERVER_PORT", 4173)
+#   la port = cfg.hent_int_streng(s, "SERVER_PORT", 4173)   // feil viss ikkje tal
 #   la debug = cfg.hent_bool(s, "DEBUG", usann)
-#   la db_sti = cfg.krev(s, "DATABASE_URL")   // kast feil viss ikkje sett
+#   la db_sti = cfg.krev(s, "DATABASE_URL")                 // kast feil viss ikkje sett
+#   la s2 = cfg.last_med("innstillingar.toml", "MIN_APP_", "/run/secrets")
 
 bruk std.json som json
 
@@ -28,12 +39,20 @@ funksjon ny() -> ordbok_tekst {
     // Tom konfig med berre standardar
     la s: ordbok_tekst = {}
     s["__kjelde__"] = "tom"
+    s["__prefiks__"] = "NORSCODE_APP_"
     returner _bruk_standardar(s)
 }
 
 funksjon last(sti: tekst) -> ordbok_tekst {
+    returner last_med(sti, "NORSCODE_APP_", "")
+}
+
+// Full variant: eigendefinert miljøprefiks og valfri secrets-mappe.
+funksjon last_med(sti: tekst, prefiks: tekst, secrets_dir: tekst) -> ordbok_tekst {
     la s: ordbok_tekst = {}
     s["__kjelde__"] = sti
+    s["__prefiks__"] = prefiks
+    hvis secrets_dir != "" { s["__secrets__"] = secrets_dir }
 
     // Prøv fil-lasting
     prøv {
@@ -45,11 +64,12 @@ funksjon last(sti: tekst) -> ordbok_tekst {
             s = _parse_enkel_cfg(innhald, s)
         }
     } fang (e) {
-        // Filen finst ikkje — bruk berre env + standardar
+        // Filen finst ikkje — bruk berre secrets + env + standardar
         s["__kjelde__"] = "env"
     }
 
-    // Miljøvariablar overstyrer fil-innstillingar
+    // Prioritet: secrets overstyrer fil, miljø overstyrer secrets.
+    s = _secret_materialiser(s)
     s = _hent_frå_env(s)
     s = _bruk_standardar(s)
     returner s
@@ -58,14 +78,64 @@ funksjon last(sti: tekst) -> ordbok_tekst {
 funksjon frå_env() -> ordbok_tekst {
     la s: ordbok_tekst = {}
     s["__kjelde__"] = "env"
+    s["__prefiks__"] = "NORSCODE_APP_"
     s = _hent_frå_env(s)
     s = _bruk_standardar(s)
     returner s
 }
 
+// Set / endre secrets-mappe på ein eksisterande konfig.
+funksjon sett_secrets(s: ordbok_tekst, dir: tekst) -> ordbok_tekst {
+    s["__secrets__"] = dir
+    returner _secret_materialiser(s)
+}
+
+// Set / endre miljøprefiks på ein eksisterande konfig.
+funksjon sett_prefiks(s: ordbok_tekst, prefiks: tekst) -> ordbok_tekst {
+    s["__prefiks__"] = prefiks
+    returner s
+}
+
 # ─── Henting ──────────────────────────────────────────────────────────────────
 
+// Oppslag i miljøet: prefiks først (NORSCODE_APP_<K>), så bart <K>.
+// Returnerer "" når ikkje sett.
+funksjon _env_oppslag(s: ordbok_tekst, nøkkel: tekst) -> tekst {
+    la prefiks = "NORSCODE_APP_"
+    hvis har_nokkel(s, "__prefiks__") og tekst(s["__prefiks__"]) != "" {
+        prefiks = tekst(s["__prefiks__"])
+    }
+    prøv {
+        la v = miljo_hent(prefiks + nøkkel)
+        hvis v != "" { returner v }
+        la v2 = miljo_hent(nøkkel)
+        hvis v2 != "" { returner v2 }
+    } fang (e) { }
+    returner ""
+}
+
+// Oppslag i secrets-mappe: les <secrets_dir>/<nøkkel> om fila finst.
+funksjon _secret_oppslag(s: ordbok_tekst, nøkkel: tekst) -> tekst {
+    hvis ikkje har_nokkel(s, "__secrets__") { returner "" }
+    la dir = tekst(s["__secrets__"])
+    hvis dir == "" { returner "" }
+    la sti = dir + "/" + nøkkel
+    prøv {
+        hvis builtin.fil_finnes(sti) {
+            returner builtin.trim(fil_les(sti))
+        }
+    } fang (e) { }
+    returner ""
+}
+
 funksjon hent(s: ordbok_tekst, nøkkel: tekst, standard: tekst) -> tekst {
+    // 1. Miljø vinn
+    la ev = _env_oppslag(s, nøkkel)
+    hvis ev != "" { returner ev }
+    // 2. Secrets-mappe
+    la sv = _secret_oppslag(s, nøkkel)
+    hvis sv != "" { returner sv }
+    // 3. Fil / eksplisitt sett / materialisert standard
     hvis har_nokkel(s, nøkkel) og tekst(s[nøkkel]) != "" {
         returner tekst(s[nøkkel])
     }
@@ -101,6 +171,123 @@ funksjon hent_liste(s: ordbok_tekst, nøkkel: tekst, skiljetegn: tekst) -> liste
     returner resultat
 }
 
+# ─── Typa skjema (streng validering) ───────────────────────────────────────────
+
+funksjon _er_heiltall(v: tekst) -> boolsk {
+    hvis v == "" { returner usann }
+    la start: heltall = 0
+    la f = builtin.slice(v, 0, 1)
+    hvis f == "-" eller f == "+" { start = 1 }
+    hvis start >= lengde(v) { returner usann }
+    la i: heltall = start
+    mens i < lengde(v) {
+        la c = builtin.char_code(builtin.slice(v, i, i + 1))
+        hvis c < 48 eller c > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _er_desimal(v: tekst) -> boolsk {
+    hvis v == "" { returner usann }
+    la i: heltall = 0
+    la f = builtin.slice(v, 0, 1)
+    hvis f == "-" eller f == "+" { i = 1 }
+    la siffer: heltall = 0
+    la prikk: heltall = 0
+    la eksp: heltall = 0
+    mens i < lengde(v) {
+        la ch = builtin.slice(v, i, i + 1)
+        la c = builtin.char_code(ch)
+        hvis c >= 48 og c <= 57 {
+            siffer = siffer + 1
+        } ellers hvis ch == "." og prikk == 0 og eksp == 0 {
+            prikk = 1
+        } ellers hvis (ch == "e" eller ch == "E") og eksp == 0 og siffer > 0 {
+            eksp = 1
+            hvis i + 1 < lengde(v) {
+                la neste = builtin.slice(v, i + 1, i + 2)
+                hvis neste == "-" eller neste == "+" { i = i + 1 }
+            }
+            siffer = 0
+        } ellers {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner siffer > 0
+}
+
+funksjon _er_bool_tekst(v: tekst) -> boolsk {
+    la lv = tekst_til_liten(v)
+    hvis lv == "sann" eller lv == "true" eller lv == "1" eller lv == "ja" eller lv == "on" { returner sann }
+    hvis lv == "usann" eller lv == "false" eller lv == "0" eller lv == "nei" eller lv == "off" { returner sann }
+    returner usann
+}
+
+# Streng int: kastar KonfigurasjonsFeil ved ugyldig verdi (ingen stille fallback).
+funksjon hent_int_streng(s: ordbok_tekst, nøkkel: tekst, standard: heltall) -> heltall {
+    la v = hent(s, nøkkel, "")
+    hvis v == "" { returner standard }
+    hvis ikkje _er_heiltall(v) {
+        kast "KonfigurasjonsFeil: '" + nøkkel + "' = '" + v + "' er ikkje eit gyldig heiltal"
+    }
+    returner heltall_fra_tekst(v)
+}
+
+# Streng bool: kastar ved ugyldig verdi.
+funksjon hent_bool_streng(s: ordbok_tekst, nøkkel: tekst, standard: boolsk) -> boolsk {
+    la raw = hent(s, nøkkel, "")
+    hvis raw == "" { returner standard }
+    la v = tekst_til_liten(raw)
+    hvis v == "sann" eller v == "true" eller v == "1" eller v == "ja" eller v == "on" { returner sann }
+    hvis v == "usann" eller v == "false" eller v == "0" eller v == "nei" eller v == "off" { returner usann }
+    kast "KonfigurasjonsFeil: '" + nøkkel + "' = '" + raw + "' er ikkje ein gyldig boolsk verdi"
+}
+
+# Lenient float (stille fallback, bakoverkompatibelt mønster).
+funksjon hent_float(s: ordbok_tekst, nøkkel: tekst, standard) {
+    la v = hent(s, nøkkel, "")
+    hvis v != "" og _er_desimal(v) { returner desimaltall(v) }
+    returner standard
+}
+
+# Streng float: kastar ved ugyldig verdi.
+funksjon hent_float_streng(s: ordbok_tekst, nøkkel: tekst, standard) {
+    la v = hent(s, nøkkel, "")
+    hvis v == "" { returner standard }
+    hvis ikkje _er_desimal(v) {
+        kast "KonfigurasjonsFeil: '" + nøkkel + "' = '" + v + "' er ikkje eit gyldig desimaltal"
+    }
+    returner desimaltall(v)
+}
+
+# Valider eit skjema {nøkkel: type}. Typar: "int", "float", "bool", "tekst", "liste".
+# Kastar KonfigurasjonsFeil ved første ugyldige typa verdi. Tomme/usette verdiar
+# hoppast over (bruk krev_alle for påkrav).
+funksjon valider_skjema(s: ordbok_tekst, skjema: ordbok_tekst) -> heltall {
+    la nk = nøkler(skjema)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la typ = tekst_til_liten(tekst(skjema[k]))
+        la v = hent(s, k, "")
+        hvis v != "" {
+            hvis typ == "int" og ikkje _er_heiltall(v) {
+                kast "KonfigurasjonsFeil: '" + k + "' skal vere int, fekk '" + v + "'"
+            }
+            hvis typ == "float" og ikkje _er_desimal(v) {
+                kast "KonfigurasjonsFeil: '" + k + "' skal vere float, fekk '" + v + "'"
+            }
+            hvis typ == "bool" og ikkje _er_bool_tekst(v) {
+                kast "KonfigurasjonsFeil: '" + k + "' skal vere bool, fekk '" + v + "'"
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
 funksjon krev(s: ordbok_tekst, nøkkel: tekst) -> tekst {
     la v = hent(s, nøkkel, "")
     hvis v == "" { kast "KonfigurasjonsFeil: påkravd innstilling '" + nøkkel + "' manglar" }
@@ -108,7 +295,8 @@ funksjon krev(s: ordbok_tekst, nøkkel: tekst) -> tekst {
 }
 
 funksjon er_sett(s: ordbok_tekst, nøkkel: tekst) -> boolsk {
-    returner har_nokkel(s, nøkkel) og tekst(s[nøkkel]) != ""
+    // Reknar òg med miljø- og secrets-kjelder, ikkje berre materialiserte nøklar.
+    returner hent(s, nøkkel, "") != ""
 }
 
 # ─── Sett / oppdater ─────────────────────────────────────────────────────────
@@ -261,18 +449,47 @@ funksjon miljønøkkel_liste() -> liste<tekst> {
 # ─── Interne hjelpefunksjonar ─────────────────────────────────────────────────
 
 funksjon _hent_frå_env(s: ordbok_tekst) -> ordbok_tekst {
-    // Hent NORSCODE_APP_* frå miljø
-    la env_nøklar = miljønøkkel_liste()
+    // Miljø VINN over fil. Materialiser både dei kjende nøklane og alle nøklar
+    // som alt finst i konfigurasjonen (frå fil/secrets), slik at iterasjon
+    // (vis/til_json/seksjon) speglar miljøverdiane. Reine miljø-berre nøklar
+    // (vilkårlege) blir uansett løyste lazy av hent().
+    la kandidatar = miljønøkkel_liste()
+    la nk = nøkler(s)
+    la j: heltall = 0
+    mens j < lengde(nk) {
+        la fk: tekst = nk[j]
+        hvis ikkje tekst_starter_med(fk, "__") { legg_til(kandidatar, fk) }
+        j = j + 1
+    }
     la i: heltall = 0
-    mens i < lengde(env_nøklar) {
-        la k: tekst = env_nøklar[i]
-        prøv {
-            la v = miljo_hent("NORSCODE_APP_" + k)
-            hvis v != "" { s[k] = v }
-            // Prøv òg utan prefiks
-            la v2 = miljo_hent(k)
-            hvis v2 != "" og ikkje har_nokkel(s, k) { s[k] = v2 }
-        } fang (e) { }
+    mens i < lengde(kandidatar) {
+        la k: tekst = kandidatar[i]
+        la ev = _env_oppslag(s, k)
+        hvis ev != "" { s[k] = ev }
+        i = i + 1
+    }
+    returner s
+}
+
+# Materialiser secrets-mappe inn i konfigurasjonen (overstyrer fil, men miljø
+# overstyrer secrets ettersom _hent_frå_env køyrer etterpå).
+funksjon _secret_materialiser(s: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje har_nokkel(s, "__secrets__") { returner s }
+    la dir = tekst(s["__secrets__"])
+    hvis dir == "" { returner s }
+    la kandidatar = miljønøkkel_liste()
+    la nk = nøkler(s)
+    la j: heltall = 0
+    mens j < lengde(nk) {
+        la fk: tekst = nk[j]
+        hvis ikkje tekst_starter_med(fk, "__") { legg_til(kandidatar, fk) }
+        j = j + 1
+    }
+    la i: heltall = 0
+    mens i < lengde(kandidatar) {
+        la k: tekst = kandidatar[i]
+        la sv = _secret_oppslag(s, k)
+        hvis sv != "" { s[k] = sv }
         i = i + 1
     }
     returner s
