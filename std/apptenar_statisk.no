@@ -1,0 +1,229 @@
+# apptenar_statisk.no — statiske filer og SPA-fallback for apptenar (Fase 1, 1.6)
+#
+# Server filer frå ei konfigurert mappe UNDER datamappa (apptenaren har disk.read der).
+# Rett Content-Type (std/mimetypes), sterk ETag + Last-Modified (304 via apptenaren sin
+# vilkårsbundne veg), Range → 206, Content-Disposition for nedlasting, og SPA-fallback
+# (ukjend sti → index.html). Lek ALDRI absolutt sti og tillèt ALDRI path traversal (../).
+#
+# Konfig (apptenar-nøkkelen "statisk"):
+#   {
+#     "url_prefiks": "/static/",   # URL-prefikset som blir servert frå mappa
+#     "mappe": "public",           # mappe relativt til datamappa (disk-rota)
+#     "index": "index.html",       # fil for katalog og SPA-fallback
+#     "spa": usann,                # ukjend sti → index.html (einsidesapp)
+#     "last_ned": usann            # tving Content-Disposition: attachment
+#   }
+
+bruk std.mimetypes som _mime
+bruk std.http_cache som _hc
+bruk std.runtime_filesystem som _fs
+
+funksjon _k(konf: ordbok, namn: tekst, standard) {
+    hvis konf != null og builtin.type(konf) == "ordbok" og har_nokkel(konf, namn) { returner konf[namn] }
+    returner standard
+}
+
+# ─── Trygg sti (ingen traversal, ingen absolutt sti) ─────────────────────────
+
+# Gjev den trygge relative stien, eller "" om noko er ulovleg: "..", ".", tomt segment,
+# omvend skråstrek, NUL eller innleiande skråstrek (absolutt sti).
+funksjon trygg_relativ(sub: tekst) -> tekst {
+    hvis sub == "" { returner "" }
+    hvis builtin.index_of(sub, builtin.chr(0)) >= 0 { returner "" }
+    hvis builtin.index_of(sub, "\\") >= 0 { returner "" }
+    hvis builtin.starts_with(sub, "/") { returner "" }
+    la delar = builtin.split(sub, "/")
+    la ut = []
+    la i = 0
+    mens i < lengde(delar) {
+        la seg = delar[i]
+        hvis seg == ".." { returner "" }
+        hvis seg == "." { returner "" }
+        hvis seg == "" {
+            # Tomt segment (// eller etterfølgjande /) er ikkje ei fil.
+            hvis i != lengde(delar) - 1 { returner "" }
+        } ellers {
+            legg_til(ut, seg)
+        }
+        i = i + 1
+    }
+    returner builtin.join(ut, "/")
+}
+
+funksjon _full(mappe: tekst, rel: tekst) -> tekst {
+    la m = mappe
+    hvis ikkje builtin.ends_with(m, "/") { m = m + "/" }
+    returner m + rel
+}
+
+funksjon _finst_fil(sti: tekst) -> bool {
+    prøv {
+        la st = _fs.native_stat_sti(sti)
+        returner tekst(st["status"]) == "ok" og tekst(st["kind"]) == "file"
+    } fang (e) { }
+    returner usann
+}
+
+funksjon _mtime_http(sti: tekst) -> tekst {
+    prøv {
+        la st = _fs.native_stat_sti(sti)
+        hvis tekst(st["status"]) == "ok" og har_nokkel(st, "mtime") {
+            la mt = st["mtime"]
+            la ms = 0
+            hvis builtin.type(mt) == "heltall" { ms = mt * 1000 } ellers { ms = heltall_fra_tekst(tekst(mt)) * 1000 }
+            hvis ms > 0 { returner http_dato(ms) }
+        }
+    } fang (e) { }
+    returner ""
+}
+
+# HTTP-dato (RFC 9110 IMF-fixdate) — same som apptenar.http_dato, kopiert hit for å
+# unngå sirkulær import (apptenar importerer denne modulen).
+funksjon _to(n: heltall) -> tekst {
+    hvis n < 10 { returner "0" + tekst(n) }
+    returner tekst(n)
+}
+
+funksjon http_dato(ms: heltall) -> tekst {
+    la sek = ms / 1000
+    la dagar = sek / 86400
+    la rest = sek - dagar * 86400
+    la vekedag = (dagar + 4) % 7
+    la z = dagar + 719468
+    la era = z / 146097
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = mp + 3
+    hvis mp >= 10 { m = mp - 9 }
+    hvis m <= 2 { y = y + 1 }
+    la dnamn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    la mnamn = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    returner dnamn[vekedag] + ", " + _to(d) + " " + mnamn[m - 1] + " " + tekst(y) + " " +
+        _to(rest / 3600) + ":" + _to((rest % 3600) / 60) + ":" + _to(rest % 60) + " GMT"
+}
+
+# ─── Range (RFC 9110 §14) ────────────────────────────────────────────────────
+
+# Tolk ein enkel byte-range mot total lengd. Gjev {"ok", "start", "slutt"} (inklusive),
+# {"ufullnøgd": sann} (416) eller null (ingen/fleire range → server heile).
+funksjon _tolk_range(rå: tekst, total: heltall) -> ordbok {
+    hvis ikkje builtin.starts_with(rå, "bytes=") { returner null }
+    la spec = builtin.slice(rå, 6, lengde(rå))
+    hvis builtin.index_of(spec, ",") >= 0 { returner null }
+    la bind = builtin.index_of(spec, "-")
+    hvis bind < 0 { returner null }
+    la a = builtin.trim(builtin.slice(spec, 0, bind))
+    la b = builtin.trim(builtin.slice(spec, bind + 1, lengde(spec)))
+    la start = 0
+    la slutt = total - 1
+    hvis a == "" {
+        # suffiks: siste N byte
+        hvis b == "" { returner null }
+        la n = heltall_fra_tekst(b)
+        hvis n <= 0 { returner {"ufullnøgd": sann} }
+        start = total - n
+        hvis start < 0 { start = 0 }
+    } ellers {
+        start = heltall_fra_tekst(a)
+        hvis b != "" { slutt = heltall_fra_tekst(b) }
+    }
+    hvis slutt > total - 1 { slutt = total - 1 }
+    hvis start > slutt eller start >= total eller start < 0 { returner {"ufullnøgd": sann} }
+    returner {"ok": sann, "start": start, "slutt": slutt}
+}
+
+# ─── Servering ───────────────────────────────────────────────────────────────
+
+funksjon _les(sti: tekst) -> tekst {
+    returner builtin.fil_les(sti)
+}
+
+# Bygg eit 200-svar for ei fil (med etag, last-modified, accept-ranges), eller eit
+# 206-svar om Range er sett og gyldig, eller 416 om range er ufullnøgd.
+funksjon _svar_fil(konf: ordbok, full: tekst, rel: tekst, ctx: ordbok, range_rå: tekst) -> ordbok {
+    la body = _les(full)
+    la ct = _mime.content_type_header(rel)
+    la etag = _hc.etag_av(body)
+    la lm = _mtime_http(full)
+    la total = lengde(body)
+    la grunnh = {"accept-ranges": "bytes"}
+    hvis _k(konf, "last_ned", usann) {
+        la filnamn = rel
+        la sl = builtin.index_of(rel, "/")
+        mens sl >= 0 { filnamn = builtin.slice(rel, sl + 1, lengde(rel))  sl = builtin.index_of(filnamn, "/") }
+        grunnh["content-disposition"] = "attachment; filename=\"" + filnamn + "\""
+    }
+    hvis range_rå != "" {
+        la rr = _tolk_range(range_rå, total)
+        hvis rr != null {
+            hvis har_nokkel(rr, "ufullnøgd") {
+                la h416 = {"content-range": "bytes */" + tekst(total)}
+                returner {"status": 416, "content_type": "text/plain; charset=utf-8",
+                          "body": "Range ikkje tilfredsstillande", "headers": h416}
+            }
+            la start = rr["start"]
+            la slutt = rr["slutt"]
+            la del = builtin.slice(body, start, slutt + 1)
+            la h = {"accept-ranges": "bytes", "content-range": "bytes " + tekst(start) + "-" + tekst(slutt) + "/" + tekst(total)}
+            la d206 = {"status": 206, "content_type": ct, "body": del, "headers": h}
+            hvis lm != "" { d206["last_modified"] = lm }
+            returner d206
+        }
+    }
+    la d = {"status": 200, "content_type": ct, "body": body, "etag": etag,
+            "cache_control": "public, max-age=3600", "headers": grunnh}
+    hvis lm != "" { d["last_modified"] = lm }
+    returner d
+}
+
+# Server ei statisk fil for sti-en i ctx. Gjev eit svar (200/206/304-klar/404/416) eller
+# null når stien ikkje er under url_prefiks (så rutaren handterer han). GET/HEAD berre.
+funksjon tilby(konf: ordbok, ctx: ordbok) -> ordbok {
+    la metode = tekst(ctx["__method__"])
+    hvis metode != "get" og metode != "head" { returner null }
+    la sti = tekst(ctx["__path__"])
+    la pre = tekst(_k(konf, "url_prefiks", "/static/"))
+    hvis ikkje builtin.starts_with(sti, pre) { returner null }
+    la mappe = tekst(_k(konf, "mappe", ""))
+    hvis mappe == "" { returner {"status": 404, "content_type": "text/plain; charset=utf-8", "body": "Ikkje funne"} }
+    la sub = builtin.slice(sti, lengde(pre), lengde(sti))
+    hvis sub == "" {
+        la idx = tekst(_k(konf, "index", ""))
+        hvis idx == "" { returner {"status": 404, "content_type": "text/plain; charset=utf-8", "body": "Ikkje funne"} }
+        sub = idx
+    }
+    la rel = trygg_relativ(sub)
+    hvis rel == "" { returner {"status": 404, "content_type": "text/plain; charset=utf-8", "body": "Ikkje funne"} }
+    la full = _full(mappe, rel)
+    hvis ikkje _finst_fil(full) { returner {"status": 404, "content_type": "text/plain; charset=utf-8", "body": "Ikkje funne"} }
+    la range_rå = ""
+    prøv {
+        hvis har_nokkel(ctx, "__headers__") {
+            la hh = ctx["__headers__"]
+            hvis har_nokkel(hh, "range") { range_rå = tekst(hh["range"]) }
+        }
+    } fang (e) { }
+    returner _svar_fil(konf, full, rel, ctx, range_rå)
+}
+
+# SPA-fallback: server index.html for ukjende GET/HEAD-stiar. Gjev svar eller null.
+funksjon spa(konf: ordbok, ctx: ordbok) -> ordbok {
+    hvis ikkje _k(konf, "spa", usann) { returner null }
+    la metode = tekst(ctx["__method__"])
+    hvis metode != "get" og metode != "head" { returner null }
+    la mappe = tekst(_k(konf, "mappe", ""))
+    la idx = tekst(_k(konf, "index", "index.html"))
+    hvis mappe == "" eller idx == "" { returner null }
+    la rel = trygg_relativ(idx)
+    hvis rel == "" { returner null }
+    la full = _full(mappe, rel)
+    hvis ikkje _finst_fil(full) { returner null }
+    # SPA-index skal ikkje cachast hardt (ny utgåve må nå klienten); revalider.
+    la d = _svar_fil(konf, full, rel, ctx, "")
+    d["cache_control"] = "no-cache"
+    returner d
+}
