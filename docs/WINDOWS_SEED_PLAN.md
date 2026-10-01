@@ -5,6 +5,61 @@ Mål: erstatte den frosne C-æra-binæren `bootstrap/stage0/norscode-windows-x86
 som dei tre andre seedane (materialisert full-host-NCB → førehandsbygd kryss-codegen → binær),
 utan C, Python eller framande lenkjarar.
 
+## 0. Vegkart til 100 % native Windows-seed (2026-10-01, etter #208)
+
+Status etter #208 (fletta til main): den native Windows-**codegenen** er komplett og verifisert
+GRØN på ekte Windows (alle syscalls ruta, 0 rå syscall; `nc compile`/fil-I/O/filops/system_info
+byte-identiske Linux↔Windows; run 36819849216). Dei tre andre seedane er native i main. Det
+EINASTE som står att for «100 % sjølvstendig native Norscode» er å **promotere Windows-seeden**
+(erstatte C-æra `e03f820a`). Gaten for promotering er W6-attestasjonen (8 testar på ekte Windows).
+
+**Faste reglar for kvart steg (lærdom frå #208):**
+- Kvar endring i `native_codegen_v2.no` (eller importlukkinga) krev REGEN av codegen-fikspunktet:
+  bygg `bootstrap/native_codegen_x86_64.elf` (cg1==cg2==cg3), skriv `.srchash`/`.depshash`,
+  køyr `tools/build_cross_codegen.no` (kryss + `.vertcg`), oppdater dei 3 godkjend-binær-pinane
+  i `tools/active_surface_allowlist.txt`. Elles raud: `test_native_codegen_srchash` + `test_arm64_kryss_codegen`.
+- Ingen rå shell i CI (Driftsvakt/`no_c_python_active_surface`, baseline 0): alt gjennom
+  `tools/ci_shell_runner.no` med `NORSCODE_VM_CI_COMMAND`-binding (sjå `arm64-seed.yml`).
+- Windows-only-verifikasjon berre på ekte `windows-latest` (wine er usann oracle for
+  kernel32-eksportar — jf. WaitOnAddress-fella i #208).
+
+**W4 — trådar + katalog (no `enosys`):**
+- `clone(56)` → `CreateThread` + entry-thunk (barnet held fram med eigen stakk; Linux-clone-
+  modellen må emulerast — eigen Windows-mode-emisjon, ikkje OSTAB-rutine).
+- `futex(202)` → `WaitOnAddress`/`WakeByAddressAll` (importer frå `api-ms-win-core-synch-l1-2-0`
+  / kernelbase, IKKJE kernel32). Trådutgang → `ExitThread` (eigen nr, ikkje `ExitProcess`).
+- `getdents64(217)` → dir-HANDLE via `CreateFileW(FILE_FLAG_BACKUP_SEMANTICS)` +
+  `GetFileInformationByHandleEx(FileIdBothDirectoryInfo)` → linux_dirent64. `os_open` må opne
+  katalogar med backup-semantics.
+- Verifikasjon: trådfikstur + `liste_mappe` på windows-latest.
+
+**W6 — nett / async / TLS / sandkasse (dei 5 harde attestasjonstestane):**
+- `test_windows_native_network`: `ws2_32` (`WSAStartup`/`socket`/`connect`/`send`/`recv`/
+  `closesocket`) som OSTAB-rutinar; `std/native_gap.no` Windows-backend.
+- `test_windows_iocp_scheduler`: `CreateIoCompletionPort`/`GetQueuedCompletionStatus`/
+  `PostQueuedCompletionStatus` — async-planleggjaren.
+- `test_windows_filesystem_iocp`: overlappa fil-I/O via IOCP.
+- `test_windows_schannel_client`: TLS-klient via `secur32` SChannel (`AcquireCredentialsHandle`/
+  `InitializeSecurityContext`/`EncryptMessage`/`DecryptMessage`) ELLER bruk den reine-Norscode
+  TLS-stakken (x25519/ed25519/chacha20/tls13 finst alt — sjå [[tls-over-sokkel-plan]]) over
+  ws2_32-sokkelen; sistnemnde er mest «native».
+- `test_windows_process_appcontainer`: `CreateProcessW` + AppContainer-SID-sandkasse.
+- Dei 3 krypto-testane (`test_argon2_native`/`test_acme_sign_native`/`test_acme_verify_native`)
+  er rein Norscode-compute og bør passere utan nett — verifiser dei fyrst (3/8).
+
+**W5/W7 — bygg + promoter seeden:**
+- `tools/build_windows_seed.no` (materialiser full-host nc_main-NCB → kryss-codegen → PE), analog
+  til `tools/build_arm64_seed.no`; kryss-codegen `bootstrap/native_codegen_windows-x86_64_on_linux-x86_64.elf`
+  (+ hashar/.vertcg/pin) via `tools/build_cross_codegen.no` med `NC_CROSS_TARGETS=windows-x86_64`.
+- CI-jobb `windows-seed.yml` (analog `arm64-seed.yml`): kryssbygg på ubuntu → attestasjon på
+  windows-latest (dei 8 testane) gjennom `ci_shell_runner` (policy-konform).
+- Når grøn: byt `bootstrap/stage0/norscode-windows-x86_64.exe` → den Norscode-bygde, flytt
+  C-æra til `bootstrap/stage0/rollback/`, oppdater `SHA256SUMS` + allowlist, og flytt B4-porten
+  frå «PE-prefiks == committa» til «committa == bygd frå kjelde» (`NC_WINDOWS_KREV_LIK`).
+
+Estimat: W4 ~2–3 økter, W6 ~3–5 økter (TLS/IOCP tyngst), W5/W7 ~1 økt. Alt må verifiserast på
+ekte windows-latest (ingen interaktiv Windows lokalt → iterasjon via CI-push).
+
 ## 1. Noverande tilstand (survey 2026-09-27)
 
 ### Den frosne exe-en
