@@ -494,6 +494,40 @@ funksjon web_rute_til_json(route)
     route_json = route_json + "\"example\":" + web_type_til_eksempel(response_type)
     route_json = route_json + "}}}"
     route_json = route_json + "}"
+    // 2.10(b): OpenAPI-markørar
+    route_json = route_json + ",\"tags\":" + json_fra_tekstliste(route_felt_liste(route, "tags"))
+    route_json = route_json + ",\"description\":" + json_escape_tekst(route_felt_tekst(route, "description"))
+    la depr = "false"
+    hvis har_nokkel(route, "deprecated") og route["deprecated"] == sann
+        depr = "true"
+    slutt
+    route_json = route_json + ",\"deprecated\":" + depr
+    la skjul_t = "false"
+    hvis har_nokkel(route, "hidden") og route["hidden"] == sann
+        skjul_t = "true"
+    slutt
+    route_json = route_json + ",\"hidden\":" + skjul_t
+    la extra_json: tekst = "["
+    la extra_list = route_felt_liste(route, "extra_responses")
+    la xi: heltall = 0
+    mens xi < lengde(extra_list)
+        la x_item = extra_list[xi]
+        la x_status = ""
+        la x_desc = ""
+        hvis har_nokkel(x_item, "status")
+            x_status = tekst(x_item["status"])
+        slutt
+        hvis har_nokkel(x_item, "description")
+            x_desc = tekst(x_item["description"])
+        slutt
+        hvis xi > 0
+            extra_json = extra_json + ","
+        slutt
+        extra_json = extra_json + "{\"status\":" + json_escape_tekst(x_status) + ",\"description\":" + json_escape_tekst(x_desc) + "}"
+        xi = xi + 1
+    slutt
+    extra_json = extra_json + "]"
+    route_json = route_json + ",\"extra_responses\":" + extra_json
     route_json = route_json + "}"
     returner route_json
 slutt
@@ -560,6 +594,60 @@ funksjon er_web_kall(node, namn)
     returner usann
 slutt
 
+// Rekursiv skann for request_query/request_json_field/response_error-kall.
+// Går inn i nøsta blokker (hvis/mens/for/prøv) slik at metadata frå kall inne
+// i greiner også vert fanga for OpenAPI. Akkumulatorlistene vert muterte.
+funksjon skann_rute_metadata(stmts, qp, bf, er)
+    la sk = 0
+    mens sk < lengde(stmts)
+        la scan_stmt = stmts[sk]
+        la scan_kall = scan_stmt
+        hvis scan_stmt["type"] == "La" og lengde(scan_stmt["barn"]) > 0
+            scan_kall = scan_stmt["barn"][0]
+        ellers hvis scan_stmt["type"] == "Returner" og lengde(scan_stmt["barn"]) > 0
+            scan_kall = scan_stmt["barn"][0]
+        slutt
+        la scan_nm = web_kall_namn(scan_kall)
+        hvis scan_nm != "" og lengde(scan_kall["barn"]) > 1 og lengde(scan_kall["barn"][1]["barn"]) > 0
+            scan_arg = scan_kall["barn"][1]["barn"]
+            hvis tekst_ender_med(scan_nm, ".request_query_int") eller tekst_ender_med(scan_nm, ".request_query_param") eller tekst_ender_med(scan_nm, ".request_query_required") eller tekst_ender_med(scan_nm, ".request_query_float")
+                hvis lengde(scan_arg) >= 2 og scan_arg[1]["type"] == "Tekst"
+                    legg_til(qp, scan_arg[1]["verdi"])
+                slutt
+            slutt
+            hvis tekst_ender_med(scan_nm, ".request_json_field") eller tekst_ender_med(scan_nm, ".request_json_field_or") eller tekst_ender_med(scan_nm, ".request_json_field_int") eller tekst_ender_med(scan_nm, ".request_json_field_bool") eller tekst_ender_med(scan_nm, ".request_json_field_float")
+                hvis lengde(scan_arg) >= 2 og scan_arg[1]["type"] == "Tekst"
+                    legg_til(bf, scan_arg[1]["verdi"])
+                slutt
+            slutt
+            hvis tekst_ender_med(scan_nm, ".response_error")
+                hvis lengde(scan_arg) >= 2
+                    la err_entry = {}
+                    err_entry["status"] = scan_arg[0]["verdi"]
+                    hvis scan_arg[1]["type"] == "Tekst"
+                        err_entry["message"] = scan_arg[1]["verdi"]
+                    ellers
+                        err_entry["message"] = "error"
+                    slutt
+                    legg_til(er, err_entry)
+                slutt
+            slutt
+        slutt
+        // Rekurser inn i nøsta blokker (hvis-then/else, mens, for, prøv/fang …).
+        hvis har_nokkel(scan_stmt, "barn")
+            la bi = 0
+            mens bi < lengde(scan_stmt["barn"])
+                la kid = scan_stmt["barn"][bi]
+                hvis har_nokkel(kid, "type") og kid["type"] == "Blokk"
+                    skann_rute_metadata(kid["barn"], qp, bf, er)
+                slutt
+                bi = bi + 1
+            slutt
+        slutt
+        sk = sk + 1
+    slutt
+slutt
+
 funksjon samla_web_annotasjonar(ast_program, modul_namn)
     handlers = []
     providers = []
@@ -580,12 +668,18 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
 
         blokk = fn["barn"][2]
         statements = blokk["barn"]
-        spec = ""
+        specs = []
         route_prefix = ""
         route_deps = []
         route_guards = []
         route_provided = []
         route_guard = usann
+        // 2.10(b): OpenAPI-markørar samla i prologen.
+        route_tags = []
+        route_beskriving = ""
+        route_forelda = usann
+        route_skjul = usann
+        route_responser = []
 
         j = 0
         mens j < lengde(statements)
@@ -636,6 +730,17 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
                 j = j + 1
                 fortsett
             slutt
+            // 2.10(b): parameterlause OpenAPI-markørar.
+            hvis tekst_ender_med(target_namn, ".forelda") og ikkje har_args
+                route_forelda = sann
+                j = j + 1
+                fortsett
+            slutt
+            hvis tekst_ender_med(target_namn, ".skjul") og ikkje har_args
+                route_skjul = sann
+                j = j + 1
+                fortsett
+            slutt
 
             hvis ikkje har_args
                 bryt
@@ -647,7 +752,40 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             slutt
 
             hvis tekst_ender_med(target_namn, ".route")
-                spec = første_arg["verdi"]
+                legg_til(specs, første_arg["verdi"])
+                j = j + 1
+                fortsett
+            slutt
+            // 2.10(b): OpenAPI-markørar. web.tags("a","b"), web.beskriving("..."),
+            // web.respons("404","..."). Alle argument er allereie validerte som
+            // Tekst ovanfor (første_arg). Fleire tag/respons-argument vert samla.
+            hvis tekst_ender_med(target_namn, ".tags")
+                la ta = stmt["barn"][1]["barn"]
+                la ti = 0
+                mens ti < lengde(ta)
+                    hvis ta[ti]["type"] == "Tekst"
+                        legg_til(route_tags, ta[ti]["verdi"])
+                    slutt
+                    ti = ti + 1
+                slutt
+                j = j + 1
+                fortsett
+            slutt
+            hvis tekst_ender_med(target_namn, ".beskriving")
+                route_beskriving = første_arg["verdi"]
+                j = j + 1
+                fortsett
+            slutt
+            hvis tekst_ender_med(target_namn, ".respons")
+                la ra = stmt["barn"][1]["barn"]
+                la r_entry = {}
+                r_entry["status"] = ra[0]["verdi"]
+                hvis lengde(ra) >= 2 og ra[1]["type"] == "Tekst"
+                    r_entry["description"] = ra[1]["verdi"]
+                ellers
+                    r_entry["description"] = ""
+                slutt
+                legg_til(route_responser, r_entry)
                 j = j + 1
                 fortsett
             slutt
@@ -681,7 +819,22 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             legg_til(guard_providers, fn["verdi"] + "|SEP|" + modul_namn + "." + fn["verdi"])
             slutt
 
-        hvis spec != ""
+        // Metadata-skannen (rekursiv, inkl. hvis/mens-greiner) er lik for alle
+        // rutene til funksjonen → rekn ut éin gong før spec-løkka.
+        route_query_params = []
+        route_body_fields = []
+        route_error_responses = []
+        skann_rute_metadata(statements, route_query_params, route_body_fields, route_error_responses)
+
+        route_response_type = "tekst"
+        hvis lengde(fn["barn"]) > 1 og fn["barn"][1]["type"] == "Returtype" og fn["barn"][1]["verdi"] != "tom"
+            route_response_type = fn["barn"][1]["verdi"]
+        slutt
+
+        // 2.10(a): fleire web.route()-kall per handler → éi route-oppføring kvar.
+        si = 0
+        mens si < lengde(specs)
+            spec = specs[si]
             combined_spec = web_kombiner_prefiks(route_prefix, spec)
             spec_delar = web_split_spec(combined_spec)
             route = {}
@@ -692,62 +845,21 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             route["summary"] = fn["verdi"]
             route["operation_id"] = fn["verdi"]
             route["path_params"] = []
-            // Scan alle setningar for request_query/request_json_field/response_error kall
-            route_query_params = []
-            route_body_fields = []
-            route_error_responses = []
-            sk = 0
-            mens sk < lengde(statements)
-                scan_stmt = statements[sk]
-                // Sjekk direkte kall, La-setning, ELLER Returner-setning
-                scan_kall = scan_stmt
-                hvis scan_stmt["type"] == "La" og lengde(scan_stmt["barn"]) > 0
-                    scan_kall = scan_stmt["barn"][0]
-                ellers hvis scan_stmt["type"] == "Returner" og lengde(scan_stmt["barn"]) > 0
-                    scan_kall = scan_stmt["barn"][0]
-                slutt
-                scan_nm = web_kall_namn(scan_kall)
-                hvis scan_nm != "" og lengde(scan_kall["barn"]) > 1 og lengde(scan_kall["barn"][1]["barn"]) > 0
-                    scan_arg = scan_kall["barn"][1]["barn"]
-                    hvis tekst_ender_med(scan_nm, ".request_query_int") eller tekst_ender_med(scan_nm, ".request_query_param") eller tekst_ender_med(scan_nm, ".request_query_required") eller tekst_ender_med(scan_nm, ".request_query_float")
-                        hvis lengde(scan_arg) >= 2 og scan_arg[1]["type"] == "Tekst"
-                            legg_til(route_query_params, scan_arg[1]["verdi"])
-                        slutt
-                    slutt
-                    hvis tekst_ender_med(scan_nm, ".request_json_field") eller tekst_ender_med(scan_nm, ".request_json_field_or") eller tekst_ender_med(scan_nm, ".request_json_field_int") eller tekst_ender_med(scan_nm, ".request_json_field_bool") eller tekst_ender_med(scan_nm, ".request_json_field_float")
-                        hvis lengde(scan_arg) >= 2 og scan_arg[1]["type"] == "Tekst"
-                            legg_til(route_body_fields, scan_arg[1]["verdi"])
-                        slutt
-                    slutt
-                    // Skann for response_error(status, msg) → legg til i error_responses
-                    // scan_nm og kall-type er tilgjengelege her
-                    hvis tekst_ender_med(scan_nm, ".response_error")
-                        hvis lengde(scan_arg) >= 2
-                            la err_entry = {}
-                            err_entry["status"] = scan_arg[0]["verdi"]
-                            hvis scan_arg[1]["type"] == "Tekst"
-                                err_entry["message"] = scan_arg[1]["verdi"]
-                            ellers
-                                err_entry["message"] = "error"
-                            slutt
-                            legg_til(route_error_responses, err_entry)
-                        slutt
-                    slutt
-                slutt
-                sk = sk + 1
-            slutt
             route["query_params"] = route_query_params
             route["body_fields"] = route_body_fields
             route["error_responses"] = route_error_responses
             route["deps"] = route_deps
             route["guards"] = route_guards
+            // 2.10(b): OpenAPI-markørar
+            route["tags"] = route_tags
+            route["description"] = route_beskriving
+            route["deprecated"] = route_forelda
+            route["hidden"] = route_skjul
+            route["extra_responses"] = route_responser
             route["request_example"] = {}
             route["request_example"]["method"] = "get"
             route["request_example"]["path"] = combined_spec
-            route["response_type"] = "tekst"
-            hvis lengde(fn["barn"]) > 1 og fn["barn"][1]["type"] == "Returtype" og fn["barn"][1]["verdi"] != "tom"
-                route["response_type"] = fn["barn"][1]["verdi"]
-            slutt
+            route["response_type"] = route_response_type
             route["response_example"] = web_type_til_eksempel(route["response_type"])
             route["response_schema"] = web_type_til_schema(route["response_type"])
             route["responses"] = {}
@@ -759,6 +871,7 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             route["responses"]["200"]["content"]["application/json"]["schema"] = route["response_schema"]
             route["responses"]["200"]["content"]["application/json"]["example"] = route["response_example"]
             legg_til(handlers, route)
+            si = si + 1
         slutt
 
         l = 0
