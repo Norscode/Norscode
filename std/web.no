@@ -149,17 +149,41 @@ funksjon bearer_token(ctx: ordbok_tekst) -> tekst {
     returner ""
 }
 
-funksjon require_bearer(ctx: ordbok_tekst, expected: tekst) -> boolsk {
-    returner bearer_token(ctx) == expected
+// TRYGGLEIK (Fase 0.5b): konstant-tid-samanlikning for token/hemmeleg. Eit vanleg
+// `==` på tekst kan avslutte ved første ulike byte og lekke lengd/innhald via tid.
+// Her går vi alltid gjennom heile lengda og akkumulerer skilnaden.
+funksjon _konstant_tid_lik(a: tekst, b: tekst) -> boolsk {
+    prøv { returner builtin.constant_time_compare(a, b) } fang (e) { }
+    la la_lengd = lengde(a)
+    la lb_lengd = lengde(b)
+    // Bland inn lengde-skilnad utan å returnere tidleg.
+    la skilnad: heltall = la_lengd - lb_lengd
+    hvis skilnad < 0 { skilnad = 0 - skilnad }
+    la n = la_lengd
+    hvis lb_lengd > n { n = lb_lengd }
+    la i: heltall = 0
+    mens i < n {
+        la ca: heltall = 0
+        hvis i < la_lengd { ca = builtin.char_code(a[i]) }
+        la cb: heltall = 0
+        hvis i < lb_lengd { cb = builtin.char_code(b[i]) }
+        la d = ca - cb
+        skilnad = skilnad + (d * d)
+        i = i + 1
+    }
+    returner skilnad == 0
 }
 
-funksjon _roles_fra_ctx(ctx: ordbok_tekst) -> liste<tekst> {
-    // Støttar x-role (singular) og x-roles (komma-separert) headers
-    la h = ctx["__headers__"]
-    la roles_str: tekst = ""
-    hvis finnes_nøkkel(h, "x-roles") { roles_str = h["x-roles"] }
-    ellers hvis finnes_nøkkel(h, "x-role") { roles_str = h["x-role"] }
-    la deler = builtin.split(roles_str, ",")
+funksjon konstant_tid_lik(a: tekst, b: tekst) -> boolsk {
+    returner _konstant_tid_lik(a, b)
+}
+
+funksjon require_bearer(ctx: ordbok_tekst, expected: tekst) -> boolsk {
+    returner _konstant_tid_lik(bearer_token(ctx), expected)
+}
+
+funksjon _csv_til_liste(csv: tekst) -> liste<tekst> {
+    la deler = builtin.split(csv, ",")
     la r: liste<tekst> = []
     la i: heltall = 0
     mens i < lengde(deler) {
@@ -168,21 +192,59 @@ funksjon _roles_fra_ctx(ctx: ordbok_tekst) -> liste<tekst> {
         i = i + 1
     }
     returner r
+}
+
+// TRYGGLEIK (Fase 0.5a): roller og rettar kjem BERRE frå klarerte, server-sette
+// felt i ctx — aldri frå klient-sende headerar som X-Roles/X-Permissions. Ein
+// klient kan setje kva header som helst, so å stole på dei gav rolle-forfalsking
+// (send «X-Roles: admin» → full tilgang). Autentiseringslaget (sesjon/JWT/api-nøkkel)
+// må kalle sett_roller/sett_rettar etter at identiteten er verifisert. Standard er
+// «ingen roller» = nekt, som er trygt.
+funksjon _roles_fra_ctx(ctx: ordbok_tekst) -> liste<tekst> {
+    la roller_str: tekst = ""
+    hvis finnes_nøkkel(ctx, "__roller__") { roller_str = tekst(ctx["__roller__"]) }
+    returner _csv_til_liste(roller_str)
 }
 
 funksjon _perms_fra_ctx(ctx: ordbok_tekst) -> liste<tekst> {
-    la h = ctx["__headers__"]
     la perms_str: tekst = ""
-    hvis finnes_nøkkel(h, "x-permissions") { perms_str = h["x-permissions"] }
-    la deler = builtin.split(perms_str, ",")
-    la r: liste<tekst> = []
-    la i: heltall = 0
-    mens i < lengde(deler) {
-        la v = builtin.trim(deler[i])
-        hvis v != "" { legg_til(r, v) }
-        i = i + 1
-    }
-    returner r
+    hvis finnes_nøkkel(ctx, "__rettar__") { perms_str = tekst(ctx["__rettar__"]) }
+    returner _csv_til_liste(perms_str)
+}
+
+// Server-side oppsett av verifiserte roller/rettar. Kall desse frå autentiserings-
+// eller dependency-laget ETTER at identiteten er stadfesta. roller/rettar er ein
+// komma-separert streng (t.d. "admin,editor").
+funksjon sett_roller(ctx: ordbok_tekst, roller: tekst) -> ordbok_tekst {
+    ctx["__roller__"] = roller
+    returner ctx
+}
+
+funksjon sett_rettar(ctx: ordbok_tekst, rettar: tekst) -> ordbok_tekst {
+    ctx["__rettar__"] = rettar
+    returner ctx
+}
+
+funksjon gje_rolle(ctx: ordbok_tekst, rolle: tekst) -> ordbok_tekst {
+    la noverande: tekst = ""
+    hvis finnes_nøkkel(ctx, "__roller__") { noverande = tekst(ctx["__roller__"]) }
+    hvis noverande == "" { ctx["__roller__"] = rolle }
+    ellers { ctx["__roller__"] = noverande + "," + rolle }
+    returner ctx
+}
+
+// EKSPLISITT opt-in: promoter X-Role(s)/X-Permissions-headerane til klarerte felt.
+// Kall denne BERRE når requesten kjem gjennom ein klarert proxy som set desse
+// headerane etter autentisering (og strippar klient-sende variantar), eller i
+// demo/testkontekst. Dette er ikkje trygt mot direkte klientar på `nc serve`.
+funksjon stol_på_rolle_headerar(ctx: ordbok_tekst) -> ordbok_tekst {
+    la h = ctx["__headers__"]
+    la roller_str: tekst = ""
+    hvis finnes_nøkkel(h, "x-roles") { roller_str = h["x-roles"] }
+    ellers hvis finnes_nøkkel(h, "x-role") { roller_str = h["x-role"] }
+    hvis roller_str != "" { ctx["__roller__"] = roller_str }
+    hvis finnes_nøkkel(h, "x-permissions") { ctx["__rettar__"] = h["x-permissions"] }
+    returner ctx
 }
 
 funksjon role(ctx: ordbok_tekst) -> tekst {
@@ -219,8 +281,190 @@ funksjon require_permission(ctx: ordbok_tekst, rettighet: tekst) -> boolsk {
     returner has_permission(ctx, rettighet)
 }
 
+# ─── Fase 0.3: streng JSON-validator i rein Norscode ─────────────────────────────
+# Den native builtin.json_parse_raw kan krasje (SIGSEGV) på feilforma JSON, so ein
+# enkelt POST med «{…» eller «{"a":1,}» kunne ta ned `nc serve` (DoS). Vi validerer
+# difor velforma JSON i rein Norscode FØR vi sender kroppen til den native parseren.
+# Validatoren sjekkar balanserte {}/[], gyldige strengar/escapes, gyldige tal,
+# ingen hengande komma og ingen søppel etter verdien. Djupnevakt hindrar at djupt
+# nøsta input kan stakk-overflø validatoren sjølv.
+#
+# (Den VARIGE fiksen er native parser + aritetskontroll i vm.no — det er reseed,
+# Fase 2. Her er berre std-vakta.)
+
+funksjon _json_kode(s: tekst, i: heiltall) -> heiltall {
+    hvis i < 0 { returner -1 }
+    hvis i >= lengde(s) { returner -1 }
+    returner builtin.char_code(builtin.slice(s, i, i + 1))
+}
+
+funksjon _json_er_siffer(c: heiltall) -> boolsk {
+    returner c >= 48 og c <= 57
+}
+
+funksjon _json_er_hex(c: heiltall) -> boolsk {
+    hvis c >= 48 og c <= 57 { returner sann }
+    hvis c >= 97 og c <= 102 { returner sann }
+    hvis c >= 65 og c <= 70 { returner sann }
+    returner usann
+}
+
+funksjon _json_hopp_ws(s: tekst, i: heiltall) -> heiltall {
+    la j = i
+    mens sann {
+        la c = _json_kode(s, j)
+        hvis c == 32 eller c == 9 eller c == 10 eller c == 13 { j = j + 1 }
+        ellers { returner j }
+    }
+    returner j
+}
+
+funksjon _json_streng(s: tekst, i: heiltall) -> heiltall {
+    // i peikar på opningssitat
+    la j = i + 1
+    mens sann {
+        la c = _json_kode(s, j)
+        hvis c == -1 { returner -1 }        // uavslutta
+        hvis c == 34 { returner j + 1 }     // avsluttande "
+        hvis c == 92 {                      // backslash
+            j = j + 1
+            la e = _json_kode(s, j)
+            hvis e == 34 eller e == 92 eller e == 47 eller e == 98 eller e == 102 eller e == 110 eller e == 114 eller e == 116 {
+                j = j + 1
+            } ellers hvis e == 117 {        // \uXXXX
+                j = j + 1
+                la h = 0
+                mens h < 4 {
+                    hvis ikkje _json_er_hex(_json_kode(s, j)) { returner -1 }
+                    j = j + 1
+                    h = h + 1
+                }
+            } ellers {
+                returner -1
+            }
+        } ellers hvis c < 32 {              // rå kontrollteikn er ulovleg i JSON-streng
+            returner -1
+        } ellers {
+            j = j + 1
+        }
+    }
+    returner -1
+}
+
+funksjon _json_tal(s: tekst, i: heiltall) -> heiltall {
+    la j = i
+    hvis _json_kode(s, j) == 45 { j = j + 1 }   // valfri minus
+    la c = _json_kode(s, j)
+    hvis c == 48 {
+        j = j + 1
+    } ellers hvis c >= 49 og c <= 57 {
+        j = j + 1
+        mens _json_er_siffer(_json_kode(s, j)) { j = j + 1 }
+    } ellers {
+        returner -1
+    }
+    // brøk
+    hvis _json_kode(s, j) == 46 {
+        j = j + 1
+        hvis ikkje _json_er_siffer(_json_kode(s, j)) { returner -1 }
+        mens _json_er_siffer(_json_kode(s, j)) { j = j + 1 }
+    }
+    // eksponent
+    la e = _json_kode(s, j)
+    hvis e == 101 eller e == 69 {
+        j = j + 1
+        la sgn = _json_kode(s, j)
+        hvis sgn == 43 eller sgn == 45 { j = j + 1 }
+        hvis ikkje _json_er_siffer(_json_kode(s, j)) { returner -1 }
+        mens _json_er_siffer(_json_kode(s, j)) { j = j + 1 }
+    }
+    returner j
+}
+
+funksjon _json_literal(s: tekst, i: heiltall, lit: tekst) -> heiltall {
+    la n = lengde(lit)
+    hvis i + n > lengde(s) { returner -1 }
+    hvis builtin.slice(s, i, i + n) == lit { returner i + n }
+    returner -1
+}
+
+funksjon _json_objekt(s: tekst, i: heiltall, dybde: heiltall) -> heiltall {
+    la j = _json_hopp_ws(s, i + 1)
+    hvis _json_kode(s, j) == 125 { returner j + 1 }   // tom {}
+    mens sann {
+        j = _json_hopp_ws(s, j)
+        hvis _json_kode(s, j) != 34 { returner -1 }   // nøkkel må vere streng
+        j = _json_streng(s, j)
+        hvis j < 0 { returner -1 }
+        j = _json_hopp_ws(s, j)
+        hvis _json_kode(s, j) != 58 { returner -1 }   // :
+        j = j + 1
+        j = _json_verdi(s, j, dybde + 1)
+        hvis j < 0 { returner -1 }
+        j = _json_hopp_ws(s, j)
+        la c = _json_kode(s, j)
+        hvis c == 44 {
+            j = _json_hopp_ws(s, j + 1)
+            hvis _json_kode(s, j) == 125 { returner -1 }   // hengande komma
+        } ellers hvis c == 125 {
+            returner j + 1
+        } ellers {
+            returner -1
+        }
+    }
+    returner -1
+}
+
+funksjon _json_liste(s: tekst, i: heiltall, dybde: heiltall) -> heiltall {
+    la j = _json_hopp_ws(s, i + 1)
+    hvis _json_kode(s, j) == 93 { returner j + 1 }    // tom []
+    mens sann {
+        j = _json_verdi(s, j, dybde + 1)
+        hvis j < 0 { returner -1 }
+        j = _json_hopp_ws(s, j)
+        la c = _json_kode(s, j)
+        hvis c == 44 {
+            j = _json_hopp_ws(s, j + 1)
+            hvis _json_kode(s, j) == 93 { returner -1 }    // hengande komma
+        } ellers hvis c == 93 {
+            returner j + 1
+        } ellers {
+            returner -1
+        }
+    }
+    returner -1
+}
+
+funksjon _json_verdi(s: tekst, i: heiltall, dybde: heiltall) -> heiltall {
+    hvis dybde > 256 { returner -1 }   // djupnevakt mot stakk-overflow-DoS
+    la j = _json_hopp_ws(s, i)
+    la c = _json_kode(s, j)
+    hvis c == 34 { returner _json_streng(s, j) }
+    hvis c == 123 { returner _json_objekt(s, j, dybde) }
+    hvis c == 91 { returner _json_liste(s, j, dybde) }
+    hvis c == 116 { returner _json_literal(s, j, "true") }
+    hvis c == 102 { returner _json_literal(s, j, "false") }
+    hvis c == 110 { returner _json_literal(s, j, "null") }
+    hvis c == 45 eller _json_er_siffer(c) { returner _json_tal(s, j) }
+    returner -1
+}
+
+// Returnerer sann berre for ein komplett, velforma JSON-tekst (eitt toppnivå-verdi,
+// ingen søppel etter).
+funksjon json_er_gyldig(s: tekst) -> boolsk {
+    la slutt: heiltall = _json_verdi(s, 0, 0)
+    hvis slutt < 0 { returner usann }
+    la etter: heiltall = _json_hopp_ws(s, slutt)
+    hvis etter == lengde(s) { returner sann }
+    returner usann
+}
+
 funksjon request_json(ctx: ordbok_tekst) -> ordbok_tekst {
     la body = ctx["__body__"]
+    // Fase 0.3: hindre at feilforma JSON når den native parseren (SIGSEGV/DoS).
+    hvis body != "" og ikkje json_er_gyldig(body) {
+        kast "json_invalid: ugyldig JSON-kropp"
+    }
     prøv {
         la r = builtin.json_parse_raw(body)
         la rt = builtin.type(r)
@@ -230,6 +474,67 @@ funksjon request_json(ctx: ordbok_tekst) -> ordbok_tekst {
         kast e
     }
     returner {}
+}
+
+funksjon _ascii_lower(verdi: tekst) -> tekst {
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < lengde(verdi) {
+        la c: tekst = builtin.slice(verdi, i, i + 1)
+        la code = builtin.char_code(c)
+        hvis code >= 65 og code <= 90 { ut = ut + builtin.chr(code + 32) }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _content_type_er_json(ctx: ordbok_tekst) -> boolsk {
+    la ct = request_header(ctx, "content-type")
+    hvis ct == "" { returner usann }
+    la base = ct
+    la semi = builtin.index_of(ct, ";")
+    hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
+    base = _ascii_lower(builtin.trim(base))
+    returner base == "application/json"
+}
+
+// 422-respons for ugyldig JSON, i det samla 0.7-formatet.
+funksjon json_feil_respons(melding: tekst) -> ordbok_tekst {
+    la loc: liste<tekst> = ["body"]
+    la post = valideringsfeil_post("json_invalid", loc, melding, "")
+    la poster: liste<tekst> = [post]
+    returner valideringsfeil_respons(poster, 422)
+}
+
+// Serve-trygg JSON-innlesing: sjekkar Content-Type = application/json, validerer
+// strengt, og returnerer {ok, data} eller {ok:"usann", respons} (422 json_invalid).
+// Handlar-mønster:
+//   la r = web.request_json_resultat(ctx)
+//   hvis r["ok"] == "usann" { returner r["respons"] }
+//   la data = r["data"]
+funksjon request_json_resultat(ctx: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    hvis ikkje _content_type_er_json(ctx) {
+        r["ok"] = "usann"
+        r["respons"] = json_feil_respons("Content-Type må vere application/json")
+        returner r
+    }
+    la body = ctx["__body__"]
+    hvis ikkje json_er_gyldig(body) {
+        r["ok"] = "usann"
+        r["respons"] = json_feil_respons("ugyldig JSON-kropp")
+        returner r
+    }
+    la parsed = builtin.json_parse_raw(body)
+    hvis builtin.type(parsed) != "ordbok" {
+        r["ok"] = "usann"
+        r["respons"] = json_feil_respons("body forventa JSON-objekt")
+        returner r
+    }
+    r["ok"] = "sann"
+    r["data"] = parsed
+    returner r
 }
 
 funksjon request_json_field(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
@@ -594,6 +899,56 @@ funksjon validation_error_response(errors: liste<tekst>, status: heiltall) -> or
 
 funksjon validation_bad_request(errors: liste<tekst>) -> ordbok_tekst {
     returner validation_error_response(errors, 422)
+}
+
+// ─── Fase 0.7: samla 422-format {detail:[{type,loc,msg,input}]} ──────────────────
+// FastAPI-kompatibelt valideringsfeil-format, delt mellom web, skjema og rest.
+// All brukarinput blir JSON-escapa (FA-030) so anførselsteikn ikkje bryt JSON-en.
+
+funksjon _json_escape(s: tekst) -> tekst {
+    la r = tekst_erstatt(s, "\\", "\\\\")
+    r = tekst_erstatt(r, "\"", "\\\"")
+    r = tekst_erstatt(r, "\n", "\\n")
+    r = tekst_erstatt(r, "\r", "\\r")
+    r = tekst_erstatt(r, "\t", "\\t")
+    returner r
+}
+
+// Byggjer éin detalj-post som ferdig-serialisert JSON-objekt-streng.
+// loc er ei liste av stegnamn (t.d. ["body", "namn"]).
+funksjon valideringsfeil_post(type_kode: tekst, loc: liste<tekst>, msg: tekst, input_verdi: tekst) -> tekst {
+    la loc_json: liste<tekst> = []
+    la j: heltall = 0
+    mens j < lengde(loc) {
+        legg_til(loc_json, "\"" + _json_escape(tekst(loc[j])) + "\"")
+        j = j + 1
+    }
+    returner "{\"type\":\"" + _json_escape(type_kode) + "\",\"loc\":[" + builtin.join(loc_json, ",") +
+             "],\"msg\":\"" + _json_escape(msg) + "\",\"input\":\"" + _json_escape(input_verdi) + "\"}"
+}
+
+// Samlar ferdig-serialiserte poster (frå valideringsfeil_post) til {detail:[...]}.
+funksjon valideringsfeil_json(poster: liste<tekst>) -> tekst {
+    returner "{\"detail\":[" + builtin.join(poster, ",") + "]}"
+}
+
+funksjon valideringsfeil_respons(poster: liste<tekst>, status: heiltall) -> ordbok_tekst {
+    la body = valideringsfeil_json(poster)
+    returner response_builder(status, {"content-type": "application/json; charset=utf-8"}, body)
+}
+
+// Enkel bru frå felt→melding-ordbok til 422-respons med loc ["body", felt].
+funksjon valideringsfeil_frå_felt(feil: ordbok_tekst, status: heiltall) -> ordbok_tekst {
+    la nk = nøkler(feil)
+    la poster: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = tekst(nk[i])
+        la loc: liste<tekst> = ["body", k]
+        legg_til(poster, valideringsfeil_post("value_error", loc, tekst(feil[k]), ""))
+        i = i + 1
+    }
+    returner valideringsfeil_respons(poster, status)
 }
 
 funksjon request_query_required_or_error(ctx: ordbok_tekst, nøkkel: tekst, errors: liste<tekst>) -> tekst {
