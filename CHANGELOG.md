@@ -4,6 +4,12 @@ Alle merkbare endringar i Norscode blir dokumenterte i denne fila.
 
 ## [Unreleased]
 
+### HTTP og statiske filer
+
+- **Retta:** `nc serve` gjorde binære svar om til tekst (`tekst(bytes)` i `selfhost/http_response.no`), så fontar (woff2), PNG og PDF kom fram korrupte med feil `Content-Length`. No blir headerane sende som tekst og bytane uendra via `socket.send_bytes` (`http_response.response_body_bytes`, `nc_main.serve_handle_one_ut`). HEAD, 204 og 304 sender aldri bytane.
+- **Retta:** `std.statisk` kalla den uregistrerte funksjonen `fil_les_bytes` og feila ved køyring; bruker no `builtin.fil_les_binær`/`fil_skriv_binær`.
+- Lagt til `web.response_bytes(status, headers, bytes)` og `web.response_file_bytes(sti, content_type)` for binære svar.
+- Testar: `tests/test_http_response_bytes.no`, `tests/test_statisk_binaer.no`.
 ### nc serve: tekst-svar og response-middleware
 
 - **Retta:** eit tekst-svar frå ein rutehandlar vart sendt som `text/plain`, òg når det var HTML. `http_response.normaliser_svar` gjev `text/html; charset=utf-8` når teksten startar med `<!doctype` eller `<html` (kasusuavhengig), elles `text/plain`.
