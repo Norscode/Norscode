@@ -33,6 +33,70 @@ funksjon sha(sti: tekst) -> tekst {
     prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) { returner "" }
 }
 
+funksjon u16b(b, o: heiltall) -> heiltall { returner (b[o] & 255) + ((b[o+1] & 255) * 256) }
+funksjon u32b(b, o: heiltall) -> heiltall {
+    returner (b[o] & 255) + ((b[o+1] & 255) * 256) + ((b[o+2] & 255) * 65536) + ((b[o+3] & 255) * 16777216)
+}
+// Les null-terminert import-DLL-namn ved byte-offset og sjekk om det byrjar
+// (store/små like) på eit av C-runtime-prefiksa. Byggjer ingen streng (unngår
+// bytes-til-tekst-kostnaden); samanliknar byte for byte.
+funksjon namn_er_crt(b, off: heiltall) -> boolsk {
+    for pat i ["api-ms-win-crt", "ucrtbase", "msvcrt", "vcruntime"] {
+        la treff = sann
+        la i = 0
+        mens i < lengde(pat) {
+            la c = b[off + i] & 255
+            hvis c >= 65 og c <= 90 { c = c + 32 }
+            hvis c != (builtin.char_code(pat[i]) & 255) { treff = usann  i = lengde(pat) }
+            i = i + 1
+        }
+        hvis treff { returner sann }
+    }
+    returner usann
+}
+funksjon rva_til_off(b, so: heiltall, nsec: heiltall, rva: heiltall) -> heiltall {
+    la i = 0
+    mens i < nsec {
+        la base = so + i * 40
+        la va = u32b(b, base + 12)
+        la vsz = u32b(b, base + 8)
+        la rsz = u32b(b, base + 16)
+        la praw = u32b(b, base + 20)
+        la span = vsz
+        hvis rsz > span { span = rsz }
+        hvis rva >= va og rva < va + span { returner praw + (rva - va) }
+        i = i + 1
+    }
+    returner 0 - 1
+}
+// "" = frittståande (ingen C-runtime-import); elles ei feilmelding.
+funksjon pe_crt_fri(sti: tekst) -> tekst {
+    la b = builtin.fil_les_binær(sti)
+    hvis lengde(b) < 512 { returner "PE for liten" }
+    hvis (b[0] & 255) != 77 eller (b[1] & 255) != 90 { returner "ikkje MZ" }
+    la e = u32b(b, 60)
+    hvis e + 24 > lengde(b) eller (b[e] & 255) != 80 eller (b[e+1] & 255) != 69 { returner "ikkje PE\\0\\0" }
+    la nsec = u16b(b, e + 6)
+    la szopt = u16b(b, e + 20)
+    la opt = e + 24
+    la imp_rva = u32b(b, opt + 112 + 8)   // PE32+ data-directory #1 = import
+    la so = e + 24 + szopt
+    la d = rva_til_off(b, so, nsec, imp_rva)
+    hvis d < 0 { returner "fann ikkje import-dir" }
+    la vakt = 0
+    mens vakt < 256 {
+        la name_rva = u32b(b, d + 12)
+        la oft = u32b(b, d + 0)
+        la ft = u32b(b, d + 16)
+        hvis name_rva == 0 og oft == 0 og ft == 0 { returner "" }
+        la noff = rva_til_off(b, so, nsec, name_rva)
+        hvis noff >= 0 og namn_er_crt(b, noff) { returner "C-runtime-import i PE" }
+        d = d + 20
+        vakt = vakt + 1
+    }
+    returner ""
+}
+
 funksjon spawn(prog: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst,
                timeout_ms: heiltall) -> ordbok_tekst {
     la req = process_abi.request(prog, argv, root, "", timeout_ms, 65536)
@@ -130,6 +194,19 @@ funksjon start() -> heiltall {
     }
     hvis ikkje builtin.fil_finnes(ut) { linje("[FEIL] PE ikkje skriven: " + ut) returner 1 }
     linje("[OK] windows-x86_64 nc_main " + bytes(ut) + " bytes → " + ut)
+
+    // Frittståande-gate: parse import-tabellen og krev at han IKKJE lenkjar nokon
+    // C-runtime (api-ms-win-crt-*/ucrtbase/msvcrt/vcruntime). Dette er sjølve poenget
+    // med den native Windows-seeden (c_æra→0), og køyrer på den fungerande linux-
+    // adapteren — motsett ekte-Windows-EKSEKVERING, som ventar på W6 (kandidaten må
+    // sjølv kunne vere adapter via process.exec; den committa C-vert-seeden ignorerer
+    // adapter-argumenta og køyrer berre sin innebygde selftest).
+    la crt = pe_crt_fri(ut)
+    hvis crt != "" {
+        linje("[FEIL] PE er IKKJE frittståande: " + crt)
+        returner 1
+    }
+    linje("[OK] import-tabellen er C-runtime-fri (frittståande, c_æra-rein)")
 
     // NC_WINDOWS_KREV_LIK=1: den committa stage0-seeden MÅ vere byte-lik det kjelda byggjer
     // (reproduserbarheit etter W7-promotering). Før promotering er committa seed C-æra-verten
