@@ -45,6 +45,11 @@ funksjon NR_GETRANDOM() -> heiltall { returner 318 }
 // Syntetisk OSTAB-slot (ikkje eit Linux-syscall): _start kallar han for å syntetisere
 // argv/envp frå GetCommandLineW på Windows. Slot 500 < OSTAB_LEN.
 funksjon NR_SETUP_ARGV() -> heiltall { returner 500 }
+// Syntetisk OSTAB-slot (W6.1): synkron prosess-spawn via CreateProcessW. rdi=UTF-8
+// kommandolinje (null-terminert), rsi=UTF-8 arbeidskatalog (eller 0=arv forelderen),
+// → rax = barnet sin exit-kode (0..) eller −1 ved spawn-feil. Windows har ingen fork,
+// so std.native_gap sin windows-grein kallar denne i staden for POSIX-fork/execve.
+funksjon NR_WIN_SPAWN() -> heiltall { returner 501 }
 funksjon OSTAB_LEN() -> heiltall { returner 512 }
 
 // DLL-ar og funksjonar OS-rutinane treng (W1-delmengd).
@@ -71,7 +76,9 @@ funksjon os_importar_full() {
             "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
             "CloseHandle", "SetFilePointerEx",
             "DeleteFileW", "RemoveDirectoryW", "CreateDirectoryW",
-            "GetCurrentDirectoryW", "GetModuleFileNameW", "Sleep", "MoveFileExW"]],
+            "GetCurrentDirectoryW", "GetModuleFileNameW", "Sleep", "MoveFileExW",
+            // W6.1 synkron prosess-spawn (os_win_spawn). Alle er KERNEL32-eksportar.
+            "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess"]],
         ["ADVAPI32.dll", ["SystemFunction036"]],
         ["SHELL32.dll", ["CommandLineToArgvW"]]
     ]
@@ -746,6 +753,97 @@ funksjon emit_rename(a, slot, base: heiltall) -> heiltall {
     returner 0
 }
 
+// ── OS-rutine (W6.1): synkron prosess-spawn via CreateProcessW ────────────────
+// Inn (Linux-konvensjon): rdi = UTF-8 kommandolinje (null-terminert), rsi = UTF-8
+// arbeidskatalog eller 0 (NULL = arv forelderen). Ut: rax = exit-kode (0..) eller −1.
+// Framgang: MultiByteToWideChar(CP_UTF8) av kommandolinja (og cwd om sett) → stakk-
+// buffrar, nullstill STARTUPINFOW(104)+cb=104 og PROCESS_INFORMATION(24), CreateProcessW,
+// WaitForSingleObject(INFINITE), GetExitCodeProcess, CloseHandle×2. Ramme-offset (rsp-
+// relativt etter sub): widecmd@0x100, widecwd@0x1100, si@0x2100, pi@0x2170, exit@0x2190,
+// lagra cmdline@0x21A0, lagra cwd@0x21A8, cwd-peikar@0x21B0; ramme 0x2200 (16-aligna).
+// Stakk-arg til Win64-kall ligg i [rsp+32..]. Inga stdout-fanging enno (W6.1b).
+funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_win_spawn")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 8704)                      // 0x2200
+    asm.st(a, asm.RSP(), 8608, asm.RDI())              // lagra cmdline (0x21A0)
+    asm.st(a, asm.RSP(), 8616, asm.RSI())              // lagra cwd     (0x21A8)
+    // widecmd = MultiByteToWideChar(65001, 0, cmdline, -1, &widecmd, 2048)
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RDI())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.lea(a, asm.RAX(), asm.RSP(), 256)              // &widecmd (0x100)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 2048)
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    // cwd-peikar: standard NULL; om lagra cwd != 0, konverter → &widecwd
+    asm.st_i(a, asm.RSP(), 8624, 0)                    // cwd-peikar = NULL (0x21B0)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8616)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_nocwd")
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RAX())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.lea(a, asm.RAX(), asm.RSP(), 4352)             // &widecwd (0x1100)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 2048)
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    asm.lea(a, asm.RAX(), asm.RSP(), 4352)
+    asm.st(a, asm.RSP(), 8624, asm.RAX())              // cwd-peikar = &widecwd
+    asm.merk(a, "os_win_spawn_nocwd")
+    // nullstill STARTUPINFOW(104) @0x2100 og set cb=104
+    la k: heiltall = 0
+    mens k < 104 { asm.st_i(a, asm.RSP(), 8448 + k, 0)  k = k + 8 }
+    asm.st_i(a, asm.RSP(), 8448, 104)                  // cb (låg dword)
+    // nullstill PROCESS_INFORMATION(24) @0x2170
+    asm.st_i(a, asm.RSP(), 8560, 0)
+    asm.st_i(a, asm.RSP(), 8568, 0)
+    asm.st_i(a, asm.RSP(), 8576, 0)
+    // CreateProcessW(NULL, &widecmd, NULL, NULL, FALSE, 0, NULL, cwdptr, &si, &pi)
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.lea(a, asm.RDX(), asm.RSP(), 256)              // &widecmd
+    asm.xor(a, asm.R8(), asm.R8())
+    asm.xor(a, asm.R9(), asm.R9())
+    asm.st_i(a, asm.RSP(), 32, 0)                      // bInheritHandles = FALSE
+    asm.st_i(a, asm.RSP(), 40, 0)                      // dwCreationFlags = 0
+    asm.st_i(a, asm.RSP(), 48, 0)                      // lpEnvironment = NULL
+    asm.ld(a, asm.RAX(), asm.RSP(), 8624)
+    asm.st(a, asm.RSP(), 56, asm.RAX())                // lpCurrentDirectory = cwdptr
+    asm.lea(a, asm.RAX(), asm.RSP(), 8448)
+    asm.st(a, asm.RSP(), 64, asm.RAX())                // lpStartupInfo = &si
+    asm.lea(a, asm.RAX(), asm.RSP(), 8560)
+    asm.st(a, asm.RSP(), 72, asm.RAX())                // lpProcessInformation = &pi
+    iat(a, slot, base, "KERNEL32.dll!CreateProcessW")
+    asm.tst(a, asm.RAX(), asm.RAX())                   // BOOL
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_fail")
+    // WaitForSingleObject(pi.hProcess, INFINITE)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
+    asm.mov_i32(a, asm.RDX(), 4294967295)              // INFINITE = 0xFFFFFFFF
+    iat(a, slot, base, "KERNEL32.dll!WaitForSingleObject")
+    // GetExitCodeProcess(pi.hProcess, &exit)
+    asm.st_i(a, asm.RSP(), 8592, 0)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
+    asm.lea(a, asm.RDX(), asm.RSP(), 8592)             // &exit (0x2190)
+    iat(a, slot, base, "KERNEL32.dll!GetExitCodeProcess")
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)              // CloseHandle(hProcess)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld(a, asm.RCX(), asm.RSP(), 8568)              // CloseHandle(hThread @ pi+8)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld32(a, asm.RAX(), asm.RSP(), 8592)            // exit-kode (nullutvida)
+    asm.jmp(a, "os_win_spawn_ut")
+    asm.merk(a, "os_win_spawn_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 1)                    // −1 spawn-feil
+    asm.merk(a, "os_win_spawn_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
 // Emitter heile OS-rutinesettet i rekkjefølgje inn i assemblarstaten `a` og returnerer
 // tabellen [[linux_nr, etikett], …] so kallaren kan fylle OSTAB. os_enosys er standardfyllet
 // for alle andre slottar. Same rutinar som native_codegen_v2 emitterer inn i .text (W1).
@@ -771,6 +869,7 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
     emit_getcwd(a, slot, base)
     emit_readlink(a, slot, base)
     emit_rename(a, slot, base)
+    emit_win_spawn(a, slot, base)
     emit_enosys(a)
     returner [
         [NR_WRITE(), "os_write"], [NR_READ(), "os_read"], [NR_EXIT(), "os_exit"],
@@ -780,7 +879,8 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
         [NR_LSEEK(), "os_lseek"], [NR_STAT(), "os_stat"],
         [NR_UNLINK(), "os_unlink"], [NR_RMDIR(), "os_rmdir"], [NR_MKDIR(), "os_mkdir"],
         [NR_CHMOD(), "os_chmod"], [NR_UNAME(), "os_uname"], [NR_NANOSLEEP(), "os_nanosleep"],
-        [NR_GETCWD(), "os_getcwd"], [NR_READLINK(), "os_readlink"], [NR_RENAME(), "os_rename"]
+        [NR_GETCWD(), "os_getcwd"], [NR_READLINK(), "os_readlink"], [NR_RENAME(), "os_rename"],
+        [NR_WIN_SPAWN(), "os_win_spawn"]
         // getdents64(217)/futex(202)/clone(56): OSTAB-slot → os_enosys (W4/dir, treng ekte
         // Windows for verifikasjon); sitane blir ruta so ingen rå syscall står att.
     ]
