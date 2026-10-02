@@ -883,6 +883,12 @@ funksjon feil_frå_unntak(e) -> ordbok<tekst, tekst> {
 // køyrer anvend_response_middlewares + response_to_http sentralt på alle svar.
 funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, svar, head_fallback: boolsk, request_if_modified_since: tekst, request_if_match: tekst) -> ordbok<tekst, tekst> {
     hvis head_fallback {
+        // #216: HEAD på ein GET-handler med bytes-body → returner ei respons-ordbok med
+        // bytes-body slik at response_to_http (sentralt) set rett Content-Length utan å
+        // sende bytane (response_body_bytes gjev null for __head__).
+        hvis http_response.body_er_bytes(svar) {
+            returner {"status": 200, "__head__": sann, "body": http_response.hent(svar, "body", "__body__")}
+        }
         returner {"status": 200, "__head__": sann, "body": tekst(svar)}
     }
     la request_etag = hent_header_tekst(parsed["headers"], "If-None-Match", "if-none-match")
@@ -1246,7 +1252,14 @@ funksjon køyre_livssyklus_hooks_trygt(ncb: ordbok<tekst, tekst>, hook_nøkkel: 
     }
 }
 
+// Handterer éin request og returnerer HTTP-teksten (headerar + eventuell tekst-body).
+// Har handleren ein bytes-body, blir bytane lagde i ut_bytes[0] og må sendast rett etter teksten.
 funksjon serve_handle_one(ncb: ordbok<tekst, tekst>, rå: tekst) -> tekst {
+    la ut_bytes: liste = [null]
+    returner serve_handle_one_ut(ncb, rå, ut_bytes)
+}
+
+funksjon serve_handle_one_ut(ncb: ordbok<tekst, tekst>, rå: tekst, ut_bytes: liste) -> tekst {
     la parsed = parse_http_request(rå)
     la ctx: ordbok<tekst, tekst> = {
         "__method__": builtin.lower(parsed["method"]),
@@ -1275,6 +1288,10 @@ funksjon serve_handle_one(ncb: ordbok<tekst, tekst>, rå: tekst) -> tekst {
 
     // 2.4: response-mw køyrer på ALLE svar (ikkje berre /helse).
     resp_dict = anvend_response_middlewares(ncb, resp_dict)
+    // #216: ekstraher ein eventuell binær body sentralt (etter response-mw) slik at
+    // serve-løkka kan sende bytane uendra rett etter headerane. response_body_bytes
+    // gjev null for tekst-body, HEAD, 204 og 304.
+    ut_bytes[0] = http_response.response_body_bytes(resp_dict)
     returner response_to_http(resp_dict)
 }
 
@@ -1429,12 +1446,17 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
         } ellers {
             la received = serve_receive_request(conn)
             la resp: tekst = ""
+            la ut_bytes: liste = [null]
             hvis received["ok"] {
-                resp = serve_handle_one(ncb, received["raw"])
+                resp = serve_handle_one_ut(ncb, received["raw"], ut_bytes)
             } ellers {
                 resp = serve_receive_error(received["status"], received["error"])
             }
             sok.send(conn, resp)
+            hvis ut_bytes[0] != null {
+                // Binær body: send bytane uendra etter headerane (Content-Length er alt sett).
+                sok.send_bytes(conn, builtin.bytes_to_list(ut_bytes[0]))
+            }
             sok.lukk(conn)
         }
     }
