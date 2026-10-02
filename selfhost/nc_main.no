@@ -478,11 +478,124 @@ funksjon serve_max_request_bytes() -> heiltall {
     returner 22020096
 }
 
+// 2.8: finn ein header-verdi (case-insensitiv nøkkel) i header-seksjonen.
+funksjon serve_header_verdi(raw: tekst, nøkkel_lower: tekst) -> tekst {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    hvis header_end < 0 { header_end = builtin.index_of(raw, "\n\n") }
+    la hdr = raw
+    hvis header_end >= 0 { hdr = builtin.slice(raw, 0, header_end) }
+    hdr = builtin.replace(hdr, "\r", "")
+    la lines = builtin.split(hdr, "\n")
+    la i: heiltall = 1
+    mens i < lengde(lines) {
+        la line = lines[i]
+        la colon = builtin.index_of(line, ":")
+        hvis colon > 0 {
+            la key = builtin.lower(builtin.trim(builtin.slice(line, 0, colon)))
+            hvis key == nøkkel_lower {
+                returner builtin.trim(builtin.slice(line, colon + 1, lengde(line)))
+            }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon hex_parse(s: tekst) -> heiltall {
+    hvis s == "" { returner -1 }
+    la v: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        la d = hex_siffer_verdi(builtin.slice(s, i, i + 1))
+        hvis d < 0 { returner -1 }
+        v = v * 16 + d
+        i = i + 1
+    }
+    returner v
+}
+
+// 2.8: dekod ein chunked request-kropp. Returnerer {"status": ok/ufullstendig/
+// ugyldig, "data": <dekoda>}. «ufullstendig» tyder at kallaren må lese meir.
+funksjon dekod_chunked(body: tekst) -> ordbok<tekst, tekst> {
+    la data = ""
+    la p: heiltall = 0
+    la n_body = lengde(body)
+    mens sann {
+        la rest = builtin.slice(body, p, n_body)
+        la crlf = builtin.index_of(rest, "\r\n")
+        hvis crlf < 0 { returner {"status": "ufullstendig", "data": ""} }
+        la storleik_linje = builtin.slice(rest, 0, crlf)
+        la semi = builtin.index_of(storleik_linje, ";")
+        hvis semi >= 0 { storleik_linje = builtin.slice(storleik_linje, 0, semi) }
+        storleik_linje = builtin.trim(storleik_linje)
+        la n = hex_parse(storleik_linje)
+        hvis n < 0 { returner {"status": "ugyldig", "data": ""} }
+        p = p + crlf + 2
+        hvis n == 0 {
+            // Siste chunk; evt. trailer vert ignorert.
+            returner {"status": "ok", "data": data}
+        }
+        hvis p + n > n_body { returner {"status": "ufullstendig", "data": ""} }
+        data = data + builtin.slice(body, p, p + n)
+        p = p + n
+        hvis p + 2 > n_body { returner {"status": "ufullstendig", "data": ""} }
+        hvis builtin.slice(body, p, p + 2) != "\r\n" { returner {"status": "ugyldig", "data": ""} }
+        p = p + 2
+    }
+    returner {"status": "ugyldig", "data": ""}
+}
+
+// 2.8: les og dekod ein chunked request til heile kroppen er motteken.
+// Erstattar chunked-kroppen i raw med den dekoda kroppen (parse_http_request
+// les kroppen rått etter header-skiljet).
+funksjon serve_receive_chunked(conn, raw: tekst, max_bytes: heiltall) -> ordbok<tekst, tekst> {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    la sep = 4
+    hvis header_end < 0 {
+        header_end = builtin.index_of(raw, "\n\n")
+        sep = 2
+    }
+    hvis header_end < 0 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig HTTP-header"}
+    }
+    mens sann {
+        la body = builtin.slice(raw, header_end + sep, lengde(raw))
+        la res = dekod_chunked(body)
+        la st = tekst(res["status"])
+        hvis st == "ok" {
+            la nytt_raw = builtin.slice(raw, 0, header_end + sep) + tekst(res["data"])
+            returner {"ok": sann, "status": 200, "raw": nytt_raw, "error": ""}
+        }
+        hvis st == "ugyldig" {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Ugyldig chunked-koding"}
+        }
+        hvis lengde(raw) >= max_bytes {
+            returner {"ok": usann, "status": 413, "raw": "", "error": "Request er for stor"}
+        }
+        la chunk = sok.motta(conn, 65536)
+        hvis lengde(chunk) == 0 {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig chunked-kropp"}
+        }
+        raw = raw + chunk
+    }
+    returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig chunked-kropp"}
+}
+
 funksjon serve_receive_request(conn) -> ordbok<tekst, tekst> {
     la max_bytes = serve_max_request_bytes()
     la raw = sok.motta(conn, 65536)
     hvis lengde(raw) == 0 {
         returner {"ok": usann, "status": 400, "raw": "", "error": "Tom request"}
+    }
+
+    // 2.8: Transfer-Encoding: chunked. Avvis samstundes Content-Length
+    // (request-smugling), dekod elles kroppen.
+    la te = builtin.lower(serve_header_verdi(raw, "transfer-encoding"))
+    hvis builtin.index_of(te, "chunked") >= 0 {
+        hvis serve_header_verdi(raw, "content-length") != "" {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Både Transfer-Encoding og Content-Length"}
+        }
+        returner serve_receive_chunked(conn, raw, max_bytes)
     }
 
     la content_length = serve_request_content_length(raw)
@@ -984,7 +1097,8 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
         i = i + 1
     }
 
-    hvis req_method == "options" {
+    // 2.8: OPTIONS gjev 204 BERRE når stien finst; ukjend sti fell gjennom til 404.
+    hvis req_method == "options" og found_path {
         la allow_list = bygg_allow_liste(allowed_methods)
         returner {"status": 204, "body": "", "__headers__": {"Allow": allow_list}}
     }
