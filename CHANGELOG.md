@@ -4,6 +4,12 @@ Alle merkbare endringar i Norscode blir dokumenterte i denne fila.
 
 ## [Unreleased]
 
+### nc serve: tekst-svar og response-middleware
+
+- **Retta:** eit tekst-svar frå ein rutehandlar vart sendt som `text/plain`, òg når det var HTML. `http_response.normaliser_svar` gjev `text/html; charset=utf-8` når teksten startar med `<!doctype` eller `<html` (kasusuavhengig), elles `text/plain`.
+- **Retta:** `response_middlewares` køyrde berre på helseruta. No køyrer dei på alle rutesvar (`nc_main.normaliser_handler_svar`), so ein app kan setje ETag, Speculation-Rules og tryggleiksheaderar éin stad.
+- Test: `tests/test_http_response_normaliser.no`.
+
 ### Release-klargjering
 
 - Lagt til `./bin/nc local-green` som lokal release-preflight, aktiv flate, fase-0, L1-L6-sjølvhosting og full testport utan publisering.
