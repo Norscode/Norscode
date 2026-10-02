@@ -21,6 +21,9 @@ bruk std.desimaltall_tekst som desimaltall_tekst
 // Argon2id-gap-ruta (builtin.argon2id → std.argon2id_pure.hash_raw_hex) må ha
 // modulen i bunten; rå-minne-varianten unngår 64 MiB-OOM-en frå VM-lister.
 bruk std.argon2id_pure som argon2id_pure
+// Fase 2 / 2.6: base64 for auto-JSON-serialisering av bytes i serve-svar.
+// (base64 er alt i nc_main-lukkinga via krypto-modulane.)
+bruk std.base64 som b64
 
 // ─── Kompiler kjeldekode-fil til NCB ─────────────────────────────────────────
 
@@ -119,49 +122,213 @@ funksjon is_int_text(v: tekst) -> boolsk {
     returner sann
 }
 
+// Verdien til eitt hex-siffer, eller -1 om det ikkje er hex.
+funksjon hex_siffer_verdi(c: tekst) -> heiltall {
+    la code = builtin.char_code(c)
+    hvis code >= 48 og code <= 57 { returner code - 48 }
+    hvis code >= 97 og code <= 102 { returner code - 87 }
+    hvis code >= 65 og code <= 70 { returner code - 55 }
+    returner -1
+}
+
+// %-dekoding av eit URL-segment. plus_som_mellomrom=sann for query/form
+// (application/x-www-form-urlencoded), usann for path-segment (der «+» er
+// bokstavleg). Speglar std/web._url_decode_komponent.
+funksjon pct_decode(verdi: tekst, plus_som_mellomrom: boolsk) -> tekst {
+    la n = lengde(verdi)
+    la ut: tekst = ""
+    la i: heiltall = 0
+    mens i < n {
+        la c = builtin.slice(verdi, i, i + 1)
+        hvis c == "%" og i + 2 < n {
+            la k1 = hex_siffer_verdi(builtin.slice(verdi, i + 1, i + 2))
+            la k2 = hex_siffer_verdi(builtin.slice(verdi, i + 2, i + 3))
+            hvis k1 >= 0 og k2 >= 0 {
+                ut = ut + builtin.chr(k1 * 16 + k2)
+                i = i + 3
+            } ellers {
+                ut = ut + c
+                i = i + 1
+            }
+        } ellers hvis c == "+" og plus_som_mellomrom {
+            ut = ut + " "
+            i = i + 1
+        } ellers {
+            ut = ut + c
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon is_float_text(v: tekst) -> boolsk {
+    hvis v == "" { returner usann }
+    la i: heltall = 0
+    la har_siffer = usann
+    la har_punkt = usann
+    mens i < lengde(v) {
+        la tegn = builtin.slice(v, i, i + 1)
+        hvis tegn >= "0" og tegn <= "9" {
+            har_siffer = sann
+        } ellers hvis tegn == "." {
+            hvis har_punkt { returner usann }
+            har_punkt = sann
+        } ellers hvis tegn == "-" og i == 0 {
+            // leiande minus
+        } ellers {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner har_siffer
+}
+
+funksjon is_bool_text(v: tekst) -> boolsk {
+    la lav = builtin.lower(v)
+    returner lav == "true" eller lav == "false" eller lav == "1" eller lav == "0" eller lav == "sann" eller lav == "usann"
+}
+
+funksjon is_hex_text(v: tekst) -> boolsk {
+    hvis v == "" { returner usann }
+    la i: heltall = 0
+    mens i < lengde(v) {
+        hvis hex_siffer_verdi(builtin.slice(v, i, i + 1)) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon is_uuid_text(v: tekst) -> boolsk {
+    hvis lengde(v) != 36 { returner usann }
+    la i: heltall = 0
+    mens i < 36 {
+        la c = builtin.slice(v, i, i + 1)
+        hvis i == 8 eller i == 13 eller i == 18 eller i == 23 {
+            hvis c != "-" { returner usann }
+        } ellers hvis hex_siffer_verdi(c) < 0 {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Validerer eit typa path-segment. type_tekst er alt normalisert til lowercase
+// utan "str"/"tekst" (dei når aldri hit). Returnerer sann når segmentet er gyldig
+// for typen.
+funksjon path_type_ok(type_tekst: tekst, v: tekst) -> boolsk {
+    hvis type_tekst == "int" eller type_tekst == "heltall" eller type_tekst == "heiltall" {
+        returner is_int_text(v)
+    }
+    hvis type_tekst == "desimaltall" eller type_tekst == "float" {
+        returner is_float_text(v)
+    }
+    hvis type_tekst == "bool" eller type_tekst == "boolsk" {
+        returner is_bool_text(v)
+    }
+    hvis type_tekst == "uuid" {
+        returner is_uuid_text(v)
+    }
+    // enum og ukjende typar kan ikkje validerast mot medlemmer her; godta rått
+    // (medlemsvalidering skjer i handlaren/2.6-laget).
+    returner sann
+}
+
+// path_match returnerer ein av tre:
+//   {}                                   → ingen strukturell match (prøv neste rute)
+//   {..., "__path_match__": sann}        → match + alle typar gyldige
+//   {..., "__path_match__": sann,        → strukturell match men typefeil (422);
+//    "__path_422__": sann, loc/msg}        avgjer_route_respons gjev då 422 med loc.
 funksjon path_match(pattern: tekst, sti: tekst) -> ordbok<tekst, tekst> {
     la params: ordbok<tekst, tekst> = {}
     la pattern_delar = path_segments(pattern)
     la sti_delar = path_segments(sti)
-    hvis lengde(pattern_delar) != lengde(sti_delar) {
-        returner {}
+
+    // Avgjer om siste pattern-segment er ein {namn:path}-konvertar (slukar
+    // resten av stien, inkludert «/»). Då treng ikkje lengdene vere like.
+    la har_path_konv = usann
+    la path_namn = ""
+    hvis lengde(pattern_delar) > 0 {
+        la siste = pattern_delar[lengde(pattern_delar) - 1]
+        hvis builtin.starts_with(siste, "{") og builtin.ends_with(siste, "}") {
+            la inn = builtin.slice(siste, 1, lengde(siste) - 1)
+            la kol = builtin.index_of(inn, ":")
+            hvis kol >= 0 og builtin.lower(builtin.slice(inn, kol + 1, lengde(inn))) == "path" {
+                har_path_konv = sann
+                path_namn = builtin.slice(inn, 0, kol)
+            }
+        }
     }
 
+    hvis har_path_konv {
+        hvis lengde(sti_delar) < lengde(pattern_delar) {
+            returner {}
+        }
+    } ellers {
+        hvis lengde(pattern_delar) != lengde(sti_delar) {
+            returner {}
+        }
+    }
+
+    la fast_tal = lengde(pattern_delar)
+    hvis har_path_konv { fast_tal = lengde(pattern_delar) - 1 }
+
     la i: heiltall = 0
-    mens i < lengde(pattern_delar) {
+    mens i < fast_tal {
         la p = pattern_delar[i]
-        la v = sti_delar[i]
+        la v = pct_decode(sti_delar[i], usann)
         hvis builtin.starts_with(p, "{") og builtin.ends_with(p, "}") {
             la innvendig = builtin.slice(p, 1, lengde(p) - 1)
             la kolon = builtin.index_of(innvendig, ":")
-            hvis kolon < 0 {
-                returner {}
+            la namn = innvendig
+            la type_tekst = "str"
+            hvis kolon >= 0 {
+                namn = builtin.slice(innvendig, 0, kolon)
+                type_tekst = builtin.lower(builtin.slice(innvendig, kolon + 1, lengde(innvendig)))
             }
-            la namn = builtin.slice(innvendig, 0, kolon)
-            la type_tekst = builtin.slice(innvendig, kolon + 1, lengde(innvendig))
-            hvis type_tekst == "int" {
-                hvis is_int_text(v) {
-                    params[namn] = v
-                } ellers {
-                    returner {}
-                }
-            } ellers {
+            hvis type_tekst == "str" eller type_tekst == "tekst" {
                 params[namn] = v
+            } ellers hvis path_type_ok(type_tekst, v) {
+                params[namn] = v
+            } ellers {
+                // Strukturell match, men segmentet er ikkje gyldig for typen → 422.
+                la feil422: ordbok<tekst, tekst> = {}
+                feil422["__path_match__"] = sann
+                feil422["__path_422__"] = sann
+                feil422["__path_422_loc__"] = namn
+                feil422["__path_422_msg__"] = "Ugyldig verdi for " + type_tekst + ": " + namn
+                returner feil422
             }
-        } ellers hvis p != v {
+        } ellers hvis p != sti_delar[i] {
             returner {}
         }
         i = i + 1
     }
+
+    hvis har_path_konv {
+        // Slå saman resten av stien (dekoda segment) med «/».
+        la rest = ""
+        la ri = fast_tal
+        mens ri < lengde(sti_delar) {
+            hvis rest != "" { rest = rest + "/" }
+            rest = rest + pct_decode(sti_delar[ri], usann)
+            ri = ri + 1
+        }
+        params[path_namn] = rest
+    }
+
     params["__path_match__"] = sann
     returner params
 }
 
+// parse_query: %-dekoder nøkkel/verdi (plus→mellomrom), tek vare på gjentekne
+// nøklar som liste, og legg den rå query-strengen i "__raw__".
 funksjon parse_query(raw_query: tekst) -> ordbok<tekst, tekst> {
     la query: ordbok<tekst, tekst> = {}
     hvis raw_query == "" {
         returner query
     }
+    query["__raw__"] = raw_query
 
     la delar = builtin.split(raw_query, "&")
     la i = 0
@@ -169,10 +336,24 @@ funksjon parse_query(raw_query: tekst) -> ordbok<tekst, tekst> {
         la p = builtin.trim(delar[i])
         hvis p != "" {
             la eq = builtin.index_of(p, "=")
+            la nøkkel = ""
+            la verdi = ""
             hvis eq == -1 {
-                query[p] = ""
+                nøkkel = pct_decode(p, sann)
             } ellers {
-                query[builtin.trim(builtin.slice(p, 0, eq))] = builtin.trim(builtin.slice(p, eq + 1, lengde(p)))
+                nøkkel = pct_decode(builtin.slice(p, 0, eq), sann)
+                verdi = pct_decode(builtin.slice(p, eq + 1, lengde(p)), sann)
+            }
+            hvis har_nokkel(query, nøkkel) og nøkkel != "__raw__" {
+                la eksisterande = query[nøkkel]
+                hvis builtin.type(eksisterande) == "liste" {
+                    legg_til(eksisterande, verdi)
+                } ellers {
+                    la liste_verdi = [eksisterande, verdi]
+                    query[nøkkel] = liste_verdi
+                }
+            } ellers {
+                query[nøkkel] = verdi
             }
         }
         i = i + 1
@@ -297,11 +478,124 @@ funksjon serve_max_request_bytes() -> heiltall {
     returner 22020096
 }
 
+// 2.8: finn ein header-verdi (case-insensitiv nøkkel) i header-seksjonen.
+funksjon serve_header_verdi(raw: tekst, nøkkel_lower: tekst) -> tekst {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    hvis header_end < 0 { header_end = builtin.index_of(raw, "\n\n") }
+    la hdr = raw
+    hvis header_end >= 0 { hdr = builtin.slice(raw, 0, header_end) }
+    hdr = builtin.replace(hdr, "\r", "")
+    la lines = builtin.split(hdr, "\n")
+    la i: heiltall = 1
+    mens i < lengde(lines) {
+        la line = lines[i]
+        la colon = builtin.index_of(line, ":")
+        hvis colon > 0 {
+            la key = builtin.lower(builtin.trim(builtin.slice(line, 0, colon)))
+            hvis key == nøkkel_lower {
+                returner builtin.trim(builtin.slice(line, colon + 1, lengde(line)))
+            }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon hex_parse(s: tekst) -> heiltall {
+    hvis s == "" { returner -1 }
+    la v: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        la d = hex_siffer_verdi(builtin.slice(s, i, i + 1))
+        hvis d < 0 { returner -1 }
+        v = v * 16 + d
+        i = i + 1
+    }
+    returner v
+}
+
+// 2.8: dekod ein chunked request-kropp. Returnerer {"status": ok/ufullstendig/
+// ugyldig, "data": <dekoda>}. «ufullstendig» tyder at kallaren må lese meir.
+funksjon dekod_chunked(body: tekst) -> ordbok<tekst, tekst> {
+    la data = ""
+    la p: heiltall = 0
+    la n_body = lengde(body)
+    mens sann {
+        la rest = builtin.slice(body, p, n_body)
+        la crlf = builtin.index_of(rest, "\r\n")
+        hvis crlf < 0 { returner {"status": "ufullstendig", "data": ""} }
+        la storleik_linje = builtin.slice(rest, 0, crlf)
+        la semi = builtin.index_of(storleik_linje, ";")
+        hvis semi >= 0 { storleik_linje = builtin.slice(storleik_linje, 0, semi) }
+        storleik_linje = builtin.trim(storleik_linje)
+        la n = hex_parse(storleik_linje)
+        hvis n < 0 { returner {"status": "ugyldig", "data": ""} }
+        p = p + crlf + 2
+        hvis n == 0 {
+            // Siste chunk; evt. trailer vert ignorert.
+            returner {"status": "ok", "data": data}
+        }
+        hvis p + n > n_body { returner {"status": "ufullstendig", "data": ""} }
+        data = data + builtin.slice(body, p, p + n)
+        p = p + n
+        hvis p + 2 > n_body { returner {"status": "ufullstendig", "data": ""} }
+        hvis builtin.slice(body, p, p + 2) != "\r\n" { returner {"status": "ugyldig", "data": ""} }
+        p = p + 2
+    }
+    returner {"status": "ugyldig", "data": ""}
+}
+
+// 2.8: les og dekod ein chunked request til heile kroppen er motteken.
+// Erstattar chunked-kroppen i raw med den dekoda kroppen (parse_http_request
+// les kroppen rått etter header-skiljet).
+funksjon serve_receive_chunked(conn, raw: tekst, max_bytes: heiltall) -> ordbok<tekst, tekst> {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    la sep = 4
+    hvis header_end < 0 {
+        header_end = builtin.index_of(raw, "\n\n")
+        sep = 2
+    }
+    hvis header_end < 0 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig HTTP-header"}
+    }
+    mens sann {
+        la body = builtin.slice(raw, header_end + sep, lengde(raw))
+        la res = dekod_chunked(body)
+        la st = tekst(res["status"])
+        hvis st == "ok" {
+            la nytt_raw = builtin.slice(raw, 0, header_end + sep) + tekst(res["data"])
+            returner {"ok": sann, "status": 200, "raw": nytt_raw, "error": ""}
+        }
+        hvis st == "ugyldig" {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Ugyldig chunked-koding"}
+        }
+        hvis lengde(raw) >= max_bytes {
+            returner {"ok": usann, "status": 413, "raw": "", "error": "Request er for stor"}
+        }
+        la chunk = sok.motta(conn, 65536)
+        hvis lengde(chunk) == 0 {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig chunked-kropp"}
+        }
+        raw = raw + chunk
+    }
+    returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig chunked-kropp"}
+}
+
 funksjon serve_receive_request(conn) -> ordbok<tekst, tekst> {
     la max_bytes = serve_max_request_bytes()
     la raw = sok.motta(conn, 65536)
     hvis lengde(raw) == 0 {
         returner {"ok": usann, "status": 400, "raw": "", "error": "Tom request"}
+    }
+
+    // 2.8: Transfer-Encoding: chunked. Avvis samstundes Content-Length
+    // (request-smugling), dekod elles kroppen.
+    la te = builtin.lower(serve_header_verdi(raw, "transfer-encoding"))
+    hvis builtin.index_of(te, "chunked") >= 0 {
+        hvis serve_header_verdi(raw, "content-length") != "" {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Både Transfer-Encoding og Content-Length"}
+        }
+        returner serve_receive_chunked(conn, raw, max_bytes)
     }
 
     la content_length = serve_request_content_length(raw)
@@ -436,6 +730,29 @@ funksjon bygg_feil_respons(status: heiltall, body: tekst) -> ordbok<tekst, tekst
     returner {"status": status, "body": body}
 }
 
+// Fase 0/1-format for valideringsfeil (speglar std/web.valideringsfeil_json):
+// {"detail":[{"type":...,"loc":[...],"msg":...,"input":...}]}. loc er ei liste
+// av tekst-segment (t.d. ["path", "id"]).
+funksjon bygg_422_respons(type_kode: tekst, loc: liste<tekst>, msg: tekst, input_verdi: tekst) -> ordbok<tekst, tekst> {
+    la loc_json = ""
+    la j: heltall = 0
+    mens j < lengde(loc) {
+        hvis loc_json != "" { loc_json = loc_json + "," }
+        loc_json = loc_json + builtin.json_stringify(tekst(loc[j]))
+        j = j + 1
+    }
+    la post = "{\"type\":" + builtin.json_stringify(type_kode) +
+        ",\"loc\":[" + loc_json + "]" +
+        ",\"msg\":" + builtin.json_stringify(msg) +
+        ",\"input\":" + builtin.json_stringify(input_verdi) + "}"
+    la body = "{\"detail\":[" + post + "]}"
+    returner {
+        "status": 422,
+        "body": body,
+        "__headers__": {"Content-Type": "application/json; charset=utf-8"}
+    }
+}
+
 funksjon hent_header_tekst(headers: ordbok<tekst, tekst>, nøkkel_a: tekst, nøkkel_b: tekst) -> tekst {
     hvis headers == null {
         returner ""
@@ -460,25 +777,125 @@ funksjon bygg_standard_helse_respons(ctx: ordbok<tekst, tekst>, req_method: teks
     }
     la helselogg = standard_server_logg(ctx, 200)
     helse["__headers__"] = {"X-Server-Logg": json_skriv(helselogg)}
-    helse = anvend_response_middlewares(ncb, helse)
+    // response-mw vert køyrt sentralt i serve_handle_one (2.4).
     returner helse
 }
 
+// Fase 2 / 2.6: automatisk JSON-serialisering av eit handlar-svar som er
+// ordbok/liste/bytes utan respons-nøklar. Speglar apptenar_serde-semantikken
+// for dei byggjeklossane som finst i nc_main-lukkinga:
+//   * __rå_json__-innpakking → lagt inn uendra,
+//   * bytes → base64,
+//   * interne nøklar ("__…") vert hoppa over,
+//   * lister/ordbøker rekursivt, primitivar via builtin.json_stringify
+//     (tekst/heltall/desimaltall/boolsk/null handterer den rett).
+// MERK: ISO-dato/datotid/tidspunkt og __desimal__-innpakkinga krev std.tidspunkt
+// / std.desimal som IKKJE er i nc_main-lukkinga; slike ordbøker vert serialiserte
+// generisk (med __-nøkkel-filtrering). apptenar-vegen dekkjer den fulle ISO-/
+// desimal-semantikken.
+funksjon nc_serve_til_json(v, djup: heltall) -> tekst {
+    hvis djup > 64 {
+        kast "nc_serve_til_json: for djup nøsting"
+    }
+    hvis v == null {
+        returner "null"
+    }
+    la t = builtin.type(v)
+    hvis t == "bytes" {
+        returner "\"" + b64.kod_bytes(v) + "\""
+    }
+    hvis t == "liste" {
+        la ut = "["
+        la i = 0
+        mens i < lengde(v) {
+            hvis i > 0 { ut = ut + "," }
+            ut = ut + nc_serve_til_json(v[i], djup + 1)
+            i = i + 1
+        }
+        returner ut + "]"
+    }
+    hvis t == "ordbok" {
+        hvis har_nokkel(v, "__rå_json__") {
+            returner tekst(v["__rå_json__"])
+        }
+        la ut = "{"
+        la ks = nøkler(v)
+        la i = 0
+        la først = sann
+        mens i < lengde(ks) {
+            la k = tekst(ks[i])
+            hvis ikkje builtin.starts_with(k, "__") {
+                hvis ikkje først { ut = ut + "," }
+                ut = ut + builtin.json_stringify(k) + ":" + nc_serve_til_json(v[ks[i]], djup + 1)
+                først = usann
+            }
+            i = i + 1
+        }
+        returner ut + "}"
+    }
+    returner builtin.json_stringify(v)
+}
+
+// Fase 2 / 2.6: map eit kasta unntak frå ein handlar/vakt til ein respons.
+// Speglar apptenar._feil_frå_unntak:
+//   * {"__httpfeil__": sann, status, detalj, headers} → status + {"detail": detalj}
+//   * tekst "ValideringsFeil: <melding>" → 422 (Fase 0/1-format)
+//   * alt anna → 500 «Intern feil»; sjølve unntaksmeldinga lek BERRE når
+//     NC_SERVE_DEBUG=1 (unngår informasjonslekkasje i produksjon).
+funksjon feil_frå_unntak(e) -> ordbok<tekst, tekst> {
+    hvis e != null og builtin.type(e) == "ordbok" og har_nokkel(e, "__httpfeil__") {
+        la st = 500
+        hvis har_nokkel(e, "status") {
+            la sv = e["status"]
+            hvis builtin.type(sv) == "heltall" {
+                st = sv
+            } ellers hvis is_int_text(tekst(sv)) {
+                st = heltall_fra_tekst(tekst(sv))
+            }
+        }
+        la detalj = ""
+        hvis har_nokkel(e, "detalj") { detalj = tekst(e["detalj"]) }
+        la d: ordbok<tekst, tekst> = {
+            "status": st,
+            "body": "{\"detail\":" + builtin.json_stringify(detalj) + "}",
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"}
+        }
+        hvis har_nokkel(e, "headers") og e["headers"] != null og builtin.type(e["headers"]) == "ordbok" og lengde(nøkler(e["headers"])) > 0 {
+            d["__headers__"] = e["headers"]
+        }
+        returner d
+    }
+    la et = ""
+    hvis e != null og builtin.type(e) == "tekst" { et = e }
+    hvis builtin.starts_with(et, "ValideringsFeil:") {
+        la msg = builtin.trim(builtin.slice(et, 16, lengde(et)))
+        la loc: liste<tekst> = ["body"]
+        returner bygg_422_respons("value_error", loc, msg, "")
+    }
+    la body = "Intern feil"
+    hvis miljo_hent("NC_SERVE_DEBUG") == "1" {
+        body = "Intern feil: " + tekst(e)
+    }
+    returner {"status": 500, "body": body}
+}
+
+// Returnerer no ei respons-ORDBOK (ikkje ferdig HTTP-tekst). serve_handle_one
+// køyrer anvend_response_middlewares + response_to_http sentralt på alle svar.
 funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, svar, head_fallback: boolsk, request_if_modified_since: tekst, request_if_match: tekst) -> ordbok<tekst, tekst> {
     hvis head_fallback {
-        returner response_to_http({"status": 200, "__head__": sann, "body": tekst(svar)})
+        returner {"status": 200, "__head__": sann, "body": tekst(svar)}
     }
     la request_etag = hent_header_tekst(parsed["headers"], "If-None-Match", "if-none-match")
     hvis request_etag != "" og har_nokkel(svar, "etag") {
         la response_etag = tekst(svar["etag"])
         hvis response_etag != "" og response_etag == request_etag {
-            returner response_to_http({"status": 304, "etag": response_etag, "body": ""})
+            returner {"status": 304, "etag": response_etag, "body": ""}
         }
     }
     hvis request_if_modified_since != "" og har_nokkel(svar, "last_modified") {
         la response_last_modified = tekst(svar["last_modified"])
         hvis response_last_modified != "" og response_last_modified == request_if_modified_since {
-            returner response_to_http({"status": 304, "last_modified": response_last_modified, "body": ""})
+            returner {"status": 304, "last_modified": response_last_modified, "body": ""}
         }
     }
     hvis request_if_match != "" og har_nokkel(svar, "etag") {
@@ -487,22 +904,80 @@ funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordb
             la feil = bygg_feil_respons(412, "")
             feil["status_text"] = "Precondition Failed"
             feil = anvend_error_middlewares(ncb, feil)
-            returner response_to_http(feil)
+            returner feil
         }
     }
     hvis svar == null {
-        returner response_to_http({"status": 204, "body": ""})
+        returner {"status": 204, "body": ""}
     }
-    hvis har_nokkel(svar, "status") eller har_nokkel(svar, "__status__") eller har_nokkel(svar, "body") eller har_nokkel(svar, "__body__") eller har_nokkel(svar, "headers") eller har_nokkel(svar, "__headers__") eller har_nokkel(svar, "content_type") eller har_nokkel(svar, "__content_type__") eller har_nokkel(svar, "__head__") {
-        returner response_to_http(svar)
+    la svar_type = builtin.type(svar)
+    hvis svar_type == "ordbok" {
+        hvis har_nokkel(svar, "status") eller har_nokkel(svar, "__status__") eller har_nokkel(svar, "body") eller har_nokkel(svar, "__body__") eller har_nokkel(svar, "headers") eller har_nokkel(svar, "__headers__") eller har_nokkel(svar, "content_type") eller har_nokkel(svar, "__content_type__") eller har_nokkel(svar, "__head__") {
+            returner svar
+        }
+        // 2.6: data-ordbok utan respons-nøklar → automatisk JSON.
+        returner {
+            "status": 200,
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"},
+            "body": nc_serve_til_json(svar, 0)
+        }
+    }
+    hvis svar_type == "liste" eller svar_type == "bytes" {
+        // 2.6: liste/bytes → automatisk JSON.
+        returner {
+            "status": 200,
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"},
+            "body": nc_serve_til_json(svar, 0)
+        }
     }
     hvis tekst(svar) == "" {
-        returner response_to_http({"status": 204, "body": ""})
+        returner {"status": 204, "body": ""}
     }
-    returner response_to_http({"status": 200, "body": tekst(svar)})
+    returner {"status": 200, "body": tekst(svar)}
 }
 
-funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, route_handlers: liste<ordbok<tekst, tekst>>, req_method: tekst, req_path: tekst) -> ordbok<tekst, tekst> {
+// Avgjer om eit guard-/handlar-resultat er ei respons-ordbok (skal kortslutte).
+funksjon er_respons_ordbok(v) -> boolsk {
+    hvis v == null eller builtin.type(v) != "ordbok" {
+        returner usann
+    }
+    returner har_nokkel(v, "status") eller har_nokkel(v, "__status__") eller har_nokkel(v, "body") eller har_nokkel(v, "__body__") eller har_nokkel(v, "headers") eller har_nokkel(v, "__headers__") eller har_nokkel(v, "content_type") eller har_nokkel(v, "__content_type__") eller har_nokkel(v, "__head__")
+}
+
+// 2.4: løys rute-avhengnader flatt. For kvart dep-namn: finn provider-funksjonen
+// frå dependency_providers (map namn→fullnamn, med __main__-fallback) og kall
+// den med [ctx]. Resultatet vert send til handlaren som ekstra posisjonelle
+// argument etter ctx (2.1-aritetssjekken validerer talet). MERK: nøsta
+// dep-grafar, per-request-caching og yield/opprydding er IKKJE implementert her
+// — apptenar (std/apptenar_di) dekkjer den fulle semantikken.
+funksjon løys_route_deps(ncb: ordbok<tekst, tekst>, item: ordbok<tekst, tekst>, ctx: ordbok<tekst, tekst>) -> liste {
+    la verdiar: liste = []
+    la deps = item["deps"]
+    hvis deps == null {
+        returner verdiar
+    }
+    la providers = ncb["dependency_providers"]
+    la di = 0
+    mens di < lengde(deps) {
+        la dep_namn = tekst(deps[di])
+        la prov_fn = "__main__." + dep_namn
+        hvis providers != null og builtin.type(providers) == "ordbok" og har_nokkel(providers, dep_namn) {
+            prov_fn = tekst(providers[dep_namn])
+        }
+        hvis ikkje builtin.contains(prov_fn, ".") {
+            prov_fn = "__main__." + prov_fn
+        }
+        la verdi = køyre_ncb_funksjon(prov_fn, [ctx], ncb["functions"])
+        legg_til(verdiar, verdi)
+        di = di + 1
+    }
+    returner verdiar
+}
+
+// Returnerer no ei respons-ORDBOK. base_ctx er ctx-en etter
+// anvend_request_middlewares (2.4) — request-mw-mutasjonar følgjer med inn i
+// handlar-ctx i staden for å byggjast på nytt frå parsed.
+funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, base_ctx: ordbok<tekst, tekst>, route_handlers: liste<ordbok<tekst, tekst>>, req_method: tekst, req_path: tekst) -> ordbok<tekst, tekst> {
     la found_path = usann
     la allowed_methods = {}
     la head_fallback = usann
@@ -526,27 +1001,47 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                     hvis req_method == "head" og item_method == "get" {
                         head_fallback = sann
                     }
+                    // 2.5: ruta matcha strukturelt, men eit typa path-segment var
+                    // ugyldig → 422 med loc ["path", <namn>] (Fase 0/1-format).
+                    hvis har_nokkel(params, "__path_422__") {
+                        la loc_422: liste<tekst> = ["path", tekst(params["__path_422_loc__"])]
+                        la feil_422 = bygg_422_respons("value_error", loc_422, tekst(params["__path_422_msg__"]), "")
+                        returner anvend_error_middlewares(ncb, feil_422)
+                    }
+                    // 2.4: ta vare på request-mw-mutasjonane (base_ctx), overstyr
+                    // request-spesifikke felt og sett path-params per rute.
                     la ctx = {}
+                    hvis base_ctx != null {
+                        la bk = nøkler(base_ctx)
+                        la bi = 0
+                        mens bi < lengde(bk) {
+                            ctx[bk[bi]] = base_ctx[bk[bi]]
+                            bi = bi + 1
+                        }
+                    }
                     la qn = nøkler(parsed)
                     la qi = 0
                     mens qi < lengde(qn) {
                         la k = qn[qi]
                         la v = parsed[k]
                         hvis k == "query" {
-                            ctx["__query__"] = v
+                            hvis ikkje har_nokkel(ctx, "__query__") { ctx["__query__"] = v }
                         } ellers hvis k == "headers" {
-                            ctx["__headers__"] = v
+                            hvis ikkje har_nokkel(ctx, "__headers__") { ctx["__headers__"] = v }
                         } ellers hvis k == "body" {
-                            ctx["__body__"] = v
+                            hvis ikkje har_nokkel(ctx, "__body__") { ctx["__body__"] = v }
                         } ellers hvis k == "path" {
-                            ctx["__path__"] = v
+                            hvis ikkje har_nokkel(ctx, "__path__") { ctx["__path__"] = v }
                         } ellers {
-                            ctx[k] = v
+                            hvis ikkje har_nokkel(ctx, k) { ctx[k] = v }
                         }
                         qi = qi + 1
                     }
                     ctx["__method__"] = req_method
                     ctx["__params__"] = params
+                    // 2.4: vakter i prøv/fang (fail-closed). Ei vakt kan kortslutte
+                    // med ei respons-ordbok (t.d. 401 + WWW-Authenticate); elles må
+                    // ho returnere noko sant. Feil/falsk → deny, aldri krasj.
                     la guards = item["guards"]
                     hvis guards != null {
                         la gi = 0
@@ -556,12 +1051,20 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                             hvis ikkje builtin.contains(guard_namn, ".") {
                                 guard_fn = "__main__." + guard_namn
                             }
-                    la guard_args: liste = [ctx]
-                            la guard_result = køyre_ncb_funksjon(guard_fn, guard_args, ncb["functions"])
+                            la guard_result = null
+                            prøv {
+                                guard_result = køyre_ncb_funksjon(guard_fn, [ctx], ncb["functions"])
+                            } fang (e) {
+                                la feil = feil_frå_unntak(e)
+                                returner anvend_error_middlewares(ncb, feil)
+                            }
+                            hvis er_respons_ordbok(guard_result) {
+                                // Kortslutt med vakta sitt eige svar (401 o.l.).
+                                returner anvend_error_middlewares(ncb, guard_result)
+                            }
                             hvis ikkje guard_result {
                                 la feil = bygg_feil_respons(403, "Forbidden")
-                                feil = anvend_error_middlewares(ncb, feil)
-                                returner response_to_http(feil)
+                                returner anvend_error_middlewares(ncb, feil)
                             }
                             gi = gi + 1
                         }
@@ -570,14 +1073,22 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                     hvis ikkje builtin.contains(handler, ".") {
                         handler = "__main__." + handler
                     }
-                    la handler_args: liste = [ctx]
                     la svar = null
                     prøv {
+                        // 2.4: injiser rute-avhengnader som ekstra handlar-argument.
+                        la handler_args: liste = [ctx]
+                        la dep_values = løys_route_deps(ncb, item, ctx)
+                        la dvi = 0
+                        mens dvi < lengde(dep_values) {
+                            legg_til(handler_args, dep_values[dvi])
+                            dvi = dvi + 1
+                        }
                         svar = køyre_ncb_funksjon(handler, handler_args, ncb["functions"])
                     } fang (e) {
-                        la feil = bygg_feil_respons(500, tekst(e))
-                        feil = anvend_error_middlewares(ncb, feil)
-                        returner response_to_http(feil)
+                        // 2.6: map unntak → 422 (ValideringsFeil) / httpfeil-status /
+                        // 500 (utan å lekke unntaksmeldinga med mindre NC_SERVE_DEBUG=1).
+                        la feil = feil_frå_unntak(e)
+                        returner anvend_error_middlewares(ncb, feil)
                     }
                     returner avgjer_standard_handler_respons(ncb, parsed, svar, head_fallback, request_if_modified_since, request_if_match)
                 }
@@ -586,21 +1097,20 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
         i = i + 1
     }
 
-    hvis req_method == "options" {
+    // 2.8: OPTIONS gjev 204 BERRE når stien finst; ukjend sti fell gjennom til 404.
+    hvis req_method == "options" og found_path {
         la allow_list = bygg_allow_liste(allowed_methods)
-        returner response_to_http({"status": 204, "body": "", "__headers__": {"Allow": allow_list}})
+        returner {"status": 204, "body": "", "__headers__": {"Allow": allow_list}}
     }
 
     hvis found_path {
         la allow_list = bygg_allow_liste(allowed_methods)
         la feil = {"status": 405, "body": "Method Not Allowed", "__headers__": {"Allow": allow_list}}
-        feil = anvend_error_middlewares(ncb, feil)
-        returner response_to_http(feil)
+        returner anvend_error_middlewares(ncb, feil)
     }
 
     la feil = bygg_feil_respons(404, "Ikkje funne: " + req_method + " " + req_path)
-    feil = anvend_error_middlewares(ncb, feil)
-    returner response_to_http(feil)
+    returner anvend_error_middlewares(ncb, feil)
 }
 
 funksjon anvend_response_middlewares(ncb: ordbok<tekst, tekst>, response: ordbok<tekst, tekst>) -> ordbok<tekst, tekst> {
@@ -748,22 +1258,65 @@ funksjon serve_handle_one(ncb: ordbok<tekst, tekst>, rå: tekst) -> tekst {
     }
     ctx = anvend_request_middlewares(ncb, ctx)
 
+    la resp_dict: ordbok<tekst, tekst> = {}
     la route_handlers = ncb["route_handlers"]
     hvis route_handlers == null {
-        la feil = bygg_feil_respons(404, "Ingen route_handlers definert")
-        feil = anvend_error_middlewares(ncb, feil)
-        returner response_to_http(feil)
-    }
-
-    la req_method = builtin.lower(parsed["method"])
-    la req_path = parsed["path"]
-    hvis er_helse_rute(req_path) {
-        hvis req_method == "get" eller req_method == "head" {
-            la helse = bygg_standard_helse_respons(ctx, req_method, ncb)
-            returner response_to_http(helse)
+        resp_dict = anvend_error_middlewares(ncb, bygg_feil_respons(404, "Ingen route_handlers definert"))
+    } ellers {
+        la req_method = builtin.lower(parsed["method"])
+        la req_path = parsed["path"]
+        hvis er_helse_rute(req_path) og (req_method == "get" eller req_method == "head") {
+            resp_dict = bygg_standard_helse_respons(ctx, req_method, ncb)
+        } ellers {
+            // 2.4: send mw-mutert ctx inn i dispatchen (request-mw følgjer med).
+            resp_dict = avgjer_route_respons(ncb, parsed, ctx, route_handlers, req_method, req_path)
         }
     }
-    returner avgjer_route_respons(ncb, parsed, route_handlers, req_method, req_path)
+
+    // 2.4: response-mw køyrer på ALLE svar (ikkje berre /helse).
+    resp_dict = anvend_response_middlewares(ncb, resp_dict)
+    returner response_to_http(resp_dict)
+}
+
+// Fase 2 / 2.3: Produksjons-serve må setje opp runtime likt som vm.køyr_ncb
+// (den nøsta køyre-/test-vegen) gjer, slik at handlarar som brukar DI, vakter
+// eller modulglobalar faktisk verkar under `nc serve`:
+//   * __ncb_<nøkkel>__-metadata (route_handlers/dependency_providers/
+//     guard_providers) vert kopiert inn i functions slik at builtin.ncb_metadata
+//     / builtin.ncb_route_handlers finn dei (serve-dispatchen les route_handlers
+//     direkte frå ncb, men DI/guard-oppslaga går via functions).
+//   * vm_runtime_init + vm_initialiser_modular køyrer toppnivå-`la`-globalar og
+//     modul-initialisatorane (desse køyrde ALDRI under serve før).
+//
+// Caps-policy (fail-closed): __vm_target_policy__ gjer at tryggleikspolicyen
+// berre les mål-namnerommet (NORSCODE_VM_TARGET_CAPABILITIES /
+// NORSCODE_VM_TARGET_DISK_ROOT / *_NET_SCOPE / *_PROCESS_SCOPE). Standard er
+// TOMT ⇒ ingen capabilities og disk-scope "." ⇒ alt nekta. env.read vert såleis
+// berre gjeve når operatøren eksplisitt listar "env.read" i
+// NORSCODE_VM_TARGET_CAPABILITIES; disk-scope kjem frå NORSCODE_VM_TARGET_DISK_ROOT.
+// Vi opnar ALDRI env/disk breitt automatisk (T1 auth-hygiene er ikkje ferdig).
+funksjon nc_serve_init_runtime(ncb: ordbok<tekst, tekst>) -> heiltall {
+    la functions = ncb["functions"]
+    hvis functions == null {
+        returner 0
+    }
+    functions["__vm_inherit_env__"] = "sann"
+    functions["__vm_target_policy__"] = "sann"
+    la _md_rh = ncb["route_handlers"]
+    hvis _md_rh != null {
+        functions["__ncb_route_handlers__"] = _md_rh
+    }
+    la _md_dep = ncb["dependency_providers"]
+    hvis _md_dep != null {
+        functions["__ncb_dependency_providers__"] = _md_dep
+    }
+    la _md_guard = ncb["guard_providers"]
+    hvis _md_guard != null {
+        functions["__ncb_guard_providers__"] = _md_guard
+    }
+    vm_runtime_init(functions, sann)
+    vm_initialiser_modular(ncb, functions)
+    returner 0
 }
 
 funksjon nc_serve(src_sti: tekst) -> heltall {
@@ -824,6 +1377,8 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
         }
         returner 1
     }
+    // Fase 2 / 2.3: set opp functions-metadata, modulglobalar og caps FØR hooks.
+    nc_serve_init_runtime(ncb)
     la startup_status = køyre_livssyklus_hooks_trygt(ncb, "startup_hooks")
     hvis ikkje startup_status["ok"] {
         skriv("Feil: startup_hooks feila: " + tekst(startup_status["error"]) + "\n")
