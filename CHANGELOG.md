@@ -4,6 +4,12 @@ Alle merkbare endringar i Norscode blir dokumenterte i denne fila.
 
 ## [Unreleased]
 
+### Web-appar: SPA-navigasjon og PWA
+
+- Lagt til `std.spa`: SPA-navigasjonsshim generert frå Norscode (`spa_js`, `spa_inline`, `spa_script_tag`, `spa_js_response`). Byter `[data-spa-main]`, `[data-spa-nav]`, `<title>` og rot-attributta `lang`/`data-theme`/`data-density` utan fullside-omlasting; sperre mot dobbel innsending (`aria-busy`), scroll-gjenoppretting via `history.state`, fokus til `h1` + `aria-live`, fragmentbyte (`data-spa-target`), polling (`data-spa-poll`), Cmd/Ctrl+K til `[data-spa-search]`, forhåndshenting ved hover. `er_spa_request(ctx)` kjenner att shim-førespurnader. Erstattar kopiane av `klient.no` i Helpdesk, Gateway-v2 og norscode.no.
+- Lagt til `std.pwa`: web-app-manifest (`manifest_json`/`manifest_response`), service worker (`service_worker_js`/`service_worker_response`: precache, cache-først under eit prefiks, nett-først for navigasjonar med offline-side), `head_tags` og registrering (`register_js`/`register_inline`/`register_response`). Alt er tekst, så det verkar med `nc serve` i dag.
+- Testar: `tests/test_spa_module.no`, `tests/test_pwa_module.no`.
+
 ### Release-klargjering
 
 - Lagt til `./bin/nc local-green` som lokal release-preflight, aktiv flate, fase-0, L1-L6-sjølvhosting og full testport utan publisering.

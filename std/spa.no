@@ -1,0 +1,224 @@
+// spa.no — SPA-navigasjon utan fullside-omlasting, generert frå Norscode.
+//
+// Modulen emitterer klient-koden som ein streng (slik CSS/HTML alt blir emittert
+// frå .no). All app-logikk og rendering er framleis 100 % Norscode på tenaren;
+// shimmen hentar den ferdig rendra sida med fetch og byter berre dei regionane
+// som endrar seg. Felles for Helpdesk, ERP og andre Norscode-appar.
+//
+// Kontrakt (data-attributt i HTML-en appen rendrar):
+//   [data-spa-main]            regionen som byter innhald per side (hovudinnhald)
+//   [data-spa-nav]             navigasjon (byter for korrekt aktiv-markering)
+//   [data-spa-shell="namn"]    valfri, på skal-wrapperen; ulik verdi mellom to
+//                              sider (t.d. "tenant" vs "public") gjev full omlasting
+//   [data-no-spa]              på <a>/<form> som skal gjere full navigering
+//                              (innlogging, utlogging, tema-/språkbyte)
+//   [data-spa-target="#id"]    på <form method=post>: byt berre dette elementet
+//                              frå svaret (fragment), ikkje heile hovudinnhaldet
+//   [data-spa-poll="30"]       på element med id: hent sida att kvart N sekund
+//                              og byt elementet (lister, KPI, SLA-nedtelling)
+//   [data-spa-search]          på <input>: Cmd/Ctrl+K fokuserer feltet
+//   [data-spa-prefetch="off"]  på <a>: ikkje forhåndshent ved hover
+//   [data-spa-focus]           valfri, element som får fokus etter byte (elles h1)
+//
+// Åtferd:
+//   - Fangar interne lenke-klikk og skjema-innsending, hentar sida med fetch
+//     (header X-Requested-With: spa) og byter [data-spa-main], alle
+//     [data-spa-nav], <title> og rot-attributta lang/data-theme/data-density/
+//     data-app på <html>. Tema- og språkbyte som sida sjølv gjer, blir dermed synleg.
+//   - Sperre mot dobbel innsending: skjemaet får aria-busy og knappane blir
+//     deaktiverte til svaret er komme. Ved nettverksfeil blir skjemaet frigjeve
+//     att utan automatisk ny innsending.
+//   - Scroll: posisjonen blir lagra i history.state og gjenoppretta ved tilbake/fram.
+//   - Tilgjenge: etter byte får h1 (eller [data-spa-focus]) fokus, og ein
+//     aria-live-region les opp den nye tittelen.
+//   - Forhåndshenting ved hover/touchstart med kort cache (6 s), tømd etter POST.
+//   - Fell tilbake til vanleg navigering ved kryss-opphav, sider utan kontrakten,
+//     ulikt tal nav-regionar eller ulik data-spa-shell.
+//   - Inline <script> i bytt innhald blir køyrde (krev at CSP tillèt det;
+//     under script-src 'self' bør sidelogikk ligge i eksterne filer).
+//
+// Hendingar på document: 'spa:load' (detail.url) etter sidebyte,
+// 'spa:fragment' (detail.target) etter fragmentbyte.
+// window.NorscodeSpa = { go(url), refresh(), prefetch(url) }
+//
+// JS-en nyttar berre einskild-hermeteikn ' og ingen omvend skråstrek, så
+// Norscode-strengen treng inga escaping. Held seg unna </script> og <!-- .
+
+bruk std.web som web
+
+funksjon spa_js() -> tekst {
+    returner "(function(){"
+        + "'use strict';"
+        + "if(window.NorscodeSpa)return;"
+        + "var MAIN='[data-spa-main]',NAV='[data-spa-nav]',SHELL='[data-spa-shell]';"
+        + "var cache={},TTL=6000,busy=false,pollTimers=[];"
+        + "var live=document.createElement('div');"
+        + "live.setAttribute('aria-live','polite');live.setAttribute('aria-atomic','true');"
+        + "live.style.cssText='position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap';"
+        + "document.body.appendChild(live);"
+        + "var bar=document.createElement('div');"
+        + "bar.setAttribute('aria-hidden','true');"
+        + "bar.style.cssText='position:fixed;top:0;left:0;height:2px;width:0;background:var(--accent,var(--acc,#3b82f6));z-index:99999;transition:width .18s ease-out;pointer-events:none';"
+        + "document.body.appendChild(bar);"
+        + "function prog(p){bar.style.width=p+'%';if(p>=100){setTimeout(function(){bar.style.opacity='0';setTimeout(function(){bar.style.width='0';bar.style.opacity='1';},220);},180);}}"
+        + "function local(a){"
+        + "if(!a||a.target==='_blank'||a.hasAttribute('download'))return false;"
+        + "if(a.hasAttribute('data-no-spa'))return false;"
+        + "var h=a.getAttribute('href');"
+        + "if(!h||h.charAt(0)==='#')return false;"
+        + "if(h.indexOf('mailto:')===0||h.indexOf('tel:')===0||h.indexOf('javascript:')===0)return false;"
+        + "if(a.origin&&a.origin!==location.origin)return false;"
+        + "return true;}"
+        + "function hasContract(t){return t.indexOf('data-spa-main')>=0;}"
+        + "function shellOf(doc){var s=doc.querySelector(SHELL);return s?s.getAttribute('data-spa-shell'):'';}"
+        + "function syncRoot(doc){"
+        + "var src=doc.documentElement,dst=document.documentElement;"
+        + "var names=['lang','data-theme','data-density','data-app'];"
+        + "for(var i=0;i<names.length;i++){var v=src.getAttribute(names[i]);if(v===null){dst.removeAttribute(names[i]);}else if(dst.getAttribute(names[i])!==v){dst.setAttribute(names[i],v);}}"
+        + "if(doc.body&&doc.body.className!==document.body.className)document.body.className=doc.body.className;"
+        + "}"
+        + "function runScripts(root){"
+        + "var list=root.querySelectorAll('script');"
+        + "for(var i=0;i<list.length;i++){var s=list[i];if(s.src)continue;var n=document.createElement('script');n.textContent=s.textContent;s.parentNode.replaceChild(n,s);}"
+        + "}"
+        + "function focusMain(cm){"
+        + "var h=cm.querySelector('[data-spa-focus],h1');"
+        + "if(h){if(!h.hasAttribute('tabindex'))h.setAttribute('tabindex','-1');try{h.focus({preventScroll:true});}catch(e){h.focus();}}"
+        + "live.textContent=document.title;"
+        + "}"
+        + "function schedulePolls(){"
+        + "for(var i=0;i<pollTimers.length;i++)clearInterval(pollTimers[i]);"
+        + "pollTimers=[];"
+        + "var els=document.querySelectorAll('[data-spa-poll][id]');"
+        + "for(var j=0;j<els.length;j++){(function(el){"
+        + "var sec=parseInt(el.getAttribute('data-spa-poll'),10);if(!(sec>0))return;"
+        + "pollTimers.push(setInterval(function(){"
+        + "if(document.hidden||busy)return;"
+        + "fetch(location.href,{headers:{'X-Requested-With':'spa'},credentials:'same-origin'})"
+        + ".then(function(r){return r.ok?r.text():null;})"
+        + ".then(function(t){if(t&&hasContract(t))swapFragment(t,'#'+el.id);})"
+        + ".catch(function(){});"
+        + "},sec*1000));"
+        + "})(els[j]);}"
+        + "}"
+        + "function swapFragment(html,sel){"
+        + "var doc=new DOMParser().parseFromString(html,'text/html');"
+        + "var n=doc.querySelector(sel),c=document.querySelector(sel);"
+        + "if(!n||!c)return false;"
+        + "c.replaceWith(n);runScripts(n);"
+        + "try{document.dispatchEvent(new CustomEvent('spa:fragment',{detail:{target:sel}}));}catch(e){}"
+        + "return true;"
+        + "}"
+        + "function swap(html,url,push,y){"
+        + "var doc=new DOMParser().parseFromString(html,'text/html');"
+        + "var nm=doc.querySelector(MAIN),cm=document.querySelector(MAIN);"
+        + "if(!nm||!cm){window.location.href=url;return false;}"
+        + "var nns=doc.querySelectorAll(NAV),cns=document.querySelectorAll(NAV);"
+        + "if(nns.length!==cns.length||shellOf(doc)!==shellOf(document)){window.location.href=url;return false;}"
+        + "if(push){try{history.replaceState({spa:1,y:window.scrollY},'',location.href);}catch(e){}}"
+        + "syncRoot(doc);"
+        + "cm.replaceWith(nm);"
+        + "for(var i=0;i<cns.length;i++){cns[i].replaceWith(nns[i]);}"
+        + "if(doc.title)document.title=doc.title;"
+        + "if(push){try{history.pushState({spa:1,y:0},'',url);}catch(e){}}"
+        + "window.scrollTo(0,y||0);"
+        + "runScripts(nm);"
+        + "focusMain(nm);"
+        + "schedulePolls();"
+        + "try{document.dispatchEvent(new CustomEvent('spa:load',{detail:{url:url}}));}catch(e){}"
+        + "return true;"
+        + "}"
+        + "function fresh(url){var c=cache[url];if(c&&(Date.now()-c.t)<TTL)return c.h;return null;}"
+        + "function prefetch(url){"
+        + "if(fresh(url))return;"
+        + "if(navigator.connection&&navigator.connection.saveData)return;"
+        + "fetch(url,{headers:{'X-Requested-With':'spa'},credentials:'same-origin'})"
+        + ".then(function(r){if(r.ok&&!r.redirected)return r.text();return null;})"
+        + ".then(function(t){if(t&&hasContract(t))cache[url]={h:t,t:Date.now()};})"
+        + ".catch(function(){});"
+        + "}"
+        + "function go(url,push,y){"
+        + "if(busy)return;"
+        + "var c=fresh(url);"
+        + "if(c){swap(c,url,push,y);return;}"
+        + "busy=true;prog(28);"
+        + "fetch(url,{headers:{'X-Requested-With':'spa'},credentials:'same-origin'})"
+        + ".then(function(r){prog(72);var fu=r.redirected?r.url:url;return r.text().then(function(t){return {t:t,u:fu,ok:r.ok};});})"
+        + ".then(function(o){busy=false;prog(100);if(!hasContract(o.t)){window.location.href=o.u;return;}cache[o.u]={h:o.t,t:Date.now()};swap(o.t,o.u,push,y);})"
+        + ".catch(function(){busy=false;prog(100);window.location.href=url;});"
+        + "}"
+        + "function nearLink(e){return e.target&&e.target.closest?e.target.closest('a'):null;}"
+        + "document.addEventListener('mouseover',function(e){var a=nearLink(e);if(local(a)&&a.getAttribute('data-spa-prefetch')!=='off')prefetch(a.href);});"
+        + "document.addEventListener('touchstart',function(e){var a=nearLink(e);if(local(a)&&a.getAttribute('data-spa-prefetch')!=='off')prefetch(a.href);},{passive:true});"
+        + "document.addEventListener('click',function(e){"
+        + "if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;"
+        + "var a=nearLink(e);"
+        + "if(!local(a))return;"
+        + "e.preventDefault();"
+        + "go(a.href,true,0);"
+        + "});"
+        + "document.addEventListener('submit',function(e){"
+        + "var f=e.target;"
+        + "if(!f||f.hasAttribute('data-no-spa'))return;"
+        + "if(f.getAttribute('aria-busy')==='true'){e.preventDefault();return;}"
+        + "var method=(f.getAttribute('method')||'get').toLowerCase();"
+        + "var action=f.getAttribute('action')||location.pathname;"
+        + "try{var au=new URL(action,location.href);if(au.origin!==location.origin)return;action=au.href;}catch(err){}"
+        + "e.preventDefault();"
+        + "var target=f.getAttribute('data-spa-target');"
+        + "var btns=f.querySelectorAll('button,input[type=submit]');"
+        + "function lock(on){f.setAttribute('aria-busy',on?'true':'false');for(var i=0;i<btns.length;i++){btns[i].disabled=on;}}"
+        + "lock(true);prog(28);"
+        + "var opts={credentials:'same-origin',headers:{'X-Requested-With':'spa'}};"
+        + "var url=action;"
+        + "if(method==='post'){opts.method='POST';opts.body=new FormData(f);cache={};}"
+        + "else{var q=new URLSearchParams(new FormData(f)).toString();url=action+(action.indexOf('?')<0?'?':'&')+q;}"
+        + "fetch(url,opts)"
+        + ".then(function(r){prog(72);var fu=r.redirected?r.url:url;return r.text().then(function(t){return {t:t,u:fu,ok:r.ok};});})"
+        + ".then(function(o){prog(100);lock(false);"
+        + "if(!hasContract(o.t)){window.location.href=o.u;return;}"
+        + "if(target&&method==='post'&&o.ok&&swapFragment(o.t,target)){live.textContent='Lagra';return;}"
+        + "swap(o.t,o.u,true,0);})"
+        + ".catch(function(){prog(100);lock(false);live.textContent='Nettverksfeil, prøv att';});"
+        + "});"
+        + "document.addEventListener('keydown',function(e){"
+        + "if((e.metaKey||e.ctrlKey)&&!e.altKey&&(e.key==='k'||e.key==='K')){var s=document.querySelector('[data-spa-search]');if(s){e.preventDefault();s.focus();if(s.select)s.select();}}"
+        + "});"
+        + "window.addEventListener('popstate',function(e){var y=(e.state&&e.state.y)||0;go(location.href,false,y);});"
+        + "try{history.replaceState({spa:1,y:window.scrollY},'',location.href);}catch(e){}"
+        + "schedulePolls();"
+        + "window.NorscodeSpa={go:function(u){go(u,true,0);},refresh:function(){cache={};go(location.href,false,window.scrollY);},prefetch:prefetch};"
+        + "})();"
+}
+
+// Inline <script> klar for innsetjing før </body>. Krev at CSP tillèt inline
+// script; under script-src 'self' bruk spa_script_tag + spa_js_response.
+funksjon spa_inline() -> tekst {
+    returner "<script>" + spa_js() + "</script>"
+}
+
+// <script src=...> for ein rute som leverer spa_js_response() (t.d. /assets/spa.js).
+funksjon spa_script_tag(src: tekst) -> tekst {
+    returner "<script src=\"" + src + "\" defer></script>"
+}
+
+// Respons for ruta som leverer shimmen som ekstern fil (cache i eitt døgn).
+funksjon spa_js_response() -> ordbok_tekst {
+    returner web.response_builder(200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=86400"}, spa_js())
+}
+
+// Attributt-hjelparar for appar som rendrar kontrakten.
+funksjon main_attr() -> tekst { returner " data-spa-main" }
+funksjon nav_attr() -> tekst { returner " data-spa-nav" }
+funksjon shell_attr(namn: tekst) -> tekst { returner " data-spa-shell=\"" + namn + "\"" }
+funksjon no_spa_attr() -> tekst { returner " data-no-spa" }
+funksjon target_attr(selektor: tekst) -> tekst { returner " data-spa-target=\"" + selektor + "\"" }
+funksjon poll_attr(sekund: heltall) -> tekst { returner " data-spa-poll=\"" + tekst_fra_heltall(sekund) + "\"" }
+funksjon search_attr() -> tekst { returner " data-spa-search" }
+funksjon focus_attr() -> tekst { returner " data-spa-focus" }
+
+// Sann når requesten kom frå shimmen (X-Requested-With: spa); appar kan då
+// t.d. sløyfe tunge delar utanfor [data-spa-main].
+funksjon er_spa_request(ctx: ordbok_tekst) -> boolsk {
+    returner builtin.lower(web.request_header(ctx, "x-requested-with")) == "spa"
+}
