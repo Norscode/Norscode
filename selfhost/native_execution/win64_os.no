@@ -74,6 +74,7 @@ funksjon os_importar_full() {
         ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
             "VirtualProtect", "GetSystemTimePreciseAsFileTime",
             "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc",
+            "GetEnvironmentStringsW",
             "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
             "CloseHandle", "SetFilePointerEx",
             "DeleteFileW", "RemoveDirectoryW", "CreateDirectoryW",
@@ -296,13 +297,14 @@ funksjon emit_clock_gettime(a, slot, base: heiltall) -> heiltall {
     returner 0
 }
 
-// ── os_setup_argv: syntetiser argv (+ tomt envp) frå GetCommandLineW (W1) ─────
-// Windows-entry har inga startstakk med argc/argv. _start kallar OSTAB[NR_SETUP_ARGV]:
+// ── os_setup_argv: syntetiser argv + envp frå GetCommandLineW/GetEnvironmentStringsW (W1/W6) ─
+// Windows-entry har inga startstakk med argc/argv/envp. _start kallar OSTAB[NR_SETUP_ARGV]:
 // GetCommandLineW → CommandLineToArgvW(&argc) → per arg WideCharToMultiByte(CP_UTF8) inn i
 // ein VirtualAlloc-buffer; byggjer argv** (array av UTF-8 char*) og skriv {argv**, argc} til
-// verts-ABI-slottane runtimeen les (argv_store_va / +8), og envp → ein null-slot i bufferen
-// (tomt miljø, ingen null-deref). Callee-saved (rbx,r12-r15) lagra i eigen prolog.
-// Bufferlayout: argv-peikarar [0, 8192), null-slot @6144 (envp), UTF-8-strengar [8192, 1 MiB).
+// verts-ABI-slottane runtimeen les (argv_store_va / +8). Deretter (W6) GetEnvironmentStringsW
+// → eit eige buffer med null-terminert envp** (UTF-8 «KEY=VALUE») → envp_store_va, slik at
+// env() verkar på Windows. Callee-saved (rbx,r12-r15) lagra i eigen prolog.
+// Argv-bufferlayout: argv-peikarar [0, argc*8), UTF-8-strengar frå 16-aligna (argc+2)*8.
 funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_store_va: heiltall) -> heiltall {
     asm.merk(a, "os_setup_argv")
     asm.push(a, asm.RBP())
@@ -342,11 +344,7 @@ funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_
     asm.mov_i64(a, asm.R11(), argv_store_va)
     asm.st(a, asm.R11(), 0, asm.R14())           // argv** = buffer
     asm.st(a, asm.R11(), 8, asm.R15())           // argc
-    asm.mov(a, asm.RAX(), asm.R15())
-    asm.shl_i(a, asm.RAX(), 3)                    // argc*8
-    asm.add(a, asm.RAX(), asm.R14())              // buffer + argc*8 (nullstilt slot etter argv-array)
-    asm.mov_i64(a, asm.R11(), envp_store_va)
-    asm.st(a, asm.R11(), 0, asm.RAX())           // envp → &0 (tomt miljø)
+    // (envp blir no syntetisert frå GetEnvironmentStringsW etter sa_done, ikkje tomt)
     asm.xor(a, asm.RBX(), asm.RBX())             // i = 0
     asm.merk(a, "sa_loop")
     asm.cmp(a, asm.RBX(), asm.R15())
@@ -373,6 +371,59 @@ funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_
     asm.add_i(a, asm.RBX(), 1)
     asm.jmp(a, "sa_loop")
     asm.merk(a, "sa_done")
+    // ── envp: GetEnvironmentStringsW → UTF-8 «KEY=VALUE»-array (W6: env() på Windows) ──
+    // Windows gjev ingen envp på entry. Vi hentar det wide, dobbelt-NUL-terminerte
+    // miljøblokket og byggjer eit eige 1 MiB-buffer: peikararray i [0, 8192) (opp til 1023
+    // oppføringar + NUL-terminator), UTF-8-strengane frå +8192. Skriv array-basen til
+    // envp_store_va slik at runtimeen sin env()-oppslag (null-terminert char**) finn verdiane.
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.mov_i64(a, asm.RDX(), 1048576)
+    asm.mov_i64(a, asm.R8(), 12288)              // MEM_COMMIT|MEM_RESERVE
+    asm.mov_i64(a, asm.R9(), 4)                  // PAGE_READWRITE
+    iat(a, slot, base, "KERNEL32.dll!VirtualAlloc")
+    asm.mov(a, asm.R14(), asm.RAX())             // r14 = env-buffer (peikararray @[0,8192), strengar @ +8192)
+    iat(a, slot, base, "KERNEL32.dll!GetEnvironmentStringsW")
+    asm.mov(a, asm.R12(), asm.RAX())             // r12 = wide gå-peikar gjennom miljøblokket
+    asm.mov(a, asm.R13(), asm.R14())
+    asm.add_i(a, asm.R13(), 8192)                // r13 = UTF-8 skrivepeikar
+    asm.xor(a, asm.RBX(), asm.RBX())             // i = 0
+    asm.merk(a, "ev_loop")
+    asm.ld16(a, asm.RAX(), asm.R12(), 0)         // fyrste wide-eining i oppføringa
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "ev_done")            // tom streng = dobbel-NUL = slutt
+    // envp[i] = r13
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.shl_i(a, asm.RAX(), 3)
+    asm.add(a, asm.RAX(), asm.R14())
+    asm.st(a, asm.RAX(), 0, asm.R13())
+    // WideCharToMultiByte(CP_UTF8=65001, 0, r12, -1, r13, 32768, 0, 0)
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.R12())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.st(a, asm.RSP(), 32, asm.R13())          // lpMultiByteStr = dst
+    asm.st_i(a, asm.RSP(), 40, 32768)            // cbMultiByte = cap
+    asm.st_i(a, asm.RSP(), 48, 0)                // lpDefaultChar = NULL
+    asm.st_i(a, asm.RSP(), 56, 0)                // lpUsedDefaultChar = NULL
+    iat(a, slot, base, "KERNEL32.dll!WideCharToMultiByte")
+    asm.add(a, asm.R13(), asm.RAX())             // advance dst forbi UTF-8 + NUL
+    // gå r12 forbi denne wide-strengen (til og med wide-NUL)
+    asm.merk(a, "ev_scan")
+    asm.ld16(a, asm.RAX(), asm.R12(), 0)
+    asm.add_i(a, asm.R12(), 2)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_NE(), "ev_scan")
+    asm.add_i(a, asm.RBX(), 1)
+    asm.jmp(a, "ev_loop")
+    asm.merk(a, "ev_done")
+    // envp[i] = NULL (null-terminer peikararrayen)
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.shl_i(a, asm.RAX(), 3)
+    asm.add(a, asm.RAX(), asm.R14())
+    asm.st_i(a, asm.RAX(), 0, 0)
+    // envp_store_va → peikararray-basen
+    asm.mov_i64(a, asm.R11(), envp_store_va)
+    asm.st(a, asm.R11(), 0, asm.R14())
     asm.lea(a, asm.RSP(), asm.RBP(), 0 - 40)     // tilbake til r15-sloten (5 push × 8)
     asm.pop(a, asm.R15())
     asm.pop(a, asm.R14())
