@@ -1,0 +1,111 @@
+name: Windows fersk seed (frittståande CRT-fri nc_main-PE + smoke på ekte Windows)
+
+# Byggjer ein FRITTSTÅANDE windows-x86_64 nc_main-PE frå levande kjelde
+# (tools/build_windows_seed.no: materialize nc_main-NCB + native_codegen_v2 med
+# NC_TARGET=windows-x86_64 → PE32+ som importerer berre KERNEL32/ADVAPI32/SHELL32,
+# INGEN api-ms-win-crt/UCRT), og røyktestar kandidaten på ekte windows-latest
+# (version + run + CRT-fri import-tabell). Dette er W5 i docs/WINDOWS_SEED_PLAN.md:
+# erstatninga av den gamle C-æra-verten med ein ekte native Norscode-PE.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - selfhost/native_execution/native_codegen_v2.no
+      - selfhost/native_execution/pe_emitter.no
+      - selfhost/native_execution/win64_os.no
+      - selfhost/native_execution/win64_asm.no
+      - selfhost/native_execution/heap_layout.no
+      - selfhost/native_execution/codegen_prebuilt.no
+      - tools/build_windows_seed.no
+      - .github/workflows/windows-seed.yml
+
+env:
+  NORSCODE_ROOT: ${{ github.workspace }}
+  NORSCODE_ENABLE_EXEC_PROSESS: "1"
+  NORSCODE_VM_CAPABILITIES: env.read,env.write,process.exec,disk.read,disk.write
+  NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NC_CI: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  bygg:
+    name: Kryss-bygg frittståande windows nc_main (på x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: ${{ github.workspace }}/bootstrap/stage0/norscode-linux-x86_64 run ${{ github.workspace }}/tools/ci_shell_runner.no {0}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Materialiser native runtime (x86_64)
+        env:
+          NORSCODE_CI_FILE_SOURCE: bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_CI_FILE_TARGET: dist/norscode_native
+          NORSCODE_VM_CI_CHILD_CMD: run
+          NORSCODE_VM_CI_CHILD_EXECUTABLE: ./bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_VM_CI_CHILD_FILE: ${{ github.workspace }}/tools/ci_runtime_fileops.no
+          NORSCODE_VM_CI_CHILD_CAPABILITIES: env.read,process.exec,disk.read,disk.write
+          NORSCODE_VM_CI_CHILD_DISK_ROOT: ${{ github.workspace }},.,/tmp
+          NORSCODE_VM_CI_COMMAND: "./bootstrap/stage0/norscode-linux-x86_64"
+        run: ./bootstrap/stage0/norscode-linux-x86_64
+      - name: Bygg frittståande windows-x86_64 nc_main frå kjelde (materialize + kryss-codegen)
+        env:
+          NORSCODE_VM_CI_STEP_TIMEOUT_MS: "5400000"
+          NORSCODE_VM_CI_STREAM: "1"
+          NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/build_windows_seed.no"
+        run: ./bin/nc run tools/build_windows_seed.no
+      - name: Last opp den frittståande kandidaten
+        if: success() || failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: norscode-windows-freestanding-kandidat
+          path: build/windows/nc_main_freestanding_win.exe
+          if-no-files-found: error
+
+  smoke:
+    name: Røyktest frittståande PE på ekte Windows
+    needs: bygg
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-windows-freestanding-kandidat
+          path: build/windows
+      - name: Frittståande / CRT-fri import-tabell
+        shell: pwsh
+        run: |
+          $exe = "build/windows/nc_main_freestanding_win.exe"
+          if (-not (Test-Path $exe)) { throw "kandidat manglar: $exe" }
+          $txt = [System.IO.File]::ReadAllText($exe, [System.Text.Encoding]::ASCII)
+          if ($txt -match 'api-ms-win-crt|ucrtbase|msvcrt|vcruntime') {
+            throw "PE importerer C-runtime (UCRT) - IKKJE frittståande"
+          }
+          Write-Host "[OK] Ingen UCRT-referanse i PE-en (frittståande)"
+      - name: version + run + fil-I/O på ekte Windows
+        shell: pwsh
+        run: |
+          $exe = "build/windows/nc_main_freestanding_win.exe"
+          Write-Host "== nc version =="
+          & $exe version
+          if ($LASTEXITCODE -ne 0) { throw "nc version gav exit $LASTEXITCODE" }
+          Write-Host "== nc run (compile + execute + stdout) =="
+          'funksjon start() -> heiltall { skriv("WINSMOKE-OK\n") returner 0 }' | Out-File -Encoding ascii hello.no
+          & $exe run hello.no | Tee-Object -FilePath out.txt
+          if ($LASTEXITCODE -ne 0) { throw "nc run gav exit $LASTEXITCODE" }
+          if (-not (Select-String -Path out.txt -Pattern 'WINSMOKE-OK' -Quiet)) {
+            throw "venta WINSMOKE-OK i utdata, fann ikkje"
+          }
+          Write-Host "== fil-I/O (skriv + les attende) =="
+          'funksjon start() -> heiltall { fil_skriv("fio.txt", "FIO-123"); la s = fil_les("fio.txt"); hvis s == "FIO-123" { skriv("FIO-OK\n") returner 0 } ellers { skriv("FIO-FEIL\n") returner 1 } }' | Out-File -Encoding ascii fio.no
+          & $exe run fio.no | Tee-Object -FilePath fio_out.txt
+          if ($LASTEXITCODE -ne 0) { throw "fil-I/O nc run gav exit $LASTEXITCODE" }
+          if (-not (Select-String -Path fio_out.txt -Pattern 'FIO-OK' -Quiet)) {
+            throw "venta FIO-OK, fann ikkje"
+          }
+          Write-Host "[OK] Frittståande Windows-PE: version + run + fil-I/O grøne på ekte Windows"

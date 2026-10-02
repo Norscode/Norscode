@@ -1,0 +1,147 @@
+// tools/build_windows_seed.no — byggjer ein FRITTSTÅANDE, CRT-fri windows-x86_64
+// nc_main-PE frå levande kjelde med Norscode sin eigen codegen (native_codegen_v2 —
+// same kjelde som linux-x86_64; windows-målet blir valt med NC_TARGET ved runtime, so
+// den delte x86-codegen-ELF-en treng ingen eigen windows-kryss-codegen). Ingen C, Python
+// eller framande lenkjar. Den emitterte PE-en importerer berre KERNEL32/ADVAPI32/SHELL32
+// (INGEN api-ms-win-crt / UCRT), motsett den gamle C-æra-verten.
+//
+// To steg, begge spawna med EKSPLISITT miljø (omgår ci_shell_runner-whitelista):
+//   1) tools/materialize_nc_main_fullhost_candidate.no → full-host nc_main-NCB
+//      (build/fullhost/nc_main_fullhost_candidate.ncb.json). NORSCODE_SEED_NCB = ferdig
+//      NCB hoppar over steget.
+//   2) bootstrap/native_codegen_x86_64.elf med NC_INPUT/NC_OUTPUT + NC_TARGET=windows-x86_64
+//      + NORSCODE_GC_ALLOC=1 → PE32+ med frittståande GC-heap. Deterministisk: same NCB
+//      gjev same bytes.
+//
+// Utdata: build/windows/nc_main_freestanding_win.exe; NC_WIN_OUT overstyrer. Køyring og
+// seed-port skjer på ekte windows-latest (.github/workflows/windows-seed.yml).
+
+bruk std.runtime.process_abi som process_abi
+
+funksjon linje(m: tekst) -> heiltall { skriv(m + "\n") returner 0 }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon bytes(sti: tekst) -> tekst {
+    prøv { returner tekst_fra_heltall(lengde(builtin.fil_les_binær(sti))) } fang (e) { returner "0" }
+}
+
+funksjon sha(sti: tekst) -> tekst {
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) { returner "" }
+}
+
+funksjon spawn(prog: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst,
+               timeout_ms: heiltall) -> ordbok_tekst {
+    la req = process_abi.request(prog, argv, root, "", timeout_ms, 65536)
+    process_abi.sett_sandbox(req, "none", 0, 64, usann)
+    process_abi.sett_environment(req, miljø)
+    la res = builtin.process_spawn_argv(req)
+    hvis res["stdout"] != "" { skriv(res["stdout"]) }
+    hvis res["stderr"] != "" { skriv(res["stderr"]) }
+    returner res
+}
+
+funksjon ok(res: ordbok_tekst) -> boolsk {
+    returner res["status"] == "ferdig" og heltall_fra_tekst(tekst(res["exit_code"])) == 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    hvis ikkje builtin.fil_finnes(native) { linje("Feil: manglar native runtime: " + native) returner 1 }
+    // windows-x86_64 deler native_codegen_v2 med linux-x86_64 (codegen_prebuilt.codegen_kjelde);
+    // målet blir valt med NC_TARGET ved runtime, so den committa linux-x86-codegen-ELF-en held.
+    la codegen = root + "/bootstrap/native_codegen_x86_64.elf"
+    hvis ikkje builtin.fil_finnes(codegen) { linje("Feil: manglar x86-codegen: " + codegen) returner 1 }
+    la ut = env("NC_WIN_OUT")
+    hvis ut == "" { ut = root + "/build/windows/nc_main_freestanding_win.exe" }
+    la ncb = env("NORSCODE_SEED_NCB")
+    la disk = root + ",.,/tmp,/private/tmp," + root + "/build"
+    builtin.mkdir_p(root + "/build/windows")
+
+    hvis ncb == "" {
+        // Materialiseringa treng L5-driveren (build/l5/compiler_driver.ncb.json), som
+        // `nc selfcompile-l5` byggjer frå kjelde.
+        la driver = root + "/build/l5/compiler_driver.ncb.json"
+        hvis ikkje builtin.fil_finnes(driver) {
+            linje("[0/2] selfcompile-l5 (L5-driver frå kjelde) ...")
+            la m0 = {
+                "NORSCODE_ROOT": root,
+                "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+                "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write,jit.execute",
+                "NORSCODE_VM_DISK_ROOT": disk,
+                "PATH": env("PATH"),
+                "TMPDIR": "/tmp"
+            }
+            la r0 = spawn(native, ["selfcompile-l5"], root, m0, 3600000)
+            hvis ikkje ok(r0) eller ikkje builtin.fil_finnes(driver) {
+                linje("[FEIL] selfcompile-l5: status=" + tekst(r0["status"]) + " exit=" + tekst(r0["exit_code"]) +
+                      " error=" + tekst(r0["error"]))
+                returner 1
+            }
+        }
+        ncb = root + "/build/fullhost/nc_main_fullhost_candidate.ncb.json"
+        linje("[1/2] Materialiser full-host nc_main-NCB frå kjelde ...")
+        la m1 = {
+            "NORSCODE_ROOT": root,
+            "NORSCODE_CMD": "run",
+            "NORSCODE_FILE": root + "/tools/materialize_nc_main_fullhost_candidate.no",
+            "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+            "NC_FULLHOST_REUSE": env("NC_FULLHOST_REUSE"),
+            "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write,jit.execute",
+            "NORSCODE_VM_DISK_ROOT": disk,
+            "PATH": env("PATH"),
+            "TMPDIR": "/tmp"
+        }
+        la r1 = spawn(native, [], root, m1, 3600000)
+        hvis ikkje ok(r1) {
+            linje("[FEIL] materialisering: status=" + tekst(r1["status"]) + " exit=" + tekst(r1["exit_code"]) +
+                  " error=" + tekst(r1["error"]))
+            returner 1
+        }
+    } ellers {
+        linje("[1/2] Brukar ferdig NCB (NORSCODE_SEED_NCB): " + ncb)
+    }
+    hvis ikkje builtin.fil_finnes(ncb) { linje("[FEIL] manglar NCB: " + ncb) returner 1 }
+    linje("[OK] NCB " + bytes(ncb) + " bytes")
+
+    linje("[2/2] Kryss-codegen NCB → frittståande windows-x86_64 PE (GC) ...")
+    la m2 = {
+        "NORSCODE_ROOT": root,
+        "NC_INPUT": ncb,
+        "NC_OUTPUT": ut,
+        "NC_TARGET": "windows-x86_64",
+        "NC_NATIVE_SYMBOL_MAP": ut + ".symbols",
+        "NC_BUILTIN_REPORT": "1",
+        "NORSCODE_GC_ALLOC": "1",
+        "PATH": env("PATH"),
+        "TMPDIR": "/tmp"
+    }
+    la r2 = spawn(codegen, [], root, m2, 3600000)
+    hvis ikkje ok(r2) {
+        linje("[FEIL] kryss-codegen: status=" + tekst(r2["status"]) + " exit=" + tekst(r2["exit_code"]) +
+              " error=" + tekst(r2["error"]))
+        returner 1
+    }
+    hvis ikkje builtin.fil_finnes(ut) { linje("[FEIL] PE ikkje skriven: " + ut) returner 1 }
+    linje("[OK] windows-x86_64 nc_main " + bytes(ut) + " bytes → " + ut)
+
+    // NC_WINDOWS_KREV_LIK=1: den committa stage0-seeden MÅ vere byte-lik det kjelda byggjer
+    // (reproduserbarheit etter W7-promotering). Før promotering er committa seed C-æra-verten
+    // og dette slår ikkje til — gaten er for CI etter at den frittståande PE-en er promotert.
+    hvis env("NC_WINDOWS_KREV_LIK") == "1" {
+        la seed = root + "/bootstrap/stage0/norscode-windows-x86_64.exe"
+        hvis sha(seed) == "" eller sha(seed) != sha(ut) {
+            linje("[FEIL] bootstrap/stage0/norscode-windows-x86_64.exe er IKKJE byte-lik kandidaten frå kjelda (" +
+                  bytes(seed) + " vs " + bytes(ut) + " bytes). Bygg og promoter på nytt.")
+            returner 1
+        }
+        linje("[OK] bootstrap/stage0/norscode-windows-x86_64.exe er byte-lik kandidaten frå kjelda")
+    }
+    returner 0
+}
