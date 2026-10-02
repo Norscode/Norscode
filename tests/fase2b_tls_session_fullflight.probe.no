@@ -1,0 +1,89 @@
+# MERK: full statsmaskin-flight i rein tolk køyrer ECDHE/Ed25519/ChaCha i pure-VM
+#       og er difor minuttlang (ikkje test_-prefiks → ikkje i `nc test`-suiten).
+#       Rask ekvivalent (same wiring, utan tung krypto): tests/test_fase2b_tls_session.no.
+#       Denne probe er meint for native/seed-køyring etter reseed.
+# Fase 2 punkt 2.11 — TLS legacy_session_id-spegling på serversida (RFC 8446 §4.1.3).
+# Matar ein ClientHello med NON-tom legacy_session_id inn i tenar-tilstandsmaskina
+# (std.tls13_session._tenar_motta) og stadfestar at ServerHello ekkar nett den same
+# session_id-en. Før fiksen sende serveren tom session_id (sjå tls13_session.no:205);
+# denne testen fangar regresjonen om nokon skulle setje han tom att.
+bruk std.tls13_session som ses
+bruk std.tls13_handshake som hs
+bruk std.x25519 som dh
+
+funksjon _seed(base: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < 32 { legg_til(ut, (base + i * 7) & 255) i = i + 1 }
+    returner ut
+}
+
+# 32-byte legacy_session_id som OpenSSL/LibreSSL sender i TLS 1.3-kompatibilitetsmodus.
+funksjon _sid() -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < 32 { legg_til(ut, (0xA0 + i) & 255) i = i + 1 }
+    returner ut
+}
+
+# Plaintext record (type || 0x0303 || len || body) — same ramme som sesjonen ventar.
+funksjon _rec_plain(type: heiltall, body: liste_heiltall) -> liste_heiltall {
+    la n = lengde(body)
+    la ut: liste_heiltall = [type & 255, 3, 3, (n >> 8) & 255, n & 255]
+    la i = 0
+    mens i < n { legg_til(ut, body[i]) i = i + 1 }
+    returner ut
+}
+
+# Trekk ut handshake-innhald frå det første plaintext-recordet i ein straum.
+funksjon _first_record_body(buf: liste_heiltall) -> liste_heiltall {
+    la len = (buf[3] << 8) | buf[4]
+    la ut: liste_heiltall = []
+    la i = 5
+    mens i < 5 + len { legg_til(ut, buf[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    la c_priv = _seed(1)
+    la c_pub = dh.scalarmult_base(c_priv)
+    la sid = _sid()
+
+    # Rå ClientHello med NON-tom legacy_session_id.
+    la rnd: liste_heiltall = [] la i = 0
+    mens i < 32 { legg_til(rnd, 0) i = i + 1 }
+    la CH = hs.build_client_hello({"random": rnd, "session_id": sid, "key_share_pub": c_pub, "server_name": "norscode.example"})
+    la ch_rec = _rec_plain(22, CH)
+
+    # Tenar-sesjon med rå Ed25519-identitet (M2a, inga x509 trengst).
+    la s = ses.ny_tenar({"priv": _seed(101), "id_seed": _seed(200)})
+    la res = ses.motta(s, ch_rec)
+    assert_eq(res["status"], "ventande")      # tenaren har sendt SH+flight, ventar klient-Finished
+
+    # Første record i svaret er ServerHello (plaintext, type 22).
+    la ut = res["ut"]
+    assert_eq(ut[0], 22)
+    la sh = _first_record_body(ut)
+    la ph = hs.parse_handshake(sh, 0)
+    assert_eq(ph["ok"], sann)
+    assert_eq(ph["type"], 2)                  # ServerHello
+    la sp = hs.parse_server_hello(sh, ph["start"], ph["end"])
+    assert_eq(sp["ok"], sann)
+
+    # KJERNA: ServerHello.legacy_session_id_echo == ClientHello.legacy_session_id.
+    assert_eq(lengde(sp["session_id"]), 32)
+    assert_eq(_lik(sp["session_id"], sid), sann)
+
+    # Kontroll: parse_client_hello ser same session_id (sjølvsamanheng).
+    la cph = hs.parse_handshake(CH, 0)
+    la cp = hs.parse_client_hello(CH, cph["start"], cph["end"])
+    assert_eq(_lik(cp["session_id"], sid), sann)
+
+    skriv("test_fase2b_tls_session OK — legacy_session_id spegla (" + tekst(lengde(sp["session_id"])) + " byte)")
+    returner 0
+}
