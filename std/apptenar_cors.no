@@ -1,0 +1,123 @@
+# apptenar_cors.no — CORS for apptenar (Fase 1, 1.4)
+#
+# Allowlist-basert CORS. Speglar ALDRI ein vilkårleg Origin: Access-Control-Allow-Origin
+# er anten "*" (berre når credentials er av) eller nøyaktig ein origin som står i
+# allowlista. Ein ukjend origin får ingen Access-Control-*-headerar (nettlesaren blokkerer
+# då sjølv). Dette er same oppførsel som Starlette/FastAPI sin CORSMiddleware, og rettar
+# spegling-holet som #206 fann i std/web.no.
+#
+# Konfig (apptenar-nøkkelen "cors"):
+#   {
+#     "origins": ["https://app.eksempel.no"],   # eksakte origins, eller ["*"]
+#     "metodar": ["GET", "POST", ...],           # tillatne metodar (preflight)
+#     "headerar": ["content-type", ...],         # tillatne request-headerar, eller ["*"]
+#     "credentials": usann,                       # Access-Control-Allow-Credentials
+#     "maks_alder": 600,                          # Access-Control-Max-Age (sekund)
+#     "eksponer": []                              # Access-Control-Expose-Headers
+#   }
+# "*" saman med credentials=sann er ikkje lov (standarden forbyr det); då blir
+# wildcard ignorert og berre eksakte origins slepp gjennom.
+
+funksjon _liten(t: tekst) -> tekst {
+    hvis lengde(t) > 256 { returner t }
+    returner builtin.lower(t)
+}
+
+funksjon _har(liste_v, v: tekst) -> bool {
+    hvis liste_v == null eller builtin.type(liste_v) != "liste" { returner usann }
+    la i = 0
+    mens i < lengde(liste_v) {
+        hvis tekst(liste_v[i]) == v { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _standard(c: ordbok) -> ordbok {
+    la out = {}
+    out["origins"] = []
+    out["metodar"] = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    out["headerar"] = ["*"]
+    out["credentials"] = usann
+    out["maks_alder"] = 600
+    out["eksponer"] = []
+    hvis c != null og builtin.type(c) == "ordbok" {
+        la ks = nøkler(c)
+        la i = 0
+        mens i < lengde(ks) { out[ks[i]] = c[ks[i]]  i = i + 1 }
+    }
+    returner out
+}
+
+# Wildcard er berre tillate utan credentials (standarden forbyr "*" + credentials).
+funksjon _wildcard(c: ordbok) -> bool {
+    returner _har(c["origins"], "*") og ikkje c["credentials"]
+}
+
+# Er origin lov? Eksakt treff i allowlista, eller wildcard (utan credentials).
+funksjon origin_tillaten(konf: ordbok, origin: tekst) -> bool {
+    hvis origin == "" { returner usann }
+    la c = _standard(konf)
+    hvis _wildcard(c) { returner sann }
+    returner _har(c["origins"], origin)
+}
+
+# Verdien til Access-Control-Allow-Origin: "*" ved wildcard, elles den eksakte (allowlista)
+# origin-en. Me returnerer ALDRI ein origin som ikkje er allowlista.
+funksjon acao_verdi(konf: ordbok, origin: tekst) -> tekst {
+    la c = _standard(konf)
+    hvis _wildcard(c) { returner "*" }
+    hvis _har(c["origins"], origin) { returner origin }
+    returner ""
+}
+
+# Når ACAO ikkje er "*" varierer svaret med Origin → Vary: Origin (så cache ikkje lek).
+funksjon _treng_vary(konf: ordbok, origin: tekst) -> bool {
+    returner acao_verdi(konf, origin) != "*"
+}
+
+# Headerar for eit ekte svar (ikkje preflight) når Origin er allowlista. {} elles.
+funksjon aktuelle_headerar(konf: ordbok, origin: tekst) -> ordbok {
+    hvis ikkje origin_tillaten(konf, origin) { returner {} }
+    la c = _standard(konf)
+    la h = {}
+    h["access-control-allow-origin"] = acao_verdi(c, origin)
+    hvis c["credentials"] { h["access-control-allow-credentials"] = "true" }
+    hvis _treng_vary(c, origin) { h["vary"] = "Origin" }
+    hvis c["eksponer"] != null og builtin.type(c["eksponer"]) == "liste" og lengde(c["eksponer"]) > 0 {
+        h["access-control-expose-headers"] = builtin.join(c["eksponer"], ", ")
+    }
+    returner h
+}
+
+# Er dette ein CORS-preflight? OPTIONS med Origin og Access-Control-Request-Method.
+funksjon er_preflight(metode_liten: tekst, origin: tekst, acrm: tekst) -> bool {
+    returner metode_liten == "options" og origin != "" og acrm != ""
+}
+
+# Preflight-svar (204) med Access-Control-*-headerar når Origin er allowlista. Ein ukjend
+# origin gjev eit 204 UTAN CORS-headerar (nettlesaren blokkerer). `acrh` er verdien av
+# Access-Control-Request-Headers frå førespurnaden.
+funksjon preflight_svar(konf: ordbok, origin: tekst, acrh: tekst) -> ordbok {
+    la c = _standard(konf)
+    la h = {}
+    hvis origin_tillaten(c, origin) {
+        h["access-control-allow-origin"] = acao_verdi(c, origin)
+        hvis c["credentials"] { h["access-control-allow-credentials"] = "true" }
+        h["access-control-allow-methods"] = builtin.join(c["metodar"], ", ")
+        # Headerar: "*" (utan credentials) → "*"; elles den konfigurerte lista, eller det
+        # klienten bad om når lista er tom.
+        hvis _har(c["headerar"], "*") og ikkje c["credentials"] {
+            h["access-control-allow-headers"] = "*"
+        } ellers hvis c["headerar"] != null og builtin.type(c["headerar"]) == "liste" og lengde(c["headerar"]) > 0 og ikkje _har(c["headerar"], "*") {
+            h["access-control-allow-headers"] = builtin.join(c["headerar"], ", ")
+        } ellers hvis acrh != "" {
+            h["access-control-allow-headers"] = acrh
+        }
+        h["access-control-max-age"] = tekst(c["maks_alder"])
+        la vv = "Origin"
+        hvis acrh != "" { vv = "Origin, Access-Control-Request-Headers" }
+        h["vary"] = vv
+    }
+    returner {"status": 204, "body": "", "headers": h}
+}
