@@ -1528,8 +1528,89 @@ funksjon _pg_synkron_feil(detalj: tekst) {
 // ALLE builtin.process_spawn_argv-kall hit (kompileringsfeil utan std.native_gap i bunten).
 // Same Norscode-motor som den asynkrone ABI-en, med blokkerande venting på ppoll og
 // seccomp-sandkasse i barnet når request-en ber om ein profil.
+funksjon _pg_er_windows() -> boolsk {
+    prøv { returner tekst(builtin.native_target()) == "windows-x86_64" } fang (e) { returner usann }
+    returner usann
+}
+
+// OSTAB-slot for os_win_spawn (win64_os.NR_WIN_SPAWN). Ikkje eit Linux-syscall, so det
+// står ikkje i nsys-tabellen — synkron CreateProcessW-veg, berre windows-x86_64.
+funksjon _PG_NR_WIN_SPAWN() -> heiltall { returner 501 }
+// OSTAB-slot for os_mmap (win64_os.NR_MMAP = Linux mmap-nr 9, VirtualAlloc på Windows).
+// Kalla direkte med sys6 (ikkje _sys_mmap_rw/nsys, som manglar windows-tabell).
+funksjon _PG_NR_WIN_MMAP() -> heiltall { returner 9 }
+
+// Dobbel-siter ein kommandolinje-token (handterer mellomrom i stiar). Enkelt: inga
+// escaping av innebygde hermeteikn — greitt for seed-bruk (stiar som ci_shell_runner/
+// nc_test spawnar). W6.1b kan stramme opp.
+funksjon _pg_win_quote(s: tekst) -> tekst {
+    // Berre siter når det trengst: tomt token, eller token med mellomrom/tab. Å sitere
+    // ALT bryt cmd.exe sin innebygde-kommando-parsing (t.d. «"exit" "7"» køyrer ikkje
+    // exit-builtinen → feil exit-kode), so enkle token (stiar utan mellomrom) står nakne.
+    hvis s == "" eller builtin.index_of(s, " ") >= 0 eller builtin.index_of(s, "\t") >= 0 {
+        returner "\"" + s + "\""
+    }
+    returner s
+}
+
+// Synkron Windows-spawn: byggjer CreateProcessW-kommandolinja (exe + args, kvar token
+// sitert ved mellomrom) i mmap-scratch (VirtualAlloc via os_mmap), gjev os_win_spawn
+// (OSTAB 501) eit fang-buffer, og les stdout+stderr attende (chr(raw_load8) → join).
+// Windows har ingen fork, so dette er den parallelle vegen til POSIX-_pg_spawn.
+// Returnerer same forma som process_spawn_argv_gap (norscode-process-spawn-v1).
+funksjon _pg_windows_spawn_synkron(req) {
+    la exe = ""
+    hvis finnes_nøkkel(req, "executable") { exe = tekst(req["executable"]) }
+    hvis exe == "" { returner _pg_synkron_feil("tom executable") }
+    la args = req["args"]
+    hvis builtin.type(args) != "liste" { args = [] }
+    la cmd = _pg_win_quote(exe)
+    la i: heiltall = 0
+    mens i < lengde(args) { cmd = cmd + " " + _pg_win_quote(tekst(args[i]))  i = i + 1 }
+    la cwd = ""
+    hvis finnes_nøkkel(req, "cwd") { cwd = tekst(req["cwd"]) }
+    // scratch via os_mmap (OSTAB 9 = VirtualAlloc) — IKKJE _sys_mmap_rw/nsys, som manglar
+    // windows-tabell. VirtualAlloc-området blir ikkje frigjort enno (W6.1b); OK for synkron
+    // kortlevd bruk.
+    la scratch = builtin.sys6(_PG_NR_WIN_MMAP(), 0, _PG_SCRATCH(), 0, 0, 0 - 1, 0)
+    hvis scratch <= 0 { returner _pg_synkron_feil("VirtualAlloc feila (windows)") }
+    la str_slutt: heiltall = scratch + _PG_STR_SLUTT() - 64
+    la fri: heiltall = scratch
+    hvis fri + lengde(cmd) + 1 > str_slutt { returner _pg_synkron_feil("kommandolinje for lang") }
+    la cmd_adr: heiltall = fri
+    fri = _pg_cstr(fri, cmd)
+    la cwd_adr: heiltall = 0
+    hvis cwd != "" {
+        hvis fri + lengde(cwd) + 1 > str_slutt { returner _pg_synkron_feil("cwd for lang") }
+        cwd_adr = fri
+        fri = _pg_cstr(fri, cwd)
+    }
+    // Fang-buffer etter streng-området: out_buf .. out_len_ptr i same scratch.
+    la out_buf: heiltall = scratch + _PG_STR_SLUTT()
+    la out_len_ptr: heiltall = scratch + _PG_SCRATCH() - 8
+    la out_cap: heiltall = out_len_ptr - out_buf - 8
+    builtin.raw_store64(out_len_ptr, 0)
+    la exit_kode = builtin.sys6(_PG_NR_WIN_SPAWN(), cmd_adr, cwd_adr, out_buf, out_cap, out_len_ptr, 0)
+    hvis exit_kode < 0 { returner _pg_synkron_feil("CreateProcessW feila") }
+    // Les fanga stdout+stderr (byte-eksakt, som _pg_dren): chr(raw_load8) → join.
+    la ut = ""
+    la ut_len = builtin.raw_load64(out_len_ptr)
+    hvis ut_len > 0 {
+        hvis ut_len > out_cap { ut_len = out_cap }
+        la teikn: liste_tekst = []
+        la j: heiltall = 0
+        mens j < ut_len { legg_til(teikn, builtin.chr(builtin.raw_load8(out_buf + j)))  j = j + 1 }
+        ut = builtin.join(teikn, "")
+    }
+    la r = _pg_res("ferdig", 0, "", exit_kode, ut, "", "", 0, 0)
+    r["abi"] = "norscode-process-spawn-v1"
+    fjern_nokkel(r, "handle")
+    returner r
+}
+
 funksjon process_spawn_argv_gap(req) {
     hvis builtin.type(req) != "ordbok" { returner _pg_synkron_feil("ugyldig request") }
+    hvis _pg_er_windows() { returner _pg_windows_spawn_synkron(req) }
     la r = _pg_spawn(req, sann)
     hvis r["status"] == "feil" { returner _pg_synkron_feil(tekst(r["error"])) }
     la handle = tekst(r["handle"])

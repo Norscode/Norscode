@@ -25,6 +25,7 @@ funksjon NR_STAT() -> heiltall { returner 4 }
 funksjon NR_OPEN() -> heiltall { returner 2 }
 funksjon NR_CLOSE() -> heiltall { returner 3 }
 funksjon NR_LSEEK() -> heiltall { returner 8 }
+funksjon NR_MMAP() -> heiltall { returner 9 }
 funksjon NR_MPROTECT() -> heiltall { returner 10 }
 funksjon NR_ACCESS() -> heiltall { returner 21 }
 funksjon NR_MKDIR() -> heiltall { returner 83 }
@@ -45,6 +46,11 @@ funksjon NR_GETRANDOM() -> heiltall { returner 318 }
 // Syntetisk OSTAB-slot (ikkje eit Linux-syscall): _start kallar han for å syntetisere
 // argv/envp frå GetCommandLineW på Windows. Slot 500 < OSTAB_LEN.
 funksjon NR_SETUP_ARGV() -> heiltall { returner 500 }
+// Syntetisk OSTAB-slot (W6.1): synkron prosess-spawn via CreateProcessW. rdi=UTF-8
+// kommandolinje (null-terminert), rsi=UTF-8 arbeidskatalog (eller 0=arv forelderen),
+// → rax = barnet sin exit-kode (0..) eller −1 ved spawn-feil. Windows har ingen fork,
+// so std.native_gap sin windows-grein kallar denne i staden for POSIX-fork/execve.
+funksjon NR_WIN_SPAWN() -> heiltall { returner 501 }
 funksjon OSTAB_LEN() -> heiltall { returner 512 }
 
 // DLL-ar og funksjonar OS-rutinane treng (W1-delmengd).
@@ -68,10 +74,14 @@ funksjon os_importar_full() {
         ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
             "VirtualProtect", "GetSystemTimePreciseAsFileTime",
             "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc",
+            "GetEnvironmentStringsW",
             "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
             "CloseHandle", "SetFilePointerEx",
             "DeleteFileW", "RemoveDirectoryW", "CreateDirectoryW",
-            "GetCurrentDirectoryW", "GetModuleFileNameW", "Sleep", "MoveFileExW"]],
+            "GetCurrentDirectoryW", "GetModuleFileNameW", "Sleep", "MoveFileExW",
+            // W6.1 synkron prosess-spawn + stdout-fanging (os_win_spawn). KERNEL32-eksportar.
+            "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess",
+            "CreatePipe", "SetHandleInformation"]],
         ["ADVAPI32.dll", ["SystemFunction036"]],
         ["SHELL32.dll", ["CommandLineToArgvW"]]
     ]
@@ -287,13 +297,14 @@ funksjon emit_clock_gettime(a, slot, base: heiltall) -> heiltall {
     returner 0
 }
 
-// ── os_setup_argv: syntetiser argv (+ tomt envp) frå GetCommandLineW (W1) ─────
-// Windows-entry har inga startstakk med argc/argv. _start kallar OSTAB[NR_SETUP_ARGV]:
+// ── os_setup_argv: syntetiser argv + envp frå GetCommandLineW/GetEnvironmentStringsW (W1/W6) ─
+// Windows-entry har inga startstakk med argc/argv/envp. _start kallar OSTAB[NR_SETUP_ARGV]:
 // GetCommandLineW → CommandLineToArgvW(&argc) → per arg WideCharToMultiByte(CP_UTF8) inn i
 // ein VirtualAlloc-buffer; byggjer argv** (array av UTF-8 char*) og skriv {argv**, argc} til
-// verts-ABI-slottane runtimeen les (argv_store_va / +8), og envp → ein null-slot i bufferen
-// (tomt miljø, ingen null-deref). Callee-saved (rbx,r12-r15) lagra i eigen prolog.
-// Bufferlayout: argv-peikarar [0, 8192), null-slot @6144 (envp), UTF-8-strengar [8192, 1 MiB).
+// verts-ABI-slottane runtimeen les (argv_store_va / +8). Deretter (W6) GetEnvironmentStringsW
+// → eit eige buffer med null-terminert envp** (UTF-8 «KEY=VALUE») → envp_store_va, slik at
+// env() verkar på Windows. Callee-saved (rbx,r12-r15) lagra i eigen prolog.
+// Argv-bufferlayout: argv-peikarar [0, argc*8), UTF-8-strengar frå 16-aligna (argc+2)*8.
 funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_store_va: heiltall) -> heiltall {
     asm.merk(a, "os_setup_argv")
     asm.push(a, asm.RBP())
@@ -333,11 +344,7 @@ funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_
     asm.mov_i64(a, asm.R11(), argv_store_va)
     asm.st(a, asm.R11(), 0, asm.R14())           // argv** = buffer
     asm.st(a, asm.R11(), 8, asm.R15())           // argc
-    asm.mov(a, asm.RAX(), asm.R15())
-    asm.shl_i(a, asm.RAX(), 3)                    // argc*8
-    asm.add(a, asm.RAX(), asm.R14())              // buffer + argc*8 (nullstilt slot etter argv-array)
-    asm.mov_i64(a, asm.R11(), envp_store_va)
-    asm.st(a, asm.R11(), 0, asm.RAX())           // envp → &0 (tomt miljø)
+    // (envp blir no syntetisert frå GetEnvironmentStringsW etter sa_done, ikkje tomt)
     asm.xor(a, asm.RBX(), asm.RBX())             // i = 0
     asm.merk(a, "sa_loop")
     asm.cmp(a, asm.RBX(), asm.R15())
@@ -364,6 +371,59 @@ funksjon emit_setup_argv(a, slot, base: heiltall, argv_store_va: heiltall, envp_
     asm.add_i(a, asm.RBX(), 1)
     asm.jmp(a, "sa_loop")
     asm.merk(a, "sa_done")
+    // ── envp: GetEnvironmentStringsW → UTF-8 «KEY=VALUE»-array (W6: env() på Windows) ──
+    // Windows gjev ingen envp på entry. Vi hentar det wide, dobbelt-NUL-terminerte
+    // miljøblokket og byggjer eit eige 1 MiB-buffer: peikararray i [0, 8192) (opp til 1023
+    // oppføringar + NUL-terminator), UTF-8-strengane frå +8192. Skriv array-basen til
+    // envp_store_va slik at runtimeen sin env()-oppslag (null-terminert char**) finn verdiane.
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.mov_i64(a, asm.RDX(), 1048576)
+    asm.mov_i64(a, asm.R8(), 12288)              // MEM_COMMIT|MEM_RESERVE
+    asm.mov_i64(a, asm.R9(), 4)                  // PAGE_READWRITE
+    iat(a, slot, base, "KERNEL32.dll!VirtualAlloc")
+    asm.mov(a, asm.R14(), asm.RAX())             // r14 = env-buffer (peikararray @[0,8192), strengar @ +8192)
+    iat(a, slot, base, "KERNEL32.dll!GetEnvironmentStringsW")
+    asm.mov(a, asm.R12(), asm.RAX())             // r12 = wide gå-peikar gjennom miljøblokket
+    asm.mov(a, asm.R13(), asm.R14())
+    asm.add_i(a, asm.R13(), 8192)                // r13 = UTF-8 skrivepeikar
+    asm.xor(a, asm.RBX(), asm.RBX())             // i = 0
+    asm.merk(a, "ev_loop")
+    asm.ld16(a, asm.RAX(), asm.R12(), 0)         // fyrste wide-eining i oppføringa
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "ev_done")            // tom streng = dobbel-NUL = slutt
+    // envp[i] = r13
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.shl_i(a, asm.RAX(), 3)
+    asm.add(a, asm.RAX(), asm.R14())
+    asm.st(a, asm.RAX(), 0, asm.R13())
+    // WideCharToMultiByte(CP_UTF8=65001, 0, r12, -1, r13, 32768, 0, 0)
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.R12())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.st(a, asm.RSP(), 32, asm.R13())          // lpMultiByteStr = dst
+    asm.st_i(a, asm.RSP(), 40, 32768)            // cbMultiByte = cap
+    asm.st_i(a, asm.RSP(), 48, 0)                // lpDefaultChar = NULL
+    asm.st_i(a, asm.RSP(), 56, 0)                // lpUsedDefaultChar = NULL
+    iat(a, slot, base, "KERNEL32.dll!WideCharToMultiByte")
+    asm.add(a, asm.R13(), asm.RAX())             // advance dst forbi UTF-8 + NUL
+    // gå r12 forbi denne wide-strengen (til og med wide-NUL)
+    asm.merk(a, "ev_scan")
+    asm.ld16(a, asm.RAX(), asm.R12(), 0)
+    asm.add_i(a, asm.R12(), 2)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_NE(), "ev_scan")
+    asm.add_i(a, asm.RBX(), 1)
+    asm.jmp(a, "ev_loop")
+    asm.merk(a, "ev_done")
+    // envp[i] = NULL (null-terminer peikararrayen)
+    asm.mov(a, asm.RAX(), asm.RBX())
+    asm.shl_i(a, asm.RAX(), 3)
+    asm.add(a, asm.RAX(), asm.R14())
+    asm.st_i(a, asm.RAX(), 0, 0)
+    // envp_store_va → peikararray-basen
+    asm.mov_i64(a, asm.R11(), envp_store_va)
+    asm.st(a, asm.R11(), 0, asm.R14())
     asm.lea(a, asm.RSP(), asm.RBP(), 0 - 40)     // tilbake til r15-sloten (5 push × 8)
     asm.pop(a, asm.R15())
     asm.pop(a, asm.R14())
@@ -746,6 +806,186 @@ funksjon emit_rename(a, slot, base: heiltall) -> heiltall {
     returner 0
 }
 
+// ── OS-rutine (W6.1): mmap(anonym RW) via VirtualAlloc ────────────────────────
+// Linux: rdi=addr(ignorert), rsi=len, ... → rax=adresse (eller −errno). Windows har
+// ingen mmap; VirtualAlloc(NULL, len, MEM_COMMIT|MEM_RESERVE=0x3000, PAGE_READWRITE=4)
+// gjev eit anonymt RW-område. Trengst av std.native_gap sitt scratch-område for
+// prosess-spawn (os_win_spawn). (Førebels inga VirtualFree i munmap → W6.1b.)
+funksjon emit_mmap(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_mmap")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 32)
+    asm.xor(a, asm.RCX(), asm.RCX())                   // lpAddress = NULL
+    asm.mov(a, asm.RDX(), asm.RSI())                   // dwSize = len
+    asm.mov_i32(a, asm.R8(), 12288)                    // MEM_COMMIT|MEM_RESERVE (0x3000)
+    asm.mov_i32(a, asm.R9(), 4)                        // PAGE_READWRITE
+    iat(a, slot, base, "KERNEL32.dll!VirtualAlloc")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_NE(), "os_mmap_ut")              // adresse != 0 → ok
+    asm.mov_is(a, asm.RAX(), 0 - 12)                   // −ENOMEM
+    asm.merk(a, "os_mmap_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
+// ── OS-rutine (W6.1a+b): synkron prosess-spawn + stdout/stderr-fanging ────────
+// Inn (Linux-konvensjon): rdi = UTF-8 kommandolinje, rsi = UTF-8 cwd|0, rdx = out_buf,
+// r10 = out_cap, r8 = out_len_ptr. Ut: rax = exit-kode (0..) eller −1; *out_len_ptr =
+// fanga byte. Lagar eit røyr (CreatePipe, lese-enden ikkje-arveleg), koplar barnet sin
+// stdout+stderr til skrive-enden (STARTF_USESTDHANDLES), CreateProcessW(inherit=TRUE),
+// lukkar skrive-enden i forelderen, les røyret inn i out_buf (ReadFile-lykkje til EOF/
+// fullt), ventar, hentar exit-kode, lukkar handtaka. Ramme-offset (rsp-rel etter sub):
+// widecmd@0x100, widecwd@0x1100, si@0x2100, pi@0x2170, exit@0x2190, cmdline@0x21A0,
+// cwd@0x21A8, cwdptr@0x21B0, out_buf@0x21B8, out_cap@0x21C0, out_len_ptr@0x21C8,
+// written@0x21D0, hRead@0x21D8, hWrite@0x21E0, sa@0x21E8(24), bytesRead@0x21F0; ramme 0x2300.
+funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_win_spawn")
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 8960)                      // 0x2300
+    asm.st(a, asm.RSP(), 8608, asm.RDI())              // cmdline
+    asm.st(a, asm.RSP(), 8616, asm.RSI())              // cwd
+    asm.st(a, asm.RSP(), 8632, asm.RDX())              // out_buf
+    asm.st(a, asm.RSP(), 8640, asm.R10())              // out_cap
+    asm.st(a, asm.RSP(), 8648, asm.R8())               // out_len_ptr
+    asm.st_i(a, asm.RSP(), 8656, 0)                    // written = 0
+    // widecmd = MultiByteToWideChar(65001, 0, cmdline, -1, &widecmd, 2048)
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RDI())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.lea(a, asm.RAX(), asm.RSP(), 256)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 2048)
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    // cwd-peikar: NULL med mindre cwd != 0
+    asm.st_i(a, asm.RSP(), 8624, 0)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8616)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_nocwd")
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.mov(a, asm.R8(), asm.RAX())
+    asm.mov_is(a, asm.R9(), 0 - 1)
+    asm.lea(a, asm.RAX(), asm.RSP(), 4352)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 2048)
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    asm.lea(a, asm.RAX(), asm.RSP(), 4352)
+    asm.st(a, asm.RSP(), 8624, asm.RAX())
+    asm.merk(a, "os_win_spawn_nocwd")
+    // SECURITY_ATTRIBUTES @0x21E8: nLength=24, lpSD=0, bInheritHandle=1
+    asm.st_i(a, asm.RSP(), 8680, 24)
+    asm.st_i(a, asm.RSP(), 8688, 0)
+    asm.st_i(a, asm.RSP(), 8696, 1)
+    // CreatePipe(&hRead@0x21D8, &hWrite@0x21E0, &sa@0x21E8, 0)
+    asm.lea(a, asm.RCX(), asm.RSP(), 8664)
+    asm.lea(a, asm.RDX(), asm.RSP(), 8672)
+    asm.lea(a, asm.R8(), asm.RSP(), 8680)
+    asm.xor(a, asm.R9(), asm.R9())
+    iat(a, slot, base, "KERNEL32.dll!CreatePipe")
+    // SetHandleInformation(hRead, HANDLE_FLAG_INHERIT=1, 0) — ikkje arv lese-enden
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)
+    asm.mov_i32(a, asm.RDX(), 1)
+    asm.xor(a, asm.R8(), asm.R8())
+    iat(a, slot, base, "KERNEL32.dll!SetHandleInformation")
+    // STARTUPINFOW @0x2100: nullstill, cb=104, dwFlags=STARTF_USESTDHANDLES, std-handtak
+    la k: heiltall = 0
+    mens k < 104 { asm.st_i(a, asm.RSP(), 8448 + k, 0)  k = k + 8 }
+    asm.st_i(a, asm.RSP(), 8448, 104)                  // cb
+    asm.st_i(a, asm.RSP(), 8508, 256)                  // dwFlags@60 = 0x100 (USESTDHANDLES)
+    asm.mov_is(a, asm.RCX(), 0 - 10)                   // STD_INPUT_HANDLE
+    iat(a, slot, base, "KERNEL32.dll!GetStdHandle")
+    asm.st(a, asm.RSP(), 8528, asm.RAX())              // hStdInput@80
+    asm.ld(a, asm.RAX(), asm.RSP(), 8672)
+    asm.st(a, asm.RSP(), 8536, asm.RAX())              // hStdOutput@88 = hWrite
+    asm.ld(a, asm.RAX(), asm.RSP(), 8672)
+    asm.st(a, asm.RSP(), 8544, asm.RAX())              // hStdError@96 = hWrite
+    // PROCESS_INFORMATION @0x2170 null
+    asm.st_i(a, asm.RSP(), 8560, 0)
+    asm.st_i(a, asm.RSP(), 8568, 0)
+    asm.st_i(a, asm.RSP(), 8576, 0)
+    // CreateProcessW(NULL, &widecmd, NULL, NULL, TRUE, 0, NULL, cwdptr, &si, &pi)
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.lea(a, asm.RDX(), asm.RSP(), 256)
+    asm.xor(a, asm.R8(), asm.R8())
+    asm.xor(a, asm.R9(), asm.R9())
+    asm.st_i(a, asm.RSP(), 32, 1)                      // bInheritHandles = TRUE
+    asm.st_i(a, asm.RSP(), 40, 0)
+    asm.st_i(a, asm.RSP(), 48, 0)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8624)
+    asm.st(a, asm.RSP(), 56, asm.RAX())                // cwd
+    asm.lea(a, asm.RAX(), asm.RSP(), 8448)
+    asm.st(a, asm.RSP(), 64, asm.RAX())                // &si
+    asm.lea(a, asm.RAX(), asm.RSP(), 8560)
+    asm.st(a, asm.RSP(), 72, asm.RAX())                // &pi
+    iat(a, slot, base, "KERNEL32.dll!CreateProcessW")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_fail")
+    // forelder lukkar skrive-enden → ReadFile ser EOF når barnet er ferdig
+    asm.ld(a, asm.RCX(), asm.RSP(), 8672)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    // ReadFile-lykkje: les røyret inn i out_buf til EOF eller fullt
+    asm.merk(a, "os_win_spawn_read")
+    asm.ld(a, asm.RAX(), asm.RSP(), 8640)              // out_cap
+    asm.ld(a, asm.RCX(), asm.RSP(), 8656)              // written
+    asm.sub(a, asm.RAX(), asm.RCX())                   // remaining = cap - written
+    asm.cmp_i(a, asm.RAX(), 0)
+    asm.jcc(a, asm.CC_LE(), "os_win_spawn_readdone")
+    asm.mov(a, asm.R8(), asm.RAX())                    // r8 = remaining
+    asm.ld(a, asm.RDX(), asm.RSP(), 8632)              // out_buf
+    asm.ld(a, asm.RAX(), asm.RSP(), 8656)              // written
+    asm.add(a, asm.RDX(), asm.RAX())                   // dest = out_buf + written
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)              // hRead
+    asm.lea(a, asm.R9(), asm.RSP(), 8688)              // &bytesRead (gjenbruk sa+8-slot, ferdig med sa)
+    asm.st_i(a, asm.RSP(), 32, 0)                      // lpOverlapped = NULL
+    iat(a, slot, base, "KERNEL32.dll!ReadFile")
+    asm.tst(a, asm.RAX(), asm.RAX())                   // BOOL
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_readdone")    // feil/EOF
+    asm.ld32(a, asm.RAX(), asm.RSP(), 8688)            // bytesRead (nullutvida)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_readdone")    // 0 byte = EOF
+    asm.ld(a, asm.RCX(), asm.RSP(), 8656)
+    asm.add(a, asm.RCX(), asm.RAX())                   // written += bytesRead
+    asm.st(a, asm.RSP(), 8656, asm.RCX())
+    asm.jmp(a, "os_win_spawn_read")
+    asm.merk(a, "os_win_spawn_readdone")
+    // WaitForSingleObject(pi.hProcess, INFINITE)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
+    asm.mov_i32(a, asm.RDX(), 4294967295)
+    iat(a, slot, base, "KERNEL32.dll!WaitForSingleObject")
+    // GetExitCodeProcess(pi.hProcess, &exit)
+    asm.st_i(a, asm.RSP(), 8592, 0)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
+    asm.lea(a, asm.RDX(), asm.RSP(), 8592)
+    iat(a, slot, base, "KERNEL32.dll!GetExitCodeProcess")
+    // *out_len_ptr = written
+    asm.ld(a, asm.RCX(), asm.RSP(), 8648)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8656)
+    asm.st(a, asm.RCX(), 0, asm.RAX())
+    // CloseHandle(hRead), CloseHandle(hProcess), CloseHandle(hThread)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld(a, asm.RCX(), asm.RSP(), 8568)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld32(a, asm.RAX(), asm.RSP(), 8592)            // exit-kode
+    asm.jmp(a, "os_win_spawn_ut")
+    asm.merk(a, "os_win_spawn_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 1)
+    asm.merk(a, "os_win_spawn_ut")
+    asm.mov(a, asm.RSP(), asm.RBP())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
 // Emitter heile OS-rutinesettet i rekkjefølgje inn i assemblarstaten `a` og returnerer
 // tabellen [[linux_nr, etikett], …] so kallaren kan fylle OSTAB. os_enosys er standardfyllet
 // for alle andre slottar. Same rutinar som native_codegen_v2 emitterer inn i .text (W1).
@@ -771,6 +1011,8 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
     emit_getcwd(a, slot, base)
     emit_readlink(a, slot, base)
     emit_rename(a, slot, base)
+    emit_mmap(a, slot, base)
+    emit_win_spawn(a, slot, base)
     emit_enosys(a)
     returner [
         [NR_WRITE(), "os_write"], [NR_READ(), "os_read"], [NR_EXIT(), "os_exit"],
@@ -780,7 +1022,8 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
         [NR_LSEEK(), "os_lseek"], [NR_STAT(), "os_stat"],
         [NR_UNLINK(), "os_unlink"], [NR_RMDIR(), "os_rmdir"], [NR_MKDIR(), "os_mkdir"],
         [NR_CHMOD(), "os_chmod"], [NR_UNAME(), "os_uname"], [NR_NANOSLEEP(), "os_nanosleep"],
-        [NR_GETCWD(), "os_getcwd"], [NR_READLINK(), "os_readlink"], [NR_RENAME(), "os_rename"]
+        [NR_GETCWD(), "os_getcwd"], [NR_READLINK(), "os_readlink"], [NR_RENAME(), "os_rename"],
+        [NR_MMAP(), "os_mmap"], [NR_WIN_SPAWN(), "os_win_spawn"]
         // getdents64(217)/futex(202)/clone(56): OSTAB-slot → os_enosys (W4/dir, treng ekte
         // Windows for verifikasjon); sitane blir ruta so ingen rå syscall står att.
     ]
