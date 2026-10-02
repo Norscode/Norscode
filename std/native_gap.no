@@ -348,6 +348,196 @@ funksjon _jp_tal(st) -> tekst {
     returner fortegn + ut
 }
 
+// ─── STRENG, TYPA JSON-parser (Fase 2.2): json_parse_raw_streng ──────────────
+// Native hardning av DoS-holet (Fase 0.3 la pre-validatoren i web.request_json;
+// her hardnar vi sjølve parsaren). Medan builtin.json_parse_raw (RT_JSON_PARSE)
+// og json_parse ovanfor er LEMPELEGE (ugyldig → "null"/tom/delvis verdi), KASTAR
+// denne parseren ein FANGBAR feil ved: ufullstendig input («{…» utan lukking),
+// hengande komma, søppel etter toppnivå-verdi, uavslutta strengar og ugyldige
+// escapes.
+//
+// ABSOLUTT KRAV: for GYLDIG (maskingenerert) NCB er output-STRUKTUREN identisk med
+// RT_JSON_PARSE: objekt → ordbok, array → liste, heiltal → heiltall,
+// desimal/eksponent → desimaltall, true/false → boolsk, null → null-verdi,
+// streng → tekst med UTF-8-dekoda \u (inkl. surrogatpar) og dekoda n/t/r/b/f/"/\//.
+//
+// AKTIVERING: medvite IKKJE kalla json_parse_raw (ville kollidere med
+// selfhost.vm.json_parse_raw i nc_main-lukkinga sin uqualifiserte namneromsresolusjon).
+// Gap-rutast for builtin.json_parse_raw ved å leggje til ein gap-FYRST-blokk i
+// BEGGE codegen-backendane (native_codegen_v2.no ~l.11057 + macho_arm64_codegen.no)
+// som rutar til QUALIFISERT nøkkel std.native_gap.json_parse_raw_streng — same
+// mønster som json_parse. Utan den codegen-endringa er parseren inert (RT-atomet
+// vinn via builtin_va før gap_rute). Sjå SELFHOST_HANDLINGSPLAN / fase2b-rapport.
+
+funksjon _jpr_siffer(s: tekst, p: heiltall) -> boolsk {
+    hvis p >= lengde(s) { returner usann }
+    la c = builtin.slice(s, p, p + 1)
+    returner c >= "0" og c <= "9"
+}
+
+// Streng strengparser: typa tekst ut, kastar ved uavslutta streng / ugyldig escape.
+funksjon _jpr_streng(st) -> tekst {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"] + 1   // hopp over opnings-"
+    la n: heiltall = lengde(s)
+    la ut = ""
+    mens p < n {
+        la c = builtin.slice(s, p, p + 1)
+        hvis c == "\"" { st["p"] = p + 1 returner ut }
+        hvis c == "\\" {
+            hvis p + 1 >= n { kast "json_parse_raw_streng: uavslutta escape i streng" }
+            la e = builtin.slice(s, p + 1, p + 2)
+            p = p + 2
+            hvis e == "n" { ut = ut + "\n" }
+            ellers hvis e == "t" { ut = ut + "\t" }
+            ellers hvis e == "r" { ut = ut + "\r" }
+            ellers hvis e == "b" { ut = ut + builtin.chr(8) }
+            ellers hvis e == "f" { ut = ut + builtin.chr(12) }
+            ellers hvis e == "\"" { ut = ut + "\"" }
+            ellers hvis e == "\\" { ut = ut + "\\" }
+            ellers hvis e == "/" { ut = ut + "/" }
+            ellers hvis e == "u" {
+                hvis p + 4 > n { kast "json_parse_raw_streng: avkutta \\u-escape" }
+                la kode = _jp_hex4(s, p)
+                hvis kode < 0 { kast "json_parse_raw_streng: ugyldige hex-siffer i \\u-escape" }
+                p = p + 4
+                // Surrogatpar (U+10000+): same som _jp_streng.
+                hvis kode >= 55296 og kode <= 56319 og p + 6 <= n og
+                   builtin.slice(s, p, p + 2) == "\\u" {
+                    la lav = _jp_hex4(s, p + 2)
+                    hvis lav >= 56320 og lav <= 57343 {
+                        kode = 65536 + (kode - 55296) * 1024 + (lav - 56320)
+                        p = p + 6
+                    }
+                }
+                ut = ut + _jp_utf8(kode)
+            }
+            ellers { kast "json_parse_raw_streng: ugyldig escape" }
+            fortsett
+        }
+        ut = ut + c
+        p = p + 1
+    }
+    kast "json_parse_raw_streng: uavslutta streng"
+}
+
+// Streng talparser: typa heiltall/desimaltall ut. Kastar ved leiande null,
+// manglande siffer etter . eller eksponent, eller teikn som ikkje endar på
+// ei token-grense. Typen matchar RT_JSON_PARSE (desimal/eksponent → desimaltall).
+funksjon _jpr_tal(st) {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"]
+    la n: heiltall = lengde(s)
+    la start: heiltall = p
+    hvis builtin.slice(s, p, p + 1) == "-" { p = p + 1 }
+    hvis ikkje _jpr_siffer(s, p) { kast "json_parse_raw_streng: forventa siffer i tal" }
+    hvis builtin.slice(s, p, p + 1) == "0" {
+        p = p + 1
+        hvis _jpr_siffer(s, p) { kast "json_parse_raw_streng: leiande null i tal" }
+    } ellers {
+        mens _jpr_siffer(s, p) { p = p + 1 }
+    }
+    la er_desimal = usann
+    hvis p < n og builtin.slice(s, p, p + 1) == "." {
+        er_desimal = sann
+        p = p + 1
+        hvis ikkje _jpr_siffer(s, p) { kast "json_parse_raw_streng: manglar siffer etter '.'" }
+        mens _jpr_siffer(s, p) { p = p + 1 }
+    }
+    hvis p < n og (builtin.slice(s, p, p + 1) == "e" eller builtin.slice(s, p, p + 1) == "E") {
+        er_desimal = sann
+        p = p + 1
+        hvis p < n og (builtin.slice(s, p, p + 1) == "+" eller builtin.slice(s, p, p + 1) == "-") { p = p + 1 }
+        hvis ikkje _jpr_siffer(s, p) { kast "json_parse_raw_streng: manglar siffer i eksponent" }
+        mens _jpr_siffer(s, p) { p = p + 1 }
+    }
+    hvis ikkje _jp_grense(builtin.slice(s, p, p + 1)) { kast "json_parse_raw_streng: ugyldig teikn i tal" }
+    la tok = builtin.slice(s, start, p)
+    st["p"] = p
+    hvis er_desimal { returner builtin.desimaltall(tok) }
+    returner heltall(tok)
+}
+
+funksjon _jpr_verdi(st) {
+    _jp_ws(st)
+    la c = _jp_peek(st)
+    hvis c == "{" { returner _jpr_objekt(st) }
+    hvis c == "[" { returner _jpr_liste(st) }
+    hvis c == "\"" { returner _jpr_streng(st) }
+    hvis c == "t" {
+        hvis builtin.slice(st["s"], st["p"], st["p"] + 4) == "true" { st["p"] = st["p"] + 4 returner sann }
+        kast "json_parse_raw_streng: ugyldig token (venta 'true')"
+    }
+    hvis c == "f" {
+        hvis builtin.slice(st["s"], st["p"], st["p"] + 5) == "false" { st["p"] = st["p"] + 5 returner usann }
+        kast "json_parse_raw_streng: ugyldig token (venta 'false')"
+    }
+    hvis c == "n" {
+        hvis builtin.slice(st["s"], st["p"], st["p"] + 4) == "null" { st["p"] = st["p"] + 4 returner _jpr_null() }
+        kast "json_parse_raw_streng: ugyldig token (venta 'null')"
+    }
+    hvis c == "-" eller (c >= "0" og c <= "9") { returner _jpr_tal(st) }
+    hvis c == "" { kast "json_parse_raw_streng: uventa slutt på input" }
+    kast "json_parse_raw_streng: uventa teikn: " + c
+}
+
+// null-verdi med type «ingenting», same trappe som selfhost.json.json_null_verdi
+// (unngår avhengnad av NULL-lexertokenet på eldre stage0-generasjonar).
+funksjon _jpr_null() {
+    la tom = {}
+    returner tom["__json_null__"]
+}
+
+funksjon _jpr_objekt(st) {
+    st["p"] = st["p"] + 1   // {
+    la ut = {}
+    _jp_ws(st)
+    hvis _jp_peek(st) == "}" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        _jp_ws(st)
+        hvis _jp_peek(st) != "\"" { kast "json_parse_raw_streng: forventa strengnøkkel i objekt" }
+        la k = _jpr_streng(st)
+        _jp_ws(st)
+        hvis _jp_peek(st) != ":" { kast "json_parse_raw_streng: forventa ':' etter nøkkel" }
+        st["p"] = st["p"] + 1
+        la v = _jpr_verdi(st)
+        ut[k] = v
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," { st["p"] = st["p"] + 1 fortsett }   // ingen hengande komma: ny nøkkel krevst
+        hvis c == "}" { st["p"] = st["p"] + 1 returner ut }
+        kast "json_parse_raw_streng: forventa ',' eller '}' i objekt"
+    }
+    returner ut
+}
+
+funksjon _jpr_liste(st) {
+    st["p"] = st["p"] + 1   // [
+    la ut: liste = []
+    _jp_ws(st)
+    hvis _jp_peek(st) == "]" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        la v = _jpr_verdi(st)
+        legg_til(ut, v)
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," { st["p"] = st["p"] + 1 fortsett }   // ingen hengande komma: ny verdi krevst
+        hvis c == "]" { st["p"] = st["p"] + 1 returner ut }
+        kast "json_parse_raw_streng: forventa ',' eller ']' i liste"
+    }
+    returner ut
+}
+
+// Offentleg inngang. Kastar fangbar feil ved all ugyldig JSON.
+funksjon json_parse_raw_streng(t: tekst) {
+    hvis builtin.type(t) != "tekst" { kast "json_parse_raw_streng: input må vere tekst" }
+    la st = {"s": t, "p": 0}
+    la v = _jpr_verdi(st)
+    _jp_ws(st)
+    hvis st["p"] != lengde(t) { kast "json_parse_raw_streng: søppel etter JSON-verdi ved posisjon " + tekst(st["p"]) }
+    returner v
+}
+
 funksjon bytes_new(storleik: heiltall, fyll: heiltall) -> liste_heiltall {
     la ut: liste_heiltall = []
     la i: heiltall = 0
