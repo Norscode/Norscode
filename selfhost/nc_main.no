@@ -21,6 +21,9 @@ bruk std.desimaltall_tekst som desimaltall_tekst
 // Argon2id-gap-ruta (builtin.argon2id → std.argon2id_pure.hash_raw_hex) må ha
 // modulen i bunten; rå-minne-varianten unngår 64 MiB-OOM-en frå VM-lister.
 bruk std.argon2id_pure som argon2id_pure
+// Fase 2 / 2.6: base64 for auto-JSON-serialisering av bytes i serve-svar.
+// (base64 er alt i nc_main-lukkinga via krypto-modulane.)
+bruk std.base64 som b64
 
 // ─── Kompiler kjeldekode-fil til NCB ─────────────────────────────────────────
 
@@ -665,6 +668,104 @@ funksjon bygg_standard_helse_respons(ctx: ordbok<tekst, tekst>, req_method: teks
     returner helse
 }
 
+// Fase 2 / 2.6: automatisk JSON-serialisering av eit handlar-svar som er
+// ordbok/liste/bytes utan respons-nøklar. Speglar apptenar_serde-semantikken
+// for dei byggjeklossane som finst i nc_main-lukkinga:
+//   * __rå_json__-innpakking → lagt inn uendra,
+//   * bytes → base64,
+//   * interne nøklar ("__…") vert hoppa over,
+//   * lister/ordbøker rekursivt, primitivar via builtin.json_stringify
+//     (tekst/heltall/desimaltall/boolsk/null handterer den rett).
+// MERK: ISO-dato/datotid/tidspunkt og __desimal__-innpakkinga krev std.tidspunkt
+// / std.desimal som IKKJE er i nc_main-lukkinga; slike ordbøker vert serialiserte
+// generisk (med __-nøkkel-filtrering). apptenar-vegen dekkjer den fulle ISO-/
+// desimal-semantikken.
+funksjon nc_serve_til_json(v, djup: heltall) -> tekst {
+    hvis djup > 64 {
+        kast "nc_serve_til_json: for djup nøsting"
+    }
+    hvis v == null {
+        returner "null"
+    }
+    la t = builtin.type(v)
+    hvis t == "bytes" {
+        returner "\"" + b64.kod_bytes(v) + "\""
+    }
+    hvis t == "liste" {
+        la ut = "["
+        la i = 0
+        mens i < lengde(v) {
+            hvis i > 0 { ut = ut + "," }
+            ut = ut + nc_serve_til_json(v[i], djup + 1)
+            i = i + 1
+        }
+        returner ut + "]"
+    }
+    hvis t == "ordbok" {
+        hvis har_nokkel(v, "__rå_json__") {
+            returner tekst(v["__rå_json__"])
+        }
+        la ut = "{"
+        la ks = nøkler(v)
+        la i = 0
+        la først = sann
+        mens i < lengde(ks) {
+            la k = tekst(ks[i])
+            hvis ikkje builtin.starts_with(k, "__") {
+                hvis ikkje først { ut = ut + "," }
+                ut = ut + builtin.json_stringify(k) + ":" + nc_serve_til_json(v[ks[i]], djup + 1)
+                først = usann
+            }
+            i = i + 1
+        }
+        returner ut + "}"
+    }
+    returner builtin.json_stringify(v)
+}
+
+// Fase 2 / 2.6: map eit kasta unntak frå ein handlar/vakt til ein respons.
+// Speglar apptenar._feil_frå_unntak:
+//   * {"__httpfeil__": sann, status, detalj, headers} → status + {"detail": detalj}
+//   * tekst "ValideringsFeil: <melding>" → 422 (Fase 0/1-format)
+//   * alt anna → 500 «Intern feil»; sjølve unntaksmeldinga lek BERRE når
+//     NC_SERVE_DEBUG=1 (unngår informasjonslekkasje i produksjon).
+funksjon feil_frå_unntak(e) -> ordbok<tekst, tekst> {
+    hvis e != null og builtin.type(e) == "ordbok" og har_nokkel(e, "__httpfeil__") {
+        la st = 500
+        hvis har_nokkel(e, "status") {
+            la sv = e["status"]
+            hvis builtin.type(sv) == "heltall" {
+                st = sv
+            } ellers hvis is_int_text(tekst(sv)) {
+                st = heltall_fra_tekst(tekst(sv))
+            }
+        }
+        la detalj = ""
+        hvis har_nokkel(e, "detalj") { detalj = tekst(e["detalj"]) }
+        la d: ordbok<tekst, tekst> = {
+            "status": st,
+            "body": "{\"detail\":" + builtin.json_stringify(detalj) + "}",
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"}
+        }
+        hvis har_nokkel(e, "headers") og e["headers"] != null og builtin.type(e["headers"]) == "ordbok" og lengde(nøkler(e["headers"])) > 0 {
+            d["__headers__"] = e["headers"]
+        }
+        returner d
+    }
+    la et = ""
+    hvis e != null og builtin.type(e) == "tekst" { et = e }
+    hvis builtin.starts_with(et, "ValideringsFeil:") {
+        la msg = builtin.trim(builtin.slice(et, 16, lengde(et)))
+        la loc: liste<tekst> = ["body"]
+        returner bygg_422_respons("value_error", loc, msg, "")
+    }
+    la body = "Intern feil"
+    hvis miljo_hent("NC_SERVE_DEBUG") == "1" {
+        body = "Intern feil: " + tekst(e)
+    }
+    returner {"status": 500, "body": body}
+}
+
 funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, svar, head_fallback: boolsk, request_if_modified_since: tekst, request_if_match: tekst) -> ordbok<tekst, tekst> {
     hvis head_fallback {
         returner response_to_http({"status": 200, "__head__": sann, "body": tekst(svar)})
@@ -694,8 +795,25 @@ funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordb
     hvis svar == null {
         returner response_to_http({"status": 204, "body": ""})
     }
-    hvis har_nokkel(svar, "status") eller har_nokkel(svar, "__status__") eller har_nokkel(svar, "body") eller har_nokkel(svar, "__body__") eller har_nokkel(svar, "headers") eller har_nokkel(svar, "__headers__") eller har_nokkel(svar, "content_type") eller har_nokkel(svar, "__content_type__") eller har_nokkel(svar, "__head__") {
-        returner response_to_http(svar)
+    la svar_type = builtin.type(svar)
+    hvis svar_type == "ordbok" {
+        hvis har_nokkel(svar, "status") eller har_nokkel(svar, "__status__") eller har_nokkel(svar, "body") eller har_nokkel(svar, "__body__") eller har_nokkel(svar, "headers") eller har_nokkel(svar, "__headers__") eller har_nokkel(svar, "content_type") eller har_nokkel(svar, "__content_type__") eller har_nokkel(svar, "__head__") {
+            returner response_to_http(svar)
+        }
+        // 2.6: data-ordbok utan respons-nøklar → automatisk JSON.
+        returner response_to_http({
+            "status": 200,
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"},
+            "body": nc_serve_til_json(svar, 0)
+        })
+    }
+    hvis svar_type == "liste" eller svar_type == "bytes" {
+        // 2.6: liste/bytes → automatisk JSON.
+        returner response_to_http({
+            "status": 200,
+            "__headers__": {"Content-Type": "application/json; charset=utf-8"},
+            "body": nc_serve_til_json(svar, 0)
+        })
     }
     hvis tekst(svar) == "" {
         returner response_to_http({"status": 204, "body": ""})
@@ -784,7 +902,9 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                     prøv {
                         svar = køyre_ncb_funksjon(handler, handler_args, ncb["functions"])
                     } fang (e) {
-                        la feil = bygg_feil_respons(500, tekst(e))
+                        // 2.6: map unntak → 422 (ValideringsFeil) / httpfeil-status /
+                        // 500 (utan å lekke unntaksmeldinga med mindre NC_SERVE_DEBUG=1).
+                        la feil = feil_frå_unntak(e)
                         feil = anvend_error_middlewares(ncb, feil)
                         returner response_to_http(feil)
                     }
