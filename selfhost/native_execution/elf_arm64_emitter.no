@@ -28,8 +28,11 @@ funksjon pad(buf: liste_heiltall, storleik: heiltall) -> heiltall {
     returner 0
 }
 
-funksjon bygg_program(aot_kode: liste_heiltall) -> liste_heiltall {
-    hvis lengde(aot_kode) == 0 { kast "Linux arm64 AOT-kode kan ikkje vere tom" }
+// Byggjer alt FØR aot-koden: ELF64-header + eitt PT_LOAD + fyll til kode_offset +
+// _start-stubben. Treng berre LENGDA på aot-koden (for p_filesz/p_memsz), ikkje koden
+// sjølv — so strøyme-vegen (skriv_program) slepp å halde ein kopi av koden i minnet.
+funksjon bygg_hode(aot_lengd: heiltall) -> liste_heiltall {
+    hvis aot_lengd == 0 { kast "Linux arm64 AOT-kode kan ikkje vere tom" }
     la base = 0x400000
     la kode_offset = 4096
     la start_stub: liste_heiltall = []
@@ -44,7 +47,7 @@ funksjon bygg_program(aot_kode: liste_heiltall) -> liste_heiltall {
     u32(start_stub, 0x94000003)                 // bl main
     u32(start_stub, 0xD2800000 | (93 << 5) | 8) // mov x8, #93 (exit)
     u32(start_stub, 0xD4000001)                 // svc #0
-    la total = kode_offset + lengde(start_stub) + lengde(aot_kode)
+    la total = kode_offset + lengde(start_stub) + aot_lengd
     la elf: liste_heiltall = []
 
     // ELF64-header.
@@ -79,8 +82,60 @@ funksjon bygg_program(aot_kode: liste_heiltall) -> liste_heiltall {
     pad(elf, kode_offset)
     la i = 0
     mens i < lengde(start_stub) { u8(elf, start_stub[i]) i = i + 1 }
+    returner elf
+}
+
+funksjon bygg_program(aot_kode: liste_heiltall) -> liste_heiltall {
+    // Byte-identisk med den gamle emitteren: hode ‖ aot-kode. Held framleis heile
+    // biletet i minnet; strøyme-vegen (skriv_program) er for store seed-image.
+    la elf = bygg_hode(lengde(aot_kode))
     // O(n): for-iterasjon i staden for aot_kode[i]-indeksering. Indeksert lese er
     // O(n) i tolken → indeksloopen var O(n²) på det store seed-imaget (12t+ CPU).
     for b i aot_kode { u8(elf, b) }
     returner elf
+}
+
+// Legg bytes til fila i bitar på 512 KiB: fil_append_binær på x86-verten går via
+// bytes_to_text, som klemmer til 1 MiB (stakkbuffer) — eitt kall med heile koden skreiv
+// berre den første MiB-en. Same handtering som macho.append_i_bitar, men lokal so ELF-
+// emitteren ikkje dreg inn macho/std.sha256 i kryss-codegen-bunten.
+funksjon append_i_bitar(sti: tekst, bytes: liste_heiltall) -> heiltall {
+    la bit = 524288
+    la n = lengde(bytes)
+    hvis n <= bit {
+        builtin.fil_append_binær(sti, bytes)
+        returner n
+    }
+    la a = 0
+    mens a < n {
+        la b = a + bit
+        hvis b > n { b = n }
+        la del = []
+        la del_ok = usann
+        prøv {
+            del = builtin.slice(bytes, a, b)
+            del_ok = builtin.type(del) == "liste" og lengde(del) == b - a
+        } fang (e) { del_ok = usann }
+        hvis ikkje del_ok {
+            del = []
+            la p = a
+            mens p < b { u8(del, bytes[p]) p = p + 1 }
+        }
+        builtin.fil_append_binær(sti, del)
+        a = b
+    }
+    returner n
+}
+
+// Skriv ELF-biletet direkte til fil (same bytes som bygg_program), utan ein samla kopi
+// av koden i minnet: hovudet fyrst, deretter aot-koden strøyma i 512 KiB-bitar. Dette
+// unngår at hode‖kode-kopien lever saman med aot-koden — det var det doble levande settet
+// som sprengde 1 GiB-heapen til kryss-codegen-en (GC-heap full, exit 199). Returnerer
+// talet på byte. ELF har ingen hale/signatur, so biletet er berre hode ‖ aot-kode.
+funksjon skriv_program(sti: tekst, aot_kode: liste_heiltall) -> heiltall {
+    la hode = bygg_hode(lengde(aot_kode))
+    builtin.fil_skriv_binær(sti, hode)
+    la n = lengde(hode)
+    n = n + append_i_bitar(sti, aot_kode)
+    returner n
 }
