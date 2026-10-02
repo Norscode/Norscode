@@ -78,8 +78,9 @@ funksjon os_importar_full() {
             "CloseHandle", "SetFilePointerEx",
             "DeleteFileW", "RemoveDirectoryW", "CreateDirectoryW",
             "GetCurrentDirectoryW", "GetModuleFileNameW", "Sleep", "MoveFileExW",
-            // W6.1 synkron prosess-spawn (os_win_spawn). Alle er KERNEL32-eksportar.
-            "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess"]],
+            // W6.1 synkron prosess-spawn + stdout-fanging (os_win_spawn). KERNEL32-eksportar.
+            "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess",
+            "CreatePipe", "SetHandleInformation"]],
         ["ADVAPI32.dll", ["SystemFunction036"]],
         ["SHELL32.dll", ["CommandLineToArgvW"]]
     ]
@@ -780,34 +781,39 @@ funksjon emit_mmap(a, slot, base: heiltall) -> heiltall {
     returner 0
 }
 
-// ── OS-rutine (W6.1): synkron prosess-spawn via CreateProcessW ────────────────
-// Inn (Linux-konvensjon): rdi = UTF-8 kommandolinje (null-terminert), rsi = UTF-8
-// arbeidskatalog eller 0 (NULL = arv forelderen). Ut: rax = exit-kode (0..) eller −1.
-// Framgang: MultiByteToWideChar(CP_UTF8) av kommandolinja (og cwd om sett) → stakk-
-// buffrar, nullstill STARTUPINFOW(104)+cb=104 og PROCESS_INFORMATION(24), CreateProcessW,
-// WaitForSingleObject(INFINITE), GetExitCodeProcess, CloseHandle×2. Ramme-offset (rsp-
-// relativt etter sub): widecmd@0x100, widecwd@0x1100, si@0x2100, pi@0x2170, exit@0x2190,
-// lagra cmdline@0x21A0, lagra cwd@0x21A8, cwd-peikar@0x21B0; ramme 0x2200 (16-aligna).
-// Stakk-arg til Win64-kall ligg i [rsp+32..]. Inga stdout-fanging enno (W6.1b).
+// ── OS-rutine (W6.1a+b): synkron prosess-spawn + stdout/stderr-fanging ────────
+// Inn (Linux-konvensjon): rdi = UTF-8 kommandolinje, rsi = UTF-8 cwd|0, rdx = out_buf,
+// r10 = out_cap, r8 = out_len_ptr. Ut: rax = exit-kode (0..) eller −1; *out_len_ptr =
+// fanga byte. Lagar eit røyr (CreatePipe, lese-enden ikkje-arveleg), koplar barnet sin
+// stdout+stderr til skrive-enden (STARTF_USESTDHANDLES), CreateProcessW(inherit=TRUE),
+// lukkar skrive-enden i forelderen, les røyret inn i out_buf (ReadFile-lykkje til EOF/
+// fullt), ventar, hentar exit-kode, lukkar handtaka. Ramme-offset (rsp-rel etter sub):
+// widecmd@0x100, widecwd@0x1100, si@0x2100, pi@0x2170, exit@0x2190, cmdline@0x21A0,
+// cwd@0x21A8, cwdptr@0x21B0, out_buf@0x21B8, out_cap@0x21C0, out_len_ptr@0x21C8,
+// written@0x21D0, hRead@0x21D8, hWrite@0x21E0, sa@0x21E8(24), bytesRead@0x21F0; ramme 0x2300.
 funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.merk(a, "os_win_spawn")
     asm.push(a, asm.RBP())
     asm.mov(a, asm.RBP(), asm.RSP())
     asm.and_i(a, asm.RSP(), 0 - 16)
-    asm.sub_i(a, asm.RSP(), 8704)                      // 0x2200
-    asm.st(a, asm.RSP(), 8608, asm.RDI())              // lagra cmdline (0x21A0)
-    asm.st(a, asm.RSP(), 8616, asm.RSI())              // lagra cwd     (0x21A8)
+    asm.sub_i(a, asm.RSP(), 8960)                      // 0x2300
+    asm.st(a, asm.RSP(), 8608, asm.RDI())              // cmdline
+    asm.st(a, asm.RSP(), 8616, asm.RSI())              // cwd
+    asm.st(a, asm.RSP(), 8632, asm.RDX())              // out_buf
+    asm.st(a, asm.RSP(), 8640, asm.R10())              // out_cap
+    asm.st(a, asm.RSP(), 8648, asm.R8())               // out_len_ptr
+    asm.st_i(a, asm.RSP(), 8656, 0)                    // written = 0
     // widecmd = MultiByteToWideChar(65001, 0, cmdline, -1, &widecmd, 2048)
     asm.mov_i32(a, asm.RCX(), 65001)
     asm.xor(a, asm.RDX(), asm.RDX())
     asm.mov(a, asm.R8(), asm.RDI())
     asm.mov_is(a, asm.R9(), 0 - 1)
-    asm.lea(a, asm.RAX(), asm.RSP(), 256)              // &widecmd (0x100)
+    asm.lea(a, asm.RAX(), asm.RSP(), 256)
     asm.st(a, asm.RSP(), 32, asm.RAX())
     asm.st_i(a, asm.RSP(), 40, 2048)
     iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
-    // cwd-peikar: standard NULL; om lagra cwd != 0, konverter → &widecwd
-    asm.st_i(a, asm.RSP(), 8624, 0)                    // cwd-peikar = NULL (0x21B0)
+    // cwd-peikar: NULL med mindre cwd != 0
+    asm.st_i(a, asm.RSP(), 8624, 0)
     asm.ld(a, asm.RAX(), asm.RSP(), 8616)
     asm.tst(a, asm.RAX(), asm.RAX())
     asm.jcc(a, asm.CC_E(), "os_win_spawn_nocwd")
@@ -815,55 +821,113 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.xor(a, asm.RDX(), asm.RDX())
     asm.mov(a, asm.R8(), asm.RAX())
     asm.mov_is(a, asm.R9(), 0 - 1)
-    asm.lea(a, asm.RAX(), asm.RSP(), 4352)             // &widecwd (0x1100)
+    asm.lea(a, asm.RAX(), asm.RSP(), 4352)
     asm.st(a, asm.RSP(), 32, asm.RAX())
     asm.st_i(a, asm.RSP(), 40, 2048)
     iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
     asm.lea(a, asm.RAX(), asm.RSP(), 4352)
-    asm.st(a, asm.RSP(), 8624, asm.RAX())              // cwd-peikar = &widecwd
+    asm.st(a, asm.RSP(), 8624, asm.RAX())
     asm.merk(a, "os_win_spawn_nocwd")
-    // nullstill STARTUPINFOW(104) @0x2100 og set cb=104
+    // SECURITY_ATTRIBUTES @0x21E8: nLength=24, lpSD=0, bInheritHandle=1
+    asm.st_i(a, asm.RSP(), 8680, 24)
+    asm.st_i(a, asm.RSP(), 8688, 0)
+    asm.st_i(a, asm.RSP(), 8696, 1)
+    // CreatePipe(&hRead@0x21D8, &hWrite@0x21E0, &sa@0x21E8, 0)
+    asm.lea(a, asm.RCX(), asm.RSP(), 8664)
+    asm.lea(a, asm.RDX(), asm.RSP(), 8672)
+    asm.lea(a, asm.R8(), asm.RSP(), 8680)
+    asm.xor(a, asm.R9(), asm.R9())
+    iat(a, slot, base, "KERNEL32.dll!CreatePipe")
+    // SetHandleInformation(hRead, HANDLE_FLAG_INHERIT=1, 0) — ikkje arv lese-enden
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)
+    asm.mov_i32(a, asm.RDX(), 1)
+    asm.xor(a, asm.R8(), asm.R8())
+    iat(a, slot, base, "KERNEL32.dll!SetHandleInformation")
+    // STARTUPINFOW @0x2100: nullstill, cb=104, dwFlags=STARTF_USESTDHANDLES, std-handtak
     la k: heiltall = 0
     mens k < 104 { asm.st_i(a, asm.RSP(), 8448 + k, 0)  k = k + 8 }
-    asm.st_i(a, asm.RSP(), 8448, 104)                  // cb (låg dword)
-    // nullstill PROCESS_INFORMATION(24) @0x2170
+    asm.st_i(a, asm.RSP(), 8448, 104)                  // cb
+    asm.st_i(a, asm.RSP(), 8508, 256)                  // dwFlags@60 = 0x100 (USESTDHANDLES)
+    asm.mov_is(a, asm.RCX(), 0 - 10)                   // STD_INPUT_HANDLE
+    iat(a, slot, base, "KERNEL32.dll!GetStdHandle")
+    asm.st(a, asm.RSP(), 8528, asm.RAX())              // hStdInput@80
+    asm.ld(a, asm.RAX(), asm.RSP(), 8672)
+    asm.st(a, asm.RSP(), 8536, asm.RAX())              // hStdOutput@88 = hWrite
+    asm.ld(a, asm.RAX(), asm.RSP(), 8672)
+    asm.st(a, asm.RSP(), 8544, asm.RAX())              // hStdError@96 = hWrite
+    // PROCESS_INFORMATION @0x2170 null
     asm.st_i(a, asm.RSP(), 8560, 0)
     asm.st_i(a, asm.RSP(), 8568, 0)
     asm.st_i(a, asm.RSP(), 8576, 0)
-    // CreateProcessW(NULL, &widecmd, NULL, NULL, FALSE, 0, NULL, cwdptr, &si, &pi)
+    // CreateProcessW(NULL, &widecmd, NULL, NULL, TRUE, 0, NULL, cwdptr, &si, &pi)
     asm.xor(a, asm.RCX(), asm.RCX())
-    asm.lea(a, asm.RDX(), asm.RSP(), 256)              // &widecmd
+    asm.lea(a, asm.RDX(), asm.RSP(), 256)
     asm.xor(a, asm.R8(), asm.R8())
     asm.xor(a, asm.R9(), asm.R9())
-    asm.st_i(a, asm.RSP(), 32, 0)                      // bInheritHandles = FALSE
-    asm.st_i(a, asm.RSP(), 40, 0)                      // dwCreationFlags = 0
-    asm.st_i(a, asm.RSP(), 48, 0)                      // lpEnvironment = NULL
+    asm.st_i(a, asm.RSP(), 32, 1)                      // bInheritHandles = TRUE
+    asm.st_i(a, asm.RSP(), 40, 0)
+    asm.st_i(a, asm.RSP(), 48, 0)
     asm.ld(a, asm.RAX(), asm.RSP(), 8624)
-    asm.st(a, asm.RSP(), 56, asm.RAX())                // lpCurrentDirectory = cwdptr
+    asm.st(a, asm.RSP(), 56, asm.RAX())                // cwd
     asm.lea(a, asm.RAX(), asm.RSP(), 8448)
-    asm.st(a, asm.RSP(), 64, asm.RAX())                // lpStartupInfo = &si
+    asm.st(a, asm.RSP(), 64, asm.RAX())                // &si
     asm.lea(a, asm.RAX(), asm.RSP(), 8560)
-    asm.st(a, asm.RSP(), 72, asm.RAX())                // lpProcessInformation = &pi
+    asm.st(a, asm.RSP(), 72, asm.RAX())                // &pi
     iat(a, slot, base, "KERNEL32.dll!CreateProcessW")
-    asm.tst(a, asm.RAX(), asm.RAX())                   // BOOL
+    asm.tst(a, asm.RAX(), asm.RAX())
     asm.jcc(a, asm.CC_E(), "os_win_spawn_fail")
+    // forelder lukkar skrive-enden → ReadFile ser EOF når barnet er ferdig
+    asm.ld(a, asm.RCX(), asm.RSP(), 8672)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    // ReadFile-lykkje: les røyret inn i out_buf til EOF eller fullt
+    asm.merk(a, "os_win_spawn_read")
+    asm.ld(a, asm.RAX(), asm.RSP(), 8640)              // out_cap
+    asm.ld(a, asm.RCX(), asm.RSP(), 8656)              // written
+    asm.sub(a, asm.RAX(), asm.RCX())                   // remaining = cap - written
+    asm.cmp_i(a, asm.RAX(), 0)
+    asm.jcc(a, asm.CC_LE(), "os_win_spawn_readdone")
+    asm.mov(a, asm.R8(), asm.RAX())                    // r8 = remaining
+    asm.ld(a, asm.RDX(), asm.RSP(), 8632)              // out_buf
+    asm.ld(a, asm.RAX(), asm.RSP(), 8656)              // written
+    asm.add(a, asm.RDX(), asm.RAX())                   // dest = out_buf + written
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)              // hRead
+    asm.lea(a, asm.R9(), asm.RSP(), 8688)              // &bytesRead (gjenbruk sa+8-slot, ferdig med sa)
+    asm.st_i(a, asm.RSP(), 32, 0)                      // lpOverlapped = NULL
+    iat(a, slot, base, "KERNEL32.dll!ReadFile")
+    asm.tst(a, asm.RAX(), asm.RAX())                   // BOOL
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_readdone")    // feil/EOF
+    asm.ld32(a, asm.RAX(), asm.RSP(), 8688)            // bytesRead (nullutvida)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_readdone")    // 0 byte = EOF
+    asm.ld(a, asm.RCX(), asm.RSP(), 8656)
+    asm.add(a, asm.RCX(), asm.RAX())                   // written += bytesRead
+    asm.st(a, asm.RSP(), 8656, asm.RCX())
+    asm.jmp(a, "os_win_spawn_read")
+    asm.merk(a, "os_win_spawn_readdone")
     // WaitForSingleObject(pi.hProcess, INFINITE)
     asm.ld(a, asm.RCX(), asm.RSP(), 8560)
-    asm.mov_i32(a, asm.RDX(), 4294967295)              // INFINITE = 0xFFFFFFFF
+    asm.mov_i32(a, asm.RDX(), 4294967295)
     iat(a, slot, base, "KERNEL32.dll!WaitForSingleObject")
     // GetExitCodeProcess(pi.hProcess, &exit)
     asm.st_i(a, asm.RSP(), 8592, 0)
     asm.ld(a, asm.RCX(), asm.RSP(), 8560)
-    asm.lea(a, asm.RDX(), asm.RSP(), 8592)             // &exit (0x2190)
+    asm.lea(a, asm.RDX(), asm.RSP(), 8592)
     iat(a, slot, base, "KERNEL32.dll!GetExitCodeProcess")
-    asm.ld(a, asm.RCX(), asm.RSP(), 8560)              // CloseHandle(hProcess)
+    // *out_len_ptr = written
+    asm.ld(a, asm.RCX(), asm.RSP(), 8648)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8656)
+    asm.st(a, asm.RCX(), 0, asm.RAX())
+    // CloseHandle(hRead), CloseHandle(hProcess), CloseHandle(hThread)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8664)
     iat(a, slot, base, "KERNEL32.dll!CloseHandle")
-    asm.ld(a, asm.RCX(), asm.RSP(), 8568)              // CloseHandle(hThread @ pi+8)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8560)
     iat(a, slot, base, "KERNEL32.dll!CloseHandle")
-    asm.ld32(a, asm.RAX(), asm.RSP(), 8592)            // exit-kode (nullutvida)
+    asm.ld(a, asm.RCX(), asm.RSP(), 8568)
+    iat(a, slot, base, "KERNEL32.dll!CloseHandle")
+    asm.ld32(a, asm.RAX(), asm.RSP(), 8592)            // exit-kode
     asm.jmp(a, "os_win_spawn_ut")
     asm.merk(a, "os_win_spawn_fail")
-    asm.mov_is(a, asm.RAX(), 0 - 1)                    // −1 spawn-feil
+    asm.mov_is(a, asm.RAX(), 0 - 1)
     asm.merk(a, "os_win_spawn_ut")
     asm.mov(a, asm.RSP(), asm.RBP())
     asm.pop(a, asm.RBP())
