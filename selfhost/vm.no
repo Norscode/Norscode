@@ -2308,6 +2308,15 @@ funksjon kall_innebygd_web_og_ncb(namn: tekst, args: liste<tekst>, active_functi
                 kast "Ukjent selfhost-funksjon: " + fn_namn
             }
         }
+        // Aritetskontroll for dynamiske kall: kompilatoren fyller ikkje
+        // standardargument her (det skjer på kallstaden for statiske kall), så
+        // runtime-definisjonen har ingen default-metadata → rett aritet er
+        // nøyaktig lengde(params). Feil tal argument gjev eit fangbart unntak i
+        // staden for SIGSEGV (DoS-rota via ekstern input).
+        la mål_def = vm_map_get(active_functions, løyst)
+        hvis vm_map_har_nokkel(mål_def, "params") og lengde(fn_args) != lengde(mål_def["params"]) {
+            kast "Aritetsfeil ved dynamisk kall til " + løyst + ": forventa " + tekst_fra_heltall(lengde(mål_def["params"])) + " argument, fekk " + tekst_fra_heltall(lengde(fn_args))
+        }
         // Dynamiske kall kjem via builtin-dispatch og har ikkje CALL-opkodens
         // heap-ID-liste. Ikkje la dei arve røter frå eit tidlegare nested kall.
         active_functions["__vm_pending_arg_heap_ids__"] = []
@@ -2770,6 +2779,59 @@ funksjon kall_innebygd_web_og_ncb(namn: tekst, args: liste<tekst>, active_functi
 
 }
 
+// ── Hjelparar for tid/krypto-builtins (2.12) ─────────────────────────────────
+funksjon vm_pad2(n: heiltall) -> tekst {
+    hvis n < 10 { returner "0" + tekst_fra_heltall(n) }
+    returner tekst_fra_heltall(n)
+}
+
+// Rå tekst→byte-liste (ingen padding) — byte-identisk med std.krypto._tekst_bytes.
+funksjon vm_tekst_bytes_rå(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        legg_til(ut, builtin.char_code(builtin.slice(s, i, i + 1)) & 255)
+        i = i + 1
+    }
+    returner ut
+}
+
+// Byte-liste → lowercase hex — byte-identisk med std.krypto._bytes_hex.
+funksjon vm_bytes_til_hex(bytes: liste_heiltall) -> tekst {
+    la alfabet = "0123456789abcdef"
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(bytes) {
+        la b = bytes[i] % 256
+        ut = ut + builtin.slice(alfabet, b / 16, b / 16 + 1)
+        ut = ut + builtin.slice(alfabet, b % 16, b % 16 + 1)
+        i = i + 1
+    }
+    returner ut
+}
+
+// Epoke-millisekund → ISO-8601 UTC (YYYY-MM-DDTHH:MM:SSZ). Civil-from-days
+// (Howard Hinnant), berre for ms >= 0 (tid_ms er alltid positiv).
+funksjon vm_ms_til_iso(ms: heiltall) -> tekst {
+    la sekund_total = ms / 1000
+    la dagar = sekund_total / 86400
+    la sod = sekund_total - dagar * 86400
+    la timar = sod / 3600
+    la minutt = (sod - timar * 3600) / 60
+    la sekund = sod - timar * 3600 - minutt * 60
+    la z = dagar + 719468
+    la era = z / 146097
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = hvis mp < 10 da mp + 3 ellers mp - 9
+    hvis m <= 2 { y = y + 1 }
+    returner tekst_fra_heltall(y) + "-" + vm_pad2(m) + "-" + vm_pad2(d) + "T" + vm_pad2(timar) + ":" + vm_pad2(minutt) + ":" + vm_pad2(sekund) + "Z"
+}
+
 funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
     // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
     mens builtin.starts_with(namn, "builtin.builtin.")
@@ -3130,6 +3192,41 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.tid_no" eller namn == "builtin.timestamp" {
         returner builtin.tid_ms() / 1000
+    }
+
+    hvis namn == "builtin.unix_timestamp" {
+        returner builtin.tid_ms() / 1000
+    }
+
+    hvis namn == "builtin.now_iso" {
+        returner vm_ms_til_iso(builtin.tid_ms())
+    }
+
+    hvis namn == "builtin.hmac_sha256" {
+        // (nøkkel, melding) → lowercase hex. Deleger til den reine std-
+        // implementasjonen (sha256.hmac_sha256_bytes) for identisk åtferd.
+        la rå = sha256.hmac_sha256_bytes(vm_tekst_bytes_rå(tekst(args[0])), vm_tekst_bytes_rå(tekst(args[1])))
+        returner vm_bytes_til_hex(rå)
+    }
+
+    hvis namn == "builtin.constant_time_compare" {
+        // Konstant-tid samanlikning: gå alltid over den lengste lengda, samle
+        // alle avvik utan tidleg retur (byte-identisk med std.krypto.konstant_lik).
+        la a = tekst(args[0])
+        la b = tekst(args[1])
+        la maks = lengde(a)
+        hvis lengde(b) > maks { maks = lengde(b) }
+        la resultat: heiltall = lengde(a) ^ lengde(b)
+        la ci: heiltall = 0
+        mens ci < maks {
+            la ca: heiltall = 0
+            la cb: heiltall = 0
+            hvis ci < lengde(a) { ca = builtin.char_code(builtin.slice(a, ci, ci + 1)) }
+            hvis ci < lengde(b) { cb = builtin.char_code(builtin.slice(b, ci, ci + 1)) }
+            resultat = resultat | (ca ^ cb)
+            ci = ci + 1
+        }
+        returner resultat == 0
     }
 
     hvis namn == "builtin.heltall_fra_tekst" eller namn == "heltall_fra_tekst" eller
@@ -5588,6 +5685,15 @@ funksjon køyr_funksjon(
 
     // Bind parametrar
     hvis ikkje resuming {
+        // Aritetsvakt: standardargument vert fylte på kallstaden av kompilatoren,
+        // så alle kompilerte kall har nøyaktig lengde(params) argument. Eit kall
+        // med FÆRRE argument (t.d. via builtin.ncb_call_fn / DI / guard) ville
+        // elles indeksere arg_verdiar[pi] utanfor lista → SIGSEGV (DoS). Reis i
+        // staden eit fangbart unntak (same veg som interne runtime-feil: host-kast
+        // frå eit nøsta kall vert fanga på CALL-staden og ruta til guest try/fang).
+        hvis lengde(arg_verdiar) < lengde(params) {
+            kast "Aritetsfeil: " + fn_namn + " forventa " + tekst_fra_heltall(lengde(params)) + " argument, fekk " + tekst_fra_heltall(lengde(arg_verdiar))
+        }
         la pi: heltall = 0
         mens (pi < lengde(params)) {
             ramme["last_heap_id"] = ""
@@ -6231,6 +6337,26 @@ funksjon køyr_funksjon(
                     call_args = dynamiske_args
                     call_heap_ids = dynamiske_heap
                     vm_metric_inc(functions, "dynamic_calls")
+                    // 2.1 Aritetskontroll for dynamiske bytekode-kall: eit kompilert
+                    // builtin.ncb_call_fn blir dispatcha her, og callee-ramma vert bygd
+                    // INLINE i tail-/continuation-greina nedanfor. Den vegen treffer
+                    // korkje aritetsvakta i køyr_funksjon eller ncb_call_fn-builtin-arma,
+                    // så feil tal argument slapp gjennom: for få → INDEX_GET-krasj
+                    // («Indeks utanfor»), for mange → stilt ignorert. Kompilatoren fyller
+                    // ikkje standardargument for dynamiske kall, så rett aritet er
+                    // nøyaktig lengde(params). Reis same fangbare unntak som dei to andre
+                    // vaktene, men via THROW-maskineriet (legg melding på stacken + tving
+                    // THROW) slik at det vert ruta til lokal/forelder try/fang (og vidare
+                    // til nc_main si 500-wrapping) i staden for eit rått vert-kast.
+                    la dyn_def = vm_map_get(functions, dynamisk_løyst)
+                    hvis vm_map_har_nokkel(dyn_def, "params") og lengde(call_args) != lengde(dyn_def["params"]) {
+                        la dyn_forventa: heiltall = lengde(dyn_def["params"])
+                        la dyn_fekk: heiltall = lengde(call_args)
+                        vm_arg_liste_frigje(functions, call_args, fast_mode)
+                        stack_push(ramme, "Aritetsfeil ved dynamisk kall til " + dynamisk_løyst + ": forventa " + tekst_fra_heltall(dyn_forventa) + " argument, fekk " + tekst_fra_heltall(dyn_fekk))
+                        tvungen_op = "THROW"
+                        fortsett
+                    }
                 }
             }
 
