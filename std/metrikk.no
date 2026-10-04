@@ -1,0 +1,819 @@
+# metrikk.no — metrikk-register med Prometheus-eksponering og OTLP/HTTP-JSON-eksport
+#
+# Eit register held metrikk-familiar: teljarar (counter), målarar (gauge) og histogram
+# med konfigurerbare bøtter. Kvar familie har faste etikettnamn (labels); kvar unik
+# kombinasjon av etikettverdiar er ein serie. Registeret kan:
+#   - skrivast ut i Prometheus text exposition format 0.0.4 (prometheus(reg)),
+#     med `# HELP`, `# TYPE`, `_bucket{le="..."}` (kumulative, med `+Inf`), `_sum`, `_count`
+#     og escaping av etikettverdiar (\\, \", \n) og hjelpetekst (\\, \n);
+#   - byggjast om til ein OTLP 1.x ExportMetricsServiceRequest i JSON-koding
+#     (otlp_metrikk_json), og sendast med POST til ein OTLP/HTTP-mottakar
+#     (eksporter_metrikk). Enkle spans (éin per førespurnad) kan samlast og sendast som
+#     ExportTraceServiceRequest (otlp_spor_json / eksporter_spor).
+# JSON-byggjinga er rein og testbar utan nettverk; berre eksporter_* opnar ein socket.
+#
+# Bruk:
+#   bruk std.metrikk som m
+#   la reg = m.register()
+#   la kall = m.teljar(reg, "jobbar_total", "Tal på jobbar.", ["kø"])
+#   m.tel(kall, ["e-post"])
+#   la tid = m.histogram(reg, "jobb_sekund", "Jobbtid.", [], [0.1, 0.5, 1.0])
+#   m.observer(tid, [], 0.25)
+#   skriv(m.prometheus(reg))
+#
+# I apptenaren: `app.slå_på_metrikk()` (eller konfig {"metrikk": sann}) gjev /metrics,
+# http_requests_total{method,route,status} og http_request_duration_seconds{method,route}
+# per rutemønster i standardregisteret (standard()). Sjå docs/APPTENAR_METRIKK.md.
+#
+# OTLP-endepunkt: opp["endepunkt"] (basis-URL, /v1/<signal> blir lagt til), elles
+# OTEL_EXPORTER_OTLP_METRICS_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (som dei er),
+# elles OTEL_EXPORTER_OTLP_ENDPOINT + /v1/<signal>, elles http://localhost:4318.
+# Tenestenamn: opp["tenestenamn"], elles OTEL_SERVICE_NAME, elles "norscode-app".
+# Ekstra ressursattributt frå OTEL_RESOURCE_ATTRIBUTES (k=v,k=v) og headerar frå
+# OTEL_EXPORTER_OTLP_HEADERS (k=v,k=v).
+#
+# Éin tråd: registeret er ikkje trådsikkert (VM-en har éin tråd). Eldre std.metrics
+# (flat ordbok_tekst) er uendra for eksisterande brukarar.
+
+bruk std.http som _http
+
+la _g: ordbok = {}
+
+# ─── Konstantar ──────────────────────────────────────────────────────────────
+
+funksjon prometheus_innhaldstype() -> tekst { returner "text/plain; version=0.0.4; charset=utf-8" }
+
+# Standardbøttene til Prometheus-klientane (sekund).
+funksjon standard_bøtter() -> liste {
+    returner [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+}
+
+# ─── Register ────────────────────────────────────────────────────────────────
+
+funksjon register() -> ordbok {
+    returner {"__metrikk_register__": sann, "familiar": {}, "rekkje": [], "start_ms": builtin.tid_ms()}
+}
+
+# Prosess-globalt standardregister (apptenaren brukar dette).
+funksjon standard() -> ordbok {
+    hvis ikkje har_nokkel(_g, "reg") {
+        prosess_start_ms()
+        _g["reg"] = register()
+    }
+    returner _g["reg"]
+}
+
+# Tøm standardregisteret (for testar i same prosess).
+funksjon nullstill_standard() -> heltall {
+    _g["reg"] = register()
+    _g["spans"] = []
+    _g["spans_droppa"] = 0
+    returner 0
+}
+
+# Om lag prosessstarten (ms sidan epoch): fyrste gong modulen vart spurd. Blir ikkje
+# nullstilt av nullstill_standard().
+funksjon prosess_start_ms() -> heltall {
+    hvis ikkje har_nokkel(_g, "prosess_start_ms") { _g["prosess_start_ms"] = builtin.tid_ms() }
+    returner _g["prosess_start_ms"]
+}
+
+# ─── Validering ──────────────────────────────────────────────────────────────
+
+funksjon _er_namneteikn(k: heltall, fyrst: bool, kolon: bool) -> bool {
+    hvis (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller k == 95 { returner sann }
+    hvis kolon og k == 58 { returner sann }
+    hvis ikkje fyrst og k >= 48 og k <= 57 { returner sann }
+    returner usann
+}
+
+# Metrikknamn: [a-zA-Z_:][a-zA-Z0-9_:]*. Etikettnamn: [a-zA-Z_][a-zA-Z0-9_]*.
+funksjon _gyldig_namn(n: tekst, kolon: bool) -> bool {
+    hvis lengde(n) == 0 { returner usann }
+    la i = 0
+    mens i < lengde(n) {
+        hvis ikkje _er_namneteikn(builtin.char_code(builtin.slice(n, i, i + 1)), i == 0, kolon) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _er_tal(v) -> bool {
+    la t = builtin.type(v)
+    returner t == "heltall" eller t == "desimaltall"
+}
+
+# ─── Familiar ────────────────────────────────────────────────────────────────
+
+funksjon _familie(reg: ordbok, type_namn: tekst, namn: tekst, hjelp: tekst, etikettar, bøtter) -> ordbok {
+    hvis ikkje _gyldig_namn(namn, sann) { kast "metrikk: ugyldig metrikknamn: " + namn }
+    la et = []
+    hvis etikettar != null {
+        hvis builtin.type(etikettar) != "liste" { kast "metrikk: etikettar må vere ei liste: " + namn }
+        la i = 0
+        mens i < lengde(etikettar) {
+            la e = tekst(etikettar[i])
+            hvis ikkje _gyldig_namn(e, usann) eller builtin.starts_with(e, "__") {
+                kast "metrikk: ugyldig etikettnamn: " + e
+            }
+            hvis type_namn == "histogram" og e == "le" { kast "metrikk: etiketten «le» er reservert i histogram" }
+            legg_til(et, e)
+            i = i + 1
+        }
+    }
+    la fam_alle = reg["familiar"]
+    hvis har_nokkel(fam_alle, namn) {
+        la f = fam_alle[namn]
+        hvis f["type"] != type_namn { kast "metrikk: " + namn + " er alt registrert som " + tekst(f["type"]) }
+        hvis builtin.join(f["etikettar"], ",") != builtin.join(et, ",") {
+            kast "metrikk: " + namn + " er alt registrert med andre etikettar"
+        }
+        returner f
+    }
+    la b = []
+    hvis type_namn == "histogram" {
+        la kjelde = bøtter
+        hvis kjelde == null eller builtin.type(kjelde) != "liste" eller lengde(kjelde) == 0 { kjelde = standard_bøtter() }
+        la j = 0
+        mens j < lengde(kjelde) {
+            hvis ikkje _er_tal(kjelde[j]) { kast "metrikk: bøttegrenser må vere tal: " + namn }
+            hvis j > 0 og kjelde[j] <= kjelde[j - 1] { kast "metrikk: bøttegrenser må vere strengt aukande: " + namn }
+            legg_til(b, kjelde[j])
+            j = j + 1
+        }
+    }
+    la f2 = {"namn": namn, "hjelp": hjelp, "type": type_namn, "etikettar": et, "bøtter": b,
+             "eining": "", "seriar": {}, "rekkje": []}
+    fam_alle[namn] = f2
+    legg_til(reg["rekkje"], namn)
+    # Ein familie utan etikettar har alltid éin serie (vist med 0 frå start).
+    hvis lengde(et) == 0 { _serie(f2, []) }
+    returner f2
+}
+
+funksjon teljar(reg: ordbok, namn: tekst, hjelp: tekst, etikettar) -> ordbok {
+    returner _familie(reg, "counter", namn, hjelp, etikettar, null)
+}
+
+funksjon målar(reg: ordbok, namn: tekst, hjelp: tekst, etikettar) -> ordbok {
+    returner _familie(reg, "gauge", namn, hjelp, etikettar, null)
+}
+
+# bøtter: strengt aukande øvre grenser (utan +Inf, som alltid blir lagt til). Tom liste
+# eller null gjev standard_bøtter().
+funksjon histogram(reg: ordbok, namn: tekst, hjelp: tekst, etikettar, bøtter) -> ordbok {
+    returner _familie(reg, "histogram", namn, hjelp, etikettar, bøtter)
+}
+
+# Eining for OTLP ("s", "By", "1" …). Prometheus-namnet ber eininga sjølv.
+funksjon sett_eining(fam: ordbok, eining: tekst) -> ordbok {
+    fam["eining"] = eining
+    returner fam
+}
+
+funksjon finn(reg: ordbok, namn: tekst) {
+    hvis har_nokkel(reg["familiar"], namn) { returner reg["familiar"][namn] }
+    returner null
+}
+
+# ─── Escaping ────────────────────────────────────────────────────────────────
+
+# Etikettverdi: \ → \\, " → \", linjeskift → \n.
+funksjon escape_etikett(v: tekst) -> tekst {
+    hvis builtin.index_of(v, "\\") < 0 og builtin.index_of(v, "\"") < 0 og builtin.index_of(v, "\n") < 0 { returner v }
+    la ut = ""
+    la i = 0
+    mens i < lengde(v) {
+        la c = builtin.slice(v, i, i + 1)
+        hvis c == "\\" { ut = ut + "\\\\" }
+        ellers hvis c == "\"" { ut = ut + "\\\"" }
+        ellers hvis c == "\n" { ut = ut + "\\n" }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Hjelpetekst: \ → \\, linjeskift → \n (hermeteikn blir ikkje escapa i HELP).
+funksjon escape_hjelp(v: tekst) -> tekst {
+    hvis builtin.index_of(v, "\\") < 0 og builtin.index_of(v, "\n") < 0 { returner v }
+    la ut = ""
+    la i = 0
+    mens i < lengde(v) {
+        la c = builtin.slice(v, i, i + 1)
+        hvis c == "\\" { ut = ut + "\\\\" }
+        ellers hvis c == "\n" { ut = ut + "\\n" }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Seriar ──────────────────────────────────────────────────────────────────
+
+# Etikettverdiane som liste i same rekkjefølgje som etikettnamna. `verdiar` kan vere ei
+# liste (posisjonell) eller ei ordbok (namn → verdi).
+funksjon _verdiar(fam: ordbok, verdiar) -> liste {
+    la et = fam["etikettar"]
+    la ut = []
+    hvis verdiar == null { verdiar = [] }
+    hvis builtin.type(verdiar) == "ordbok" {
+        la i = 0
+        mens i < lengde(et) {
+            hvis ikkje har_nokkel(verdiar, et[i]) { kast "metrikk: " + tekst(fam["namn"]) + " manglar etiketten " + tekst(et[i]) }
+            legg_til(ut, tekst(verdiar[et[i]]))
+            i = i + 1
+        }
+        hvis lengde(nøkler(verdiar)) != lengde(et) { kast "metrikk: " + tekst(fam["namn"]) + " fekk ukjende etikettar" }
+        returner ut
+    }
+    hvis lengde(verdiar) != lengde(et) {
+        kast "metrikk: " + tekst(fam["namn"]) + " ventar " + tekst(lengde(et)) + " etikettverdiar, fekk " + tekst(lengde(verdiar))
+    }
+    la j = 0
+    mens j < lengde(verdiar) {
+        legg_til(ut, tekst(verdiar[j]))
+        j = j + 1
+    }
+    returner ut
+}
+
+# Etikettdelen i Prometheus-format (utan klammer): a="x",b="y". Nøkkel for serien òg.
+funksjon _etikettstreng(namn: liste, verdiar: liste) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(namn) {
+        legg_til(delar, tekst(namn[i]) + "=\"" + escape_etikett(tekst(verdiar[i])) + "\"")
+        i = i + 1
+    }
+    returner builtin.join(delar, ",")
+}
+
+funksjon _serie(fam: ordbok, verdiar) -> ordbok {
+    la v = _verdiar(fam, verdiar)
+    la nøkkel = _etikettstreng(fam["etikettar"], v)
+    la s = fam["seriar"]
+    hvis har_nokkel(s, nøkkel) { returner s[nøkkel] }
+    la ny = {"verdiar": v, "nøkkel": nøkkel, "start_ms": builtin.tid_ms(), "v": 0}
+    hvis fam["type"] == "histogram" {
+        la tal = []
+        la i = 0
+        mens i <= lengde(fam["bøtter"]) {
+            legg_til(tal, 0)
+            i = i + 1
+        }
+        ny["tal"] = tal
+        ny["sum"] = 0
+        ny["n"] = 0
+    }
+    s[nøkkel] = ny
+    legg_til(fam["rekkje"], nøkkel)
+    returner ny
+}
+
+# ─── Oppdatering ─────────────────────────────────────────────────────────────
+
+# Teljar: auk med delta (>= 0). Målar: auk eller minsk (delta kan vere negativ).
+funksjon auk(fam: ordbok, verdiar, delta) -> heltall {
+    hvis ikkje _er_tal(delta) { kast "metrikk: delta må vere eit tal" }
+    hvis fam["type"] == "histogram" { kast "metrikk: bruk observer() på histogram " + tekst(fam["namn"]) }
+    hvis fam["type"] == "counter" og delta < 0 { kast "metrikk: teljaren " + tekst(fam["namn"]) + " kan ikkje minke" }
+    la s = _serie(fam, verdiar)
+    s["v"] = s["v"] + delta
+    returner 0
+}
+
+funksjon tel(fam: ordbok, verdiar) -> heltall {
+    returner auk(fam, verdiar, 1)
+}
+
+funksjon minsk(fam: ordbok, verdiar, delta) -> heltall {
+    hvis fam["type"] != "gauge" { kast "metrikk: berre målarar kan minke: " + tekst(fam["namn"]) }
+    returner auk(fam, verdiar, 0 - delta)
+}
+
+# Målar: set verdien.
+funksjon sett(fam: ordbok, verdiar, verdi) -> heltall {
+    hvis fam["type"] != "gauge" { kast "metrikk: sett() er berre for målarar: " + tekst(fam["namn"]) }
+    hvis ikkje _er_tal(verdi) { kast "metrikk: verdien må vere eit tal" }
+    la s = _serie(fam, verdiar)
+    s["v"] = verdi
+    returner 0
+}
+
+# Histogram: registrer éi observasjon. Ho hamnar i den fyrste bøtta med grense >= verdi.
+funksjon observer(fam: ordbok, verdiar, verdi) -> heltall {
+    hvis fam["type"] != "histogram" { kast "metrikk: observer() er berre for histogram: " + tekst(fam["namn"]) }
+    hvis ikkje _er_tal(verdi) { kast "metrikk: verdien må vere eit tal" }
+    la s = _serie(fam, verdiar)
+    la b = fam["bøtter"]
+    la i = 0
+    mens i < lengde(b) og verdi > b[i] { i = i + 1 }
+    la tal = s["tal"]
+    tal[i] = tal[i] + 1
+    s["sum"] = s["sum"] + verdi
+    s["n"] = s["n"] + 1
+    returner 0
+}
+
+# Gjeldande verdi for ein teljar/målar-serie (0 om serien ikkje finst).
+funksjon hent(fam: ordbok, verdiar) {
+    la v = _verdiar(fam, verdiar)
+    la nøkkel = _etikettstreng(fam["etikettar"], v)
+    hvis ikkje har_nokkel(fam["seriar"], nøkkel) { returner 0 }
+    la s = fam["seriar"][nøkkel]
+    hvis fam["type"] == "histogram" { returner s["n"] }
+    returner s["v"]
+}
+
+# Histogram-serie som {"grenser", "kumulativ" (inkl. +Inf sist), "sum", "n"}.
+funksjon hent_histogram(fam: ordbok, verdiar) -> ordbok {
+    la v = _verdiar(fam, verdiar)
+    la nøkkel = _etikettstreng(fam["etikettar"], v)
+    la kum = []
+    la n = 0
+    la sum = 0
+    hvis har_nokkel(fam["seriar"], nøkkel) {
+        la s = fam["seriar"][nøkkel]
+        la akk = 0
+        la i = 0
+        mens i < lengde(s["tal"]) {
+            akk = akk + s["tal"][i]
+            legg_til(kum, akk)
+            i = i + 1
+        }
+        n = s["n"]
+        sum = s["sum"]
+    } ellers {
+        la j = 0
+        mens j <= lengde(fam["bøtter"]) {
+            legg_til(kum, 0)
+            j = j + 1
+        }
+    }
+    returner {"grenser": fam["bøtter"], "kumulativ": kum, "sum": sum, "n": n}
+}
+
+# ─── Prometheus-format ───────────────────────────────────────────────────────
+
+# Tal som tekst: heiltal som dei er, desimaltal i kortaste form (1.0 → "1", 0.005).
+funksjon tal_tekst(v) -> tekst {
+    returner tekst(v)
+}
+
+funksjon _med_etikettar(namn: tekst, etikettar: tekst) -> tekst {
+    hvis etikettar == "" { returner namn }
+    returner namn + "{" + etikettar + "}"
+}
+
+funksjon _familie_prometheus(f: ordbok) -> tekst {
+    la rekkje = f["rekkje"]
+    hvis lengde(rekkje) == 0 { returner "" }
+    la namn = tekst(f["namn"])
+    la linjer = []
+    legg_til(linjer, "# HELP " + namn + " " + escape_hjelp(tekst(f["hjelp"])))
+    legg_til(linjer, "# TYPE " + namn + " " + tekst(f["type"]))
+    la i = 0
+    mens i < lengde(rekkje) {
+        la s = f["seriar"][rekkje[i]]
+        la et = tekst(s["nøkkel"])
+        hvis f["type"] == "histogram" {
+            la b = f["bøtter"]
+            la før = ""
+            hvis et != "" { før = et + "," }
+            la akk = 0
+            la j = 0
+            mens j < lengde(b) {
+                akk = akk + s["tal"][j]
+                legg_til(linjer, namn + "_bucket{" + før + "le=\"" + tal_tekst(b[j]) + "\"} " + tekst(akk))
+                j = j + 1
+            }
+            akk = akk + s["tal"][lengde(b)]
+            legg_til(linjer, namn + "_bucket{" + før + "le=\"+Inf\"} " + tekst(akk))
+            legg_til(linjer, _med_etikettar(namn + "_sum", et) + " " + tal_tekst(s["sum"]))
+            legg_til(linjer, _med_etikettar(namn + "_count", et) + " " + tekst(s["n"]))
+        } ellers {
+            legg_til(linjer, _med_etikettar(namn, et) + " " + tal_tekst(s["v"]))
+        }
+        i = i + 1
+    }
+    returner builtin.join(linjer, "\n") + "\n"
+}
+
+# Heile registeret i Prometheus text exposition format 0.0.4 (familiar i
+# registreringsrekkjefølgje, seriar i den rekkjefølgja dei vart laga).
+funksjon prometheus(reg: ordbok) -> tekst {
+    la ut = ""
+    la r = reg["rekkje"]
+    la i = 0
+    mens i < lengde(r) {
+        ut = ut + _familie_prometheus(reg["familiar"][r[i]])
+        i = i + 1
+    }
+    returner ut
+}
+
+# Ferdig svarordbok (apptenar/nc serve) med rett Content-Type.
+funksjon prometheus_svar(reg: ordbok) -> ordbok {
+    returner {"status": 200, "content_type": prometheus_innhaldstype(), "cache_control": "no-store",
+              "body": prometheus(reg)}
+}
+
+# ─── JSON-hjelparar (OTLP) ───────────────────────────────────────────────────
+
+funksjon _hex_siffer(n: heltall) -> tekst {
+    returner builtin.slice("0123456789abcdef", n, n + 1)
+}
+
+funksjon _json_str(v: tekst) -> tekst {
+    la ut = "\""
+    la i = 0
+    la n = lengde(v)
+    la start = 0
+    mens i < n {
+        la c = builtin.slice(v, i, i + 1)
+        la k = builtin.char_code(c)
+        la erstatt = ""
+        hvis c == "\"" { erstatt = "\\\"" }
+        ellers hvis c == "\\" { erstatt = "\\\\" }
+        ellers hvis c == "\n" { erstatt = "\\n" }
+        ellers hvis c == "\r" { erstatt = "\\r" }
+        ellers hvis c == "\t" { erstatt = "\\t" }
+        ellers hvis k >= 0 og k < 32 { erstatt = "\\u00" + _hex_siffer(k / 16) + _hex_siffer(k % 16) }
+        hvis erstatt != "" {
+            ut = ut + builtin.slice(v, start, i) + erstatt
+            start = i + 1
+        }
+        i = i + 1
+    }
+    returner ut + builtin.slice(v, start, n) + "\""
+}
+
+# ms sidan epoch → nanosekund som tekst (OTLP fixed64 blir koda som JSON-streng).
+funksjon _ns(ms: heltall) -> tekst {
+    hvis ms <= 0 { returner "0" }
+    returner tekst(ms) + "000000"
+}
+
+funksjon _attr_str(nøkkel: tekst, verdi: tekst) -> tekst {
+    returner "{\"key\":" + _json_str(nøkkel) + ",\"value\":{\"stringValue\":" + _json_str(verdi) + "}}"
+}
+
+funksjon _attr_int(nøkkel: tekst, verdi: heltall) -> tekst {
+    returner "{\"key\":" + _json_str(nøkkel) + ",\"value\":{\"intValue\":\"" + tekst(verdi) + "\"}}"
+}
+
+funksjon _attr_liste(namn: liste, verdiar: liste) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(namn) {
+        legg_til(delar, _attr_str(tekst(namn[i]), tekst(verdiar[i])))
+        i = i + 1
+    }
+    returner "[" + builtin.join(delar, ",") + "]"
+}
+
+funksjon _attr_ordbok(d: ordbok) -> liste {
+    la ut = []
+    la ks = nøkler(d)
+    la i = 0
+    mens i < lengde(ks) {
+        la v = d[ks[i]]
+        hvis builtin.type(v) == "heltall" { legg_til(ut, _attr_int(tekst(ks[i]), v)) }
+        ellers { legg_til(ut, _attr_str(tekst(ks[i]), tekst(v))) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _talverdi_json(v) -> tekst {
+    hvis builtin.type(v) == "heltall" { returner "\"asInt\":\"" + tekst(v) + "\"" }
+    returner "\"asDouble\":" + tal_tekst(v)
+}
+
+# ─── Miljø og ressurs ────────────────────────────────────────────────────────
+
+# Miljøvariabel; opp["miljø"] (ordbok) overstyrer prosessmiljøet (for testar).
+funksjon _miljø(opp: ordbok, namn: tekst) -> tekst {
+    hvis opp != null og har_nokkel(opp, "miljø") og builtin.type(opp["miljø"]) == "ordbok" {
+        la m = opp["miljø"]
+        hvis har_nokkel(m, namn) { returner tekst(m[namn]) }
+        returner ""
+    }
+    la v = ""
+    prøv { v = builtin.miljo_hent(namn) } fang (e) { v = "" }
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+funksjon _opp(opp: ordbok, namn: tekst) -> tekst {
+    hvis opp != null og har_nokkel(opp, namn) og opp[namn] != null { returner tekst(opp[namn]) }
+    returner ""
+}
+
+# "k=v,k2=v2" → ordbok (W3C Baggage-liknande liste frå OTEL_*-variablane).
+funksjon _kv_liste(t: tekst) -> ordbok {
+    la ut = {}
+    hvis builtin.trim(t) == "" { returner ut }
+    la delar = builtin.split(t, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        la d = delar[i]
+        la eq = builtin.index_of(d, "=")
+        hvis eq > 0 {
+            la k = builtin.trim(builtin.slice(d, 0, eq))
+            la v = builtin.trim(builtin.slice(d, eq + 1, lengde(d)))
+            hvis k != "" { ut[k] = v }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon tenestenamn(opp: ordbok) -> tekst {
+    la n = _opp(opp, "tenestenamn")
+    hvis n != "" { returner n }
+    n = _miljø(opp, "OTEL_SERVICE_NAME")
+    hvis n != "" { returner n }
+    returner "norscode-app"
+}
+
+funksjon _ressurs_json(opp: ordbok) -> tekst {
+    la attr = [_attr_str("service.name", tenestenamn(opp)),
+               _attr_str("telemetry.sdk.language", "norscode"),
+               _attr_str("telemetry.sdk.name", "norscode-std-metrikk")]
+    la ekstra = _kv_liste(_miljø(opp, "OTEL_RESOURCE_ATTRIBUTES"))
+    hvis opp != null og har_nokkel(opp, "ressurs") og builtin.type(opp["ressurs"]) == "ordbok" {
+        la r = opp["ressurs"]
+        la rk = nøkler(r)
+        la j = 0
+        mens j < lengde(rk) {
+            ekstra[rk[j]] = r[rk[j]]
+            j = j + 1
+        }
+    }
+    la ek = nøkler(ekstra)
+    la i = 0
+    mens i < lengde(ek) {
+        hvis tekst(ek[i]) != "service.name" {
+            la v = ekstra[ek[i]]
+            hvis builtin.type(v) == "heltall" { legg_til(attr, _attr_int(tekst(ek[i]), v)) }
+            ellers { legg_til(attr, _attr_str(tekst(ek[i]), tekst(v))) }
+        }
+        i = i + 1
+    }
+    returner "{\"attributes\":[" + builtin.join(attr, ",") + "]}"
+}
+
+funksjon _scope_json() -> tekst {
+    returner "{\"name\":\"norscode.std.metrikk\",\"version\":\"1\"}"
+}
+
+funksjon _no_ms(opp: ordbok) -> heltall {
+    hvis opp != null og har_nokkel(opp, "no_ms") og builtin.type(opp["no_ms"]) == "heltall" { returner opp["no_ms"] }
+    returner builtin.tid_ms()
+}
+
+# ─── OTLP metrics (ExportMetricsServiceRequest, JSON) ────────────────────────
+
+funksjon _datapunkt_json(f: ordbok, s: ordbok, start: tekst, no: tekst) -> tekst {
+    la felles = "\"attributes\":" + _attr_liste(f["etikettar"], s["verdiar"]) +
+                ",\"startTimeUnixNano\":\"" + start + "\",\"timeUnixNano\":\"" + no + "\""
+    hvis f["type"] == "histogram" {
+        la tal = []
+        la i = 0
+        mens i < lengde(s["tal"]) {
+            legg_til(tal, "\"" + tekst(s["tal"][i]) + "\"")
+            i = i + 1
+        }
+        la grenser = []
+        la j = 0
+        mens j < lengde(f["bøtter"]) {
+            legg_til(grenser, tal_tekst(f["bøtter"][j]))
+            j = j + 1
+        }
+        returner "{" + felles + ",\"count\":\"" + tekst(s["n"]) + "\",\"sum\":" + tal_tekst(s["sum"]) +
+                 ",\"bucketCounts\":[" + builtin.join(tal, ",") + "],\"explicitBounds\":[" + builtin.join(grenser, ",") + "]}"
+    }
+    returner "{" + felles + "," + _talverdi_json(s["v"]) + "}"
+}
+
+funksjon _metrikk_json(f: ordbok, no: tekst) -> tekst {
+    la punkt = []
+    la r = f["rekkje"]
+    la i = 0
+    mens i < lengde(r) {
+        la s = f["seriar"][r[i]]
+        legg_til(punkt, _datapunkt_json(f, s, _ns(s["start_ms"]), no))
+        i = i + 1
+    }
+    la dp = "\"dataPoints\":[" + builtin.join(punkt, ",") + "]"
+    la kropp = ""
+    hvis f["type"] == "counter" {
+        kropp = "\"sum\":{" + dp + ",\"aggregationTemporality\":2,\"isMonotonic\":true}"
+    } ellers hvis f["type"] == "gauge" {
+        kropp = "\"gauge\":{" + dp + "}"
+    } ellers {
+        kropp = "\"histogram\":{" + dp + ",\"aggregationTemporality\":2}"
+    }
+    la hode = "\"name\":" + _json_str(tekst(f["namn"])) + ",\"description\":" + _json_str(tekst(f["hjelp"]))
+    hvis tekst(f["eining"]) != "" { hode = hode + ",\"unit\":" + _json_str(tekst(f["eining"])) }
+    returner "{" + hode + "," + kropp + "}"
+}
+
+# ExportMetricsServiceRequest (OTLP 1.x JSON). Kumulativ temporalitet; heiltal som asInt
+# (streng), desimaltal som asDouble; tidspunkt i nanosekund som strengar.
+# opp: tenestenamn, ressurs (ordbok), no_ms, miljø (ordbok, overstyrer env).
+funksjon otlp_metrikk_json(reg: ordbok, opp: ordbok) -> tekst {
+    la no = _ns(_no_ms(opp))
+    la m = []
+    la r = reg["rekkje"]
+    la i = 0
+    mens i < lengde(r) {
+        la f = reg["familiar"][r[i]]
+        hvis lengde(f["rekkje"]) > 0 { legg_til(m, _metrikk_json(f, no)) }
+        i = i + 1
+    }
+    returner "{\"resourceMetrics\":[{\"resource\":" + _ressurs_json(opp) +
+             ",\"scopeMetrics\":[{\"scope\":" + _scope_json() + ",\"metrics\":[" + builtin.join(m, ",") + "]}]}]}"
+}
+
+# ─── Spans ───────────────────────────────────────────────────────────────────
+
+funksjon _er_hex(t: tekst) -> bool {
+    la i = 0
+    mens i < lengde(t) {
+        la k = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis ikkje ((k >= 48 og k <= 57) eller (k >= 97 og k <= 102)) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _berre_null(t: tekst) -> bool {
+    returner builtin.replace(t, "0", "") == ""
+}
+
+# W3C traceparent "00-<trace-id 32 hex>-<parent-id 16 hex>-<flagg 2 hex>". Gjev
+# {"trace_id", "parent_id"} eller null om headeren manglar eller er ugyldig.
+funksjon tolk_traceparent(t: tekst) {
+    la v = builtin.trim(t)
+    hvis lengde(v) < 55 { returner null }
+    la d = builtin.split(v, "-")
+    hvis lengde(d) < 4 { returner null }
+    hvis lengde(d[0]) != 2 eller lengde(d[1]) != 32 eller lengde(d[2]) != 16 eller lengde(d[3]) != 2 { returner null }
+    hvis d[0] == "ff" { returner null }
+    hvis ikkje (_er_hex(d[0]) og _er_hex(d[1]) og _er_hex(d[2]) og _er_hex(d[3])) { returner null }
+    hvis _berre_null(d[1]) eller _berre_null(d[2]) { returner null }
+    returner {"trace_id": d[1], "parent_id": d[2]}
+}
+
+# Start ein span. `traceparent` er innkomande header (eller ""): då blir trace-id-en
+# arva og spanen får foreldre-id. kind: 1 INTERNAL, 2 SERVER, 3 CLIENT.
+funksjon span_start(namn: tekst, traceparent: tekst, kind: heltall) -> ordbok {
+    la tp = tolk_traceparent(traceparent)
+    la trace_id = ""
+    la forelder = ""
+    hvis tp != null {
+        trace_id = tp["trace_id"]
+        forelder = tp["parent_id"]
+    } ellers {
+        trace_id = builtin.random_hex(16)
+    }
+    returner {"trace_id": trace_id, "span_id": builtin.random_hex(8), "parent_id": forelder,
+              "namn": namn, "kind": kind, "start_ms": builtin.tid_ms(), "slutt_ms": 0,
+              "attributt": {}, "status": 0, "melding": ""}
+}
+
+# traceparent-verdi for å sende spanen vidare (t.d. i utgåande kall).
+funksjon traceparent(span: ordbok) -> tekst {
+    returner "00-" + tekst(span["trace_id"]) + "-" + tekst(span["span_id"]) + "-01"
+}
+
+funksjon _maks_spans() -> heltall { returner 2048 }
+
+# Avslutt spanen og legg han i bufferen (høgst 2048; fleire blir talde som droppa).
+# status: 0 UNSET, 1 OK, 2 ERROR.
+funksjon span_slutt(span: ordbok, status: heltall) -> heltall {
+    span["slutt_ms"] = builtin.tid_ms()
+    span["status"] = status
+    hvis ikkje har_nokkel(_g, "spans") { _g["spans"] = [] }
+    hvis lengde(_g["spans"]) >= _maks_spans() {
+        _g["spans_droppa"] = _droppa() + 1
+        returner 0
+    }
+    legg_til(_g["spans"], span)
+    returner 1
+}
+
+funksjon _droppa() -> heltall {
+    hvis har_nokkel(_g, "spans_droppa") { returner _g["spans_droppa"] }
+    returner 0
+}
+
+funksjon spans() -> liste {
+    hvis ikkje har_nokkel(_g, "spans") { _g["spans"] = [] }
+    returner _g["spans"]
+}
+
+funksjon spans_droppa() -> heltall { returner _droppa() }
+
+funksjon tøm_spans() -> heltall {
+    _g["spans"] = []
+    returner 0
+}
+
+funksjon _span_json(s: ordbok) -> tekst {
+    la ut = "{\"traceId\":\"" + tekst(s["trace_id"]) + "\",\"spanId\":\"" + tekst(s["span_id"]) + "\""
+    hvis tekst(s["parent_id"]) != "" { ut = ut + ",\"parentSpanId\":\"" + tekst(s["parent_id"]) + "\"" }
+    ut = ut + ",\"name\":" + _json_str(tekst(s["namn"])) + ",\"kind\":" + tekst(s["kind"]) +
+         ",\"startTimeUnixNano\":\"" + _ns(s["start_ms"]) + "\",\"endTimeUnixNano\":\"" + _ns(s["slutt_ms"]) + "\"" +
+         ",\"attributes\":[" + builtin.join(_attr_ordbok(s["attributt"]), ",") + "]"
+    la st = "{\"code\":" + tekst(s["status"])
+    hvis tekst(s["melding"]) != "" { st = st + ",\"message\":" + _json_str(tekst(s["melding"])) }
+    returner ut + ",\"status\":" + st + "}}"
+}
+
+# ExportTraceServiceRequest (OTLP 1.x JSON). traceId/spanId er hex (ikkje base64), som
+# OTLP/JSON-spesifikasjonen krev.
+funksjon otlp_spor_json(span_liste: liste, opp: ordbok) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(span_liste) {
+        legg_til(delar, _span_json(span_liste[i]))
+        i = i + 1
+    }
+    returner "{\"resourceSpans\":[{\"resource\":" + _ressurs_json(opp) +
+             ",\"scopeSpans\":[{\"scope\":" + _scope_json() + ",\"spans\":[" + builtin.join(delar, ",") + "]}]}]}"
+}
+
+# ─── OTLP/HTTP-eksport ───────────────────────────────────────────────────────
+
+funksjon _utan_skråstrek(u: tekst) -> tekst {
+    la v = u
+    mens builtin.ends_with(v, "/") { v = builtin.slice(v, 0, lengde(v) - 1) }
+    returner v
+}
+
+# URL for eit signal ("metrics" eller "traces") etter OTel-spesifikasjonen for OTLP/HTTP.
+funksjon otlp_url(signal: tekst, opp: ordbok) -> tekst {
+    la base = _opp(opp, "endepunkt")
+    hvis base != "" { returner _utan_skråstrek(base) + "/v1/" + signal }
+    la spesifikk = _miljø(opp, "OTEL_EXPORTER_OTLP_" + builtin.upper(signal) + "_ENDPOINT")
+    hvis spesifikk != "" { returner spesifikk }
+    la felles = _miljø(opp, "OTEL_EXPORTER_OTLP_ENDPOINT")
+    hvis felles != "" { returner _utan_skråstrek(felles) + "/v1/" + signal }
+    returner "http://localhost:4318/v1/" + signal
+}
+
+# Førespurnaden som eksporter_* sender, utan å sende han: {"url", "headers", "body"}.
+funksjon otlp_førespurnad(signal: tekst, body: tekst, opp: ordbok) -> ordbok {
+    la h = _kv_liste(_miljø(opp, "OTEL_EXPORTER_OTLP_HEADERS"))
+    hvis opp != null og har_nokkel(opp, "headerar") og builtin.type(opp["headerar"]) == "ordbok" {
+        la eh = opp["headerar"]
+        la ks = nøkler(eh)
+        la i = 0
+        mens i < lengde(ks) {
+            h[ks[i]] = tekst(eh[ks[i]])
+            i = i + 1
+        }
+    }
+    h["Content-Type"] = "application/json"
+    returner {"url": otlp_url(signal, opp), "headers": h, "body": body}
+}
+
+funksjon _tidsavbrot(opp: ordbok) -> heltall {
+    hvis opp != null og har_nokkel(opp, "tidsavbrot_ms") og builtin.type(opp["tidsavbrot_ms"]) == "heltall" {
+        returner opp["tidsavbrot_ms"]
+    }
+    returner 10000
+}
+
+funksjon _send(f: ordbok, opp: ordbok) -> ordbok {
+    la svar = ""
+    prøv {
+        # request_full gjev svarkontrakten ({"status", "headers", "body"}) eller "" ved
+        # nettverksfeil; http.post gjev berre kroppen (og tolkar "" som JSON).
+        svar = _http.request_full("POST", f["url"], f["headers"], {}, f["body"], _tidsavbrot(opp))
+    } fang (e) {
+        returner {"ok": usann, "status": 0, "feil": tekst(e), "url": f["url"]}
+    }
+    hvis svar == null eller svar == "" { returner {"ok": usann, "status": 0, "feil": "ingen svar", "url": f["url"]} }
+    la st = 0
+    prøv { st = _http.response_status(svar) } fang (e) { st = 0 }
+    returner {"ok": st >= 200 og st < 300, "status": st, "feil": "", "url": f["url"]}
+}
+
+# POST registeret til OTLP-mottakaren. Gjev {"ok", "status", "feil", "url"}.
+funksjon eksporter_metrikk(reg: ordbok, opp: ordbok) -> ordbok {
+    returner _send(otlp_førespurnad("metrics", otlp_metrikk_json(reg, opp), opp), opp)
+}
+
+# POST bufra spans til OTLP-mottakaren; bufferen blir tømd når mottakaren svarar 2xx.
+funksjon eksporter_spor(opp: ordbok) -> ordbok {
+    la l = spans()
+    hvis lengde(l) == 0 { returner {"ok": sann, "status": 0, "feil": "", "url": otlp_url("traces", opp)} }
+    la r = _send(otlp_førespurnad("traces", otlp_spor_json(l, opp), opp), opp)
+    hvis r["ok"] { tøm_spans() }
+    returner r
+}

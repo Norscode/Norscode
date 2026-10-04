@@ -13,6 +13,9 @@
 #   - headerar utan omsyn til store og små bokstavar (ctx får namna i små bokstavar);
 #   - modulglobalar og tilstand mellom førespurnader (éin langliva prosess);
 #   - Server-Sent Events via apptenar.sse(kanal) og apptenar.send_hending(...).
+#   - metrikk og spor: app.slå_på_metrikk() gjev /metrics (Prometheus 0.0.4) med
+#     http_requests_total og http_request_duration_seconds per rutemønster; app.slå_på_spor()
+#     samlar éin OTLP-span per førespurnad (sjå std/metrikk.no og docs/APPTENAR_METRIKK.md).
 #
 # Bruk:
 #   bruk std.apptenar som app
@@ -40,6 +43,7 @@ bruk std.apptenar_di som _di
 bruk std.apptenar_cors som _cors
 bruk std.apptenar_statisk som _statisk
 bruk std.http_cache som _hc
+bruk std.metrikk som _metrikk
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
@@ -79,6 +83,9 @@ funksjon konfig_standard() -> ordbok {
         "tryggleik_html": usann,
         "request_id": usann,
         "tilgangslogg": usann,
+        "metrikk": usann,
+        "metrikk_sti": "/metrics",
+        "spor": usann,
         "statisk": null,
         "logg": "feil",
         "klar_melding": sann
@@ -1146,11 +1153,157 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
     la ctx = ctx0
     la start_ms = builtin.tid_ms()
     _sett_request_id(ctx)
+    _t["rute"] = ""
+    la mål = _metrikk_på()
+    la span = null
+    hvis _spor_på() {
+        span = _metrikk.span_start("", _h(ctx, "traceparent"), 2)
+        ctx["__trace_id__"] = span["trace_id"]
+        ctx["__traceparent__"] = _metrikk.traceparent(span)
+    }
     la d = _rut(ctx, start_ms)
-    hvis builtin.type(d) == "ordbok" og har_nokkel(d, "__sse__") { returner d }
+    hvis builtin.type(d) == "ordbok" og har_nokkel(d, "__sse__") {
+        hvis mål eller span != null { _mål(ctx, start_ms, 200, mål, span) }
+        returner d
+    }
     d = _ferdigstill(ctx, d)
     _tilgangslogg(ctx, start_ms, d)
+    hvis mål eller span != null {
+        la st = 0
+        hvis har_nokkel(d, "status") og builtin.type(d["status"]) == "heltall" { st = d["status"] }
+        _mål(ctx, start_ms, st, mål, span)
+    }
     returner d
+}
+
+# ─── Metrikk og spor (5f) ────────────────────────────────────────────────────
+#
+# Måler kvar førespurnad i standardregisteret til std.metrikk:
+#   http_requests_total{method,route,status}           (teljar)
+#   http_request_duration_seconds{method,route}         (histogram, standardbøtter)
+# `route` er rutemønsteret (t.d. "/vare/{id:int}"), aldri den rå stien, så kardinaliteten
+# er avgrensa av rutetabellen. Utan treff: "ukjend" (404/405/kant-svar) eller "statisk".
+# Ukjende metodar blir "ANNA". /metrics (metrikk_sti) blir servert etter
+# request-mellomvare og TrustedHost, så han kan vernast som andre ruter.
+
+funksjon slå_på_metrikk() -> heltall {
+    _t["metrikk_på"] = sann
+    _metrikk.prosess_start_ms()
+    returner 0
+}
+
+funksjon slå_av_metrikk() -> heltall {
+    _t["metrikk_på"] = usann
+    returner 0
+}
+
+funksjon slå_på_spor() -> heltall {
+    _t["spor_på"] = sann
+    returner 0
+}
+
+funksjon slå_av_spor() -> heltall {
+    _t["spor_på"] = usann
+    returner 0
+}
+
+funksjon _metrikk_på() -> bool {
+    hvis har_nokkel(_t, "metrikk_på") og _t["metrikk_på"] == sann { returner sann }
+    returner _k("metrikk") == sann
+}
+
+funksjon _spor_på() -> bool {
+    hvis har_nokkel(_t, "spor_på") og _t["spor_på"] == sann { returner sann }
+    returner _k("spor") == sann
+}
+
+funksjon _metodelabel(m: tekst) -> tekst {
+    la u = builtin.upper(m)
+    hvis u == "GET" eller u == "HEAD" eller u == "POST" eller u == "PUT" eller u == "DELETE" eller
+         u == "PATCH" eller u == "OPTIONS" { returner u }
+    returner "ANNA"
+}
+
+funksjon _rutelabel() -> tekst {
+    la r = ""
+    hvis har_nokkel(_t, "rute") { r = tekst(_t["rute"]) }
+    hvis r == "" { returner "ukjend" }
+    returner r
+}
+
+funksjon _fam_førespurnader() -> ordbok {
+    la reg = _metrikk.standard()
+    la f = _metrikk.finn(reg, "http_requests_total")
+    hvis f != null { returner f }
+    returner _metrikk.teljar(reg, "http_requests_total", "Tal på HTTP-førespurnader handsama av apptenaren.",
+                             ["method", "route", "status"])
+}
+
+funksjon _fam_varigheit() -> ordbok {
+    la reg = _metrikk.standard()
+    la f = _metrikk.finn(reg, "http_request_duration_seconds")
+    hvis f != null { returner f }
+    la h = _metrikk.histogram(reg, "http_request_duration_seconds",
+                              "Tid frå førespurnaden er tolka til svaret er laga, i sekund.",
+                              ["method", "route"], _metrikk.standard_bøtter())
+    returner _metrikk.sett_eining(h, "s")
+}
+
+funksjon _mål(ctx: ordbok, start_ms: heltall, status: heltall, mål: bool, span) -> heltall {
+    la ms = builtin.tid_ms() - start_ms
+    la metode = _metodelabel(tekst(ctx["__method__"]))
+    la rute = _rutelabel()
+    hvis mål {
+        prøv {
+            _metrikk.tel(_fam_førespurnader(), [metode, rute, tekst(status)])
+            _metrikk.observer(_fam_varigheit(), [metode, rute], ms / 1000.0)
+        } fang (e) {
+            _logg("feil", "metrikk feila: " + tekst(e))
+        }
+    }
+    hvis span != null {
+        la namn = metode
+        hvis rute != "ukjend" { namn = metode + " " + rute }
+        span["namn"] = namn
+        la a = span["attributt"]
+        a["http.request.method"] = metode
+        hvis rute != "ukjend" { a["http.route"] = rute }
+        a["url.path"] = tekst(ctx["__path__"])
+        a["http.response.status_code"] = status
+        la sk = 0
+        hvis status >= 500 { sk = 2 }
+        _metrikk.span_slutt(span, sk)
+    }
+    returner 0
+}
+
+# Prosess- og tenarmålarar, oppdaterte når /metrics blir henta.
+funksjon _oppdater_tenarmålarar() -> heltall {
+    la reg = _metrikk.standard()
+    la start = _metrikk.prosess_start_ms()
+    la no = builtin.tid_ms()
+    _metrikk.sett(_metrikk.målar(reg, "process_start_time_seconds",
+                  "Om lag når prosessen starta (fyrste bruk av std.metrikk), sekund sidan epoch.", []), [], start / 1000.0)
+    _metrikk.sett(_metrikk.sett_eining(_metrikk.målar(reg, "process_uptime_seconds",
+                  "Sekund sidan prosessen starta.", []), "s"), [], (no - start) / 1000.0)
+    _metrikk.sett(_metrikk.målar(reg, "apptenar_open_connections", "Opne TCP-tilkoplingar i apptenaren.", []), [],
+                  lengde(nøkler(_tilk)))
+    la sse = 0
+    la ks = nøkler(_kanalar)
+    la i = 0
+    mens i < lengde(ks) {
+        sse = sse + lengde(_kanalar[ks[i]])
+        i = i + 1
+    }
+    _metrikk.sett(_metrikk.målar(reg, "apptenar_sse_streams", "Opne SSE-straumar.", []), [], sse)
+    _metrikk.teljar(reg, "apptenar_rejected_connections_total",
+                    "Tilkoplingar avviste med 503 fordi maks_tilkoplingar var nådd.", [])
+    returner 0
+}
+
+funksjon _metrikk_svar() -> ordbok {
+    _oppdater_tenarmålarar()
+    returner _metrikk.prometheus_svar(_metrikk.standard())
 }
 
 funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
@@ -1180,7 +1333,12 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     }
     la metode = tekst(ctx["__method__"])
     la sti = tekst(ctx["__path__"])
+    hvis (metode == "get" eller metode == "head") og _metrikk_på() og sti == tekst(_k("metrikk_sti")) {
+        _t["rute"] = sti
+        returner _respons_mw(_metrikk_svar())
+    }
     hvis (sti == "/helse" eller sti == "/health") og (metode == "get" eller metode == "head") {
+        _t["rute"] = sti
         returner _respons_mw({"status": 200, "content_type": "application/json; charset=utf-8",
                               "cache_control": "no-store", "body": "{\"ok\":true,\"status\":\"ready\"}"})
     }
@@ -1227,10 +1385,14 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         }
         # Statiske filer og SPA-fallback (1.6): berre når ingen rute matcha.
         la st = _statisk_fallback(ctx, metode, sti, fann_sti)
-        hvis st != null { returner st }
+        hvis st != null {
+            _t["rute"] = "statisk"
+            returner st
+        }
         returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
     }
     ctx["__params__"] = treff_p
+    _t["rute"] = treff["mønster"]
     # Vakter: totale og aritetskontrollerte. Ei vakt kan returnere eit eige svar som
     # kortsluttar (t.d. 401 + WWW-Authenticate, 1.3). Unntak blir mappa (HTTPFeil →
     # status, ValideringsFeil → 422, elles 500); tenaren lever. Alt anna enn sann gjev 403.
@@ -1702,6 +1864,12 @@ funksjon lytt(konf: ordbok) -> heltall {
             fram = fram + 1
             hvis lengde(nøkler(_tilk)) >= _k("maks_tilkoplingar") {
                 _t["avviste"] = _t_int("avviste") + 1
+                hvis _metrikk_på() {
+                    prøv {
+                        _metrikk.tel(_metrikk.teljar(_metrikk.standard(), "apptenar_rejected_connections_total",
+                                     "Tilkoplingar avviste med 503 fordi maks_tilkoplingar var nådd.", []), [])
+                    } fang (e) { }
+                }
                 prøv {
                     builtin.network_operation({"abi": _abi(), "operation": "write", "handle": a["handle"],
                         "data": til_http(_feil(503, "For mange tilkoplingar"), usann, usann)})

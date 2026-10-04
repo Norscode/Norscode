@@ -1,0 +1,381 @@
+# std/metrikk.no (5f): metrikk-register, Prometheus text format 0.0.4 (byte-eksakt),
+# kumulative histogrambøtter, escaping, apptenar-integrasjon (/metrics per rutemønster via
+# in-process-testklienten std.apptest), spans, og OTLP/HTTP-JSON-struktur utan nettverk.
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.apptest som tk
+bruk std.metrikk som m
+
+# ─── Handlarar ───────────────────────────────────────────────────────────────
+
+funksjon h_vare(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /vare/{id:int}")
+    returner {"id": ctx["__params__"]["id"]}
+}
+
+funksjon h_ny_vare(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /vare")
+    returner {"status": 201, "body": "laga"}
+}
+
+funksjon h_krasj(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /krasj")
+    kast "intern feil"
+    returner {}
+}
+
+# ─── Hjelparar ───────────────────────────────────────────────────────────────
+
+# Sann om `body` har ei linje som er nøyaktig lik `linje` (ikkje berre eit prefiks).
+funksjon har_linje(body: tekst, linje: tekst) -> bool {
+    la l = builtin.split(body, "\n")
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == linje { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon kastar(fn: tekst) -> bool {
+    la kasta = usann
+    prøv { builtin.ncb_call_fn("__main__." + fn, {}) } fang (e) { kasta = sann }
+    returner kasta
+}
+
+funksjon ny_klient() -> ordbok {
+    la kl = tk.klient({"logg": "ingen"})
+    m.nullstill_standard()
+    returner kl
+}
+
+# ─── Format ──────────────────────────────────────────────────────────────────
+
+funksjon test_format_teljar_og_målar() -> heltall {
+    la reg = m.register()
+    la t = m.teljar(reg, "test_total", "Hjelp med \\ og\nlinjeskift", ["a", "b"])
+    m.tel(t, ["x", "y"])
+    m.auk(t, ["x", "y"], 2)
+    m.tel(t, {"b": "z", "a": "q\"\\\n"})
+    la g = m.målar(reg, "temp_c", "Temperatur \"inne\"", [])
+    m.sett(g, [], 21.5)
+    m.auk(g, [], 1)
+    m.minsk(g, [], 0.25)
+    la forventa = "# HELP test_total Hjelp med \\\\ og\\nlinjeskift\n" +
+                  "# TYPE test_total counter\n" +
+                  "test_total{a=\"x\",b=\"y\"} 3\n" +
+                  "test_total{a=\"q\\\"\\\\\\n\",b=\"z\"} 1\n" +
+                  "# HELP temp_c Temperatur \"inne\"\n" +
+                  "# TYPE temp_c gauge\n" +
+                  "temp_c 22.25\n"
+    la ut = m.prometheus(reg)
+    assert_eq(ut, forventa)
+    assert_eq(lengde(ut), lengde(forventa))
+    # Diskriminerer: rå (uescapa) verdi skal IKKJE stå i utskrifta.
+    assert(builtin.index_of(ut, "a=\"q\"") < 0)
+    assert(builtin.index_of(ut, "q\"\\\n") < 0)
+    # Escape-funksjonane direkte.
+    assert_eq(m.escape_etikett("a\\b\"c\nd"), "a\\\\b\\\"c\\nd")
+    assert_eq(m.escape_hjelp("a\\b\"c\nd"), "a\\\\b\"c\\nd")
+    assert_eq(m.hent(t, ["x", "y"]), 3)
+    assert_eq(m.hent(t, ["finst", "ikkje"]), 0)
+    skriv("format: teljar/målar byte-eksakt med etikett- og HELP-escaping\n")
+    returner 0
+}
+
+funksjon test_format_histogram() -> heltall {
+    la reg = m.register()
+    la h = m.histogram(reg, "jobb_sekund", "Jobbtid.", ["ko"], [0.1, 0.5, 1.0])
+    m.observer(h, ["e"], 0.05)
+    m.observer(h, ["e"], 0.1)
+    m.observer(h, ["e"], 0.5)
+    m.observer(h, ["e"], 0.7)
+    m.observer(h, ["e"], 3)
+    la u = m.histogram(reg, "utan_etikett", "Utan.", [], [1, 2])
+    m.observer(u, [], 2)
+    la forventa = "# HELP jobb_sekund Jobbtid.\n" +
+                  "# TYPE jobb_sekund histogram\n" +
+                  "jobb_sekund_bucket{ko=\"e\",le=\"0.1\"} 2\n" +
+                  "jobb_sekund_bucket{ko=\"e\",le=\"0.5\"} 3\n" +
+                  "jobb_sekund_bucket{ko=\"e\",le=\"1\"} 4\n" +
+                  "jobb_sekund_bucket{ko=\"e\",le=\"+Inf\"} 5\n" +
+                  "jobb_sekund_sum{ko=\"e\"} 4.35\n" +
+                  "jobb_sekund_count{ko=\"e\"} 5\n" +
+                  "# HELP utan_etikett Utan.\n" +
+                  "# TYPE utan_etikett histogram\n" +
+                  "utan_etikett_bucket{le=\"1\"} 0\n" +
+                  "utan_etikett_bucket{le=\"2\"} 1\n" +
+                  "utan_etikett_bucket{le=\"+Inf\"} 1\n" +
+                  "utan_etikett_sum 2\n" +
+                  "utan_etikett_count 1\n"
+    assert_eq(m.prometheus(reg), forventa)
+    # Kumulative bøtter, monotont aukande, siste = count.
+    la hh = m.hent_histogram(h, ["e"])
+    la kum = hh["kumulativ"]
+    assert_eq(lengde(kum), 4)
+    assert_eq(kum[0], 2)
+    assert_eq(kum[1], 3)
+    assert_eq(kum[2], 4)
+    assert_eq(kum[3], 5)
+    assert_eq(hh["n"], 5)
+    skriv("format: histogram med kumulative bøtter, le-grenser, +Inf, _sum og _count\n")
+    returner 0
+}
+
+# ─── Validering ──────────────────────────────────────────────────────────────
+
+funksjon k_ugyldig_namn() -> heltall { m.teljar(m.register(), "1feil", "x", [])  returner 0 }
+funksjon k_ugyldig_etikett() -> heltall { m.teljar(m.register(), "ok_total", "x", ["kø"])  returner 0 }
+funksjon k_reservert_etikett() -> heltall { m.teljar(m.register(), "ok_total", "x", ["__a"])  returner 0 }
+funksjon k_le_i_histogram() -> heltall { m.histogram(m.register(), "h", "x", ["le"], [])  returner 0 }
+funksjon k_minkande_teljar() -> heltall {
+    la t = m.teljar(m.register(), "ok_total", "x", [])
+    m.auk(t, [], -1)
+    returner 0
+}
+funksjon k_feil_tal_etikettar() -> heltall {
+    la t = m.teljar(m.register(), "ok_total", "x", ["a"])
+    m.tel(t, [])
+    returner 0
+}
+funksjon k_annan_type() -> heltall {
+    la r = m.register()
+    m.teljar(r, "x_total", "x", [])
+    m.målar(r, "x_total", "x", [])
+    returner 0
+}
+funksjon k_bøtter_ikkje_aukande() -> heltall { m.histogram(m.register(), "h", "x", [], [1, 1])  returner 0 }
+
+funksjon test_validering() -> heltall {
+    assert(kastar("k_ugyldig_namn"))
+    assert(kastar("k_ugyldig_etikett"))
+    assert(kastar("k_reservert_etikett"))
+    assert(kastar("k_le_i_histogram"))
+    assert(kastar("k_minkande_teljar"))
+    assert(kastar("k_feil_tal_etikettar"))
+    assert(kastar("k_annan_type"))
+    assert(kastar("k_bøtter_ikkje_aukande"))
+    # Ny registrering med same type og etikettar gjev same familie (idempotent).
+    la r = m.register()
+    la a = m.teljar(r, "same_total", "x", ["a"])
+    m.tel(a, ["1"])
+    la b = m.teljar(r, "same_total", "x", ["a"])
+    m.tel(b, ["1"])
+    assert_eq(m.hent(a, ["1"]), 2)
+    # Standardbøtter når lista er tom.
+    la h = m.histogram(r, "std_h", "x", [], [])
+    assert_eq(lengde(h["bøtter"]), 11)
+    skriv("validering: namn, etikettar, le, negativ teljar, aritet, typekonflikt, bøtter\n")
+    returner 0
+}
+
+# ─── Apptenar-integrasjon ────────────────────────────────────────────────────
+
+funksjon test_apptenar_metrics_per_rutemønster() -> heltall {
+    la kl = ny_klient()
+    app.slå_på_metrikk()
+    assert_eq(tk.status(tk.get(kl, "/vare/1", {})), 200)
+    assert_eq(tk.status(tk.get(kl, "/vare/2", {})), 200)
+    assert_eq(tk.status(tk.get(kl, "/vare/3", {})), 200)
+    assert_eq(tk.status(tk.post(kl, "/vare", {"json": {"namn": "a"}})), 201)
+    assert_eq(tk.status(tk.get(kl, "/finst/ikkje", {})), 404)
+    assert_eq(tk.status(tk.get(kl, "/krasj", {})), 500)
+    assert_eq(tk.status(tk.get(kl, "/vare/abc", {})), 404)
+    la r = tk.get(kl, "/metrics", {})
+    assert_eq(tk.status(r), 200)
+    assert_eq(tk.header(r, "content-type"), "text/plain; version=0.0.4; charset=utf-8")
+    la b = tk.body_tekst(r)
+    assert(har_linje(b, "# TYPE http_requests_total counter"))
+    assert(har_linje(b, "http_requests_total{method=\"GET\",route=\"/vare/{id:int}\",status=\"200\"} 3"))
+    assert(har_linje(b, "http_requests_total{method=\"POST\",route=\"/vare\",status=\"201\"} 1"))
+    assert(har_linje(b, "http_requests_total{method=\"GET\",route=\"ukjend\",status=\"404\"} 2"))
+    assert(har_linje(b, "http_requests_total{method=\"GET\",route=\"/krasj\",status=\"500\"} 1"))
+    assert(har_linje(b, "# TYPE http_request_duration_seconds histogram"))
+    assert(har_linje(b, "http_request_duration_seconds_count{method=\"GET\",route=\"/vare/{id:int}\"} 3"))
+    assert(har_linje(b, "http_request_duration_seconds_bucket{method=\"GET\",route=\"/vare/{id:int}\",le=\"+Inf\"} 3"))
+    assert(har_linje(b, "http_request_duration_seconds_count{method=\"POST\",route=\"/vare\"} 1"))
+    # Diskriminerer: feil tal og rå stiar skal IKKJE finnast (kardinalitet per mønster).
+    assert(ikkje har_linje(b, "http_requests_total{method=\"GET\",route=\"/vare/{id:int}\",status=\"200\"} 4"))
+    assert(builtin.index_of(b, "route=\"/vare/1\"") < 0)
+    assert(builtin.index_of(b, "/finst/ikkje") < 0)
+    # Prosess-/tenarmålarar.
+    assert(har_linje(b, "# TYPE process_uptime_seconds gauge"))
+    assert(har_linje(b, "# TYPE process_start_time_seconds gauge"))
+    assert(har_linje(b, "apptenar_open_connections 0"))
+    assert(har_linje(b, "apptenar_sse_streams 0"))
+    assert(har_linje(b, "apptenar_rejected_connections_total 0"))
+    # Neste skrap ser den førre /metrics-førespurnaden.
+    la b2 = tk.body_tekst(tk.get(kl, "/metrics", {}))
+    assert(har_linje(b2, "http_requests_total{method=\"GET\",route=\"/metrics\",status=\"200\"} 1"))
+    # HEAD på /metrics: same Content-Type, tom kropp.
+    la hd = tk.head(kl, "/metrics", {})
+    assert_eq(tk.status(hd), 200)
+    assert_eq(tk.header(hd, "content-type"), "text/plain; version=0.0.4; charset=utf-8")
+    app.slå_av_metrikk()
+    skriv("apptenar: /metrics teller per rutemønster og status, histogram per rute, prosessmålarar\n")
+    returner 0
+}
+
+funksjon test_apptenar_metrikk_av_og_konfig() -> heltall {
+    la kl = ny_klient()
+    app.slå_av_metrikk()
+    tk.get(kl, "/vare/1", {})
+    # Av: /metrics finst ikkje, og ingenting blir målt.
+    assert_eq(tk.status(tk.get(kl, "/metrics", {})), 404)
+    assert(m.finn(m.standard(), "http_requests_total") == null)
+    # På via konfig, med eigen sti.
+    la kl2 = tk.klient({"logg": "ingen", "metrikk": sann, "metrikk_sti": "/intern/metrikk"})
+    tk.get(kl2, "/vare/9", {})
+    assert_eq(tk.status(tk.get(kl2, "/metrics", {})), 404)
+    la r = tk.get(kl2, "/intern/metrikk", {})
+    assert_eq(tk.status(r), 200)
+    assert(har_linje(tk.body_tekst(r), "http_requests_total{method=\"GET\",route=\"/vare/{id:int}\",status=\"200\"} 1"))
+    tk.klient({"logg": "ingen"})
+    skriv("apptenar: av som standard; på via konfig {\"metrikk\": sann} med eigen metrikk_sti\n")
+    returner 0
+}
+
+funksjon test_apptenar_spor() -> heltall {
+    la kl = ny_klient()
+    app.slå_på_spor()
+    tk.get(kl, "/vare/7", {"headerar": {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}})
+    tk.get(kl, "/krasj", {})
+    app.slå_av_spor()
+    tk.get(kl, "/vare/8", {})
+    la s = m.spans()
+    assert_eq(lengde(s), 2)
+    assert_eq(s[0]["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert_eq(s[0]["parent_id"], "00f067aa0ba902b7")
+    assert_eq(lengde(s[0]["span_id"]), 16)
+    assert_eq(s[0]["namn"], "GET /vare/{id:int}")
+    assert_eq(s[0]["attributt"]["http.response.status_code"], 200)
+    assert_eq(s[0]["attributt"]["http.route"], "/vare/{id:int}")
+    assert_eq(s[0]["status"], 0)
+    # Utan traceparent: ny trace-id (32 hex), ingen forelder, 5xx gjev ERROR (2).
+    assert_eq(lengde(s[1]["trace_id"]), 32)
+    assert(s[1]["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert_eq(s[1]["parent_id"], "")
+    assert_eq(s[1]["status"], 2)
+    # Ugyldig traceparent blir ignorert.
+    assert(m.tolk_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01") == null)
+    assert(m.tolk_traceparent("00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01") == null)
+    assert(m.tolk_traceparent("tull") == null)
+    # OTLP-trace-JSON.
+    la j = builtin.json_parse_raw(m.otlp_spor_json(s, {"tenestenamn": "butikk", "miljø": {}}))
+    la sp = j["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert_eq(lengde(sp), 2)
+    assert_eq(sp[0]["traceId"], "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert_eq(sp[0]["parentSpanId"], "00f067aa0ba902b7")
+    assert_eq(sp[0]["kind"], 2)
+    assert_eq(sp[0]["name"], "GET /vare/{id:int}")
+    assert_eq(builtin.type(sp[0]["startTimeUnixNano"]), "tekst")
+    assert(builtin.ends_with(sp[0]["endTimeUnixNano"], "000000"))
+    assert_eq(sp[1]["status"]["code"], 2)
+    assert(ikkje har_nokkel(sp[1], "parentSpanId"))
+    m.tøm_spans()
+    assert_eq(lengde(m.spans()), 0)
+    skriv("spor: éin SERVER-span per førespurnad, traceparent arva, 5xx=ERROR, OTLP-trace-JSON\n")
+    returner 0
+}
+
+# ─── OTLP ────────────────────────────────────────────────────────────────────
+
+funksjon finn_metrikk(ms: liste, namn: tekst) -> ordbok {
+    la i = 0
+    mens i < lengde(ms) {
+        hvis ms[i]["name"] == namn { returner ms[i] }
+        i = i + 1
+    }
+    returner {}
+}
+
+funksjon test_otlp_metrikk_json() -> heltall {
+    la reg = m.register()
+    la t = m.teljar(reg, "kall_total", "Kall.", ["svar"])
+    m.auk(t, ["a\"b\nc"], 3)
+    la g = m.målar(reg, "temp", "Temp.", [])
+    m.sett(g, [], 0.25)
+    la h = m.sett_eining(m.histogram(reg, "tid_sekund", "Tid.", [], [0.1, 0.5, 1.0]), "s")
+    m.observer(h, [], 0.05)
+    m.observer(h, [], 0.1)
+    m.observer(h, [], 0.3)
+    m.observer(h, [], 0.7)
+    m.observer(h, [], 2)
+    m.histogram(reg, "tom_h", "Ingen seriar.", ["x"], [])
+    la ut = m.otlp_metrikk_json(reg, {"tenestenamn": "butikk", "no_ms": 1700000000000, "ressurs": {"deployment.environment": "test"}, "miljø": {}})
+    la j = builtin.json_parse_raw(ut)
+    la rm = j["resourceMetrics"]
+    assert_eq(lengde(rm), 1)
+    la attr = rm[0]["resource"]["attributes"]
+    assert_eq(attr[0]["key"], "service.name")
+    assert_eq(attr[0]["value"]["stringValue"], "butikk")
+    assert(builtin.index_of(ut, "{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"test\"}}") >= 0)
+    la sm = rm[0]["scopeMetrics"]
+    assert_eq(sm[0]["scope"]["name"], "norscode.std.metrikk")
+    la ms = sm[0]["metrics"]
+    # Familiar utan seriar blir ikkje med.
+    assert_eq(lengde(ms), 3)
+    # Teljar → sum, monoton, kumulativ (2), asInt som tekst, etikett escapa og tilbake.
+    la k = finn_metrikk(ms, "kall_total")
+    assert_eq(k["description"], "Kall.")
+    assert_eq(k["sum"]["isMonotonic"], sann)
+    assert_eq(k["sum"]["aggregationTemporality"], 2)
+    la kp = k["sum"]["dataPoints"][0]
+    assert_eq(kp["asInt"], "3")
+    assert_eq(builtin.type(kp["asInt"]), "tekst")
+    assert_eq(kp["timeUnixNano"], "1700000000000000000")
+    assert_eq(builtin.type(kp["timeUnixNano"]), "tekst")
+    assert_eq(builtin.type(kp["startTimeUnixNano"]), "tekst")
+    assert_eq(kp["attributes"][0]["key"], "svar")
+    assert_eq(kp["attributes"][0]["value"]["stringValue"], "a\"b\nc")
+    # Målar → gauge, asDouble som tal.
+    la gp = finn_metrikk(ms, "temp")["gauge"]["dataPoints"][0]
+    assert_eq(gp["asDouble"], 0.25)
+    assert(ikkje har_nokkel(finn_metrikk(ms, "temp"), "sum"))
+    # Histogram → ikkje-kumulative bucketCounts (tekst), explicitBounds (tal), count/sum.
+    la hm = finn_metrikk(ms, "tid_sekund")
+    assert_eq(hm["unit"], "s")
+    assert_eq(hm["histogram"]["aggregationTemporality"], 2)
+    la hp = hm["histogram"]["dataPoints"][0]
+    assert_eq(hp["count"], "5")
+    assert_eq(hp["sum"], 3.15)
+    la bc = hp["bucketCounts"]
+    assert_eq(lengde(bc), 4)
+    assert_eq(bc[0], "2")
+    assert_eq(bc[1], "1")
+    assert_eq(bc[2], "1")
+    assert_eq(bc[3], "1")
+    la eb = hp["explicitBounds"]
+    assert_eq(lengde(eb), 3)
+    assert_eq(eb[0], 0.1)
+    assert_eq(eb[2], 1)
+    skriv("otlp: ExportMetricsServiceRequest med sum/gauge/histogram, ressurs, nanosekund som tekst\n")
+    returner 0
+}
+
+funksjon test_otlp_endepunkt_og_eksport() -> heltall {
+    la reg = m.register()
+    m.tel(m.teljar(reg, "a_total", "A.", []), [])
+    # Standard, fellesvariabel (med og utan skråstrek), signal-spesifikk, opp-overstyring.
+    assert_eq(m.otlp_url("metrics", {"miljø": {}}), "http://localhost:4318/v1/metrics")
+    assert_eq(m.otlp_url("metrics", {"miljø": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://samlar:4318/"}}), "http://samlar:4318/v1/metrics")
+    assert_eq(m.otlp_url("traces", {"miljø": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://samlar:4318"}}), "http://samlar:4318/v1/traces")
+    assert_eq(m.otlp_url("metrics", {"miljø": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://samlar:4318",
+                                              "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://m:9/eigen"}}), "http://m:9/eigen")
+    assert_eq(m.otlp_url("metrics", {"endepunkt": "https://x.no/otlp", "miljø": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://y"}}), "https://x.no/otlp/v1/metrics")
+    assert_eq(m.tenestenamn({"miljø": {"OTEL_SERVICE_NAME": "frå-env"}}), "frå-env")
+    assert_eq(m.tenestenamn({"miljø": {}}), "norscode-app")
+    la f = m.otlp_førespurnad("metrics", m.otlp_metrikk_json(reg, {"miljø": {}}),
+                              {"miljø": {"OTEL_EXPORTER_OTLP_HEADERS": "api-key=hemmeleg, x-org = nc"}})
+    assert_eq(f["url"], "http://localhost:4318/v1/metrics")
+    assert_eq(f["headers"]["Content-Type"], "application/json")
+    assert_eq(f["headers"]["api-key"], "hemmeleg")
+    assert_eq(f["headers"]["x-org"], "nc")
+    assert(builtin.starts_with(f["body"], "{\"resourceMetrics\":["))
+    # Eksport til ein lukka port: feilar kontrollert (ok=usann), kastar ikkje.
+    la r = m.eksporter_metrikk(reg, {"endepunkt": "http://127.0.0.1:9", "tidsavbrot_ms": 2000, "miljø": {}})
+    assert_eq(r["ok"], usann)
+    assert_eq(r["url"], "http://127.0.0.1:9/v1/metrics")
+    skriv("otlp: endepunkt etter OTEL_*-reglane, headerar, kontrollert feil utan mottakar\n")
+    returner 0
+}
