@@ -51,7 +51,8 @@ bruk std.metrikk som _metrikk
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
-la _t: ordbok = {"køyrer": usann, "stopp": usann}
+la _t: ordbok = {"køyrer": usann, "stopp": usann, "req_nr": 0, "handsama": 0, "dato_s": -1, "dato": "",
+                 "bg": [], "etter": usann}
 la _konf: ordbok = {}
 la _kanalar: ordbok = {}
 la _tilk: ordbok = {}
@@ -166,6 +167,10 @@ funksjon _lag_snap() -> heltall {
     _s["rq_mw"] = _mw("request_middlewares", "forespurnad_mw")
     _s["rs_mw"] = _mw("response_middlewares", "respons_mw")
     _s["feil_mw"] = _mw("error_middlewares", "feil_mw")
+    _s["ruter"] = _ruter()
+    _s["eksakt"] = _t["eksakt"]
+    _s["har_ws"] = _t["har_ws"]
+    _s["topp"] = _topp_tabell()
     _s["ok"] = sann
     returner 0
 }
@@ -305,9 +310,19 @@ funksjon _tolk_query(rå: tekst) -> ordbok {
     returner q
 }
 
+# Headernamn som alt er validerte (ingen mellomrom/tab, høgst 128 byte), med namnet i
+# små bokstavar. Klientar sender dei same namna om att, så eitt oppslag erstattar
+# validering og lower per linje. Avgrensa storleik, så framande namn ikkje veks utan tak.
+la _hn: ordbok = {}
+la _hn_tal: ordbok = {"n": 0}
+
 # Tolkar hovudet (alt før \r\n\r\n). Gjev {"ok": sann, "metode", "mål", "sti", "query",
 # "versjon", "headers" (små bokstavar), "lengd" (Content-Length eller -1), "keep_alive"}
 # eller {"ok": usann, "status": 400/414/431/501/505, "grunn"}.
+#
+# Heit veg i tolka Norscode: kvart builtin- og funksjonskall kostar, så linjene blir
+# tolka med så få kall som mogleg (sjå _hn), og obs-fold blir sjekka per linje berre
+# når hovudet i det heile inneheld «\r\n » eller «\r\n\t».
 funksjon tolk_hovud(hovud: tekst) -> ordbok {
     la linjer = builtin.split(hovud, "\r\n")
     la første = linjer[0]
@@ -326,38 +341,56 @@ funksjon tolk_hovud(hovud: tekst) -> ordbok {
         returner {"ok": usann, "status": 400, "grunn": "ugyldig mål"}
     }
     la sti = mål
-    la rå_q = ""
+    la query = null
     la qi = builtin.index_of(mål, "?")
     hvis qi >= 0 {
         sti = builtin.slice(mål, 0, qi)
-        rå_q = builtin.slice(mål, qi + 1, lengde(mål))
+        query = _tolk_query(builtin.slice(mål, qi + 1, lengde(mål)))
+    } ellers {
+        query = {}
     }
     la h = {}
     la lengd = -1
     la te = usann
+    la nl = lengde(linjer)
+    hvis nl > 101 { returner {"ok": usann, "status": 431, "grunn": "for mange headerar"} }
+    la fold = builtin.index_of(hovud, "\r\n ") >= 0 eller builtin.index_of(hovud, "\r\n\t") >= 0
+    la hn = _hn
     la i = 1
-    hvis lengde(linjer) > 101 { returner {"ok": usann, "status": 431, "grunn": "for mange headerar"} }
-    mens i < lengde(linjer) {
+    mens i < nl {
         la l = linjer[i]
         hvis l != "" {
-            la k0 = builtin.char_code(builtin.slice(l, 0, 1))
-            hvis k0 == 32 eller k0 == 9 { returner {"ok": usann, "status": 400, "grunn": "obs-fold"} }
+            hvis fold {
+                la k0 = builtin.char_code(builtin.slice(l, 0, 1))
+                hvis k0 == 32 eller k0 == 9 { returner {"ok": usann, "status": 400, "grunn": "obs-fold"} }
+            }
             la kolon = builtin.index_of(l, ":")
             hvis kolon <= 0 { returner {"ok": usann, "status": 400, "grunn": "ugyldig header"} }
             la namn_rå = builtin.slice(l, 0, kolon)
-            hvis builtin.index_of(namn_rå, " ") >= 0 eller builtin.index_of(namn_rå, "\t") >= 0 {
-                returner {"ok": usann, "status": 400, "grunn": "mellomrom i headernamn"}
+            la namn = ""
+            hvis har_nokkel(hn, namn_rå) {
+                namn = hn[namn_rå]
+            } ellers {
+                hvis builtin.index_of(namn_rå, " ") >= 0 eller builtin.index_of(namn_rå, "\t") >= 0 {
+                    returner {"ok": usann, "status": 400, "grunn": "mellomrom i headernamn"}
+                }
+                hvis lengde(namn_rå) > 128 { returner {"ok": usann, "status": 431, "grunn": "for langt headernamn"} }
+                namn = builtin.lower(namn_rå)
+                la tal = _hn_tal
+                hvis tal["n"] < 512 {
+                    hn[namn_rå] = namn
+                    tal["n"] = tal["n"] + 1
+                }
             }
-            hvis lengde(namn_rå) > 128 { returner {"ok": usann, "status": 431, "grunn": "for langt headernamn"} }
-            la namn = _liten(namn_rå)
             la verdi = builtin.trim(builtin.slice(l, kolon + 1, lengde(l)))
             hvis namn == "content-length" {
                 hvis ikkje _er_siffer(verdi) { returner {"ok": usann, "status": 400, "grunn": "ugyldig Content-Length"} }
                 la n = heltall_fra_tekst(verdi)
                 hvis lengd >= 0 og lengd != n { returner {"ok": usann, "status": 400, "grunn": "fleire Content-Length"} }
                 lengd = n
+            } ellers hvis namn == "transfer-encoding" {
+                te = sann
             }
-            hvis namn == "transfer-encoding" { te = sann }
             hvis har_nokkel(h, namn) {
                 hvis namn == "cookie" {
                     h[namn] = tekst(h[namn]) + "; " + verdi
@@ -374,27 +407,32 @@ funksjon tolk_hovud(hovud: tekst) -> ordbok {
         hvis lengd >= 0 { returner {"ok": usann, "status": 400, "grunn": "både Transfer-Encoding og Content-Length"} }
         returner {"ok": usann, "status": 501, "grunn": "Transfer-Encoding er ikkje støtta"}
     }
-    la tilk = ""
-    hvis har_nokkel(h, "connection") { tilk = _liten(tekst(h["connection"])) }
     la ka = versjon == "HTTP/1.1"
-    hvis builtin.index_of(tilk, "close") >= 0 { ka = usann }
-    hvis versjon == "HTTP/1.0" og builtin.index_of(tilk, "keep-alive") >= 0 { ka = sann }
-    returner {"ok": sann, "metode": metode, "mål": mål, "sti": sti, "query": _tolk_query(rå_q),
+    hvis har_nokkel(h, "connection") {
+        la tilk = _liten(h["connection"])
+        hvis builtin.index_of(tilk, "close") >= 0 { ka = usann }
+        hvis versjon == "HTTP/1.0" og builtin.index_of(tilk, "keep-alive") >= 0 { ka = sann }
+    }
+    returner {"ok": sann, "metode": metode, "mål": mål, "sti": sti, "query": query,
               "versjon": versjon, "headers": h, "lengd": lengd, "keep_alive": ka}
 }
 
 # ctx i same form som nc serve (__method__ i små bokstavar), men headernamna i små bokstavar.
 funksjon ctx_frå(req: ordbok, kropp: tekst) -> ordbok {
-    _t["req_nr"] = _t_int("req_nr") + 1
+    la nr = _t["req_nr"] + 1
+    _t["req_nr"] = nr
+    la m = req["metode"]
+    la ml = ""
+    hvis m == "GET" { ml = "get" } ellers hvis m == "POST" { ml = "post" } ellers hvis m == "HEAD" { ml = "head" } ellers { ml = _liten(m) }
     returner {
-        "method": req["metode"],
-        "__method__": _liten(req["metode"]),
+        "method": m,
+        "__method__": ml,
         "__path__": req["sti"],
         "__query__": req["query"],
         "__headers__": req["headers"],
         "__body__": kropp,
         "__params__": {},
-        "__request_id__": "r" + tekst(_t_int("req_nr")),
+        "__request_id__": "r" + tekst(nr),
         "__versjon__": req["versjon"],
         "__lh__": sann
     }
@@ -488,12 +526,43 @@ funksjon _ruter() -> liste {
                 }
                 la seg = _segment(delar[1])
                 la har_param = builtin.index_of(delar[1], "{") >= 0
+                la fn = _fullt_namn(tekst(rh[i]["function"]))
                 legg_til(ut, {"m": _liten(delar[0]), "M": builtin.upper(delar[0]), "mønster": delar[1],
                               "seg": seg, "n": lengde(seg), "param": har_param,
-                              "fn": _fullt_namn(tekst(rh[i]["function"])), "vakter": vakter, "deps": rute_deps, "spec": spec})
+                              "fn": fn, "ar": _di.arity(fn), "vakter": vakter, "deps": rute_deps, "spec": spec})
             }
             i = i + 1
         }
+        # Oppslag for faste ruter: "metode /seg/seg" → første rute i lista som stien kan
+        # treffe. Ei fast rute kjem berre med når inga tidlegare parameterrute med same
+        # metode og segmenttal kunne ha teke stien først, så treffet er det same som
+        # den lineære søkinga i _rut ville gitt.
+        la eks = {}
+        la sett = {}
+        la blokk = {}
+        la har_ws = usann
+        la j = 0
+        mens j < lengde(ut) {
+            la r = ut[j]
+            hvis r["m"] == "ws" { har_ws = sann }
+            la mn = r["m"] + "#" + tekst(r["n"])
+            hvis r["param"] {
+                blokk[mn] = sann
+            } ellers {
+                la nøkkel = r["m"] + " /" + builtin.join(r["seg"], "/")
+                hvis ikkje har_nokkel(sett, nøkkel) {
+                    sett[nøkkel] = sann
+                    # Eit tomt siste segment (t.d. "/a//") blir ikkje att etter _segment
+                    # av ein førespurnadssti, så slike ruter går den lineære vegen.
+                    la tom_slutt = usann
+                    hvis r["n"] > 0 { tom_slutt = r["seg"][r["n"] - 1] == "" }
+                    hvis ikkje har_nokkel(blokk, mn) og ikkje tom_slutt { eks[nøkkel] = r }
+                }
+            }
+            j = j + 1
+        }
+        _t["eksakt"] = eks
+        _t["har_ws"] = har_ws
         _t["ruter"] = ut
     }
     returner _t["ruter"]
@@ -608,7 +677,15 @@ funksjon _utrygg(v: tekst) -> bool {
 # Ikkje-ordbok gjev 200 text/plain (tom tekst og null gjev 204).
 funksjon normaliser(svar) -> ordbok {
     hvis svar == null { returner {"status": 204, "body": ""} }
-    la typ = builtin.type(svar)
+    returner _norm(svar, builtin.type(svar))
+}
+
+# Respons-nøklane _er_svar ser etter, som oppslagssett.
+la _svarnøklar: ordbok = {"status": sann, "__status__": sann, "body": sann, "__body__": sann, "headers": sann,
+                          "__headers__": sann, "content_type": sann, "__content_type__": sann, "__sse__": sann}
+
+# normaliser med typen alt rekna ut (svar er ikkje null).
+funksjon _norm(svar, typ: tekst) -> ordbok {
     hvis typ != "ordbok" {
         # Liste, struktur-liste og bytes → automatisk JSON (1.1); primitivar → text/plain.
         hvis typ == "liste" eller typ == "bytes" {
@@ -618,13 +695,30 @@ funksjon normaliser(svar) -> ordbok {
         hvis t == "" { returner {"status": 204, "body": ""} }
         returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": t}
     }
-    hvis ikkje _er_svar(svar) {
+    # Svar eller data? For små ordbøker er det færre kall å slå opp nøklane i settet
+    # enn å spørje etter alle ni respons-nøklane (same svar som _er_svar).
+    la ks = nøkler(svar)
+    la nk = lengde(ks)
+    la er = usann
+    hvis nk <= 8 {
+        la sn = _svarnøklar
+        la j = 0
+        mens j < nk {
+            hvis har_nokkel(sn, ks[j]) {
+                er = sann
+                j = nk
+            }
+            j = j + 1
+        }
+    } ellers {
+        er = _er_svar(svar)
+    }
+    hvis ikkje er {
         # Data-ordbok eller struktur (ingen respons-nøklar) → automatisk JSON (1.1):
         # interne nøklar ("__type__" m.m.) blir fjerna, dato/tid blir ISO-8601, bytes base64.
         returner {"status": 200, "content_type": "application/json; charset=utf-8", "body": _serde.til_json(svar)}
     }
     la d = {}
-    la ks = nøkler(svar)
     la i = 0
     mens i < lengde(ks) {
         la k = ks[i]
@@ -771,31 +865,74 @@ funksjon _header_linje(namn: tekst, verdi: tekst) -> tekst {
     returner namn + ": " + verdi + "\r\n"
 }
 
+# Headernamn og -verdiar som alt er sjekka (ingen CR, LF eller NUL, og ikkje kolon i
+# namnet). Svar brukar dei same headerane om att, så eitt oppslag erstattar fire
+# index_of-kall per header. _hs gjev namnet i små bokstavar (som _liten). Avgrensa.
+la _hs: ordbok = {}
+la _tv: ordbok = {}
+la _hs_tal: ordbok = {"n": 0, "v": 0}
+
+funksjon _sjekk_namn(namn: tekst) -> tekst {
+    hvis _utrygg(namn) eller builtin.index_of(namn, ":") >= 0 { kast "apptenar: utrygg header " + namn }
+    la l = _liten(namn)
+    hvis _hs_tal["n"] < 512 {
+        _hs[namn] = l
+        _hs_tal["n"] = _hs_tal["n"] + 1
+    }
+    returner l
+}
+
+funksjon _sjekk_verdi(namn: tekst, verdi: tekst) -> heltall {
+    hvis _utrygg(verdi) { kast "apptenar: utrygg header " + namn }
+    hvis _hs_tal["v"] < 1024 og lengde(verdi) <= 256 {
+        _tv[verdi] = sann
+        _hs_tal["v"] = _hs_tal["v"] + 1
+    }
+    returner 0
+}
+
 # Serialiserer eit normalisert svar (sjå normaliser) i same form som nc serve, med Date,
 # Connection og Keep-Alive i tillegg. HEAD: same headerar (også Content-Length), utan
 # kropp. Kastar ved CR, LF eller NUL i ein header.
 funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
     hvis ikkje _s["ok"] { _lag_snap() }
     la s = d["status"]
-    la ut = "HTTP/1.1 " + tekst(s) + " " + _status_tekst(s) + "\r\nDate: " + _dato_no() + "\r\n"
+    la ut = ""
+    hvis s == 200 {
+        ut = "HTTP/1.1 200 OK\r\nDate: "
+    } ellers {
+        ut = "HTTP/1.1 " + tekst(s) + " " + _status_tekst(s) + "\r\nDate: "
+    }
+    # Date blir rekna ut éin gong per sekund (same som _dato_no).
+    la t = _t
+    la sek = builtin.tid_ms() / 1000
+    hvis sek != t["dato_s"] {
+        t["dato_s"] = sek
+        t["dato"] = http_dato(sek * 1000)
+    }
+    ut = ut + t["dato"] + "\r\n"
     hvis keep_alive {
         ut = ut + _s["ka"]
     } ellers {
         ut = ut + "Connection: close\r\n"
     }
-    la topp = _topp_tabell()
+    la topp = _s["topp"]
+    la tv = _tv
     la har_ct = usann
     la ks = nøkler(d)
+    la nk = lengde(ks)
     la i = 0
-    mens i < lengde(ks) {
+    mens i < nk {
         la k = ks[i]
-        hvis har_nokkel(topp, k) {
+        hvis k != "status" og k != "body" og k != "headers" og har_nokkel(topp, k) {
             la v = d[k]
             hvis v != null {
                 la vt = tekst(v)
                 hvis vt != "" {
-                    ut = ut + _header_linje(topp[k], vt)
-                    hvis topp[k] == "Content-Type" { har_ct = sann }
+                    la hn = topp[k]
+                    hvis ikkje har_nokkel(tv, vt) { _sjekk_verdi(hn, vt) }
+                    ut = ut + hn + ": " + vt + "\r\n"
+                    hvis hn == "Content-Type" { har_ct = sann }
                 }
             }
         }
@@ -804,13 +941,17 @@ funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
     hvis har_nokkel(d, "headers") {
         la h = d["headers"]
         la hk = nøkler(h)
+        la hs = _hs
         la j = 0
         mens j < lengde(hk) {
             la n = tekst(hk[j])
             hvis n != "" {
-                la l = _liten(n)
+                la l = ""
+                hvis har_nokkel(hs, n) { l = hs[n] } ellers { l = _sjekk_namn(n) }
                 hvis ikkje ((l == "content-type" og har_ct) eller l == "content-length" eller l == "connection" eller l == "transfer-encoding" eller l == "keep-alive" eller l == "date") {
-                    ut = ut + _header_linje(n, tekst(h[hk[j]]))
+                    la v = tekst(h[hk[j]])
+                    hvis ikkje har_nokkel(tv, v) { _sjekk_verdi(n, v) }
+                    ut = ut + n + ": " + v + "\r\n"
                 }
             }
             j = j + 1
@@ -883,12 +1024,14 @@ funksjon _er_ctx(r) -> bool {
 # Legg til ei oppgåve som køyrer ETTER at svaret er sendt (i apptenar-løkka), utan trådar.
 funksjon bakgrunn(fn_namn: tekst) -> heltall {
     hvis ikkje har_nokkel(_t, "bg") { _t["bg"] = [] }
+    _t["etter"] = sann
     legg_til(_t["bg"], {"fn": _fullt_namn(fn_namn), "har_arg": usann, "arg": null})
     returner 0
 }
 
 funksjon bakgrunn_arg(fn_namn: tekst, arg) -> heltall {
     hvis ikkje har_nokkel(_t, "bg") { _t["bg"] = [] }
+    _t["etter"] = sann
     legg_til(_t["bg"], {"fn": _fullt_namn(fn_namn), "har_arg": sann, "arg": arg})
     returner 0
 }
@@ -896,6 +1039,7 @@ funksjon bakgrunn_arg(fn_namn: tekst, arg) -> heltall {
 # Køyr oppryddinga (yield-deps, omvend rekkjefølgje) og bakgrunnsoppgåvene for den
 # førespurnaden som nett vart svara. Feil her tek ikkje ned tenaren.
 funksjon _etter_svar() -> heltall {
+    _t["etter"] = usann
     prøv { _di.ferdig() } fang (e) { _logg("feil", "opprydding kasta: " + tekst(e)) }
     hvis har_nokkel(_t, "bg") og lengde(_t["bg"]) > 0 {
         la kø = _t["bg"]
@@ -1416,8 +1560,12 @@ funksjon _periodisk(no: heltall, siste: bool) -> heltall {
 
 funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     la ctx = ctx0
-    _di.start(ctx)
-    _t["bg"] = []
+    # Bakgrunnsoppgåver/opprydding frå ein førespurnad som aldri fekk _etter_svar
+    # (dispatch kalla direkte) blir droppa, som før.
+    hvis _t["etter"] {
+        _t["bg"] = []
+        _t["etter"] = usann
+    }
     # Tidlege kant-kontrollar (1.4): TrustedHost (400), rate (429), CORS-preflight (204).
     hvis _s["kant"] {
         la kant = _tidleg_kant(ctx)
@@ -1426,8 +1574,9 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     # Request-mellomvare (wrap): kan endre ctx som når handlaren, eller kortslutte med
     # eit eige svar (1.3). Unntak blir mappa (HTTPFeil/ValideringsFeil/500).
     la rq = _s["rq_mw"]
+    la n_rq = lengde(rq)
     la mi = 0
-    mens mi < lengde(rq) {
+    mens mi < n_rq {
         la r = null
         prøv {
             r = _di.kall(rq[mi], [ctx])
@@ -1441,85 +1590,107 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         }
         mi = mi + 1
     }
-    la metode = tekst(ctx["__method__"])
-    la sti = tekst(ctx["__path__"])
-    hvis (metode == "get" eller metode == "head") og _s["metrikk"] og sti == _s["metrikk_sti"] {
+    # ctx frå ctx_frå (merkt "__lh__") har tekst i metode og sti og headernamn i små
+    # bokstavar; andre ctx-ar går den generelle vegen.
+    la lh = har_nokkel(ctx, "__lh__")
+    la metode = ""
+    la sti = ""
+    hvis lh {
+        metode = ctx["__method__"]
+        sti = ctx["__path__"]
+    } ellers {
+        metode = tekst(ctx["__method__"])
+        sti = tekst(ctx["__path__"])
+    }
+    la g_h = metode == "get" eller metode == "head"
+    hvis g_h og _s["metrikk"] og sti == _s["metrikk_sti"] {
         _t["rute"] = sti
         returner _respons_mw(_metrikk_svar())
     }
-    hvis (sti == "/helse" eller sti == "/health") og (metode == "get" eller metode == "head") {
+    hvis g_h og (sti == "/helse" eller sti == "/health") {
         _t["rute"] = sti
         returner _respons_mw({"status": 200, "content_type": "application/json; charset=utf-8",
                               "cache_control": "no-store", "body": "{\"ok\":true,\"status\":\"ready\"}"})
     }
-    la ruter = _ruter()
-    la seg = _segment(sti)
-    la fann_sti = usann
     la treff = null
-    la treff_p = null
-    la i = 0
     # WebSocket (5c): GET med «Upgrade: websocket» går til ei «WS»-rute på stien.
-    hvis metode == "get" og _ws.er_oppgradering(ctx) {
-        la wo = _ws_rute(ruter, seg)
-        hvis wo != null {
-            fann_sti = sann
-            treff_p = wo["p"]
-            treff = wo["r"]
-        }
-    }
-    mens i < lengde(ruter) og treff == null {
-        la r = ruter[i]
-        la p = _match(r, seg)
-        hvis p != null {
-            fann_sti = sann
-            hvis r["m"] == metode {
-                treff = r
-                treff_p = p
+    # Utan WS-ruter kan ingenting oppgraderast, så headeren treng ikkje lesast.
+    la oppg = usann
+    hvis metode == "get" og _s["har_ws"] { oppg = _ws.er_oppgradering(ctx) }
+    la eks = _s["eksakt"]
+    la nøkkel = metode + " " + sti
+    hvis ikkje oppg og har_nokkel(eks, nøkkel) {
+        # Fast rute: same treff som den lineære søkinga (sjå _ruter).
+        treff = eks[nøkkel]
+        hvis ikkje lh eller n_rq > 0 { ctx["__params__"] = {} }
+    } ellers {
+        la ruter = _s["ruter"]
+        la seg = _segment(sti)
+        la fann_sti = usann
+        la treff_p = null
+        la i = 0
+        hvis oppg {
+            la wo = _ws_rute(ruter, seg)
+            hvis wo != null {
+                fann_sti = sann
+                treff_p = wo["p"]
+                treff = wo["r"]
             }
         }
-        i = i + 1
-    }
-    hvis treff == null og metode == "head" {
-        i = 0
         mens i < lengde(ruter) og treff == null {
             la r = ruter[i]
-            hvis r["m"] == "get" {
-                la p = _match(r, seg)
-                hvis p != null {
+            la p = _match(r, seg)
+            hvis p != null {
+                fann_sti = sann
+                hvis r["m"] == metode {
                     treff = r
                     treff_p = p
                 }
             }
             i = i + 1
         }
+        hvis treff == null og metode == "head" {
+            i = 0
+            mens i < lengde(ruter) og treff == null {
+                la r = ruter[i]
+                hvis r["m"] == "get" {
+                    la p = _match(r, seg)
+                    hvis p != null {
+                        treff = r
+                        treff_p = p
+                    }
+                }
+                i = i + 1
+            }
+        }
+        # Vanleg GET (utan Upgrade) mot ei rute som berre finst som WS: handtrykket under
+        # gjev 426 Upgrade Required.
+        hvis treff == null og metode == "get" og fann_sti {
+            la wt = _ws_rute(ruter, seg)
+            hvis wt != null {
+                treff_p = wt["p"]
+                treff = wt["r"]
+            }
+        }
+        hvis treff == null {
+            hvis metode == "options" og fann_sti {
+                returner {"status": 204, "body": "", "allow": _allow(ruter, seg)}
+            }
+            hvis fann_sti {
+                la f = _feil(405, "Method Not Allowed")
+                f["allow"] = _allow(ruter, seg)
+                returner _feil_mw(f)
+            }
+            # Statiske filer og SPA-fallback (1.6): berre når ingen rute matcha.
+            la st = _statisk_fallback(ctx, metode, sti, fann_sti)
+            hvis st != null {
+                _t["rute"] = "statisk"
+                returner st
+            }
+            returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
+        }
+        ctx["__params__"] = treff_p
     }
-    # Vanleg GET (utan Upgrade) mot ei rute som berre finst som WS: handtrykket under
-    # gjev 426 Upgrade Required.
-    hvis treff == null og metode == "get" og fann_sti {
-        la wt = _ws_rute(ruter, seg)
-        hvis wt != null {
-            treff_p = wt["p"]
-            treff = wt["r"]
-        }
-    }
-    hvis treff == null {
-        hvis metode == "options" og fann_sti {
-            returner {"status": 204, "body": "", "allow": _allow(ruter, seg)}
-        }
-        hvis fann_sti {
-            la f = _feil(405, "Method Not Allowed")
-            f["allow"] = _allow(ruter, seg)
-            returner _feil_mw(f)
-        }
-        # Statiske filer og SPA-fallback (1.6): berre når ingen rute matcha.
-        la st = _statisk_fallback(ctx, metode, sti, fann_sti)
-        hvis st != null {
-            _t["rute"] = "statisk"
-            returner st
-        }
-        returner _feil_mw(_feil(404, "Ikkje funne: " + metode + " " + sti))
-    }
-    ctx["__params__"] = treff_p
     _t["rute"] = treff["mønster"]
     # WebSocket: handtrykket blir validert før vaktene (400/405/426/403), men sjølve
     # oppgraderinga skjer først når vakter og avhengnader har godkjent førespurnaden.
@@ -1551,6 +1722,14 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     }
     # Avhengnader (1.2): globale + prefiks-deps køyrer for sideeffekt (auth, logging o.l.),
     # rute-deps blir sende til handlaren. Alle er cacha per førespurnad og aritetskontrollerte.
+    # Cachen blir nullstilt (og oppryddinga køyrd etter svaret) berre når førespurnaden
+    # faktisk har avhengnader.
+    la rute_deps = treff["deps"]
+    la har_rute_deps = lengde(rute_deps) > 0
+    hvis _s["deps"] eller har_rute_deps {
+        _di.start(ctx)
+        _t["etter"] = sann
+    }
     hvis _s["deps"] {
         prøv {
             _di.løys_fleire(ctx, _globale_og_prefiks(sti))
@@ -1560,9 +1739,9 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         }
     }
     la dep_values = []
-    hvis lengde(treff["deps"]) > 0 {
+    hvis har_rute_deps {
         prøv {
-            dep_values = _di.løys_fleire(ctx, treff["deps"])
+            dep_values = _di.løys_fleire(ctx, rute_deps)
         } fang (e) {
             _logg("feil", "avhengnad feila på " + metode + " " + sti + ": " + tekst(e))
             returner _feil_mw(_feil_frå_unntak(e))
@@ -1574,17 +1753,36 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     }
     la d = null
     prøv {
-        la svar = _di.kall_handlar(fn, ctx, dep_values)
-        hvis svar != null og builtin.type(svar) == "ordbok" og har_nokkel(svar, "__sse__") {
-            hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
-            returner svar
+        la svar = null
+        # Aritet 1 (berre ctx) er det vanlege: kall direkte i staden for via
+        # _di.kall_handlar, som ville rekna ut ariteten to gonger per førespurnad.
+        hvis treff["ar"] == 1 {
+            svar = builtin.ncb_call_fn(fn, ctx)
+        } ellers {
+            svar = _di.kall_handlar(fn, ctx, dep_values)
         }
-        d = normaliser(svar)
+        hvis svar == null {
+            d = normaliser(svar)
+        } ellers {
+            la typ = builtin.type(svar)
+            hvis typ == "ordbok" og har_nokkel(svar, "__sse__") {
+                hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
+                returner svar
+            }
+            d = _norm(svar, typ)
+        }
     } fang (e) {
         _logg("feil", "handlar " + fn + " kasta på " + metode + " " + sti + ": " + tekst(e))
         returner _feil_mw(_feil_frå_unntak(e))
     }
-    d = _respons_mw(d)
+    hvis lengde(_s["rs_mw"]) > 0 { d = _respons_mw(d) }
+    # Vilkårsbunde svar (304) berre for GET/HEAD med 200 og If-None-Match/If-Modified-Since.
+    la m2 = ctx["__method__"]
+    hvis (m2 != "get" og m2 != "head") eller d["status"] != 200 { returner d }
+    hvis lh {
+        la hh = ctx["__headers__"]
+        hvis ikkje har_nokkel(hh, "if-none-match") og ikkje har_nokkel(hh, "if-modified-since") { returner d }
+    }
     returner vilkårsbunde(ctx, d)
 }
 
@@ -1607,16 +1805,16 @@ funksjon handsam_rå(rå: tekst) -> tekst {
     la kropp = builtin.slice(rå, slutt + 4, lengde(rå))
     la ctx = ctx_frå(req, kropp)
     la d = dispatch(ctx)
-    hvis har_nokkel(d, "__sse__") { _etter_svar()  returner "SSE " + tekst(d["__sse__"]) }
+    hvis har_nokkel(d, "__sse__") { hvis _t["etter"] { _etter_svar() }  returner "SSE " + tekst(d["__sse__"]) }
     hvis har_nokkel(d, "__ws__") {
         la t = _ws_start(d)
-        _etter_svar()
+        hvis _t["etter"] { _etter_svar() }
         _ws.opna(t)
         returner _ws.svar_101(d["__ws_ctx__"])
     }
     la ut = til_http_trygt(d, ctx["__method__"] == "head", req["keep_alive"])
     # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga (1.2/1.7).
-    _etter_svar()
+    hvis _t["etter"] { _etter_svar() }
     returner ut
 }
 
@@ -1638,7 +1836,7 @@ funksjon ws_opne_rå(rå: tekst) -> ordbok {
     la d = dispatch(ctx)
     hvis har_nokkel(d, "__ws__") {
         la t = _ws_start(d)
-        _etter_svar()
+        hvis _t["etter"] { _etter_svar() }
         la svar = _ws.svar_101(d["__ws_ctx__"])
         _ws.opna(t)
         la rest = builtin.slice(rå, slutt + 4, lengde(rå))
@@ -1646,11 +1844,11 @@ funksjon ws_opne_rå(rå: tekst) -> ordbok {
         returner {"status": 101, "svar": svar, "t": t}
     }
     hvis har_nokkel(d, "__sse__") {
-        _etter_svar()
+        hvis _t["etter"] { _etter_svar() }
         returner {"status": 200, "svar": "SSE " + tekst(d["__sse__"]), "t": null}
     }
     la ut = til_http_trygt(d, usann, usann)
-    _etter_svar()
+    hvis _t["etter"] { _etter_svar() }
     returner {"status": d["status"], "svar": ut, "t": null}
 }
 
@@ -1907,7 +2105,7 @@ funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
     _t["handsama"] = _t_int("handsama") + 1
     # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga,
     # i tenarløkka utan trådar (1.2/1.7).
-    _etter_svar()
+    hvis _t["etter"] { _etter_svar() }
     hvis har_nokkel(d, "__ws__") {
         # 101 Switching Protocols: tilkoplinga går over til WebSocket-rammer.
         la t = _ws_start(d)
