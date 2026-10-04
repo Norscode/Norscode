@@ -983,6 +983,9 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
         la kandidat = enclosing_namn[ci]
         hvis har_nokkel(body_idents, kandidat) og ikkje har_nokkel(param_sett, kandidat)
             legg_til(captures, kandidat)
+            // Fanga namn er lokale i lambda-ramma (F04: metodekall på fanga self).
+            la fanga_lokale = komp["current_locals"]
+            fanga_lokale[kandidat] = sann
         slutt
         ci = ci + 1
     slutt
@@ -1820,30 +1823,14 @@ funksjon emit_uttrykk(komp, node, kode)
             slutt
         slutt
 
-        // Metode-kall: p.metode(args) der p er ein LOKAL variabel (struktur-instans,
-        // ikkje ein modul). Dispatch dynamisk på __type__ via ncb_call_fn:
-        //   ncb_call_fn(modul + "." + p["__type__"] + ".metode", p, args…)
+        // Metode-kall: mott.metode(args) der mott er ein verdi (lokal variabel,
+        // feltkjede frå ein lokal, kall- eller indeksresultat …), ikkje ein
+        // modulsti. Dispatch dynamisk på __type__, sjå emit_metodekall (F04).
         // Stacken må vere [fn_namn, self, args…], so dette må skje FØR arg-løkka.
-        hvis fn_ident["type"] == "Felt" og fn_ident["barn"][0]["type"] == "Ident" og har_nokkel(komp["current_locals"], fn_ident["barn"][0]["verdi"])
-            la metode_namn = fn_ident["verdi"]
-            // fn_namn = modul + "." + p["__type__"] + "." + metode
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", komp["modul"] + "."))
-            emit_uttrykk(komp, fn_ident["barn"][0], kode)
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
-            legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
-            legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "." + metode_namn))
-            legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-            // self
-            emit_uttrykk(komp, fn_ident["barn"][0], kode)
-            // metode-argument
-            la mai = 0
-            mens mai < arg_antal
-                emit_uttrykk(komp, argumenter["barn"][mai], kode)
-                mai = mai + 1
+        hvis fn_ident["type"] == "Felt"
+            hvis er_metode_mottakar(komp, fn_ident["barn"][0])
+                returner emit_metodekall(komp, node, kode)
             slutt
-            legg_til(kode, json_kall("builtin.ncb_call_fn", arg_antal + 2))
-            returner sann
         slutt
 
         // Varargs: kallar vi ein kjend vararg-funksjon, pakk overskotet av
@@ -1896,6 +1883,14 @@ funksjon emit_uttrykk(komp, node, kode)
                 returner sann
             slutt
             legg_til(kode, json_kall("builtin." + modul_del + "." + fn_del, arg_antal))
+            returner sann
+        slutt
+
+        // Kall på eit uttrykksresultat (m["f"](x), f()(x), (funksjon(..){..})(x)):
+        // argumenta ligg alt på stacken; evaluer kallaren og bruk CALL_VALUE (F04).
+        hvis fn_ident["type"] != "Ident"
+            emit_uttrykk(komp, fn_ident, kode)
+            legg_til(kode, json_instruksjon_med_int("CALL_VALUE", arg_antal))
             returner sann
         slutt
 
@@ -2006,6 +2001,84 @@ funksjon fjern_ubrukte_literal_setning(kode, start_ip: heiltall) -> boolsk
     returner sann
 slutt
 
+// ─── Metodekall på vilkårlege mottakarar (F04) ──────────────────────────────
+// Rot-identifikatoren i ei feltkjede (a.b.c → "a"), eller "" om kjeda ikkje
+// startar i eit namn (t.d. f().b eller l[0].b).
+funksjon felt_kjede_rot(node) -> tekst {
+    la n = node
+    mens n["type"] == "Felt" {
+        n = n["barn"][0]
+    }
+    hvis n["type"] == "Ident" { returner tekst(n["verdi"]) }
+    returner ""
+}
+
+// Er `mott` i `mott.metode(...)` ein verdi (struktur-instans) og ikkje ein
+// modulsti (modul.fn, std.x.fn, builtin.x.fn)?
+//   - lokal variabel (inkl. parameter, for- og fang-variabel): metode
+//   - feltkjede med rot i ein lokal verdi: metode
+//   - feltkjede med rot i builtin, eit importalias, ein modulglobal eller eit
+//     ukjent namn: uendra (modulsti; globale mottakarar er ikkje dekte enno)
+//   - alle andre uttrykk (kall, indeks, …): metode
+funksjon er_metode_mottakar(komp, mott) -> boolsk {
+    la t = mott["type"]
+    hvis t == "Ident" {
+        la namn = mott["verdi"]
+        hvis har_nokkel(komp["current_locals"], namn) { returner sann }
+        returner usann
+    }
+    hvis t == "Felt" {
+        la rot = felt_kjede_rot(mott)
+        hvis rot == "" { returner sann }
+        hvis rot == "builtin" { returner usann }
+        hvis har_nokkel(komp["current_locals"], rot) { returner sann }
+        returner usann
+    }
+    returner sann
+}
+
+// mott.metode(args) med dynamisk dispatch på __type__ via ncb_call_fn:
+//   ncb_call_fn(modul + "." + mott["__type__"] + ".metode", mott, args…)
+// Mottakaren blir evaluert éin gong (til ein ramme-lokal temp når han ikkje er
+// eit enkelt namn).
+funksjon emit_metodekall(komp, node, kode) -> boolsk {
+    la fn_ident = node["barn"][0]
+    la mott = fn_ident["barn"][0]
+    la args = node["barn"][1]["barn"]
+    la mott_namn = ""
+    hvis mott["type"] != "Ident" {
+        mott_namn = "__mott_" + tekst_fra_heltall(komp["teller"]) + "__"
+        komp["teller"] = komp["teller"] + 1
+        emit_uttrykk(komp, mott, kode)
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", mott_namn))
+    }
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", komp["modul"] + "."))
+    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
+    legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "." + fn_ident["verdi"]))
+    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
+    la ai: heiltall = 0
+    mens ai < lengde(args) {
+        emit_uttrykk(komp, args[ai], kode)
+        ai = ai + 1
+    }
+    legg_til(kode, json_kall("builtin.ncb_call_fn", lengde(args) + 2))
+    returner sann
+}
+
+// Registrer eit namn som ramme-lokalt (for-/fang-variabel) slik at seinare
+// oppslag ikkje går til ein modulglobal med same namn, og slik at metodekall
+// på variabelen blir dynamisk dispatcha.
+funksjon merk_lokal(komp, namn) -> heiltall {
+    hvis komp["in_module_init"] { returner 0 }
+    la lokale = komp["current_locals"]
+    lokale[namn] = sann
+    returner 0
+}
+
 // ─── bryt/fortsett ut av prøv/endeleg (F03) ─────────────────────────────────
 // komp["prov_stakk"] held ein post per prøv-blokk som er under kompilering:
 // {"har_fang", "har_endeleg", "i_fang", "ctl", "etter", "loop_djupn"}.
@@ -2110,6 +2183,7 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
         legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
         legg_til(kode, json_instruksjon_uten_arg("LOAD_EXCEPTION"))
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+        merk_lokal(komp, node["verdi"])
         post["i_fang"] = sann
         emit_blokk(komp, node["barn"][1], kode)
         hvis har_endeleg {
@@ -2167,6 +2241,7 @@ funksjon emit_for_range(komp, node, kode) -> boolsk {
 
     emit_uttrykk(komp, node["barn"][0], kode)
     legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+    merk_lokal(komp, node["verdi"])
     push_loop(komp, loop_cont_lbl, loop_end_lbl)
     legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
     legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
@@ -2457,6 +2532,7 @@ funksjon emit_setning(komp, node, kode)
         legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", iter_idx_var))
 
+        merk_lokal(komp, node["verdi"])
         push_loop(komp, loop_cont_lbl, loop_end_lbl)
         legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
 
