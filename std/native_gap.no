@@ -1388,9 +1388,15 @@ funksjon _pg_spawn(req, synkron: boolsk) {
         no_new_privs = nsys._flagg("PR_SET_NO_NEW_PRIVS")
         sm_filter = nsys._flagg("SECCOMP_SET_MODE_FILTER")
     }
+    // 2.9: nc serve blokkerer SIGTERM/SIGINT/SIGHUP; barnet skal ikkje arve den maska.
+    la s29_maske = _s29_barn_maske()
+    la s29_nr_mask = nsys._nr_kompat("rt_sigprocmask")
+    la s29_setmask = nsys._flagg("SIG_SETMASK")
+    la s29_sz = nsys._layout("sigset", "storleik")
     la pid = builtin.sys6(nsys._nr_kompat("fork"), nsys._flagg("FORK_A1"), 0, 0, 0, 0, 0)   // arm64: clone(SIGCHLD, 0, 0, 0, 0)
     hvis pid == 0 {
         // BARN: koplar røyr, chdir, execve; aldri tilbake til Norscode-koden.
+        hvis s29_maske != 0 { builtin.sys6(s29_nr_mask, s29_setmask, s29_maske, 0, s29_sz, 0, 0) }
         builtin.sys6(nr_dup2, inn_r, 0, 0, 0, 0, 0)
         builtin.sys6(nr_dup2, ut_w, 1, 0, 0, 0, 0)
         builtin.sys6(nr_dup2, feil_w, 2, 0, 0, 0, 0)
@@ -1970,6 +1976,7 @@ funksjon acme_verify(alg: tekst, offentleg_pem: tekst, signing_input: tekst, sig
 funksjon network_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
     la op = _nw_tekst(req, "operation", "")
+    hvis op == "poll_mange" { returner _s29_poll_mange(req) }   // 2.9 (seksjon nedst)
     hvis op == "tls_connect" { returner _tls_connect(req) }
     hvis op == "tls_listen" { returner _tls_listen(req) }
     hvis op == "tls_handshake" { returner _tls_handshake(req) }
@@ -4253,4 +4260,324 @@ funksjon _tls_lukk(h: tekst) -> ordbok {
     // — etter at kjernen kan ha gjenbrukt det for ein annan sokkel (dobbel close).
     hvis finnes_nøkkel(_nw_slots, h) { fjern_nokkel(_nw_slots, h) }
     returner _nw_res("closed", h, "", 0, 0, "")
+}
+
+// ── 2.9: nc serve på tilkoplingsnivå (poll-lykkje, keep-alive, tidsgrenser, signal) ──
+// Byggjeklossar for den ikkje-blokkerande hendingslykkja i selfhost/nc_main.no (nc_serve):
+// éin poll(2)-tabell over lytte-fd + alle tilkoplingar, ikkje-blokkerande accept/les,
+// skriving med tidsgrense, og SIGTERM/SIGINT/SIGHUP blokkerte i prosessen og avlesne kvar
+// runde (rt_sigpending / sigpending). Alle fd-ar er rå heiltal, ikkje std.socket-lister.
+// Ingen kast: feil = negativ retur (−errno). Systemkall som (enno) ikkje står i
+// std.native_sys har lokale tal per mål her, så native_sys-tabellane står urørte.
+la _s29_scratch = 0
+la _s29_blokkert = usann
+
+// Eigen 128 KiB scratch (rører ikkje _sk_buf): [0, 64 KiB) pollfd-tabell (8192 × 8 B),
+// [64 KiB, 96 KiB) I/O-buffer, deretter éin pollfd for skrive-venting, timespec, fire
+// sigset (ny, gammal, ventande, tom) og to sigaction-structar.
+funksjon _S29_POLL() -> heiltall { returner 0 }
+funksjon _S29_IO() -> heiltall { returner 65536 }
+funksjon _S29_IO_N() -> heiltall { returner 32768 }
+funksjon _S29_SKRIV_PFD() -> heiltall { returner 98304 }
+funksjon _S29_TS() -> heiltall { returner 98368 }
+funksjon _S29_SIG() -> heiltall { returner 98432 }      // 4 × 16 B
+funksjon _S29_SA() -> heiltall { returner 98560 }       // 2 × 64 B
+funksjon _S29_MAKS_FD() -> heiltall { returner 8192 }
+
+funksjon _s29_buf() -> heiltall {
+    hvis _s29_scratch == 0 {
+        la a = _sys_mmap_rw(131072)
+        hvis a <= 0 { returner 0 }
+        _s29_scratch = a
+    }
+    returner _s29_scratch
+}
+
+// Signalnummera er like på linux-x86_64, linux-arm64 og macOS-arm64 for desse tre.
+funksjon serve_SIGHUP() -> heiltall { returner 1 }
+funksjon serve_SIGINT() -> heiltall { returner 2 }
+funksjon serve_SIGTERM() -> heiltall { returner 15 }
+
+funksjon _s29_sigbit(sig: heiltall) -> heiltall { returner 1 << (sig - 1) }
+
+funksjon _s29_maske() -> heiltall {
+    returner _s29_sigbit(serve_SIGTERM()) | _s29_sigbit(serve_SIGINT()) | _s29_sigbit(serve_SIGHUP())
+}
+
+// rt_sigpending(set, sz) / macOS sigpending(set). −1 = ukjent mål.
+funksjon _s29_nr_sigpending() -> heiltall {
+    la m = nsys.mål()
+    hvis m == "linux-x86_64" { returner 127 }
+    hvis m == "linux-arm64" { returner 136 }
+    hvis m == "macos-arm64" { returner 52 }
+    returner 0 - 1
+}
+
+// rt_sigaction(sig, act, oact, sz) / macOS sigaction(sig, act, oact). −1 = ukjent mål.
+funksjon _s29_nr_sigaction() -> heiltall {
+    la m = nsys.mål()
+    hvis m == "linux-x86_64" { returner 13 }
+    hvis m == "linux-arm64" { returner 134 }
+    hvis m == "macos-arm64" { returner 46 }
+    returner 0 - 1
+}
+
+// Blokker SIGTERM, SIGINT og SIGHUP i prosessen (rt_sigprocmask / macOS sigprocmask).
+// Signala blir då ståande ventande til lykkja les dei med serve_signal_ventande.
+// Barn som vert starta etterpå (process_spawn) får tom maske att i _pg_spawn.
+funksjon serve_signal_blokker() -> heiltall {
+    la b = _s29_buf()
+    hvis b == 0 { returner 0 - 1 }
+    la sett: heiltall = b + _S29_SIG()
+    builtin.raw_store64(sett, _s29_maske())
+    builtin.raw_store64(sett + 8, 0)
+    builtin.raw_store64(sett + 16, 0)
+    builtin.raw_store64(sett + 24, 0)
+    builtin.raw_store64(sett + 48, 0)                     // tom maske til barn
+    builtin.raw_store64(sett + 56, 0)
+    la r = builtin.sys6(nsys._nr_kompat("rt_sigprocmask"), nsys._flagg("SIG_BLOCK"), sett, sett + 16,
+                        nsys._layout("sigset", "storleik"), 0, 0)
+    hvis r >= 0 { _s29_blokkert = sann }
+    returner r
+}
+
+// Set tilbake maska frå før serve_signal_blokker.
+funksjon serve_signal_opphev() -> heiltall {
+    hvis ikkje _s29_blokkert { returner 0 }
+    la sett: heiltall = _s29_buf() + _S29_SIG()
+    _s29_blokkert = usann
+    returner builtin.sys6(nsys._nr_kompat("rt_sigprocmask"), nsys._flagg("SIG_SETMASK"), sett + 16, 0,
+                          nsys._layout("sigset", "storleik"), 0, 0)
+}
+
+// Ventande signal blant SIGTERM/SIGINT/SIGHUP som bitmaske (bit sig−1). 0 = ingen.
+funksjon serve_signal_ventande() -> heiltall {
+    la nr = _s29_nr_sigpending()
+    hvis nr < 0 { returner 0 }
+    la b = _s29_buf()
+    hvis b == 0 { returner 0 }
+    la v: heiltall = b + _S29_SIG() + 32
+    builtin.raw_store64(v, 0)
+    builtin.raw_store64(v + 8, 0)
+    la r = builtin.sys6(nr, v, nsys._layout("sigset", "storleik"), 0, 0, 0, 0)   // macOS ignorerer a2
+    hvis r < 0 { returner 0 }
+    returner builtin.raw_load64(v) & _s29_maske()
+}
+
+funksjon serve_signal_har(maske: heiltall, sig: heiltall) -> boolsk {
+    returner (maske & _s29_sigbit(sig)) != 0
+}
+
+// Forkast eit ventande (blokkert) signal: SIG_IGN forkastar det ventande signalet
+// (POSIX, òg når det er blokkert), deretter SIG_DFL att. Struct-en er nullfylt med
+// handler @0 på alle tre måla (Linux k_sigaction / Darwin __sigaction).
+funksjon serve_signal_forkast(sig: heiltall) -> heiltall {
+    la nr = _s29_nr_sigaction()
+    hvis nr < 0 { returner 0 - 1 }
+    la b = _s29_buf()
+    hvis b == 0 { returner 0 - 1 }
+    la sa: heiltall = b + _S29_SA()
+    la i: heiltall = 0
+    mens i < 128 { builtin.raw_store64(sa + i, 0) i = i + 8 }
+    la sz = nsys._layout("sigset", "storleik")
+    builtin.raw_store64(sa, 1)                          // SIG_IGN
+    la r = builtin.sys6(nr, sig, sa, sa + 64, sz, 0, 0)
+    builtin.raw_store64(sa, 0)                          // SIG_DFL
+    builtin.sys6(nr, sig, sa, sa + 64, sz, 0, 0)
+    returner r
+}
+
+// For _pg_spawn: adressa til ei tom signalmaske når serve har blokkert signal (barnet
+// skal ikkje arve blokkerte SIGTERM/SIGINT/SIGHUP gjennom execve), elles 0.
+funksjon _s29_barn_maske() -> heiltall {
+    hvis ikkje _s29_blokkert { returner 0 }
+    returner _s29_buf() + _S29_SIG() + 48
+}
+
+funksjon serve_nonblock(fd: heiltall) -> heiltall {
+    returner _pg_nonblock(fd)
+}
+
+// Ikkje-blokkerande accept på ein O_NONBLOCK-lytte-fd. Ny fd (O_NONBLOCK, SO_NOSIGPIPE
+// der målet treng det) eller −errno (−EAGAIN = ingen ventande tilkopling).
+funksjon serve_aksepter(fd: heiltall) -> heiltall {
+    la b = _s29_buf()
+    hvis b == 0 { returner 0 - 1 }
+    la adr: heiltall = b + _S29_IO()
+    builtin.raw_store64(adr + 32, 16)
+    la ny = builtin.sys6(nsys._nr("accept"), fd, adr, adr + 32, 0, 0, 0)
+    hvis ny < 0 { returner ny }
+    _sk_nosigpipe(ny)
+    _pg_nonblock(ny)
+    serve_cloexec(ny)
+    returner ny
+}
+
+// FD_CLOEXEC (fcntl F_SETFD = 2, FD_CLOEXEC = 1 på Linux og Darwin): eit barn frå ein
+// handlar skal ikkje arve tilkoplinga (då ville ho halde fram open etter lukking).
+funksjon serve_cloexec(fd: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("fcntl"), fd, 2, 1, 0, 0, 0)
+}
+
+// poll(2)/ppoll over fds (POLLIN på alle). Gjev revents i same rekkjefølgje; ved feil
+// eller tidsavbrot er alle 0. ms < 0 = vent utan tak. Maks 8192 fd-ar (resten vert 0).
+funksjon serve_poll(fds: liste, ms: heiltall) -> liste {
+    la ut: liste = []
+    la n: heiltall = lengde(fds)
+    la b = _s29_buf()
+    hvis b == 0 {
+        la j: heiltall = 0
+        mens j < n { legg_til(ut, 0) j = j + 1 }
+        returner ut
+    }
+    la maks = n
+    hvis maks > _S29_MAKS_FD() { maks = _S29_MAKS_FD() }
+    la sz: heiltall = nsys._layout("pollfd", "storleik")
+    la pollin: heiltall = nsys._flagg("POLLIN")
+    la tab: heiltall = b + _S29_POLL()
+    la i: heiltall = 0
+    mens i < maks {
+        _sys_pollfd(tab + i * sz, fds[i], pollin)
+        i = i + 1
+    }
+    la r = _sys_poll(tab, maks, ms, b + _S29_TS())
+    la ro: heiltall = nsys._layout("pollfd", "revents")
+    i = 0
+    mens i < n {
+        hvis r > 0 og i < maks { legg_til(ut, _sys_les_u16(tab + i * sz + ro)) } ellers { legg_til(ut, 0) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Sann når fd-en har noko å lese (data, EOF eller feil — lesinga avgjer kva).
+funksjon serve_klar(revents: heiltall) -> boolsk {
+    la m = nsys._flagg("POLLIN") | nsys._flagg("POLLHUP") | nsys._flagg("POLLERR") | nsys._flagg("POLLNVAL")
+    returner (revents & m) != 0
+}
+
+// Éi ikkje-blokkerande lesing (≤ 32 KiB). {"status": ok|eof|ventar|feil, "data", "n"}.
+// Teksten blir bygd byte for byte med builtin.chr, som socket_recv.
+funksjon serve_les(fd: heiltall, maks: heiltall) -> ordbok {
+    la b = _s29_buf()
+    hvis b == 0 { returner {"status": "feil", "data": "", "n": 0 - 1} }
+    la buf: heiltall = b + _S29_IO()
+    la nm = maks
+    hvis nm > _S29_IO_N() { nm = _S29_IO_N() }
+    hvis nm <= 0 { returner {"status": "ventar", "data": "", "n": 0} }
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, nm, 0, 0, 0)
+    hvis n == 0 - nsys._errno("EAGAIN") eller n == 0 - nsys._errno("EINTR") { returner {"status": "ventar", "data": "", "n": 0} }
+    hvis n < 0 { returner {"status": "feil", "data": "", "n": n} }
+    hvis n == 0 { returner {"status": "eof", "data": "", "n": 0} }
+    la ut = ""
+    la i: heiltall = 0
+    mens i < n { ut = ut + builtin.chr(builtin.raw_load8(buf + i)) i = i + 1 }
+    returner {"status": "ok", "data": ut, "n": n}
+}
+
+// Vent til fd er skrivbar, høgst ms. Sann = skrivbar (eller feil, som sendto då rapporterer).
+funksjon _s29_vent_skrivbar(fd: heiltall, ms: heiltall) -> boolsk {
+    la b = _s29_buf()
+    la pf: heiltall = b + _S29_SKRIV_PFD()
+    _sys_pollfd(pf, fd, nsys._flagg("POLLOUT"))
+    la r = _sys_poll(pf, 1, ms, b + _S29_TS())
+    returner r > 0
+}
+
+// Skriv heile data (tekst eller liste av byte) til ein O_NONBLOCK-sokkel. Ved fullt
+// sendevindauge blir det venta med poll(POLLOUT) til samla frist (ms) er ute.
+// Gjev talet på byte skrivne, eller negativt ved feil/tidsavbrot.
+funksjon serve_skriv(fd: heiltall, data, ms: heiltall) -> heiltall {
+    la b = _s29_buf()
+    hvis b == 0 { returner 0 - 1 }
+    la buf: heiltall = b + _S29_IO()
+    la er_tekst = builtin.type(data) == "tekst"
+    la total: heiltall = lengde(data)
+    la frist = builtin.tid_ms() + ms
+    la eagain = 0 - nsys._errno("EAGAIN")
+    la eintr = 0 - nsys._errno("EINTR")
+    la nr_send = nsys._nr("sendto")
+    la nosig = nsys._flagg("MSG_NOSIGNAL")
+    la sendt: heiltall = 0
+    mens sendt < total {
+        la bit = total - sendt
+        hvis bit > _S29_IO_N() { bit = _S29_IO_N() }
+        la k: heiltall = 0
+        hvis er_tekst {
+            mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        } ellers {
+            mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        }
+        la off: heiltall = 0
+        mens off < bit {
+            la w = builtin.sys6(nr_send, fd, buf + off, bit - off, nosig, 0, 0)
+            hvis w == eagain eller w == eintr {
+                la att = frist - builtin.tid_ms()
+                hvis att <= 0 { returner 0 - nsys._errno("ETIMEDOUT") }
+                _s29_vent_skrivbar(fd, att)
+            } ellers hvis w <= 0 {
+                hvis w == 0 { returner 0 - nsys._errno("EPIPE") }
+                returner w
+            } ellers {
+                off = off + w
+            }
+        }
+        sendt = sendt + bit
+    }
+    returner sendt
+}
+
+// Lukk ei tilkopling etter eit feilsvar: shutdown(SHUT_WR) så klienten får FIN etter
+// svaret, les vekk det som alt ligg i mottaksbufferen (unngår RST som kan kaste svaret),
+// og lukk.
+funksjon serve_lukk_mjukt(fd: heiltall) -> heiltall {
+    builtin.sys6(nsys._nr("shutdown"), fd, 1, 0, 0, 0, 0)          // SHUT_WR = 1 på alle mål
+    la runde: heiltall = 0
+    mens runde < 8 {
+        la r = serve_les(fd, 32768)
+        hvis r["status"] != "ok" { runde = 8 }
+        runde = runde + 1
+    }
+    returner _sys_lukk(fd)
+}
+
+funksjon serve_lukk(fd: heiltall) -> heiltall {
+    returner _sys_lukk(fd)
+}
+
+// network_operation "poll_mange": vent på FLEIRE handles samtidig. Request:
+// {"handles": [h, ...], "timeout_ms": n}. Svar: _nw_res med status "klar"/"ventende"
+// og "klare": liste over handles som har noko å lese (data, EOF eller feil).
+// Ukjende handles blir hoppa over. Grunnlag for at std.apptenar seinare kan vente
+// på alle tilkoplingane sine i éin poll i staden for éin om gongen.
+funksjon _s29_poll_mange(req) {
+    la handles = []
+    hvis finnes_nøkkel(req, "handles") og req["handles"] != null og builtin.type(req["handles"]) == "liste" { handles = req["handles"] }
+    la ms = _nw_heiltal(req, "timeout_ms", 0)
+    la fds: liste = []
+    la hs: liste = []
+    la i: heiltall = 0
+    mens i < lengde(handles) {
+        la h = tekst(handles[i])
+        hvis finnes_nøkkel(_tls_sess, h) {
+            legg_til(fds, _tls_sess[h]["fd"])
+            legg_til(hs, h)
+        } ellers hvis finnes_nøkkel(_nw_slots, h) {
+            legg_til(fds, _nw_slots[h]["fd"])
+            legg_til(hs, h)
+        }
+        i = i + 1
+    }
+    la rev = serve_poll(fds, ms)
+    la klare: liste = []
+    i = 0
+    mens i < lengde(hs) {
+        hvis serve_klar(rev[i]) { legg_til(klare, hs[i]) }
+        i = i + 1
+    }
+    la st = "ventende"
+    hvis lengde(klare) > 0 { st = "klar" }
+    la r = _nw_res(st, "", "", lengde(klare), 0, "")
+    r["klare"] = klare
+    returner r
 }

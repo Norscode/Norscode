@@ -532,8 +532,9 @@ funksjon dekod_chunked(body: tekst) -> ordbok<tekst, tekst> {
         hvis n < 0 { returner {"status": "ugyldig", "data": ""} }
         p = p + crlf + 2
         hvis n == 0 {
-            // Siste chunk; evt. trailer vert ignorert.
-            returner {"status": "ok", "data": data}
+            // Siste chunk; evt. trailer vert ignorert. «slutt» = posisjon etter
+            // 0-linja (2.9: keep-alive-lykkja les trailer/tom linje derifrå).
+            returner {"status": "ok", "data": data, "slutt": p}
         }
         hvis p + n > n_body { returner {"status": "ufullstendig", "data": ""} }
         data = data + builtin.slice(body, p, p + n)
@@ -629,6 +630,10 @@ funksjon serve_receive_request(conn) -> ordbok<tekst, tekst> {
 funksjon serve_receive_error(status: heiltall, message: tekst) -> tekst {
     la status_text = "Bad Request"
     hvis status == 413 { status_text = "Content Too Large" }
+    hvis status == 408 { status_text = "Request Timeout" }
+    hvis status == 431 { status_text = "Request Header Fields Too Large" }
+    hvis status == 500 { status_text = "Internal Server Error" }
+    hvis status == 503 { status_text = "Service Unavailable" }
     la body = message
     returner "HTTP/1.1 " + tekst_fra_heltall(status) + " " + status_text +
         "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " +
@@ -1300,6 +1305,452 @@ funksjon serve_handle_one_ut(ncb: ordbok<tekst, tekst>, rå: tekst, ut_bytes: li
     returner response_to_http(resp_dict)
 }
 
+// ── 2.9: nc serve på tilkoplingsnivå ────────────────────────────────────────
+// Ikkje-blokkerande hendingslykkje (semantikk etter std/apptenar.no): lytte-fd og alle
+// tilkoplingar i éin poll(2)-tabell kvar runde, timeout = tid til neste frist (≤ 250 ms).
+//   * HTTP/1.1 keep-alive som standard (Connection: close / HTTP/1.0 utan keep-alive
+//     lukkar), «Connection: keep-alive» + «Keep-Alive: timeout=N» i svaret, tak på
+//     førespurnader per tilkopling (NC_SERVE_MAX_REQUESTS, 100).
+//   * Tidsgrenser: header (NC_SERVE_HEADER_MS, 5 s) → 408 + lukk når noko er motteke,
+//     ledig keep-alive (NC_SERVE_IDLE_MS, 5 s) → stille lukk, kropp (NC_SERVE_BODY_MS,
+//     10 s) → 408 + lukk, skriving (NC_SERVE_WRITE_MS, 30 s) → lukk.
+//   * Tak på tilkoplingar (NC_SERVE_MAX_CONN, 256): nye over taket får 503 og vert lukka.
+//   * SIGTERM/SIGINT/SIGHUP er blokkerte og vert lesne kvar runde: TERM/INT → slutt å
+//     akseptere, la pågåande førespurnader fullføre (NC_SERVE_DRAIN_MS, 10 s), deretter
+//     returnerer lykkja og nc_serve køyrer shutdown_hooks (exit 0). HUP → logg, hald fram.
+// Byggjeklossane (poll/accept/les/skriv/signal) ligg i std/native_gap.no, seksjon 2.9.
+// Skrivinga er synkron per svar (med frist): ein treg lesar kan halde lykkja opptil
+// NC_SERVE_WRITE_MS, men aldri på ubestemt tid.
+
+funksjon serve_miljo_tal(namn: tekst, standard: heiltall, minst: heiltall) -> heiltall {
+    la v = builtin.trim(miljo_hent(namn))
+    hvis v != "" og is_int_text(v) {
+        la n = heiltall_fra_tekst(v)
+        hvis n >= minst { returner n }
+    }
+    returner standard
+}
+
+funksjon serve_konfig() -> ordbok<tekst, tekst> {
+    la maks_tilk = serve_miljo_tal("NC_SERVE_MAX_CONN", 256, 1)
+    hvis maks_tilk > 8000 { maks_tilk = 8000 }
+    la idle_ms = serve_miljo_tal("NC_SERVE_IDLE_MS", 5000, 1)
+    la idle_s = idle_ms / 1000
+    hvis idle_s < 1 { idle_s = 1 }
+    returner {
+        "header_ms": serve_miljo_tal("NC_SERVE_HEADER_MS", 5000, 1),
+        "idle_ms": idle_ms,
+        "idle_s": idle_s,
+        "body_ms": serve_miljo_tal("NC_SERVE_BODY_MS", 10000, 1),
+        "write_ms": serve_miljo_tal("NC_SERVE_WRITE_MS", 30000, 1),
+        "drain_ms": serve_miljo_tal("NC_SERVE_DRAIN_MS", 10000, 0),
+        "max_conn": maks_tilk,
+        "max_req": serve_miljo_tal("NC_SERVE_MAX_REQUESTS", 100, 1),
+        "max_bytes": serve_max_request_bytes(),
+        "max_header": 65536
+    }
+}
+
+// Skal tilkoplinga haldast open etter denne førespurnaden? HTTP/1.1: ja med mindre
+// «Connection: close»; HTTP/1.0: berre med «Connection: keep-alive»; anna: nei.
+funksjon serve_vil_keep_alive(raw: tekst) -> boolsk {
+    la linje = raw
+    la nl = builtin.index_of(raw, "\n")
+    hvis nl >= 0 { linje = builtin.slice(raw, 0, nl) }
+    linje = builtin.trim(builtin.replace(linje, "\r", ""))
+    la deler = builtin.split(linje, " ")
+    hvis lengde(deler) < 3 { returner usann }
+    la versjon = builtin.upper(builtin.trim(deler[lengde(deler) - 1]))
+    la tilk = builtin.lower(serve_header_verdi(raw, "connection"))
+    hvis versjon == "HTTP/1.1" { returner builtin.index_of(tilk, "close") < 0 }
+    hvis versjon == "HTTP/1.0" {
+        returner builtin.index_of(tilk, "keep-alive") >= 0 og builtin.index_of(tilk, "close") < 0
+    }
+    returner usann
+}
+
+// Set Connection-/Keep-Alive-headerane i eit ferdig HTTP-svar. Ein handlar som sjølv
+// set «Connection: close» får tilkoplinga lukka. Gjev {"resp": tekst, "ka": boolsk}.
+funksjon serve_sett_tilkopling(resp: tekst, keep_alive: boolsk, idle_s: heiltall) -> ordbok<tekst, tekst> {
+    la slutt = builtin.index_of(resp, "\r\n\r\n")
+    hvis slutt < 0 { returner {"resp": resp, "ka": usann} }
+    la linjer = builtin.split(builtin.slice(resp, 0, slutt), "\r\n")
+    la ut = linjer[0]
+    la ka = keep_alive
+    la i: heiltall = 1
+    mens i < lengde(linjer) {
+        la l = linjer[i]
+        la kolon = builtin.index_of(l, ":")
+        la namn = ""
+        hvis kolon > 0 { namn = builtin.lower(builtin.trim(builtin.slice(l, 0, kolon))) }
+        hvis namn == "connection" {
+            hvis builtin.index_of(builtin.lower(l), "close") >= 0 { ka = usann }
+        } ellers hvis namn != "keep-alive" {
+            ut = ut + "\r\n" + l
+        }
+        i = i + 1
+    }
+    hvis ka {
+        ut = ut + "\r\nConnection: keep-alive\r\nKeep-Alive: timeout=" + tekst_fra_heltall(idle_s)
+    } ellers {
+        ut = ut + "\r\nConnection: close"
+    }
+    returner {"resp": ut + builtin.slice(resp, slutt, lengde(resp)), "ka": ka}
+}
+
+// Vurder bufferen til ei tilkopling utan å blokkere. Gjev {"status": ok|ufullstendig|feil,
+// "raw" (heil førespurnad, chunked-kropp dekoda), "rest" (pipelina data etter),
+// "hovud_ferdig", "total" (forventa lengd ved Content-Length, elles 0), "expect"
+// (100-continue), "kode"/"error" ved feil}. Same reglar som serve_receive_request.
+funksjon serve_vurder_buffer(c: ordbok<tekst, tekst>, konf: ordbok<tekst, tekst>) -> ordbok<tekst, tekst> {
+    la inn = tekst(c["inn"])
+    // RFC 9112 §2.2: tomme linjer før request-linja skal tolerereast.
+    mens builtin.starts_with(inn, "\r\n") { inn = builtin.slice(inn, 2, lengde(inn)) }
+    mens builtin.starts_with(inn, "\n") { inn = builtin.slice(inn, 1, lengde(inn)) }
+    c["inn"] = inn
+    la svar = {"status": "ufullstendig", "raw": "", "rest": "", "hovud_ferdig": usann, "total": 0, "expect": usann, "kode": 0, "error": ""}
+    la maks_hovud: heiltall = konf["max_header"]
+    la header_end = builtin.index_of(inn, "\r\n\r\n")
+    la sep = 4
+    hvis header_end < 0 {
+        header_end = builtin.index_of(inn, "\n\n")
+        sep = 2
+    }
+    hvis header_end < 0 {
+        hvis lengde(inn) > maks_hovud {
+            svar["status"] = "feil"
+            svar["kode"] = 431
+            svar["error"] = "For store headerar"
+        }
+        returner svar
+    }
+    hvis header_end > maks_hovud {
+        svar["status"] = "feil"
+        svar["kode"] = 431
+        svar["error"] = "For store headerar"
+        returner svar
+    }
+    svar["hovud_ferdig"] = sann
+    la hovud = builtin.slice(inn, 0, header_end + sep)
+    hvis builtin.lower(serve_header_verdi(hovud, "expect")) == "100-continue" { svar["expect"] = sann }
+    la max_bytes: heiltall = konf["max_bytes"]
+    la te = builtin.lower(serve_header_verdi(hovud, "transfer-encoding"))
+    hvis builtin.index_of(te, "chunked") >= 0 {
+        hvis serve_header_verdi(hovud, "content-length") != "" {
+            svar["status"] = "feil"
+            svar["kode"] = 400
+            svar["error"] = "Både Transfer-Encoding og Content-Length"
+            returner svar
+        }
+        la body = builtin.slice(inn, header_end + sep, lengde(inn))
+        la res = dekod_chunked(body)
+        la st = tekst(res["status"])
+        hvis st == "ugyldig" {
+            svar["status"] = "feil"
+            svar["kode"] = 400
+            svar["error"] = "Ugyldig chunked-koding"
+            returner svar
+        }
+        la forbruk = -1
+        hvis st == "ok" {
+            la slutt: heiltall = res["slutt"]
+            la etter = builtin.slice(body, slutt, lengde(body))
+            hvis builtin.starts_with(etter, "\r\n") {
+                forbruk = slutt + 2
+            } ellers {
+                la t = builtin.index_of(etter, "\r\n\r\n")
+                hvis t >= 0 { forbruk = slutt + t + 4 }
+            }
+        }
+        hvis forbruk < 0 {
+            hvis lengde(inn) >= max_bytes {
+                svar["status"] = "feil"
+                svar["kode"] = 413
+                svar["error"] = "Request er for stor"
+            }
+            returner svar
+        }
+        svar["status"] = "ok"
+        svar["raw"] = hovud + tekst(res["data"])
+        svar["rest"] = builtin.slice(body, forbruk, lengde(body))
+        returner svar
+    }
+    la content_length = serve_request_content_length(hovud)
+    hvis content_length == -2 eller content_length < 0 {
+        svar["status"] = "feil"
+        svar["kode"] = 400
+        svar["error"] = "Ugyldig Content-Length"
+        returner svar
+    }
+    la total = header_end + sep + content_length
+    hvis total > max_bytes {
+        svar["status"] = "feil"
+        svar["kode"] = 413
+        svar["error"] = "Request er for stor"
+        returner svar
+    }
+    svar["total"] = total
+    hvis lengde(inn) < total { returner svar }
+    svar["status"] = "ok"
+    svar["raw"] = builtin.slice(inn, 0, total)
+    svar["rest"] = builtin.slice(inn, total, lengde(inn))
+    returner svar
+}
+
+funksjon serve_ny_tilk(fd: heiltall, no: heiltall, konf: ordbok<tekst, tekst>) -> ordbok<tekst, tekst> {
+    la frist: heiltall = no + konf["header_ms"]
+    returner {"fd": fd, "inn": "", "fase": "hovud", "frist": frist, "nr": 0, "total": 0, "continue": usann, "open": sann}
+}
+
+funksjon serve_lukk_tilk(c: ordbok<tekst, tekst>) -> heiltall {
+    hvis c["open"] {
+        c["open"] = usann
+        native_gap.serve_lukk(c["fd"])
+    }
+    returner 0
+}
+
+// Feilsvar (400/408/413/431/500/503) med Connection: close, deretter mjuk lukking.
+funksjon serve_feil_og_lukk(c: ordbok<tekst, tekst>, status: heiltall, melding: tekst) -> heiltall {
+    hvis c["open"] {
+        c["open"] = usann
+        native_gap.serve_skriv(c["fd"], serve_receive_error(status, melding), 2000)
+        native_gap.serve_lukk_mjukt(c["fd"])
+    }
+    returner 0
+}
+
+// Les det som er klart på tilkoplinga (≤ 16 × 32 KiB per runde). EOF/feil → lukk.
+funksjon serve_les_tilk(c: ordbok<tekst, tekst>, konf: ordbok<tekst, tekst>, no: heiltall) -> heiltall {
+    la runde: heiltall = 0
+    mens runde < 16 og c["open"] {
+        la r = native_gap.serve_les(c["fd"], 32768)
+        la st = tekst(r["status"])
+        hvis st == "ok" {
+            c["inn"] = tekst(c["inn"]) + tekst(r["data"])
+            hvis c["fase"] == "ledig" {
+                la hf: heiltall = no + konf["header_ms"]
+                c["fase"] = "hovud"
+                c["frist"] = hf
+            }
+            runde = runde + 1
+        } ellers hvis st == "ventar" {
+            returner 0
+        } ellers {
+            serve_lukk_tilk(c)
+            returner 0
+        }
+    }
+    returner 0
+}
+
+// Handter alle komplette førespurnader i bufferen (pipelining), éin om gongen.
+funksjon serve_handsam_tilk(ncb: ordbok<tekst, tekst>, c: ordbok<tekst, tekst>, konf: ordbok<tekst, tekst>, stoppar: boolsk) -> heiltall {
+    mens c["open"] {
+        la venta_total: heiltall = c["total"]
+        hvis venta_total > 0 og lengde(tekst(c["inn"])) < venta_total { returner 0 }
+        la v = serve_vurder_buffer(c, konf)
+        la st = tekst(v["status"])
+        hvis st == "feil" {
+            serve_feil_og_lukk(c, v["kode"], tekst(v["error"]))
+            returner 0
+        }
+        hvis st == "ufullstendig" {
+            hvis v["hovud_ferdig"] {
+                hvis c["fase"] != "kropp" {
+                    la bf: heiltall = builtin.tid_ms() + konf["body_ms"]
+                    c["fase"] = "kropp"
+                    c["frist"] = bf
+                }
+                c["total"] = v["total"]
+                hvis v["expect"] og ikkje c["continue"] {
+                    c["continue"] = sann
+                    native_gap.serve_skriv(c["fd"], "HTTP/1.1 100 Continue\r\n\r\n", konf["write_ms"])
+                }
+            }
+            returner 0
+        }
+        c["inn"] = tekst(v["rest"])
+        c["total"] = 0
+        c["continue"] = usann
+        la nr: heiltall = c["nr"]
+        nr = nr + 1
+        c["nr"] = nr
+        la maks_req: heiltall = konf["max_req"]
+        la raw = tekst(v["raw"])
+        la ka = serve_vil_keep_alive(raw) og nr < maks_req og ikkje stoppar
+        la ut_bytes: liste = [null]
+        la resp: tekst = ""
+        prøv {
+            resp = serve_handle_one_ut(ncb, raw, ut_bytes)
+        } fang (e) {
+            skriv("[serve] Intern feil i førespurnad: " + tekst(e) + "\n")
+            resp = serve_receive_error(500, "Intern feil")
+            ut_bytes[0] = null
+            ka = usann
+        }
+        la sett = serve_sett_tilkopling(resp, ka, konf["idle_s"])
+        ka = sett["ka"]
+        la w = native_gap.serve_skriv(c["fd"], tekst(sett["resp"]), konf["write_ms"])
+        hvis w >= 0 og ut_bytes[0] != null {
+            // Binær body: send bytane uendra etter headerane (Content-Length er alt sett).
+            w = native_gap.serve_skriv(c["fd"], builtin.bytes_to_list(ut_bytes[0]), konf["write_ms"])
+        }
+        hvis w < 0 eller ikkje ka {
+            serve_lukk_tilk(c)
+            returner 0
+        }
+        la no = builtin.tid_ms()
+        hvis tekst(c["inn"]) == "" {
+            la lf: heiltall = no + konf["idle_ms"]
+            c["fase"] = "ledig"
+            c["frist"] = lf
+        } ellers {
+            la hf: heiltall = no + konf["header_ms"]
+            c["fase"] = "hovud"
+            c["frist"] = hf
+        }
+    }
+    returner 0
+}
+
+// Frist ute: 408 når ein førespurnad er påbyrja (header eller kropp), elles stille lukk.
+funksjon serve_sjekk_frist(c: ordbok<tekst, tekst>, no: heiltall) -> heiltall {
+    hvis ikkje c["open"] { returner 0 }
+    la frist: heiltall = c["frist"]
+    hvis no < frist { returner 0 }
+    la fase = tekst(c["fase"])
+    hvis (fase == "hovud" eller fase == "kropp") og tekst(c["inn"]) != "" {
+        serve_feil_og_lukk(c, 408, "Tidsgrense")
+    } ellers {
+        serve_lukk_tilk(c)
+    }
+    returner 1
+}
+
+// Hendingslykkja. Returnerer når SIGTERM/SIGINT er motteke og dreneringa er ferdig
+// (eller fristen ute); kallaren køyrer shutdown_hooks.
+funksjon nc_serve_lykkje(ncb: ordbok<tekst, tekst>, srv: heiltall) -> heiltall {
+    la konf = serve_konfig()
+    native_gap.serve_signal_blokker()
+    native_gap.serve_nonblock(srv)
+    native_gap.serve_cloexec(srv)
+    la sig_term = native_gap.serve_SIGTERM()
+    la sig_int = native_gap.serve_SIGINT()
+    la sig_hup = native_gap.serve_SIGHUP()
+    la maks_tilk: heiltall = konf["max_conn"]
+    la lytt_open = sann
+    la tilk: liste = []
+    la stoppar = usann
+    la drain_frist: heiltall = 0
+    mens sann {
+        la no = builtin.tid_ms()
+        la sig = native_gap.serve_signal_ventande()
+        hvis sig != 0 {
+            hvis native_gap.serve_signal_har(sig, sig_hup) {
+                native_gap.serve_signal_forkast(sig_hup)
+                skriv("[serve] SIGHUP motteke: held fram (ingen omlasting).\n")
+            }
+            hvis ikkje stoppar og (native_gap.serve_signal_har(sig, sig_term) eller native_gap.serve_signal_har(sig, sig_int)) {
+                stoppar = sann
+                la dms: heiltall = konf["drain_ms"]
+                drain_frist = no + dms
+                la namn = "SIGTERM"
+                hvis ikkje native_gap.serve_signal_har(sig, sig_term) { namn = "SIGINT" }
+                // Slutt å ta imot: lukk lytte-sokkelen og dei ledige tilkoplingane.
+                hvis lytt_open {
+                    native_gap.serve_lukk(srv)
+                    lytt_open = usann
+                }
+                la att: liste = []
+                la k: heiltall = 0
+                mens k < lengde(tilk) {
+                    la ck = tilk[k]
+                    hvis tekst(ck["inn"]) == "" og ck["fase"] != "kropp" {
+                        serve_lukk_tilk(ck)
+                    } ellers {
+                        legg_til(att, ck)
+                    }
+                    k = k + 1
+                }
+                tilk = att
+                skriv("[serve] " + namn + " motteke: tek ikkje imot fleire tilkoplingar, drenerer " + tekst_fra_heltall(lengde(tilk)) + ".\n")
+            }
+        }
+        hvis stoppar og (lengde(tilk) == 0 eller no >= drain_frist) { bryt }
+
+        // Poll-tabell: lytte-fd (når han er open) + alle tilkoplingar.
+        la fds: liste = []
+        hvis lytt_open { legg_til(fds, srv) }
+        la vent: heiltall = 250
+        la i: heiltall = 0
+        mens i < lengde(tilk) {
+            la ci = tilk[i]
+            legg_til(fds, ci["fd"])
+            la fi: heiltall = ci["frist"]
+            hvis fi - no < vent { vent = fi - no }
+            i = i + 1
+        }
+        hvis stoppar og drain_frist - no < vent { vent = drain_frist - no }
+        hvis vent < 0 { vent = 0 }
+        la rev = native_gap.serve_poll(fds, vent)
+        no = builtin.tid_ms()
+
+        la base: heiltall = 0
+        la nye: liste = []
+        hvis lytt_open {
+            base = 1
+            hvis native_gap.serve_klar(rev[0]) {
+                la ai: heiltall = 0
+                mens ai < 64 {
+                    la fd = native_gap.serve_aksepter(srv)
+                    hvis fd < 0 {
+                        ai = 64
+                    } ellers {
+                        la ny = serve_ny_tilk(fd, no, konf)
+                        hvis lengde(tilk) + lengde(nye) >= maks_tilk {
+                            serve_feil_og_lukk(ny, 503, "For mange tilkoplingar")
+                        } ellers {
+                            legg_til(nye, ny)
+                        }
+                    }
+                    ai = ai + 1
+                }
+            }
+        }
+
+        la vidare: liste = []
+        i = 0
+        mens i < lengde(tilk) {
+            la c = tilk[i]
+            prøv {
+                hvis native_gap.serve_klar(rev[base + i]) { serve_les_tilk(c, konf, no) }
+                hvis c["open"] { serve_handsam_tilk(ncb, c, konf, stoppar) }
+                serve_sjekk_frist(c, builtin.tid_ms())
+            } fang (e) {
+                skriv("[serve] Tilkoplingsfeil: " + tekst(e) + "\n")
+                serve_lukk_tilk(c)
+            }
+            hvis c["open"] { legg_til(vidare, c) }
+            i = i + 1
+        }
+        i = 0
+        mens i < lengde(nye) {
+            legg_til(vidare, nye[i])
+            i = i + 1
+        }
+        tilk = vidare
+    }
+
+    la j: heiltall = 0
+    mens j < lengde(tilk) {
+        serve_lukk_tilk(tilk[j])
+        j = j + 1
+    }
+    hvis lytt_open { native_gap.serve_lukk(srv) }
+    returner 0
+}
+
 // Fase 2 / 2.3: Produksjons-serve må setje opp runtime likt som vm.køyr_ncb
 // (den nøsta køyre-/test-vegen) gjer, slik at handlarar som brukar DI, vakter
 // eller modulglobalar faktisk verkar under `nc serve`:
@@ -1367,7 +1818,7 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
             skriv("Feil: kunne ikkje binde sokkel på " + host + ":" + port + "\n")
             returner 1
         }
-        hvis ikkje sok.lytt(sokkel, 16) {
+        hvis ikkje sok.lytt(sokkel, 128) {
             skriv("Feil: kunne ikkje lytte på " + host + ":" + port + "\n")
             returner 1
         }
@@ -1441,37 +1892,14 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
     }
 
     skriv("[serve] Socket-lytting aktiv. Trykk Ctrl+C for å stoppe.\n")
-    la running: boolsk = sann
-    la sockel_ref = [srv, 0, 1, 0]
-    mens running {
-        la conn = sok.aksepter(sockel_ref)
-        hvis conn < 0 {
-            skriv("[serve] Accept-feil, stoppar.\n")
-            running = usann
-        } ellers {
-            la received = serve_receive_request(conn)
-            la resp: tekst = ""
-            la ut_bytes: liste = [null]
-            hvis received["ok"] {
-                resp = serve_handle_one_ut(ncb, received["raw"], ut_bytes)
-            } ellers {
-                resp = serve_receive_error(received["status"], received["error"])
-            }
-            sok.send(conn, resp)
-            hvis ut_bytes[0] != null {
-                // Binær body: send bytane uendra etter headerane (Content-Length er alt sett).
-                sok.send_bytes(conn, builtin.bytes_to_list(ut_bytes[0]))
-            }
-            sok.lukk(conn)
-        }
-    }
-
-    sok.lukk(sockel_ref)
+    // 2.9: ikkje-blokkerande hendingslykkje (keep-alive, tidsgrenser, tak, signal).
+    nc_serve_lykkje(ncb, srv)
     la shutdown_status = køyre_livssyklus_hooks_trygt(ncb, "shutdown_hooks")
     hvis ikkje shutdown_status["ok"] {
         skriv("Feil: shutdown_hooks feila: " + tekst(shutdown_status["error"]) + "\n")
         returner 1
     }
+    skriv("[serve] Stoppa.\n")
     returner 0
 }
 

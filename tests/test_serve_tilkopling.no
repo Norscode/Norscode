@@ -1,0 +1,394 @@
+// 2.9 (R1 spor C): `nc serve` på tilkoplingsnivå, ende-til-ende over ekte sokkel.
+//
+// Startar tests/fixtures/serve_tilkopling_app.no under `nc serve` i ein asynkron
+// barneprosess (miljøkontrakten, eksplisitt ikkje-arva miljø, som
+// test_app_kjensle_serve) og køyrer ein klient over std.socket mot han:
+//   1. keep-alive: to førespurnader på same tilkopling, «Connection: keep-alive» og
+//      «Keep-Alive: timeout=N» i svaret (gamal serve lukka etter første svar)
+//   2. ein ledig sokkel blokkerer IKKJE ein annan klient (gamal serve hang i recv)
+//   3. tak på tilkoplingar (NC_SERVE_MAX_CONN=3): den fjerde får 503
+//   4. pipelining: to førespurnader i éi skriving gjev to svar i rekkjefølgje
+//   5. chunked request-kropp og binær svar-kropp (bytes) på ei keep-alive-tilkopling
+//   6. header-tidsgrense (NC_SERVE_HEADER_MS): halv header → 408 + lukking
+//   7. «Connection: close» frå klienten → «Connection: close» og EOF etter svaret
+//   8. SIGHUP → tenaren lever vidare
+//   9. SIGTERM med ein halvferdig førespurnad: han får fullføre (200, Connection:
+//      close), shutdown_hooks køyrer og prosessen sluttar med exit 0
+// Alle sjekkar vert samla (ingen assert midt i), så barnet alltid vert stoppa.
+// Berre Linux/macOS med native sokkel; utdata frå barnet vert tolka robust mot
+// escapa linjeskift (\n som to teikn).
+bruk std.runtime.process_abi som process_abi
+bruk std.socket som socket
+
+la _feil: liste_tekst = []
+
+funksjon krev(ok: boolsk, melding: tekst) -> boolsk {
+    hvis ikkje ok {
+        legg_til(_feil, melding)
+        skriv("SJEKK FEILA: " + melding + "\n")
+    }
+    returner ok
+}
+
+funksjon crlf() -> tekst { returner "\r\n" }
+
+funksjon port() -> heiltall { returner 48291 }
+
+funksjon serve_miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_CMD": "serve",
+        "NORSCODE_FILE": root + "/tests/fixtures/serve_tilkopling_app.no",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_ROOT": root,
+        "NC_SERVE_PORT": tekst_fra_heltall(port()),
+        "NC_SERVE_HOST": "127.0.0.1",
+        "NC_SERVE_HEADER_MS": "1500",
+        "NC_SERVE_IDLE_MS": "4000",
+        "NC_SERVE_BODY_MS": "4000",
+        "NC_SERVE_MAX_CONN": "3",
+        "NC_SERVE_DRAIN_MS": "8000",
+        "NORSCODE_FAKE_HTTP_REQUESTS": "",
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": ""
+    }
+}
+
+// Opphev escaping når prosess-ABI-en har levert linjeskift som «\n» (to teikn).
+funksjon normaliser(t: tekst) -> tekst {
+    la s = t
+    la runde: heiltall = 0
+    mens ikkje builtin.contains(s, "\n") og builtin.contains(s, "\\n") og runde < 3 {
+        s = tekst_erstatt(s, "\\\\", "\\")
+        s = tekst_erstatt(s, "\\r", "\r")
+        s = tekst_erstatt(s, "\\n", "\n")
+        s = tekst_erstatt(s, "\\\"", "\"")
+        runde = runde + 1
+    }
+    returner s
+}
+
+// ── Barneprosessen ─────────────────────────────────────────────────────────
+
+funksjon barn_les(b: ordbok) -> tekst {
+    la r = builtin.process_operation(process_abi.async_operation("read", tekst(b["handle"])))
+    la ut = tekst(r["stdout"])
+    b["ut"] = tekst(b["ut"]) + ut
+    b["feil"] = tekst(b["feil"]) + tekst(r["stderr"])
+    returner ut
+}
+
+funksjon barn_status(b: ordbok) -> ordbok {
+    la r = builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 0))
+    b["status"] = tekst(r["status"])
+    b["exit"] = tekst(r["exit_code"])
+    returner r
+}
+
+funksjon barn_signal(b: ordbok, sig: heiltall) -> heiltall {
+    builtin.process_operation(process_abi.async_signal_request(tekst(b["handle"]), sig))
+    returner 0
+}
+
+// Vent til barnet er ferdig (høgst ms). Sann når det er ferdig.
+funksjon barn_vent(b: ordbok, ms: heiltall) -> boolsk {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        la r = builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 100))
+        barn_les(b)
+        b["status"] = tekst(r["status"])
+        b["exit"] = tekst(r["exit_code"])
+        hvis b["status"] != "kjorer" { returner sann }
+    }
+    returner usann
+}
+
+funksjon barn_stopp(b: ordbok) -> heiltall {
+    barn_les(b)
+    la r = builtin.process_operation(process_abi.async_operation("close", tekst(b["handle"])))
+    hvis tekst(r["status"]) != "" { b["status"] = tekst(r["status"]) }
+    returner 0
+}
+
+funksjon start_barn(runtime: tekst, root: tekst) -> ordbok {
+    la req = process_abi.async_spawn_request(runtime, [], root, "", 300000, 4194304)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, serve_miljø(root))
+    la h = builtin.process_operation(req)
+    returner {"handle": tekst(h["handle"]), "status": tekst(h["status"]), "exit": "", "ut": "", "feil": ""}
+}
+
+// Vent på «Socket-lytting aktiv» i stdout (bundling av appen kan ta litt tid).
+funksjon vent_klar(b: ordbok, ms: heiltall) -> boolsk {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        barn_les(b)
+        hvis builtin.contains(normaliser(tekst(b["ut"])), "Socket-lytting aktiv") { returner sann }
+        barn_status(b)
+        hvis b["status"] != "kjorer" { returner usann }
+        builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 100))
+    }
+    returner usann
+}
+
+// ── Klient ─────────────────────────────────────────────────────────────────
+
+funksjon kople() -> ordbok {
+    la h = socket.native_tilkoble("127.0.0.1", port())
+    hvis tekst(h["status"]) != "connected" {
+        krev(usann, "tilkopling feila: " + tekst(h["error"]))
+    }
+    returner h
+}
+
+funksjon send(h: ordbok, data: tekst) -> boolsk {
+    la rest = data
+    la runde: heiltall = 0
+    mens rest != "" og runde < 1000 {
+        la r = socket.native_skriv(h, rest)
+        la st = tekst(r["status"])
+        hvis st == "ok" {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            rest = builtin.slice(rest, n, lengde(rest))
+        } ellers hvis st == "ventende" {
+            socket.native_poll_vent(h, 2, 50)
+        } ellers {
+            returner usann
+        }
+        runde = runde + 1
+    }
+    returner rest == ""
+}
+
+funksjon get(sti: tekst, ekstra: tekst) -> tekst {
+    returner "GET " + sti + " HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf() + ekstra + crlf()
+}
+
+// Lengda til første fullstendige HTTP-svar i buf, eller −1.
+funksjon svar_lengd(buf: tekst) -> heiltall {
+    la hovud_ende = builtin.index_of(buf, "\r\n\r\n")
+    hvis hovud_ende < 0 { returner -1 }
+    la hovud = tekst_til_liten(builtin.slice(buf, 0, hovud_ende))
+    la cl: heiltall = 0
+    la p = builtin.index_of(hovud, "content-length:")
+    hvis p >= 0 {
+        la rest = builtin.slice(hovud, p + 15, lengde(hovud))
+        la nl = builtin.index_of(rest, "\r\n")
+        hvis nl >= 0 { rest = builtin.slice(rest, 0, nl) }
+        cl = heltall_fra_tekst(builtin.trim(rest))
+    }
+    hvis lengde(buf) < hovud_ende + 4 + cl { returner -1 }
+    returner hovud_ende + 4 + cl
+}
+
+// Les til `tal` fullstendige svar er komne, EOF, eller ms er gått.
+// {"svar": liste_tekst, "eof": boolsk, "ms": brukt tid, "rest": tekst}
+funksjon les_svar(h: ordbok, tal: heiltall, ms: heiltall) -> ordbok {
+    la start = builtin.tid_ms()
+    la buf = ""
+    la svar: liste_tekst = []
+    la eof = usann
+    mens lengde(svar) < tal og ikkje eof og builtin.tid_ms() - start < ms {
+        la r = socket.native_les(h, 65536)
+        la st = tekst(r["status"])
+        hvis st == "ok" {
+            buf = buf + tekst(r["data"])
+            la n = svar_lengd(buf)
+            mens n > 0 og lengde(svar) < tal {
+                legg_til(svar, builtin.slice(buf, 0, n))
+                buf = builtin.slice(buf, n, lengde(buf))
+                n = svar_lengd(buf)
+            }
+        } ellers hvis st == "eof" eller st == "feil" {
+            eof = sann
+        } ellers {
+            socket.native_poll_vent(h, 1, 50)
+        }
+    }
+    returner {"svar": svar, "eof": eof, "ms": builtin.tid_ms() - start, "rest": buf}
+}
+
+// Vent på EOF (sann) i høgst ms.
+funksjon vent_eof(h: ordbok, ms: heiltall) -> boolsk {
+    la start = builtin.tid_ms()
+    mens builtin.tid_ms() - start < ms {
+        la r = socket.native_les(h, 65536)
+        la st = tekst(r["status"])
+        hvis st == "eof" eller st == "feil" { returner sann }
+        hvis st != "ok" { socket.native_poll_vent(h, 1, 50) }
+    }
+    returner usann
+}
+
+funksjon status_av(svar: tekst) -> tekst {
+    hvis builtin.starts_with(svar, "HTTP/1.1 ") { returner builtin.slice(svar, 9, 12) }
+    returner ""
+}
+
+funksjon kropp_av(svar: tekst) -> tekst {
+    la hovud_ende = builtin.index_of(svar, "\r\n\r\n")
+    hvis hovud_ende < 0 { returner "" }
+    returner builtin.slice(svar, hovud_ende + 4, lengde(svar))
+}
+
+funksjon første(r: ordbok) -> tekst {
+    la s = r["svar"]
+    hvis lengde(s) > 0 { returner tekst(s[0]) }
+    returner ""
+}
+
+funksjon lukk(h: ordbok) -> heiltall {
+    prøv { socket.native_lukk(h) } fang (e) { }
+    returner 0
+}
+
+// ── Scenarioa ──────────────────────────────────────────────────────────────
+
+funksjon køyr_scenario(b: ordbok) -> heiltall {
+    // 1. keep-alive: to førespurnader på same tilkopling.
+    la a = kople()
+    krev(send(a, get("/", "")), "keep-alive: send 1")
+    la r1 = les_svar(a, 1, 10000)
+    la s1 = første(r1)
+    krev(status_av(s1) == "200", "keep-alive: første svar 200, fekk «" + s1 + "»")
+    krev(kropp_av(s1) == "ok", "keep-alive: første kropp «ok»")
+    krev(builtin.contains(s1, "Connection: keep-alive"), "keep-alive: Connection: keep-alive i svaret")
+    krev(builtin.contains(s1, "Keep-Alive: timeout=4"), "keep-alive: Keep-Alive: timeout=4 i svaret")
+    krev(send(a, get("/andre", "")), "keep-alive: send 2 på same tilkopling")
+    la r2 = les_svar(a, 1, 5000)
+    la s2 = første(r2)
+    krev(status_av(s2) == "200" og kropp_av(s2) == "andre", "keep-alive: andre svar på same tilkopling, fekk «" + s2 + "» eof=" + tekst(r2["eof"]))
+
+    // 2. ein ledig sokkel blokkerer ikkje ein annan klient.
+    la ledig = kople()
+    la c = kople()
+    krev(send(c, get("/", "")), "ledig: send på andre klient")
+    la rc = les_svar(c, 1, 5000)
+    krev(status_av(første(rc)) == "200", "ledig: andre klient fekk svar trass ledig sokkel (fekk «" + første(rc) + "»)")
+    krev(rc["ms"] < 1200, "ledig: svaret kom innan 1200 ms (brukte " + tekst(rc["ms"]) + " ms)")
+
+    // 3. tak: a, ledig og c er opne (NC_SERVE_MAX_CONN=3) → den fjerde får 503.
+    la d = kople()
+    la rd = les_svar(d, 1, 5000)
+    krev(status_av(første(rd)) == "503", "tak: fjerde tilkopling får 503, fekk «" + første(rd) + "»")
+    krev(vent_eof(d, 3000), "tak: 503-tilkoplinga vert lukka")
+    lukk(d)
+    lukk(ledig)
+    lukk(c)
+
+    // 4. pipelining på den opne keep-alive-tilkoplinga a.
+    krev(send(a, get("/andre", "") + get("/", "")), "pipelining: send")
+    la rp = les_svar(a, 2, 5000)
+    la sp = rp["svar"]
+    krev(lengde(sp) == 2, "pipelining: to svar, fekk " + tekst(lengde(sp)))
+    hvis lengde(sp) == 2 {
+        krev(kropp_av(tekst(sp[0])) == "andre" og kropp_av(tekst(sp[1])) == "ok", "pipelining: svara i rekkjefølgje")
+    }
+
+    // 5. chunked request-kropp på keep-alive, deretter ein ny førespurnad.
+    la chunked = "POST /ekko HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf() +
+        "Transfer-Encoding: chunked" + crlf() + crlf() +
+        "3" + crlf() + "hei" + crlf() + "4" + crlf() + " der" + crlf() + "0" + crlf() + crlf()
+    krev(send(a, chunked), "chunked: send")
+    la rch = les_svar(a, 1, 5000)
+    krev(kropp_av(første(rch)) == "ekko:hei der", "chunked: kropp dekoda, fekk «" + første(rch) + "»")
+    krev(send(a, get("/", "")), "chunked: send etter")
+    la rch2 = les_svar(a, 1, 5000)
+    krev(status_av(første(rch2)) == "200", "chunked: tilkoplinga er brukande etterpå")
+
+    // 5b. binær body (bytes) på keep-alive, deretter ein ny førespurnad.
+    krev(send(a, get("/bin", "")), "bytes: send")
+    la rb = les_svar(a, 1, 5000)
+    la kb = kropp_av(første(rb))
+    krev(lengde(kb) == 6, "bytes: 6 byte kropp, fekk " + tekst(lengde(kb)) + " («" + første(rb) + "»)")
+    hvis lengde(kb) == 6 {
+        krev(builtin.slice(kb, 0, 3) == "hei" og builtin.char_code(builtin.slice(kb, 3, 4)) == 0 og builtin.char_code(builtin.slice(kb, 5, 6)) == 127, "bytes: bytane uendra")
+    }
+    krev(send(a, get("/", "")), "bytes: send etter")
+    krev(status_av(første(les_svar(a, 1, 5000))) == "200", "bytes: tilkoplinga er brukande etterpå")
+
+    // 7. Connection: close frå klienten.
+    krev(send(a, get("/", "Connection: close" + crlf())), "close: send")
+    la rcl = les_svar(a, 1, 5000)
+    krev(builtin.contains(første(rcl), "Connection: close"), "close: Connection: close i svaret")
+    krev(vent_eof(a, 3000), "close: tenaren lukkar etter svaret")
+    lukk(a)
+
+    // 6. header-tidsgrense: halv header → 408 og lukking.
+    la t = kople()
+    krev(send(t, "GET / HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf()), "408: send halv header")
+    la rt = les_svar(t, 1, 6000)
+    krev(status_av(første(rt)) == "408", "408: halv header gav 408, fekk «" + første(rt) + "» etter " + tekst(rt["ms"]) + " ms")
+    krev(rt["ms"] >= 1000, "408: ikkje før tidsgrensa (" + tekst(rt["ms"]) + " ms)")
+    krev(vent_eof(t, 3000), "408: tilkoplinga vert lukka")
+    lukk(t)
+
+    // 8. SIGHUP: tenaren lever vidare.
+    barn_signal(b, 1)
+    builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 600))
+    barn_status(b)
+    krev(b["status"] == "kjorer", "SIGHUP: tenaren lever (status " + tekst(b["status"]) + ")")
+    la hu = kople()
+    krev(send(hu, get("/", "")), "SIGHUP: send etterpå")
+    krev(status_av(første(les_svar(hu, 1, 5000))) == "200", "SIGHUP: svarar etterpå")
+    lukk(hu)
+
+    // 9. SIGTERM med ein halvferdig førespurnad: fullfører, hooks, exit 0.
+    la dr = kople()
+    la full = get("/andre", "")
+    la halv = builtin.slice(full, 0, 20)
+    krev(send(dr, halv), "SIGTERM: send halv førespurnad")
+    builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 200))
+    barn_signal(b, 15)
+    builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 600))
+    la ny = socket.native_tilkoble("127.0.0.1", port())
+    krev(tekst(ny["status"]) != "connected", "SIGTERM: lytte-sokkelen er lukka (nye tilkoplingar vert avviste)")
+    hvis tekst(ny["status"]) == "connected" { lukk(ny) }
+    krev(send(dr, builtin.slice(full, 20, lengde(full))), "SIGTERM: send resten")
+    la rdr = les_svar(dr, 1, 5000)
+    la sdr = første(rdr)
+    krev(status_av(sdr) == "200" og kropp_av(sdr) == "andre", "SIGTERM: pågåande førespurnad fullførte, fekk «" + sdr + "»")
+    krev(builtin.contains(sdr, "Connection: close"), "SIGTERM: Connection: close under drenering")
+    lukk(dr)
+    krev(barn_vent(b, 10000), "SIGTERM: prosessen sluttar")
+    krev(b["status"] == "ferdig" og b["exit"] == "0", "SIGTERM: exit 0 (status " + tekst(b["status"]) + ", exit " + tekst(b["exit"]) + ")")
+    la ut = normaliser(tekst(b["ut"]))
+    krev(builtin.contains(ut, "SIGHUP motteke"), "SIGHUP vart logga")
+    krev(builtin.contains(ut, "SIGTERM motteke"), "SIGTERM vart logga")
+    krev(builtin.contains(ut, "SHUTDOWN_HOOK_KOYRDE"), "shutdown_hooks køyrde")
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la root = tekst(info["cwd"])
+    la b = start_barn(runtime, root)
+    hvis b["status"] != "kjorer" {
+        kast "kunne ikkje starte nc serve: " + tekst(b["status"])
+    }
+    hvis vent_klar(b, 180000) {
+        prøv {
+            køyr_scenario(b)
+        } fang (e) {
+            krev(usann, "unntak: " + tekst(e))
+        }
+    } ellers {
+        krev(usann, "nc serve vart ikkje klar")
+    }
+    barn_stopp(b)
+    hvis lengde(_feil) > 0 {
+        skriv("stdout frå nc serve:\n" + normaliser(tekst(b["ut"])) + "\nstderr:\n" + tekst(b["feil"]) + "\n")
+        kast "test_serve_tilkopling: " + tekst_fra_heltall(lengde(_feil)) + " sjekk(ar) feila"
+    }
+    skriv("test_serve_tilkopling OK\n")
+    returner 0
+}
