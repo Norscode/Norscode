@@ -8,6 +8,7 @@ Dokumentasjon av Norscodes standard library, innebygde typer og moduler.
 |----------|-------------|
 | **STDLIB_STATUS.md** | Status og roadmap for stdlib |
 | **JS_PARITET.md** | JavaScript-innebygde funksjonar som Norscode-modular |
+| **APPTENAR_WEBSOCKET.md** | WebSocket-tenar i apptenaren (`std.apptenar_ws`) |
 | **AST_FORMAT_V1.md** | Abstract Syntax Tree format |
 | **TOKEN_FORMAT_V1.md** | Lexer token format |
 | **IR_CONTRACT.md** | Intermediate Representation |

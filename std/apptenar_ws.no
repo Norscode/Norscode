@@ -1,0 +1,649 @@
+# apptenar_ws.no — WebSocket (RFC 6455) for std/apptenar.no (punkt 5c)
+#
+# Protokollmotoren for WebSocket i apptenaren: handtrykk, rammer, kontrollrammer,
+# close-handtrykket og rom. Motoren eig ikkje socketen: apptenaren matar inn byte med
+# mat(t, data) og sender det som ligg i t["ut"]. Difor kan app-testklienten (std/apptest.no)
+# køyre heile protokollen i same prosess, utan nettverk.
+#
+# Rute: ein WebSocket-rute er ei vanleg rute med metoden «WS». Vakter, mellomvare,
+# TrustedHost, rate og avhengnader køyrer som for andre ruter, FØR oppgraderinga:
+#
+#   bruk std.web som web
+#   bruk std.apptenar_ws som ws
+#
+#   funksjon chat(t: ordbok) -> heltall {
+#       web.use_guard("innlogga")          # køyrer før 101; avvisning gjev 401/403
+#       web.route("WS /chat/{rom}")
+#       la h = ws.hending(t)               # "open", "melding" eller "lukk"
+#       hvis h == "open" { ws.bli_med(t, ws.param(t, "rom")) }
+#       hvis h == "melding" {
+#           la m = ws.motta(t)             # {"type": "tekst"|"binær", "data": tekst}
+#           ws.rom_send(ws.param(t, "rom"), m["data"])
+#       }
+#       returner 0
+#   }
+#
+# Hendingsmodell: apptenaren har éin tråd, så handlaren blokkerer aldri. Han blir kalla
+# éin gong med "open" etter 101-svaret, éin gong per heile melding (fragment blir sette
+# saman først) med "melding", og éin gong med "lukk" når tilkoplinga er over (lukkekode
+# i ws.lukkekode(t)). Rute-avhengnader blir sende med som ekstra argument, som for
+# vanlege handlarar. Eit unntak i handlaren lukkar tilkoplinga med 1011.
+#
+# API (t er tilkoplingsobjektet handlaren får):
+#   hending(t), motta(t), send_tekst(t, s), send_bytes(t, data), ping(t, data),
+#   lukk(t, kode, grunn), er_open(t), param(t, namn), ctx(t), id(t), lukkekode(t),
+#   lukkegrunn(t); rom: bli_med(t, rom), forlat(t, rom), rom_send(rom, s),
+#   rom_send_bytes(rom, data), rom_send_unntatt(rom, s, t), tal_i_rom(rom).
+#
+# Binære data er tekst der kvart teikn er éin byte (builtin.chr/char_code); tekst i
+# Norscode er byte-trygg (òg NUL). send_bytes tek òg imot bytes og liste av heiltal.
+#
+# Protokollen: klientrammer må vere maskerte (elles 1002), RSV-bit og ukjende opkodar
+# gjev 1002, kontrollrammer må vere ufragmenterte og <= 125 byte, ping får pong
+# automatisk, ugyldig UTF-8 i tekst eller lukkegrunn gjev 1007, ein ramme over
+# "ws_maks_ramme" eller ei melding over "ws_maks_melding" gjev 1009. Ingen utvidingar
+# (permessage-deflate) og ingen subprotokollar blir forhandla.
+#
+# Konfig i app.lytt(...): "ws_maks_ramme" (standard 1 MiB), "ws_maks_melding"
+# (4 MiB), "ws_ping_ms" (30 s), "ws_lukk_ms" (5 s ventetid på klienten sin close),
+# "ws_origins" (liste; tom = alle Origin er tillatne, elles 403 for andre).
+#
+# Sjå docs/02-standard-library/APPTENAR_WEBSOCKET.md.
+
+bruk std.sha1 som _sha1
+bruk std.base64 som _b64
+bruk std.apptenar_di som _di
+
+la _ws: ordbok = {"nr": 0}
+la _wtilk: ordbok = {}
+la _rom: ordbok = {}
+
+funksjon _magi() -> tekst { returner "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" }
+
+# ─── Små hjelparar ───────────────────────────────────────────────────────────
+
+funksjon _b(s: tekst, i: heltall) -> heltall {
+    returner builtin.char_code(builtin.slice(s, i, i + 1))
+}
+
+funksjon _liten(t: tekst) -> tekst {
+    hvis lengde(t) > 256 { returner "" }
+    returner builtin.lower(t)
+}
+
+# Header frå ctx utan omsyn til kasus.
+funksjon _hdr(ctx: ordbok, namn_liten: tekst) -> tekst {
+    hvis ikkje har_nokkel(ctx, "__headers__") { returner "" }
+    la h = ctx["__headers__"]
+    hvis h == null eller builtin.type(h) != "ordbok" { returner "" }
+    hvis har_nokkel(h, namn_liten) { returner tekst(h[namn_liten]) }
+    la ks = nøkler(h)
+    la i = 0
+    mens i < lengde(ks) {
+        hvis _liten(tekst(ks[i])) == namn_liten { returner tekst(h[ks[i]]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Er `token` eitt av dei kommaskilde ledda i `verdi` (utan omsyn til kasus)?
+funksjon _har_token(verdi: tekst, token: tekst) -> bool {
+    la delar = builtin.split(verdi, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis _liten(builtin.trim(delar[i])) == token { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _konf(k: ordbok, namn: tekst, standard) {
+    hvis k != null og builtin.type(k) == "ordbok" og har_nokkel(k, namn) og k[namn] != null { returner k[namn] }
+    returner standard
+}
+
+# ─── Handtrykk ───────────────────────────────────────────────────────────────
+
+# Sec-WebSocket-Accept = base64(SHA-1(nøkkel + magi)).
+funksjon aksept(nøkkel: tekst) -> tekst {
+    returner _b64.kod_bytes(_sha1.hash_raw_tekst(nøkkel + _magi()))
+}
+
+# Ber førespurnaden om ei WebSocket-oppgradering (Upgrade: websocket)?
+funksjon er_oppgradering(ctx: ordbok) -> bool {
+    returner _har_token(_hdr(ctx, "upgrade"), "websocket")
+}
+
+# Nøkkelen skal vere 16 tilfeldige byte i base64: 22 teikn frå alfabetet + "==".
+funksjon _gyldig_nøkkel(k: tekst) -> bool {
+    hvis lengde(k) != 24 eller ikkje builtin.ends_with(k, "==") { returner usann }
+    la i = 0
+    mens i < 22 {
+        la c = _b(k, i)
+        la ok = (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller (c >= 48 og c <= 57) eller c == 43 eller c == 47
+        hvis ikkje ok { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _feilsvar(status: heltall, body: tekst, h: ordbok) -> ordbok {
+    h["X-Content-Type-Options"] = "nosniff"
+    h["Cache-Control"] = "no-store"
+    returner {"status": status, "content_type": "text/plain; charset=utf-8", "body": body, "headers": h}
+}
+
+# Gjev null når handtrykket er gyldig, elles eit feilsvar i responskontrakten:
+# 405 for andre metodar enn GET, 426 utan «Upgrade: websocket» eller med ein annan
+# versjon enn 13, 400 for HTTP/1.0, manglande «Connection: Upgrade» eller ugyldig nøkkel,
+# 403 når "origins" ikkje er tom og Origin ikkje er med.
+funksjon handtrykk_feil(ctx: ordbok, origins) {
+    la metode = _liten(tekst(ctx["__method__"]))
+    hvis metode != "get" {
+        la f = _feilsvar(405, "WebSocket krev GET", {})
+        f["allow"] = "GET"
+        returner f
+    }
+    hvis ikkje er_oppgradering(ctx) {
+        returner _feilsvar(426, "Denne ruta krev WebSocket",
+            {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13"})
+    }
+    hvis har_nokkel(ctx, "__versjon__") og tekst(ctx["__versjon__"]) != "HTTP/1.1" {
+        returner _feilsvar(400, "WebSocket krev HTTP/1.1", {})
+    }
+    hvis ikkje _har_token(_hdr(ctx, "connection"), "upgrade") {
+        returner _feilsvar(400, "Connection: Upgrade manglar", {})
+    }
+    hvis builtin.trim(_hdr(ctx, "sec-websocket-version")) != "13" {
+        returner _feilsvar(426, "Berre WebSocket-versjon 13 er støtta", {"Sec-WebSocket-Version": "13"})
+    }
+    hvis ikkje _gyldig_nøkkel(builtin.trim(_hdr(ctx, "sec-websocket-key"))) {
+        returner _feilsvar(400, "Ugyldig Sec-WebSocket-Key", {})
+    }
+    hvis origins != null og builtin.type(origins) == "liste" og lengde(origins) > 0 {
+        la o = builtin.trim(_hdr(ctx, "origin"))
+        la ok = usann
+        la i = 0
+        mens i < lengde(origins) {
+            hvis tekst(origins[i]) == o { ok = sann }
+            i = i + 1
+        }
+        hvis ikkje ok { returner _feilsvar(403, "Origin er ikkje tillaten", {}) }
+    }
+    returner null
+}
+
+# 101-svaret for eit gyldig handtrykk.
+funksjon svar_101(ctx: ordbok) -> tekst {
+    returner "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+        aksept(builtin.trim(_hdr(ctx, "sec-websocket-key"))) + "\r\n\r\n"
+}
+
+# ─── UTF-8 og lukkekodar ─────────────────────────────────────────────────────
+
+funksjon _forts(c: heltall) -> bool { returner c >= 128 og c <= 191 }
+
+# Streng UTF-8 (RFC 3629): ingen overlange former, ingen surrogatar, høgst U+10FFFF.
+funksjon gyldig_utf8(s: tekst) -> bool {
+    la n = lengde(s)
+    la i = 0
+    mens i < n {
+        la c = _b(s, i)
+        hvis c < 128 {
+            i = i + 1
+        } ellers hvis c < 194 {
+            returner usann
+        } ellers hvis c < 224 {
+            hvis i + 1 >= n eller ikkje _forts(_b(s, i + 1)) { returner usann }
+            i = i + 2
+        } ellers hvis c < 240 {
+            hvis i + 2 >= n { returner usann }
+            la c1 = _b(s, i + 1)
+            hvis ikkje _forts(c1) eller ikkje _forts(_b(s, i + 2)) { returner usann }
+            hvis c == 224 og c1 < 160 { returner usann }
+            hvis c == 237 og c1 > 159 { returner usann }
+            i = i + 3
+        } ellers hvis c < 245 {
+            hvis i + 3 >= n { returner usann }
+            la c1 = _b(s, i + 1)
+            hvis ikkje _forts(c1) eller ikkje _forts(_b(s, i + 2)) eller ikkje _forts(_b(s, i + 3)) { returner usann }
+            hvis c == 240 og c1 < 144 { returner usann }
+            hvis c == 244 og c1 > 143 { returner usann }
+            i = i + 4
+        } ellers {
+            returner usann
+        }
+    }
+    returner sann
+}
+
+# Lukkekodar som kan stå i ei close-ramme (RFC 6455 7.4 og IANA-registeret).
+funksjon gyldig_lukkekode(k: heltall) -> bool {
+    hvis k >= 3000 og k <= 4999 { returner sann }
+    hvis k >= 1000 og k <= 1003 { returner sann }
+    hvis k >= 1007 og k <= 1014 { returner sann }
+    returner usann
+}
+
+funksjon _kode_byte(k: heltall) -> tekst {
+    returner builtin.chr((k >> 8) & 255) + builtin.chr(k & 255)
+}
+
+# ─── Rammer ──────────────────────────────────────────────────────────────────
+
+funksjon _lengd_hovud(n: heltall, maskebit: heltall) -> tekst {
+    hvis n < 126 { returner builtin.chr(maskebit | n) }
+    hvis n < 65536 { returner builtin.chr(maskebit | 126) + builtin.chr((n >> 8) & 255) + builtin.chr(n & 255) }
+    la ut = builtin.chr(maskebit | 127)
+    la s = 56
+    mens s >= 0 {
+        ut = ut + builtin.chr((n >> s) & 255)
+        s = s - 8
+    }
+    returner ut
+}
+
+# Ei umaskert ramme (tenar → klient). fin: sann for siste ramme i meldinga.
+funksjon ramme(fin: bool, op: heltall, data: tekst) -> tekst {
+    la b0 = op & 15
+    hvis fin { b0 = b0 | 128 }
+    returner builtin.chr(b0) + _lengd_hovud(lengde(data), 0) + data
+}
+
+# XOR med den 4 byte lange maska (same operasjon maskerer og avmaskerer).
+funksjon masker(data: tekst, maske: tekst) -> tekst {
+    la k0 = _b(maske, 0)
+    la k1 = _b(maske, 1)
+    la k2 = _b(maske, 2)
+    la k3 = _b(maske, 3)
+    la n = lengde(data)
+    la ut = []
+    la i = 0
+    mens i + 3 < n {
+        legg_til(ut, builtin.chr(_b(data, i) ^ k0))
+        legg_til(ut, builtin.chr(_b(data, i + 1) ^ k1))
+        legg_til(ut, builtin.chr(_b(data, i + 2) ^ k2))
+        legg_til(ut, builtin.chr(_b(data, i + 3) ^ k3))
+        i = i + 4
+    }
+    la k = [k0, k1, k2, k3]
+    mens i < n {
+        legg_til(ut, builtin.chr(_b(data, i) ^ k[i % 4]))
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# Gjer data om til byte-tekst: tekst (uendra), bytes eller liste av heiltal 0–255.
+funksjon til_byte_tekst(data) -> tekst {
+    la typ = builtin.type(data)
+    hvis typ == "tekst" { returner data }
+    la l = data
+    hvis typ == "bytes" { l = builtin.bytes_to_list(data) }
+    hvis builtin.type(l) != "liste" { kast "ws: venta tekst, bytes eller liste av byte" }
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(ut, builtin.chr(l[i] & 255))
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# ─── Tilkoplingar ────────────────────────────────────────────────────────────
+
+# Ny tilkopling etter eit godkjent handtrykk. fn er handlaren (fullt kvalifisert), ctx
+# er førespurnaden (med __params__), deps er løyste rute-avhengnader, konf er apptenar-
+# konfigurasjonen (ws_maks_ramme, ws_maks_melding, logg).
+funksjon ny(fn: tekst, ctx: ordbok, deps: liste, konf: ordbok) -> ordbok {
+    _ws["nr"] = _ws["nr"] + 1
+    la id = "w" + tekst(_ws["nr"])
+    la t = {
+        "id": id, "fn": fn, "ctx": ctx, "deps": deps,
+        "inn": "", "ut": "",
+        "frag_op": 0, "frag": [], "frag_n": 0,
+        "hending": "", "melding": null,
+        "open": sann, "lukk_sendt": usann, "lukk_motteke": usann, "ferdig": usann,
+        "lukk_frist": 0, "lukkekode": 0, "lukkegrunn": "",
+        "rom": [], "motteke": 0, "sendt": 0, "feil": "",
+        "maks_ramme": _konf(konf, "ws_maks_ramme", 1048576),
+        "maks_melding": _konf(konf, "ws_maks_melding", 4194304),
+        "lukk_ms": _konf(konf, "ws_lukk_ms", 5000),
+        "logg": tekst(_konf(konf, "logg", "feil"))
+    }
+    _wtilk[id] = t
+    returner t
+}
+
+funksjon _logg(t: ordbok, melding: tekst) -> heltall {
+    hvis t["logg"] == "ingen" { returner 0 }
+    skriv("APPTENAR feil ws " + tekst(t["id"]) + ": " + melding + "\n")
+    returner 1
+}
+
+funksjon _ut(t: ordbok, b: tekst) -> heltall {
+    t["ut"] = t["ut"] + b
+    returner 1
+}
+
+# Kall handlaren for den hendinga som står i t["hending"].
+funksjon _kall(t: ordbok) -> heltall {
+    prøv {
+        _di.kall_handlar(t["fn"], t, t["deps"])
+    } fang (e) {
+        t["feil"] = tekst(e)
+        _logg(t, "handlar " + tekst(t["fn"]) + " kasta under " + tekst(t["hending"]) + ": " + tekst(e))
+        hvis ikkje t["ferdig"] { _feil(t, 1011, "intern feil") }
+    }
+    returner 0
+}
+
+# Køyr "open"-hendinga. Apptenaren kallar denne rett etter 101-svaret.
+funksjon opna(t: ordbok) -> heltall {
+    t["hending"] = "open"
+    _kall(t)
+    returner 0
+}
+
+# Tilkoplinga er over: fjern frå rom, og køyr "lukk"-hendinga éin gong.
+funksjon _avslutt(t: ordbok, kode: heltall, grunn: tekst) -> heltall {
+    hvis t["ferdig"] { returner 0 }
+    t["ferdig"] = sann
+    t["open"] = usann
+    t["lukkekode"] = kode
+    t["lukkegrunn"] = grunn
+    la rl = t["rom"]
+    la i = 0
+    mens i < lengde(rl) {
+        _rom_fjern(tekst(rl[i]), t["id"])
+        i = i + 1
+    }
+    t["rom"] = []
+    hvis har_nokkel(_wtilk, t["id"]) { fjern_nokkel(_wtilk, t["id"]) }
+    t["hending"] = "lukk"
+    t["melding"] = null
+    _kall(t)
+    returner 1
+}
+
+# Feil i protokollen («Fail the WebSocket Connection»): send close med koden og avslutt.
+# Apptenaren lukkar TCP når t["ut"] er skriven.
+funksjon _feil(t: ordbok, kode: heltall, grunn: tekst) -> heltall {
+    hvis ikkje t["lukk_sendt"] {
+        _ut(t, ramme(sann, 8, _kode_byte(kode) + builtin.slice(grunn, 0, 123)))
+        t["lukk_sendt"] = sann
+    }
+    t["inn"] = ""
+    t["frag"] = []
+    t["frag_op"] = 0
+    _avslutt(t, kode, grunn)
+    returner 1
+}
+
+# TCP vart broten (EOF, skrivefeil, tidsgrense eller at tenaren stoppar): 1006.
+funksjon tcp_lukka(t: ordbok) -> heltall {
+    hvis t["ferdig"] { returner 0 }
+    t["lukk_sendt"] = sann
+    returner _avslutt(t, 1006, "tilkoplinga vart broten")
+}
+
+# Mat inn byte frå klienten. Handsamar så mange heile rammer som bufferen har, og
+# køyrer handlaren for kvar heile melding. Gjev talet på rammer.
+funksjon mat(t: ordbok, data: tekst) -> heltall {
+    hvis t["ferdig"] { returner 0 }
+    t["inn"] = t["inn"] + data
+    la n = 0
+    mens ikkje t["ferdig"] {
+        hvis _ei_ramme(t) == 0 { bryt }
+        n = n + 1
+    }
+    returner n
+}
+
+# Les éi ramme frå t["inn"]. Gjev 1 når ei ramme (eller ein feil) vart handsama, 0 når
+# bufferen manglar byte.
+funksjon _ei_ramme(t: ordbok) -> heltall {
+    la b = t["inn"]
+    la n = lengde(b)
+    hvis n < 2 { returner 0 }
+    la b0 = _b(b, 0)
+    la b1 = _b(b, 1)
+    la fin = (b0 & 128) != 0
+    hvis (b0 & 112) != 0 { returner _feil(t, 1002, "RSV-bit utan utviding") }
+    la op = b0 & 15
+    hvis (b1 & 128) == 0 { returner _feil(t, 1002, "umaskert ramme frå klienten") }
+    la len = b1 & 127
+    la pos = 2
+    hvis len == 126 {
+        hvis n < 4 { returner 0 }
+        len = (_b(b, 2) << 8) | _b(b, 3)
+        pos = 4
+    } ellers hvis len == 127 {
+        hvis n < 10 { returner 0 }
+        hvis (_b(b, 2) & 128) != 0 { returner _feil(t, 1002, "ugyldig lengd") }
+        hvis _b(b, 2) != 0 eller _b(b, 3) != 0 eller _b(b, 4) != 0 eller _b(b, 5) != 0 {
+            returner _feil(t, 1009, "for stor ramme")
+        }
+        len = (_b(b, 6) << 24) | (_b(b, 7) << 16) | (_b(b, 8) << 8) | _b(b, 9)
+        pos = 10
+    }
+    hvis op >= 8 {
+        hvis op > 10 { returner _feil(t, 1002, "ukjend opkode") }
+        hvis ikkje fin { returner _feil(t, 1002, "fragmentert kontrollramme") }
+        hvis len > 125 { returner _feil(t, 1002, "for lang kontrollramme") }
+    } ellers hvis op > 2 {
+        returner _feil(t, 1002, "ukjend opkode")
+    }
+    hvis len > t["maks_ramme"] { returner _feil(t, 1009, "for stor ramme") }
+    hvis n < pos + 4 + len { returner 0 }
+    la data = masker(builtin.slice(b, pos + 4, pos + 4 + len), builtin.slice(b, pos, pos + 4))
+    t["inn"] = builtin.slice(b, pos + 4 + len, n)
+    returner _handsam(t, fin, op, data)
+}
+
+funksjon _handsam(t: ordbok, fin: bool, op: heltall, data: tekst) -> heltall {
+    hvis op == 9 {
+        hvis ikkje t["lukk_sendt"] { _ut(t, ramme(sann, 10, data)) }
+        returner 1
+    }
+    hvis op == 10 {
+        t["pong_ms"] = builtin.tid_ms()
+        returner 1
+    }
+    hvis op == 8 { returner _motta_lukk(t, data) }
+    # Etter at vi har sendt close, blir datarammer forkasta (RFC 6455 5.5.1).
+    hvis t["lukk_sendt"] { returner 1 }
+    hvis op == 0 {
+        hvis t["frag_op"] == 0 { returner _feil(t, 1002, "kontinuasjon utan melding") }
+        hvis t["frag_n"] + lengde(data) > t["maks_melding"] { returner _feil(t, 1009, "for stor melding") }
+        legg_til(t["frag"], data)
+        t["frag_n"] = t["frag_n"] + lengde(data)
+        hvis ikkje fin { returner 1 }
+        la heil = builtin.join(t["frag"], "")
+        la mop = t["frag_op"]
+        t["frag"] = []
+        t["frag_n"] = 0
+        t["frag_op"] = 0
+        returner _levér(t, mop, heil)
+    }
+    hvis t["frag_op"] != 0 { returner _feil(t, 1002, "ny melding midt i ei fragmentert melding") }
+    hvis fin { returner _levér(t, op, data) }
+    hvis lengde(data) > t["maks_melding"] { returner _feil(t, 1009, "for stor melding") }
+    t["frag_op"] = op
+    t["frag"] = [data]
+    t["frag_n"] = lengde(data)
+    returner 1
+}
+
+funksjon _levér(t: ordbok, op: heltall, data: tekst) -> heltall {
+    hvis op == 1 og ikkje gyldig_utf8(data) { returner _feil(t, 1007, "ugyldig UTF-8") }
+    la typ = "tekst"
+    hvis op == 2 { typ = "binær" }
+    t["motteke"] = t["motteke"] + 1
+    t["melding"] = {"type": typ, "data": data}
+    t["hending"] = "melding"
+    _kall(t)
+    t["melding"] = null
+    returner 1
+}
+
+funksjon _motta_lukk(t: ordbok, data: tekst) -> heltall {
+    la kode = 1005
+    la grunn = ""
+    hvis lengde(data) == 1 { returner _feil(t, 1002, "ugyldig close-ramme") }
+    hvis lengde(data) >= 2 {
+        kode = (_b(data, 0) << 8) | _b(data, 1)
+        hvis ikkje gyldig_lukkekode(kode) { returner _feil(t, 1002, "ugyldig lukkekode") }
+        grunn = builtin.slice(data, 2, lengde(data))
+        hvis ikkje gyldig_utf8(grunn) { returner _feil(t, 1007, "ugyldig UTF-8 i lukkegrunnen") }
+    }
+    t["lukk_motteke"] = sann
+    hvis ikkje t["lukk_sendt"] {
+        # Svar med same statuskode (RFC 6455 5.5.1).
+        la svar = ""
+        hvis kode != 1005 { svar = _kode_byte(kode) }
+        _ut(t, ramme(sann, 8, svar))
+        t["lukk_sendt"] = sann
+    }
+    t["inn"] = ""
+    _avslutt(t, kode, grunn)
+    returner 1
+}
+
+# ─── API for handlarar ───────────────────────────────────────────────────────
+
+funksjon hending(t: ordbok) -> tekst { returner tekst(t["hending"]) }
+
+# Meldinga som utløyste "melding"-hendinga: {"type": "tekst"|"binær", "data": tekst}.
+# Gjev null utanfor ei "melding"-hending og etter at meldinga er henta éin gong.
+funksjon motta(t: ordbok) {
+    la m = t["melding"]
+    t["melding"] = null
+    returner m
+}
+
+# Berre teksten i meldinga ("" når det ikkje er ei melding).
+funksjon motta_tekst(t: ordbok) -> tekst {
+    la m = motta(t)
+    hvis m == null { returner "" }
+    returner tekst(m["data"])
+}
+
+funksjon er_open(t: ordbok) -> bool { returner t["open"] og ikkje t["lukk_sendt"] }
+funksjon id(t: ordbok) -> tekst { returner tekst(t["id"]) }
+funksjon ctx(t: ordbok) -> ordbok { returner t["ctx"] }
+funksjon lukkekode(t: ordbok) -> heltall { returner t["lukkekode"] }
+funksjon lukkegrunn(t: ordbok) -> tekst { returner tekst(t["lukkegrunn"]) }
+
+funksjon param(t: ordbok, namn: tekst) -> tekst {
+    la c = t["ctx"]
+    hvis har_nokkel(c, "__params__") og c["__params__"] != null og har_nokkel(c["__params__"], namn) {
+        returner tekst(c["__params__"][namn])
+    }
+    returner ""
+}
+
+funksjon header(t: ordbok, namn: tekst) -> tekst { returner _hdr(t["ctx"], _liten(namn)) }
+
+funksjon _send_ramme(t: ordbok, r: tekst) -> heltall {
+    hvis t["lukk_sendt"] eller t["ferdig"] { returner 0 }
+    _ut(t, r)
+    t["sendt"] = t["sendt"] + 1
+    returner 1
+}
+
+# Send ei tekstmelding. Gjev 1, eller 0 når tilkoplinga er på veg ned.
+funksjon send_tekst(t: ordbok, s: tekst) -> heltall {
+    returner _send_ramme(t, ramme(sann, 1, s))
+}
+
+funksjon send_bytes(t: ordbok, data) -> heltall {
+    returner _send_ramme(t, ramme(sann, 2, til_byte_tekst(data)))
+}
+
+funksjon ping(t: ordbok, data: tekst) -> heltall {
+    returner _send_ramme(t, ramme(sann, 9, builtin.slice(data, 0, 125)))
+}
+
+# Start close-handtrykket. Tilkoplinga blir lukka når klienten svarar med close (eller
+# etter "ws_lukk_ms"). kode: 1000 (normal), 1001, 1003, 1007–1011, 3000–4999.
+funksjon lukk(t: ordbok, kode: heltall, grunn: tekst) -> heltall {
+    hvis t["lukk_sendt"] eller t["ferdig"] { returner 0 }
+    hvis ikkje gyldig_lukkekode(kode) { kast "ws.lukk: ugyldig lukkekode " + tekst(kode) }
+    _ut(t, ramme(sann, 8, _kode_byte(kode) + builtin.slice(grunn, 0, 123)))
+    t["lukk_sendt"] = sann
+    t["lukk_frist"] = builtin.tid_ms() + t["lukk_ms"]
+    t["lukkekode"] = kode
+    t["lukkegrunn"] = grunn
+    returner 1
+}
+
+# ─── Rom (kringkasting i same prosess) ───────────────────────────────────────
+
+funksjon bli_med(t: ordbok, rom: tekst) -> heltall {
+    hvis t["ferdig"] { returner 0 }
+    hvis ikkje har_nokkel(_rom, rom) { _rom[rom] = [] }
+    la l = _rom[rom]
+    la i = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == t["id"] { returner 0 }
+        i = i + 1
+    }
+    legg_til(l, t["id"])
+    legg_til(t["rom"], rom)
+    returner 1
+}
+
+funksjon _rom_fjern(rom: tekst, id: tekst) -> heltall {
+    hvis ikkje har_nokkel(_rom, rom) { returner 0 }
+    la gamle = _rom[rom]
+    la nye = []
+    la i = 0
+    mens i < lengde(gamle) {
+        hvis tekst(gamle[i]) != id { legg_til(nye, gamle[i]) }
+        i = i + 1
+    }
+    hvis lengde(nye) == 0 { fjern_nokkel(_rom, rom) } ellers { _rom[rom] = nye }
+    returner 0
+}
+
+funksjon forlat(t: ordbok, rom: tekst) -> heltall {
+    _rom_fjern(rom, t["id"])
+    la nye = []
+    la rl = t["rom"]
+    la i = 0
+    mens i < lengde(rl) {
+        hvis tekst(rl[i]) != rom { legg_til(nye, rl[i]) }
+        i = i + 1
+    }
+    t["rom"] = nye
+    returner 0
+}
+
+funksjon tal_i_rom(rom: tekst) -> heltall {
+    hvis ikkje har_nokkel(_rom, rom) { returner 0 }
+    returner lengde(_rom[rom])
+}
+
+# Ramma blir laga éin gong og lagd i kvar mottakar sin utbuffer. Gjev talet på mottakarar.
+funksjon _rom_ramme(rom: tekst, r: tekst, unntatt: tekst) -> heltall {
+    hvis ikkje har_nokkel(_rom, rom) { returner 0 }
+    la ids = _rom[rom]
+    la n = 0
+    la i = 0
+    mens i < lengde(ids) {
+        la id = tekst(ids[i])
+        hvis id != unntatt og har_nokkel(_wtilk, id) {
+            n = n + _send_ramme(_wtilk[id], r)
+        }
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon rom_send(rom: tekst, s: tekst) -> heltall { returner _rom_ramme(rom, ramme(sann, 1, s), "") }
+funksjon rom_send_bytes(rom: tekst, data) -> heltall { returner _rom_ramme(rom, ramme(sann, 2, til_byte_tekst(data)), "") }
+funksjon rom_send_unntatt(rom: tekst, s: tekst, t: ordbok) -> heltall { returner _rom_ramme(rom, ramme(sann, 1, s), tekst(t["id"])) }
+
+# Opne tilkoplingar (for status og testar).
+funksjon tal_opne() -> heltall { returner lengde(nøkler(_wtilk)) }
