@@ -2131,6 +2131,7 @@ funksjon samle_strenger(fns) {
         "exit_code", "stdout", "stderr", "error", "output limit",
         "process spawn failed", "wall_ms", "peak_rss_bytes",
         "desimaltall", "bytes", "__lambda__", "__capture__",
+        "NATIV-GAP",
         X86_MAL()
     ]
     la std_i: heiltall = 0
@@ -2140,6 +2141,15 @@ funksjon samle_strenger(fns) {
         std_i = std_i + 1
     }
     la nk = nøkler(fns)
+    // R1/F10: siste namnesegment for kvar bundla funksjon, so fail-closed-kall utan
+    // mål (sjå er_fail_closed_kall) får ei eiga «NATIV-GAP:<namn>»-melding.
+    la siste_seg: ordbok = {}
+    la ssi: heiltall = 0
+    mens ssi < lengde(nk) {
+        la ss_delar = builtin.split(tekst(nk[ssi]), ".")
+        siste_seg[ss_delar[lengde(ss_delar) - 1]] = sann
+        ssi = ssi + 1
+    }
     la fi: heltall = 0
     mens fi < lengde(nk) {
         hvis fi % 100 == 0 { native_codegen_trace("strengpass funksjon=" + tekst_fra_heltall(fi)) }
@@ -2152,6 +2162,19 @@ funksjon samle_strenger(fns) {
                 hvis ikkje finnes_nøkkel(sett, s) {
                     sett[s] = sann
                     legg_til(strenger, s)
+                }
+            }
+            hvis instr[0] == "CALL" og lengde(instr) >= 2 og builtin.type(instr[1]) == "tekst" {
+                la kall_mål: tekst = instr[1]
+                hvis er_fail_closed_kall(kall_mål) og ikkje finnes_nøkkel(fns, kall_mål) {
+                    la km_delar = builtin.split(kall_mål, ".")
+                    hvis builtin.starts_with(kall_mål, "builtin.") eller ikkje finnes_nøkkel(siste_seg, km_delar[lengde(km_delar) - 1]) {
+                        la gap_s = "NATIV-GAP:" + kall_mål
+                        hvis ikkje finnes_nøkkel(sett, gap_s) {
+                            sett[gap_s] = sann
+                            legg_til(strenger, gap_s)
+                        }
+                    }
                 }
             }
             // BUILD_LAMBDA: closure-nøklane, hjelparnamnet og capture-namna blir
@@ -10491,6 +10514,18 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         legg_til(buf, 0x50)
         returner
     }
+    // ── R1/F10: await_value(v). AOT har ingen VM-planleggar: async-funksjonar køyrer
+    // synkront og returnerer sjølve verdien, så await er identitet (VM: ikkje-future →
+    // verdien). Med std.native_gap i bunten gjeld future-kontrakten der (ferdig →
+    // verdi, feil/timeout/kansellert → kast, ventande → FutureFeil). Var null-fallback:
+    // `await dobbel(21)` gav '' med exit 0 (p06b).
+    hvis (fn_nm == "builtin.await_value" eller fn_nm == "await_value") og nargs == 1 {
+        hvis finnes_nøkkel(fn_vas, "std.native_gap.await_value") {
+            emit_user_call(buf, fn_vas["std.native_gap.await_value"], nargs, code_va)
+        }
+        // elles: identitet — argumentet blir liggjande på stakken som resultat.
+        returner
+    }
     // ── R2: builtin.ncb_call_fn(fn, a1..an) → indirekte kall via verts-funksjonstabellen
     // (namn eller closure; sjå ncb_kall-atomet). Var null-fallback: std.sched sine
     // callbackar (_kall_trygt/_io_poll_ein/_io_cleanup) køyrde aldri i AOT.
@@ -11186,6 +11221,13 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
                  " har inga rute i bunten (tryggleiksbuiltin: null-fallback ville gitt tom verdi" +
                  " utan unnatak) — legg til `bruk std.native_gap`"
         }
+        // R1/F10: fail-closed for kall som ALDRI kan gje ein meiningsfull null:
+        // trådar (thread_*), atomic_operation, VM-refleksjon (vm_*) og kvalifiserte
+        // brukarmodul-kall utan mål i bunten. Dei gav tomme verdiar med exit 0
+        // (p01/p05/m05a); no kastar kallet «NATIV-GAP:<namn>» ved køyring (fangbart,
+        // same konvensjon som ARM64-stubbane). Andre builtin.* utan rute er framleis
+        // frivillige krokar med null-fallback.
+        la fail_closed = er_fail_closed_kall(fn_nm)
         la ukjent_nøkkel = "NC_CODEGEN_UKJENT:" + fn_nm
         la alt_meldt = usann
         prøv {
@@ -11193,8 +11235,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             hvis ikkje alt_meldt { miljo_sett(ukjent_nøkkel, "1") }
         } fang (miljøfeil) { alt_meldt = usann }
         hvis ikkje alt_meldt {
+            la følgje = " → null-fallback\n"
+            hvis fail_closed { følgje = " → kastar NATIV-GAP ved køyring\n" }
             skriv("native_codegen_v2: ÅTVARING ukjent kall " + fn_nm + "/" +
-                  tekst_fra_heltall(nargs) + " → null-fallback\n")
+                  tekst_fra_heltall(nargs) + følgje)
             // Strikt gjeld kvalifiserte BRUKARMODUL-kall (modul.funksjon); builtin.*
             // utan native rutine (web/thread/acme/…) er framleis frivillige krokar.
             hvis miljo_hent("NORSCODE_CODEGEN_STRIKT") == "1" og builtin.index_of(fn_nm, ".") >= 0
@@ -11207,6 +11251,15 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             legg_til(buf, 0x58)
             ui = ui + 1
         }
+        hvis fail_closed {
+            // Meldinga er samla inn i dataseksjonen av samle_strenger; manglar ho
+            // (namn som ikkje var kjende då), blir den generiske «NATIV-GAP» brukt.
+            la gap_melding = "NATIV-GAP:" + fn_nm
+            hvis ikkje finnes_nøkkel(rd_offs, gap_melding) { gap_melding = "NATIV-GAP" }
+            emit_push_const(buf, gap_melding, rd_offs, code_va)
+            emit_rt_call_1(buf, atomic_vas["feil"], code_va)   // kastar; returnerer ikkje
+            returner
+        }
         legg_til(buf, 0x48)
         legg_til(buf, 0x31)
         legg_til(buf, 0xC0)  // xor rax, rax = Norscode-null (rå NULL for VM-fallback-krok)
@@ -11214,6 +11267,17 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         returner
     }
     emit_user_call(buf, fn_va, nargs, code_va)
+}
+
+// R1/F10: kall som skal kaste ved køyring i staden for å gje null når codegenen
+// ikkje har noko mål for dei (sjå fn_va == 0-greina i emit_builtin_or_user_call).
+funksjon er_fail_closed_kall(fn_nm: tekst) -> boolsk {
+    hvis builtin.starts_with(fn_nm, "builtin.") {
+        la n = builtin.slice(fn_nm, 8, lengde(fn_nm))
+        returner builtin.starts_with(n, "thread_") eller n == "atomic_operation" eller builtin.starts_with(n, "vm_")
+    }
+    // Kvalifisert brukarmodul-kall (modul.funksjon) utan mål i bunten.
+    returner builtin.index_of(fn_nm, ".") >= 0
 }
 
 // Verts-funksjonstabell for host_finst/host_kall/host_resolve (sjå bygg_runtime_v2):
