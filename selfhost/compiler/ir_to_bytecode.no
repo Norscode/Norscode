@@ -1033,7 +1033,8 @@ funksjon ny_komp()
     komp["modul"] = "__main__" // gjeldande modul-namn
     komp["funk_kart"] = {}     // name → params (for CALL-resolving)
     komp["funk_defaults"] = {} // name → liste med standard-uttrykk (eller null) per parameter
-    komp["enum_kart"] = {}     // enum-namn → ordbok {variant → heiltalsindeks}
+    komp["enum_kart"] = {}     // enum-namn → enum-info {"variantar": {variant → indeks}, "namn": [...]}
+    komp["modul_enum_kart"] = {} // importert modulnamn → {enum-namn → enum-info}
     komp["funk_vararg"] = {}   // name → tal faste parametrar før vararg-parameteren (siste ...p)
     komp["grensesnitt_kart"] = {} // grensesnitt-namn → liste med påkravde metodenamn
     komp["struktur_impl"] = []    // liste med [struktur-namn, grensesnitt-namn] for validering
@@ -1149,14 +1150,125 @@ funksjon emit_liste(komp, node, kode) -> boolsk {
     returner sann
 }
 
+// Enum-info for ein Enum-AST-node: {"variantar": {variant → indeks},
+// "namn": [variantnamn i deklarasjonsrekkjefølgje]}. Lista finst fordi
+// kompilatoren ikkje skal vere avhengig av nøkkeliterasjon over ordbøker.
+funksjon lag_enum_info(enum_node) {
+    la variantar = {}
+    la namn = []
+    la vi: heiltall = 0
+    mens vi < lengde(enum_node["barn"]) {
+        la vn = enum_node["barn"][vi]["verdi"]
+        variantar[vn] = vi
+        legg_til(namn, vn)
+        vi = vi + 1
+    }
+    returner {"variantar": variantar, "namn": namn}
+}
+
+// Enum-oppslag ved kompilering. Gjev enum-info for eit uttrykk som namngjev
+// ein enum, elles null:
+//   Farge         — enum i same modul (ikkje skugga av ein lokal variabel)
+//   fg.Farge      — enum i importert modul (bruk ggmod.fargar som fg)
+funksjon enum_info_for(komp, obj) {
+    hvis obj["type"] == "Ident" {
+        la namn = obj["verdi"]
+        hvis har_nokkel(komp["enum_kart"], namn) og ikkje har_nokkel(komp["current_locals"], namn) {
+            returner komp["enum_kart"][namn]
+        }
+        returner null
+    }
+    hvis obj["type"] == "Felt" og obj["barn"][0]["type"] == "Ident" {
+        la alias = obj["barn"][0]["verdi"]
+        hvis har_nokkel(komp["import_alias"], alias) og ikkje har_nokkel(komp["current_locals"], alias) {
+            la modul_namn = komp["import_alias"][alias]
+            hvis har_nokkel(komp["modul_enum_kart"], modul_namn) {
+                la mk = komp["modul_enum_kart"][modul_namn]
+                hvis har_nokkel(mk, obj["verdi"]) { returner mk[obj["verdi"]] }
+            }
+        }
+    }
+    returner null
+}
+
+funksjon enum_namn_tekst(obj) -> tekst {
+    hvis obj["type"] == "Felt" { returner tekst(obj["barn"][0]["verdi"]) + "." + tekst(obj["verdi"]) }
+    returner tekst(obj["verdi"])
+}
+
+funksjon enum_feil(node, melding: tekst) {
+    kast "Enumfeil " + tekst(node["linje"]) + ":" + tekst(node["kolonne"]) + " - " + melding
+}
+
+// Enum.metode(args): verdiar() → [0, 1, …], namn(v) → variantnamnet,
+// fraa_tekst(t) → indeksen (ingenting om t ikkje er ein variant). Gjev usann når
+// kallet ikkje er på ein enum, slik at vanleg kall-kompilering held fram.
+funksjon emit_enum_kall(komp, node, kode) -> boolsk {
+    la fn_ident = node["barn"][0]
+    la info = enum_info_for(komp, fn_ident["barn"][0])
+    hvis info == null { returner usann }
+    la metode = fn_ident["verdi"]
+    la args = node["barn"][1]["barn"]
+    la namn = info["namn"]
+    la enum_namn = enum_namn_tekst(fn_ident["barn"][0])
+    hvis metode == "verdiar" eller metode == "verdier" {
+        hvis lengde(args) != 0 { enum_feil(node, enum_namn + ".verdiar() tek ingen argument") }
+        la i: heiltall = 0
+        mens i < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", i))
+            i = i + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(namn)))
+        returner sann
+    }
+    hvis metode == "namn" eller metode == "navn" {
+        hvis lengde(args) != 1 { enum_feil(node, enum_namn + ".namn(v) tek eitt argument") }
+        la k: heiltall = 0
+        mens k < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", namn[k]))
+            k = k + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(namn)))
+        emit_uttrykk(komp, args[0], kode)
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    }
+    hvis metode == "fraa_tekst" eller metode == "frå_tekst" eller metode == "fra_tekst" {
+        hvis lengde(args) != 1 { enum_feil(node, enum_namn + ".fraa_tekst(t) tek eitt argument") }
+        la j: heiltall = 0
+        mens j < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", namn[j]))
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", j))
+            j = j + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_MAP", lengde(namn)))
+        emit_uttrykk(komp, args[0], kode)
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    }
+    enum_feil(node, "ukjend enum-metode " + enum_namn + "." + metode + "() (kjende: verdiar, namn, fraa_tekst)")
+    returner usann
+}
+
 // Feltoppslag obj.felt. Spesialfall: EnumNamn.Variant → PUSH_CONST med
-// variant-indeksen (kompileringstid-konstant). Elles obj["felt"] via INDEX_GET.
+// variant-indeksen (kompileringstid-konstant), og ukjend variant er
+// kompileringsfeil. EnumNamn.Variant.namn → variantnamnet som tekst.
+// Elles obj["felt"] via INDEX_GET.
 funksjon emit_felt(komp, node, kode) -> boolsk {
     la obj = node["barn"][0]
-    hvis obj["type"] == "Ident" og har_nokkel(komp["enum_kart"], obj["verdi"]) {
-        la variantar = komp["enum_kart"][obj["verdi"]]
+    la info = enum_info_for(komp, obj)
+    hvis info != null {
+        la variantar = info["variantar"]
         hvis har_nokkel(variantar, node["verdi"]) {
             legg_til(kode, json_instruksjon_med_int("PUSH_CONST", variantar[node["verdi"]]))
+            returner sann
+        }
+        enum_feil(node, "ukjend variant " + enum_namn_tekst(obj) + "." + tekst(node["verdi"]))
+    }
+    hvis obj["type"] == "Felt" og (node["verdi"] == "namn" eller node["verdi"] == "navn") {
+        la ei = enum_info_for(komp, obj["barn"][0])
+        hvis ei != null og har_nokkel(ei["variantar"], obj["verdi"]) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", obj["verdi"]))
             returner sann
         }
     }
@@ -1164,6 +1276,48 @@ funksjon emit_felt(komp, node, kode) -> boolsk {
     legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
     legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
     returner sann
+}
+
+// Uttømmande match over enum: når kvart case-mønster er EnumNamn.Variant for
+// same enum og det ikkje finst `ellers`/`case _`, må alle variantane vere dekte.
+// Elles kompileringsfeil. Andre match-former blir ikkje sjekka.
+funksjon sjekk_enum_match_dekning(komp, node) -> heiltall {
+    la info = null
+    la enum_tekst = ""
+    la dekt = {}
+    la ci: heiltall = 1
+    mens ci < lengde(node["barn"]) {
+        la case_node = node["barn"][ci]
+        hvis case_node["type"] == "MatchElse" eller case_node["verdi"] == "wildcard" { returner 0 }
+        la mønster = case_node["barn"][0]
+        hvis mønster["type"] != "Felt" { returner 0 }
+        la mi = enum_info_for(komp, mønster["barn"][0])
+        hvis mi == null { returner 0 }
+        la mt = enum_namn_tekst(mønster["barn"][0])
+        hvis info == null {
+            info = mi
+            enum_tekst = mt
+        } ellers hvis mt != enum_tekst {
+            returner 0
+        }
+        dekt[mønster["verdi"]] = sann
+        ci = ci + 1
+    }
+    hvis info == null { returner 0 }
+    la manglar = ""
+    la namn = info["namn"]
+    la ni: heiltall = 0
+    mens ni < lengde(namn) {
+        hvis ikkje har_nokkel(dekt, namn[ni]) {
+            hvis manglar != "" { manglar = manglar + ", " }
+            manglar = manglar + namn[ni]
+        }
+        ni = ni + 1
+    }
+    hvis manglar != "" {
+        enum_feil(node, "match over " + enum_tekst + " er ikkje uttømmande, manglar " + manglar + " (legg til case eller ellers)")
+    }
+    returner 0
 }
 
 funksjon emit_load_namn(komp, kode, namn: tekst) -> heiltall {
@@ -1658,6 +1812,13 @@ funksjon emit_uttrykk(komp, node, kode)
         argumenter = node["barn"][1]
         arg_antal = lengde(argumenter["barn"])
 
+        // Enum.verdiar() / Enum.namn(v) / Enum.fraa_tekst(t) blir løyst ved kompilering.
+        hvis fn_ident["type"] == "Felt"
+            hvis emit_enum_kall(komp, node, kode)
+                returner sann
+            slutt
+        slutt
+
         // Metode-kall: p.metode(args) der p er ein LOKAL variabel (struktur-instans,
         // ikkje ein modul). Dispatch dynamisk på __type__ via ncb_call_fn:
         //   ncb_call_fn(modul + "." + p["__type__"] + ".metode", p, args…)
@@ -1936,6 +2097,7 @@ funksjon emit_setning(komp, node, kode)
         hvis lengde(node["barn"]) == 0
             returner sann
         slutt
+        sjekk_enum_match_dekning(komp, node)
 
         subject_var = "match_subject_" + tekst_fra_heltall(komp["teller"])
         komp["teller"] = komp["teller"] + 1
@@ -2343,6 +2505,15 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
 
     mens i < lengde(ast_barn)
         node = ast_barn[i]
+        // Enumar i importerte modular: fg.Farge.GRON blir konstant ved kompilering.
+        hvis node["type"] == "Enum"
+            la mek = komp["modul_enum_kart"]
+            hvis ikkje har_nokkel(mek, modul_namn)
+                mek[modul_namn] = {}
+            slutt
+            la modul_enumar = mek[modul_namn]
+            modul_enumar[node["verdi"]] = lag_enum_info(node)
+        slutt
         hvis node["type"] == "Funksjon"
             fn_namn = node["verdi"]
             fullt_namn = modul_namn + "." + fn_namn
@@ -2611,13 +2782,7 @@ funksjon kompiler_program(ast_program, modul_namn)
         slutt
         hvis node["type"] == "Enum" {
             la ek = komp["enum_kart"]
-            la variantar = {}
-            la vi: heiltall = 0
-            mens vi < lengde(node["barn"]) {
-                variantar[node["barn"][vi]["verdi"]] = vi
-                vi = vi + 1
-            }
-            ek[node["verdi"]] = variantar
+            ek[node["verdi"]] = lag_enum_info(node)
         }
         hvis node["type"] == "Grensesnitt" {
             la gk = komp["grensesnitt_kart"]
