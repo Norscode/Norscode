@@ -2131,6 +2131,7 @@ funksjon samle_strenger(fns) {
         "exit_code", "stdout", "stderr", "error", "output limit",
         "process spawn failed", "wall_ms", "peak_rss_bytes",
         "desimaltall", "bytes", "__lambda__", "__capture__",
+        "NATIV-GAP",
         X86_MAL()
     ]
     la std_i: heiltall = 0
@@ -2140,6 +2141,15 @@ funksjon samle_strenger(fns) {
         std_i = std_i + 1
     }
     la nk = nøkler(fns)
+    // R1/F10: siste namnesegment for kvar bundla funksjon, so fail-closed-kall utan
+    // mål (sjå er_fail_closed_kall) får ei eiga «NATIV-GAP:<namn>»-melding.
+    la siste_seg: ordbok = {}
+    la ssi: heiltall = 0
+    mens ssi < lengde(nk) {
+        la ss_delar = builtin.split(tekst(nk[ssi]), ".")
+        siste_seg[ss_delar[lengde(ss_delar) - 1]] = sann
+        ssi = ssi + 1
+    }
     la fi: heltall = 0
     mens fi < lengde(nk) {
         hvis fi % 100 == 0 { native_codegen_trace("strengpass funksjon=" + tekst_fra_heltall(fi)) }
@@ -2152,6 +2162,19 @@ funksjon samle_strenger(fns) {
                 hvis ikkje finnes_nøkkel(sett, s) {
                     sett[s] = sann
                     legg_til(strenger, s)
+                }
+            }
+            hvis instr[0] == "CALL" og lengde(instr) >= 2 og builtin.type(instr[1]) == "tekst" {
+                la kall_mål: tekst = instr[1]
+                hvis er_fail_closed_kall(kall_mål) og ikkje finnes_nøkkel(fns, kall_mål) {
+                    la km_delar = builtin.split(kall_mål, ".")
+                    hvis builtin.starts_with(kall_mål, "builtin.") eller ikkje finnes_nøkkel(siste_seg, km_delar[lengde(km_delar) - 1]) {
+                        la gap_s = "NATIV-GAP:" + kall_mål
+                        hvis ikkje finnes_nøkkel(sett, gap_s) {
+                            sett[gap_s] = sann
+                            legg_til(strenger, gap_s)
+                        }
+                    }
                 }
             }
             // BUILD_LAMBDA: closure-nøklane, hjelparnamnet og capture-namna blir
@@ -9562,6 +9585,44 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                            // ret
     // R2: dynamiske kall (ncb_call_fn/CALL_VALUE), assert-sjekkar og bytes_new.
     emit_r2_atom(bytes, atomics)
+    // ── R1/F09: list_insert rdi=liste rsi=indeks (heiltals-NcVal) rdx=verdi → rax=liste ──
+    // sett_inn(liste, indeks, verdi) på plass, same kontrakt som VM-armen og
+    // std.native_gap.sett_inn: indeks utanfor [0, lengde] blir klamra. Legg verdien
+    // til (list_app veks ved behov), flytt [pos, n) eitt steg opp og skriv verdien på pos.
+    atomics["list_insert"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                     // push rbx
+    copy(bytes, [0x41, 0x54])                               // push r12
+    copy(bytes, [0x41, 0x55])                               // push r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x48, 0x89, 0xFB])                         // mov rbx,rdi
+    copy(bytes, [0x4C, 0x8B, 0x66, 0x08])                   // mov r12,QWORD PTR [rsi+0x8]
+    copy(bytes, [0x49, 0x89, 0xD5])                         // mov r13,rdx
+    copy(bytes, [0x48, 0x89, 0xD6])                         // mov rsi,rdx
+    call_rel32(bytes, atomics["list_app"], TEXT_VA())               // call X_a_list_app (rdi=liste)
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])                   // mov rax,QWORD PTR [rbx+0x8]
+    copy(bytes, [0x48, 0x8B, 0x08])                         // mov rcx,QWORD PTR [rax]
+    copy(bytes, [0x48, 0xFF, 0xC9])                         // dec rcx            (rcx = n)
+    copy(bytes, [0x4D, 0x85, 0xE4])                         // test r12,r12
+    copy(bytes, [0x79, 0x03])                               // jns +3
+    copy(bytes, [0x45, 0x31, 0xE4])                         // xor r12d,r12d      (pos < 0 → 0)
+    copy(bytes, [0x49, 0x39, 0xCC])                         // cmp r12,rcx
+    copy(bytes, [0x7E, 0x03])                               // jle +3
+    copy(bytes, [0x49, 0x89, 0xCC])                         // mov r12,rcx        (pos > n → n)
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])                   // mov rdx,QWORD PTR [rax+0x10]
+    // løkke: mens rcx > pos { e[rcx] = e[rcx-1]; rcx-- }
+    copy(bytes, [0x4C, 0x39, 0xE1])                         // cmp rcx,r12
+    copy(bytes, [0x7E, 0x0E])                               // jle ferdig
+    copy(bytes, [0x4C, 0x8B, 0x44, 0xCA, 0xF8])             // mov r8,QWORD PTR [rdx+rcx*8-0x8]
+    copy(bytes, [0x4C, 0x89, 0x04, 0xCA])                   // mov QWORD PTR [rdx+rcx*8],r8
+    copy(bytes, [0x48, 0xFF, 0xC9])                         // dec rcx
+    copy(bytes, [0xEB, 0xED])                               // jmp løkke
+    // ferdig:
+    copy(bytes, [0x4E, 0x89, 0x2C, 0xE2])                   // mov QWORD PTR [rdx+r12*8],r13
+    copy(bytes, [0x48, 0x89, 0xD8])                         // mov rax,rbx
+    copy(bytes, [0x41, 0x5D])                               // pop r13
+    copy(bytes, [0x41, 0x5C])                               // pop r12
+    copy(bytes, [0x5B])                                     // pop rbx
+    copy(bytes, [0xC3])                                     // ret
+
     // F3.8: skriv inn GC-atom-adressene i dei direkte emitterte kalla (fail-closed).
     gc_fix_løys(bytes, gc_fix, atomics)
     // Fail-closed: kvar RT_*-slot i entry-tabellen MÅ vere patcha (movabs rax = 48 B8).
@@ -10151,17 +10212,17 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.gc_mark_roots" eller fn_nm == "gc_mark_roots" { returner atomic_vas["gc_mark_roots"] }
     hvis fn_nm == "builtin.gc_collect_native" eller fn_nm == "gc_collect_native" { returner atomic_vas["gc_collect_native"] }
     // String-ops
-    la er_split        = fn_nm == "builtin.split" eller builtin.ends_with(fn_nm, ".split") eller fn_nm == "tekst_splitt"
-    la er_join         = fn_nm == "builtin.join" eller builtin.ends_with(fn_nm, ".join") eller fn_nm == "tekst_join"
-    la er_contains     = fn_nm == "builtin.contains" eller builtin.ends_with(fn_nm, ".contains") eller fn_nm == "tekst_inneholder"
+    la er_split        = fn_nm == "builtin.split" eller builtin.ends_with(fn_nm, ".split") eller fn_nm == "tekst_splitt" eller fn_nm == "builtin.tekst_splitt"
+    la er_join         = fn_nm == "builtin.join" eller builtin.ends_with(fn_nm, ".join") eller fn_nm == "tekst_join" eller fn_nm == "builtin.tekst_join"
+    la er_contains     = fn_nm == "builtin.contains" eller builtin.ends_with(fn_nm, ".contains") eller fn_nm == "tekst_inneholder" eller fn_nm == "builtin.tekst_inneholder"
     la er_starts_with  = fn_nm == "builtin.starts_with" eller builtin.ends_with(fn_nm, ".starts_with") eller fn_nm == "tekst_starter_med" eller builtin.ends_with(fn_nm, ".tekst_starter_med")
-    la er_ends_with    = fn_nm == "builtin.ends_with" eller builtin.ends_with(fn_nm, ".ends_with") eller fn_nm == "tekst_slutter_med"
+    la er_ends_with    = fn_nm == "builtin.ends_with" eller builtin.ends_with(fn_nm, ".ends_with") eller fn_nm == "tekst_slutter_med" eller fn_nm == "builtin.tekst_slutter_med"
     la er_slice        = fn_nm == "builtin.slice" eller builtin.ends_with(fn_nm, ".slice")
     la er_index_of     = fn_nm == "index_of" eller fn_nm == "builtin.index_of" eller builtin.ends_with(fn_nm, ".index_of")
     // 2026-09-06: VM-dispatcheren (vm.kall_innebygd) kallar «builtin.tekst_erstatt»
     // kvalifisert → mangla her → null-fallback (~15 seed-testar).
     la er_replace      = fn_nm == "builtin.replace" eller fn_nm == "tekst_erstatt" eller builtin.ends_with(fn_nm, ".replace") eller builtin.ends_with(fn_nm, ".tekst_erstatt")
-    la er_trim         = fn_nm == "builtin.trim" eller fn_nm == "tekst_trim" eller builtin.ends_with(fn_nm, ".trim")
+    la er_trim         = fn_nm == "builtin.trim" eller fn_nm == "tekst_trim" eller fn_nm == "builtin.tekst_trim" eller builtin.ends_with(fn_nm, ".trim")
     la er_lower        = fn_nm == "builtin.lower" eller builtin.ends_with(fn_nm, "tekst_til_liten") eller builtin.ends_with(fn_nm, "tekst_sma") eller builtin.ends_with(fn_nm, ".lower")
     la er_upper        = fn_nm == "builtin.upper" eller builtin.ends_with(fn_nm, "tekst_til_store") eller builtin.ends_with(fn_nm, "tekst_store") eller builtin.ends_with(fn_nm, ".upper")
     la er_char_code    = fn_nm == "builtin.char_code" eller fn_nm == "char_code"
@@ -10212,11 +10273,13 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     // som ordinære Norscode-kall. Berre eksplisitte builtin-/ukvalifiserte
     // JSON-intrinsics skal gå til den native skalarrutinen.
     la er_json_str     = fn_nm == "json_stringify" eller fn_nm == "json_skriv" eller fn_nm == "builtin.json_stringify" eller fn_nm == "builtin.json_skriv"
-    // List
+    // List. R1/F09: kompilatoren senkar nakne kall til «builtin.<namn>», så eit
+    // alias som berre stod som naket namn (pop_siste, fjern_indeks, tekst_*) traff
+    // aldri og fall til null-fallbacken (08b: fjern_indeks uendra, pop_siste tom).
     la er_legg_til     = fn_nm == "legg_til" eller builtin.ends_with(fn_nm, ".legg_til")
     la er_lengde       = fn_nm == "lengde" eller builtin.ends_with(fn_nm, ".lengde")
-    la er_fjern_siste  = fn_nm == "fjern_siste" eller fn_nm == "pop_siste" eller builtin.ends_with(fn_nm, ".fjern_siste")
-    la er_fjern        = fn_nm == "fjern" eller fn_nm == "fjern_indeks" eller builtin.ends_with(fn_nm, ".fjern")
+    la er_fjern_siste  = fn_nm == "fjern_siste" eller fn_nm == "pop_siste" eller fn_nm == "builtin.pop_siste" eller builtin.ends_with(fn_nm, ".fjern_siste")
+    la er_fjern        = fn_nm == "fjern" eller fn_nm == "fjern_indeks" eller fn_nm == "builtin.fjern_indeks" eller builtin.ends_with(fn_nm, ".fjern")
     // Map
     la er_finnes_nokkel = fn_nm == "finnes_nøkkel" eller fn_nm == "har_nokkel" eller builtin.ends_with(fn_nm, ".finnes_nøkkel") eller builtin.ends_with(fn_nm, ".har_nokkel")
                           eller fn_nm == "nøkkel_finnes" eller builtin.ends_with(fn_nm, ".nøkkel_finnes")
@@ -10310,6 +10373,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_lengde      { returner atomic_vas["lengde_safe"] }
     hvis er_fjern_siste { returner RT_LIST_POP() }
     hvis er_fjern       { returner RT_LIST_REMOVE() }
+    // R1/F09: sett_inn(liste, indeks, verdi) → list_insert-atomet (før: gap-ruta til
+    // std.native_gap.sett_inn berre når modulen var i bunten, elles null-fallback → 10,30).
+    hvis fn_nm == "builtin.sett_inn" eller fn_nm == "sett_inn" { returner atomic_vas["list_insert"] }
     hvis er_finnes_nokkel { returner atomic_vas["map_has_safe"] }
     hvis er_nokler      { returner atomic_vas["nokler_safe"] }
     hvis er_verdier     { returner RT_MAP_VALS() }
@@ -10446,6 +10512,18 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     hvis er_strukturkonstruktør(fn_nm, nargs) {
         call_rel32(buf, RT_MAP_NEW(), code_va)
         legg_til(buf, 0x50)
+        returner
+    }
+    // ── R1/F10: await_value(v). AOT har ingen VM-planleggar: async-funksjonar køyrer
+    // synkront og returnerer sjølve verdien, så await er identitet (VM: ikkje-future →
+    // verdien). Med std.native_gap i bunten gjeld future-kontrakten der (ferdig →
+    // verdi, feil/timeout/kansellert → kast, ventande → FutureFeil). Var null-fallback:
+    // `await dobbel(21)` gav '' med exit 0 (p06b).
+    hvis (fn_nm == "builtin.await_value" eller fn_nm == "await_value") og nargs == 1 {
+        hvis finnes_nøkkel(fn_vas, "std.native_gap.await_value") {
+            emit_user_call(buf, fn_vas["std.native_gap.await_value"], nargs, code_va)
+        }
+        // elles: identitet — argumentet blir liggjande på stakken som resultat.
         returner
     }
     // ── R2: builtin.ncb_call_fn(fn, a1..an) → indirekte kall via verts-funksjonstabellen
@@ -11143,6 +11221,13 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
                  " har inga rute i bunten (tryggleiksbuiltin: null-fallback ville gitt tom verdi" +
                  " utan unnatak) — legg til `bruk std.native_gap`"
         }
+        // R1/F10: fail-closed for kall som ALDRI kan gje ein meiningsfull null:
+        // trådar (thread_*), atomic_operation, VM-refleksjon (vm_*) og kvalifiserte
+        // brukarmodul-kall utan mål i bunten. Dei gav tomme verdiar med exit 0
+        // (p01/p05/m05a); no kastar kallet «NATIV-GAP:<namn>» ved køyring (fangbart,
+        // same konvensjon som ARM64-stubbane). Andre builtin.* utan rute er framleis
+        // frivillige krokar med null-fallback.
+        la fail_closed = er_fail_closed_kall(fn_nm)
         la ukjent_nøkkel = "NC_CODEGEN_UKJENT:" + fn_nm
         la alt_meldt = usann
         prøv {
@@ -11150,8 +11235,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             hvis ikkje alt_meldt { miljo_sett(ukjent_nøkkel, "1") }
         } fang (miljøfeil) { alt_meldt = usann }
         hvis ikkje alt_meldt {
+            la følgje = " → null-fallback\n"
+            hvis fail_closed { følgje = " → kastar NATIV-GAP ved køyring\n" }
             skriv("native_codegen_v2: ÅTVARING ukjent kall " + fn_nm + "/" +
-                  tekst_fra_heltall(nargs) + " → null-fallback\n")
+                  tekst_fra_heltall(nargs) + følgje)
             // Strikt gjeld kvalifiserte BRUKARMODUL-kall (modul.funksjon); builtin.*
             // utan native rutine (web/thread/acme/…) er framleis frivillige krokar.
             hvis miljo_hent("NORSCODE_CODEGEN_STRIKT") == "1" og builtin.index_of(fn_nm, ".") >= 0
@@ -11164,6 +11251,15 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             legg_til(buf, 0x58)
             ui = ui + 1
         }
+        hvis fail_closed {
+            // Meldinga er samla inn i dataseksjonen av samle_strenger; manglar ho
+            // (namn som ikkje var kjende då), blir den generiske «NATIV-GAP» brukt.
+            la gap_melding = "NATIV-GAP:" + fn_nm
+            hvis ikkje finnes_nøkkel(rd_offs, gap_melding) { gap_melding = "NATIV-GAP" }
+            emit_push_const(buf, gap_melding, rd_offs, code_va)
+            emit_rt_call_1(buf, atomic_vas["feil"], code_va)   // kastar; returnerer ikkje
+            returner
+        }
         legg_til(buf, 0x48)
         legg_til(buf, 0x31)
         legg_til(buf, 0xC0)  // xor rax, rax = Norscode-null (rå NULL for VM-fallback-krok)
@@ -11171,6 +11267,17 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         returner
     }
     emit_user_call(buf, fn_va, nargs, code_va)
+}
+
+// R1/F10: kall som skal kaste ved køyring i staden for å gje null når codegenen
+// ikkje har noko mål for dei (sjå fn_va == 0-greina i emit_builtin_or_user_call).
+funksjon er_fail_closed_kall(fn_nm: tekst) -> boolsk {
+    hvis builtin.starts_with(fn_nm, "builtin.") {
+        la n = builtin.slice(fn_nm, 8, lengde(fn_nm))
+        returner builtin.starts_with(n, "thread_") eller n == "atomic_operation" eller builtin.starts_with(n, "vm_")
+    }
+    // Kvalifisert brukarmodul-kall (modul.funksjon) utan mål i bunten.
+    returner builtin.index_of(fn_nm, ".") >= 0
 }
 
 // Verts-funksjonstabell for host_finst/host_kall/host_resolve (sjå bygg_runtime_v2):
