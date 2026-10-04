@@ -1045,6 +1045,7 @@ funksjon ny_komp()
     komp["lambda_teller"] = 0
     komp["loop_start"] = []    // stack: start-etiketter for løkker (continue)
     komp["loop_slutt"] = []    // stack: slutt-etiketter for løkker (break)
+    komp["prov_stakk"] = []    // stack: opne prøv-blokker (F03, sjå emit_lykkjestyring)
     komp["defer_blocks"] = []
     // Modulglobale namn er eksplisitte i NCB. Dette hindrar at toppnivå-`la`
     // blir kasta vekk og at native backend må gjette globale namn frå prefiks.
@@ -2005,6 +2006,63 @@ funksjon fjern_ubrukte_literal_setning(kode, start_ip: heiltall) -> boolsk
     returner sann
 slutt
 
+// ─── bryt/fortsett ut av prøv/endeleg (F03) ─────────────────────────────────
+// komp["prov_stakk"] held ein post per prøv-blokk som er under kompilering:
+// {"har_fang", "har_endeleg", "i_fang", "ctl", "etter", "loop_djupn"}.
+// Ein bryt/fortsett kryssar alle prøv-postar som vart opna inne i den
+// gjeldande løkka (loop_djupn == talet opne løkker). For kvar slik post:
+//   - handleren (TRY_BEGIN) blir fjerna med TRY_END, om han framleis er aktiv
+//     (i fang-blokka er han alt fjerna);
+//   - har posten endeleg, blir kontrollvariabelen sett (1 = bryt,
+//     2 = fortsett) og endeleg-blokka køyrt via FINALLY_RUN. Etter endeleg
+//     les prøv-setninga kontrollvariabelen og gjer bryt/fortsett på nytt i
+//     den ytre konteksten (sjå emit_prov_fang).
+
+// Sann om blokka inneheld ein bryt/fortsett som høyrer til ei løkke utanfor
+// blokka (dvs. ikkje inne i ei nøsta løkke, lambda eller funksjon).
+funksjon prov_har_lykkjestyring(node) -> boolsk {
+    hvis node == null { returner usann }
+    hvis builtin.type(node) != "ordbok" { returner usann }
+    la t = node["type"]
+    hvis t == "Bryt" eller t == "Fortsett" { returner sann }
+    hvis t == "For" eller t == "ForRange" eller t == "Mens" eller t == "Lambda" eller t == "Funksjon" eller t == "ListeKomprehensjon" { returner usann }
+    la barn = node["barn"]
+    hvis barn == null { returner usann }
+    hvis builtin.type(barn) != "liste" { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(barn) {
+        hvis prov_har_lykkjestyring(barn[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Emitterer bryt (kind 1) eller fortsett (kind 2) frå gjeldande stad.
+funksjon emit_lykkjestyring(komp, kind: heiltall, kode) -> heiltall {
+    la mål = gjeldande_loop_slutt(komp)
+    hvis kind == 2 { mål = gjeldande_loop_start(komp) }
+    hvis mål == "" { returner 0 }
+    la djupn: heiltall = lengde(komp["loop_start"])
+    la ps = komp["prov_stakk"]
+    la pi: heiltall = lengde(ps) - 1
+    mens pi >= 0 {
+        la p = ps[pi]
+        hvis p["loop_djupn"] != djupn { bryt }
+        hvis p["har_fang"] og ikkje p["i_fang"] {
+            legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
+        }
+        hvis p["har_endeleg"] og p["ctl"] != "" {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", kind))
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", p["ctl"]))
+            legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", p["etter"]))
+            returner 0
+        }
+        pi = pi - 1
+    }
+    legg_til(kode, json_instruksjon_med_tekst("JUMP", mål))
+    returner 0
+}
+
 funksjon emit_prov_fang(komp, node, kode) -> boolsk {
     la catch_lbl = ny_etikett(komp)
     la after_lbl = ny_etikett(komp)
@@ -2018,6 +2076,20 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
 
     la har_fang = node["has_catch"] != usann
     la har_endeleg = node["has_finally"] == sann
+    // F03: kontrollvariabel berre når ein bryt/fortsett kan forlate prøv- eller
+    // fang-blokka gjennom endeleg. Elles er NCB-en uendra.
+    la ctl_var = ""
+    hvis har_endeleg {
+        la kryssar = prov_har_lykkjestyring(node["barn"][0])
+        hvis ikkje kryssar og har_fang { kryssar = prov_har_lykkjestyring(node["barn"][1]) }
+        hvis kryssar {
+            ctl_var = "__prov_ctl_" + tekst_fra_heltall(komp["teller"]) + "__"
+            komp["teller"] = komp["teller"] + 1
+        }
+    }
+    la post = {"har_fang": har_fang, "har_endeleg": har_endeleg, "i_fang": usann, "ctl": ctl_var, "etter": after_lbl, "loop_djupn": lengde(komp["loop_start"])}
+    legg_til(komp["prov_stakk"], post)
+
     hvis har_endeleg {
         legg_til(kode, json_instruksjon_med_tekst("FINALLY_PUSH", finally_lbl))
     }
@@ -2025,6 +2097,10 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
     emit_blokk(komp, node["barn"][0], kode)
     hvis har_fang { legg_til(kode, json_instruksjon_uten_arg("TRY_END")) }
     hvis har_endeleg {
+        hvis ctl_var != "" {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", ctl_var))
+        }
         legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
     } ellers {
         legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
@@ -2034,13 +2110,20 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
         legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
         legg_til(kode, json_instruksjon_uten_arg("LOAD_EXCEPTION"))
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+        post["i_fang"] = sann
         emit_blokk(komp, node["barn"][1], kode)
         hvis har_endeleg {
+            hvis ctl_var != "" {
+                legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
+                legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", ctl_var))
+            }
             legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
         } ellers {
             legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
         }
     }
+    // Endeleg-blokka og alt etter prøv-setninga er utanfor denne posten.
+    fjern_siste(komp["prov_stakk"])
     hvis har_endeleg {
         legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_lbl))
         emit_blokk(komp, node["barn"][2], kode)
@@ -2055,6 +2138,23 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
         legg_til(kode, json_instruksjon_uten_arg("THROW"))
     }
     legg_til(kode, json_instruksjon_med_tekst("LABEL", after_lbl))
+    hvis ctl_var != "" {
+        // Etter endeleg: hald fram med bryt (1) / fortsett (2) i ytre kontekst.
+        la ikkje_bryt_lbl = ny_etikett(komp)
+        la ikkje_fortsett_lbl = ny_etikett(komp)
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", ctl_var))
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 1))
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ikkje_bryt_lbl))
+        emit_lykkjestyring(komp, 1, kode)
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", ikkje_bryt_lbl))
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", ctl_var))
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 2))
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ikkje_fortsett_lbl))
+        emit_lykkjestyring(komp, 2, kode)
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", ikkje_fortsett_lbl))
+    }
     returner sann
 }
 
@@ -2291,21 +2391,15 @@ funksjon emit_setning(komp, node, kode)
         returner sann
     slutt
 
-    // bryt
+    // bryt (ryddar opne prøv-blokker og køyrer endeleg, sjå emit_lykkjestyring)
     hvis t == "Bryt"
-        lbl = gjeldande_loop_slutt(komp)
-        hvis lbl != ""
-            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
-        slutt
+        emit_lykkjestyring(komp, 1, kode)
         returner sann
     slutt
 
     // fortsett
     hvis t == "Fortsett"
-        lbl = gjeldande_loop_start(komp)
-        hvis lbl != ""
-            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
-        slutt
+        emit_lykkjestyring(komp, 2, kode)
         returner sann
     slutt
 
