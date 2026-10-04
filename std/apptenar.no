@@ -52,7 +52,7 @@ bruk std.metrikk som _metrikk
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
 la _t: ordbok = {"køyrer": usann, "stopp": usann, "req_nr": 0, "handsama": 0, "dato_s": -1, "dato": "",
-                 "bg": [], "etter": usann, "tilk_nr": 0, "n_tilk": 0, "spes": usann}
+                 "bg": [], "etter": usann, "tilk_nr": 0, "n_tilk": 0, "spes": usann, "vanleg": usann}
 la _konf: ordbok = {}
 la _kanalar: ordbok = {}
 la _tilk: ordbok = {}
@@ -158,6 +158,9 @@ funksjon _lag_snap() -> heltall {
     _s["metrikk"] = (har_nokkel(_t, "metrikk_på") og _t["metrikk_på"] == sann) eller _konf["metrikk"] == sann
     _s["spor"] = (har_nokkel(_t, "spor_på") og _t["spor_på"] == sann) eller _konf["spor"] == sann
     _s["tid"] = _s["metrikk"] eller _s["spor"] eller _s["tilgangslogg"]
+    # Ingen av request-id, spor, metrikk, ferdigstilling eller tilgangslogg: då er
+    # dispatch berre _rut, og dei heite kallarane kallar _rut direkte.
+    _s["enkel"] = ikkje (_s["tid"] eller rid eller _s["ferdig"])
     _s["metrikk_sti"] = tekst(_konf["metrikk_sti"])
     _s["ka"] = "Connection: keep-alive\r\nKeep-Alive: timeout=" + tekst(_konf["ledig_ms"] / 1000) + "\r\n"
     la g = _konf["globale_deps"]
@@ -792,6 +795,11 @@ funksjon _norm(svar, typ: tekst) -> ordbok {
         # interne nøklar ("__type__" m.m.) blir fjerna, dato/tid blir ISO-8601, bytes base64.
         returner {"status": 200, "content_type": "application/json; charset=utf-8", "body": _serde.ordbok_json(svar, ks)}
     }
+    returner _norm_svar(svar, ks)
+}
+
+# Svarordbok (har respons-nøklar) → normalisert svar. ks er nøklane i svar.
+funksjon _norm_svar(svar, ks: liste) -> ordbok {
     la d = {}
     la i = 0
     mens i < lengde(ks) {
@@ -993,26 +1001,33 @@ funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
     la topp = _s["topp"]
     la tv = _tv
     la har_ct = usann
+    la har_h = usann
     la ks = nøkler(d)
     la nk = lengde(ks)
     la i = 0
     mens i < nk {
         la k = ks[i]
-        hvis k != "status" og k != "body" og k != "headers" og har_nokkel(topp, k) {
-            la v = d[k]
-            hvis v != null {
-                la vt = tekst(v)
-                hvis vt != "" {
-                    la hn = topp[k]
-                    hvis ikkje har_nokkel(tv, vt) { _sjekk_verdi(hn, vt) }
-                    ut = ut + hn + ": " + vt + "\r\n"
-                    hvis hn == "Content-Type" { har_ct = sann }
+        hvis k == "headers" {
+            har_h = sann
+        } ellers hvis k != "status" og k != "body" {
+            # Content-Type er den vanlegaste toppnøkkelen: utan oppslag i tabellen.
+            la hn = ""
+            hvis k == "content_type" { hn = "Content-Type" } ellers hvis har_nokkel(topp, k) { hn = topp[k] }
+            hvis hn != "" {
+                la v = d[k]
+                hvis v != null {
+                    la vt = tekst(v)
+                    hvis vt != "" {
+                        hvis ikkje har_nokkel(tv, vt) { _sjekk_verdi(hn, vt) }
+                        ut = ut + hn + ": " + vt + "\r\n"
+                        hvis hn == "Content-Type" { har_ct = sann }
+                    }
                 }
             }
         }
         i = i + 1
     }
-    hvis har_nokkel(d, "headers") {
+    hvis har_h {
         la h = d["headers"]
         la hk = nøkler(h)
         la hs = _hs
@@ -1463,9 +1478,12 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
         ctx["__trace_id__"] = span["trace_id"]
         ctx["__traceparent__"] = _metrikk.traceparent(span)
     }
+    _t["vanleg"] = usann
     la d = _rut(ctx, start_ms)
     # Kallaren (handsam_rå, _prøv_førespurnad) les _t["spes"] i staden for å slå opp att.
-    la spes = har_nokkel(d, "__sse__") eller har_nokkel(d, "__ws__")
+    # Eit vanleg handlarsvar (_t["vanleg"]) kan ikkje vere SSE/WS.
+    la spes = usann
+    hvis ikkje _t["vanleg"] { spes = har_nokkel(d, "__sse__") eller har_nokkel(d, "__ws__") }
     _t["spes"] = spes
     hvis spes {
         la st_opp = 200
@@ -1833,6 +1851,9 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         returner {"__ws__": fn, "__ws_ctx__": ctx, "__ws_deps__": dep_values}
     }
     la d = null
+    # Vanleg svar (data eller ikkje-ordbok, ingen respons-mellomvare) kan ikkje ha
+    # __sse__/__ws__, så dispatch treng ikkje sjå etter dei (sjå _t["vanleg"]).
+    la data_svar = usann
     prøv {
         la svar = null
         # Aritet 1 (berre ctx) er det vanlege: kall direkte i staden for via
@@ -1842,21 +1863,55 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         } ellers {
             svar = _di.kall_handlar(fn, ctx, dep_values)
         }
+        # Ein nøsta dispatch i handlaren kan ha sett flagget; nullstill det.
+        _t["vanleg"] = usann
         hvis svar == null {
             d = normaliser(svar)
+            data_svar = sann
         } ellers {
             la typ = builtin.type(svar)
-            hvis typ == "ordbok" og har_nokkel(svar, "__sse__") {
-                hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
-                returner svar
+            hvis typ == "ordbok" {
+                # Som _norm, men inline: svar eller data? (__sse__ er ein respons-nøkkel.)
+                la ks = nøkler(svar)
+                la nk = lengde(ks)
+                la er = usann
+                hvis nk <= 8 {
+                    la sn = _svarnøklar
+                    la j = 0
+                    mens j < nk {
+                        hvis har_nokkel(sn, ks[j]) {
+                            er = sann
+                            j = nk
+                        }
+                        j = j + 1
+                    }
+                } ellers {
+                    er = _er_svar(svar)
+                }
+                hvis er {
+                    hvis har_nokkel(svar, "__sse__") {
+                        hvis metode != "get" { returner _feil_mw(_feil(405, "SSE krev GET")) }
+                        returner svar
+                    }
+                    d = _norm_svar(svar, ks)
+                } ellers {
+                    d = {"status": 200, "content_type": "application/json; charset=utf-8", "body": _serde.ordbok_json(svar, ks)}
+                    data_svar = sann
+                }
+            } ellers {
+                d = _norm(svar, typ)
+                data_svar = sann
             }
-            d = _norm(svar, typ)
         }
     } fang (e) {
         _logg("feil", "handlar " + fn + " kasta på " + metode + " " + sti + ": " + tekst(e))
         returner _feil_mw(_feil_frå_unntak(e))
     }
-    hvis _s["n_rs"] > 0 { d = _respons_mw(d) }
+    hvis _s["n_rs"] > 0 {
+        d = _respons_mw(d)
+    } ellers hvis data_svar {
+        _t["vanleg"] = sann
+    }
     # Vilkårsbunde svar (304) berre for GET/HEAD med 200 og If-None-Match/If-Modified-Since.
     la m2 = ctx["__method__"]
     hvis (m2 != "get" og m2 != "head") eller d["status"] != 200 { returner d }
@@ -1884,8 +1939,26 @@ funksjon handsam_rå(rå: tekst) -> tekst {
     la req = tolk_hovud(builtin.slice(rå, 0, slutt))
     hvis ikkje req["ok"] { returner til_http(_feil(req["status"], req["grunn"]), usann, usann) }
     la kropp = builtin.slice(rå, slutt + 4, lengde(rå))
-    la ctx = ctx_frå(req, kropp)
-    la d = dispatch(ctx)
+    # ctx og dispatch inline (same som ctx_frå + dispatch, to kall mindre per førespurnad).
+    hvis ikkje _s["ok"] { _lag_snap() }
+    la nr = _t["req_nr"] + 1
+    _t["req_nr"] = nr
+    la m = req["metode"]
+    la ml = ""
+    hvis m == "GET" { ml = "get" } ellers hvis m == "POST" { ml = "post" } ellers hvis m == "HEAD" { ml = "head" } ellers { ml = _liten(m) }
+    la ctx = {"method": m, "__method__": ml, "__path__": req["sti"], "__query__": req["query"],
+              "__headers__": req["headers"], "__body__": kropp, "__params__": {},
+              "__request_id__": "r" + tekst(nr), "__versjon__": req["versjon"], "__lh__": sann}
+    la d = null
+    hvis _s["enkel"] {
+        _t["vanleg"] = usann
+        d = _rut(ctx, 0)
+        la spes = usann
+        hvis ikkje _t["vanleg"] { spes = har_nokkel(d, "__sse__") eller har_nokkel(d, "__ws__") }
+        _t["spes"] = spes
+    } ellers {
+        d = dispatch(ctx)
+    }
     hvis _t["spes"] og har_nokkel(d, "__sse__") { hvis _t["etter"] { _etter_svar() }  returner "SSE " + tekst(d["__sse__"]) }
     hvis _t["spes"] og har_nokkel(d, "__ws__") {
         la t = _ws_start(d)
@@ -2210,12 +2283,30 @@ funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
         kropp = builtin.slice(inn2, 0, lengd)
         c["inn"] = builtin.slice(inn2, lengd, n2)
     }
-    la nr = c["nr"] + 1
-    c["nr"] = nr
-    la ka = req["keep_alive"] og nr < k["maks_forespurnader_per_tilkopling"] og ikkje _t["stopp"]
-    la ctx = ctx_frå(req, kropp)
-    la head = ctx["__method__"] == "head"
-    la d = dispatch(ctx)
+    la cnr = c["nr"] + 1
+    c["nr"] = cnr
+    la ka = req["keep_alive"] og cnr < k["maks_forespurnader_per_tilkopling"] og ikkje _t["stopp"]
+    # ctx og dispatch inline (same som ctx_frå + dispatch, to kall mindre per førespurnad).
+    hvis ikkje _s["ok"] { _lag_snap() }
+    la nr = _t["req_nr"] + 1
+    _t["req_nr"] = nr
+    la m = req["metode"]
+    la ml = ""
+    hvis m == "GET" { ml = "get" } ellers hvis m == "POST" { ml = "post" } ellers hvis m == "HEAD" { ml = "head" } ellers { ml = _liten(m) }
+    la ctx = {"method": m, "__method__": ml, "__path__": req["sti"], "__query__": req["query"],
+              "__headers__": req["headers"], "__body__": kropp, "__params__": {},
+              "__request_id__": "r" + tekst(nr), "__versjon__": req["versjon"], "__lh__": sann}
+    la d = null
+    hvis _s["enkel"] {
+        _t["vanleg"] = usann
+        d = _rut(ctx, 0)
+        la spes = usann
+        hvis ikkje _t["vanleg"] { spes = har_nokkel(d, "__sse__") eller har_nokkel(d, "__ws__") }
+        _t["spes"] = spes
+    } ellers {
+        d = dispatch(ctx)
+    }
+    la head = ml == "head"
     _t["handsama"] = _t["handsama"] + 1
     # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga,
     # i tenarløkka utan trådar (1.2/1.7).
@@ -2357,15 +2448,51 @@ funksjon _steg(c: ordbok, no: heltall) -> heltall {
     }
     hvis fase == "hovud" eller fase == "kropp" {
         fram = fram + _prøv_førespurnad(c, no)
-        hvis c["fase"] == "skriv" og c["ut"] != "" {
-            la n2 = _skriv_ut(c)
-            hvis n2 < 0 {
-                _lukk(c)
-                returner fram + 1
+        hvis c["fase"] == "skriv" {
+            la ut2 = c["ut"]
+            la n_ut2 = lengde(ut2)
+            hvis n_ut2 > 0 og n_ut2 <= 65536 {
+                # Vanleg svar: same som _skriv_ut + _skriv_ferdig, utan dei to kalla.
+                la wq = c["wq"]
+                wq["data"] = ut2
+                la r2 = builtin.network_operation(wq)
+                wq["data"] = ""
+                la st2 = r2["status"]
+                hvis st2 == "ok" {
+                    la v2 = r2["value"]
+                    la n2 = 0
+                    hvis builtin.type(v2) == "heltall" { n2 = v2 } ellers { n2 = heltall_fra_tekst(tekst(v2)) }
+                    hvis n2 >= n_ut2 {
+                        # Heile svaret gjekk ut: gjer tilkoplinga klar for neste
+                        # førespurnad med ein gong i staden for i neste runde av lykkja.
+                        c["ut"] = ""
+                        hvis c["lukk_etter"] {
+                            _lukk(c)
+                            returner fram + 1
+                        }
+                        c["req"] = null
+                        hvis c["inn"] == "" {
+                            c["fase"] = "ledig"
+                            c["frist"] = no + _konf["ledig_ms"]
+                        } ellers {
+                            c["fase"] = "hovud"
+                            c["frist"] = no + _konf["header_ms"]
+                        }
+                    } ellers hvis n2 > 0 {
+                        c["ut"] = builtin.slice(ut2, n2, n_ut2)
+                    }
+                } ellers hvis st2 != "ventende" {
+                    _lukk(c)
+                    returner fram + 1
+                }
+            } ellers hvis n_ut2 > 0 {
+                la n3 = _skriv_ut(c)
+                hvis n3 < 0 {
+                    _lukk(c)
+                    returner fram + 1
+                }
+                hvis c["ut"] == "" og _skriv_ferdig(c, no) == 1 { returner fram + 1 }
             }
-            # Heile svaret gjekk ut: gjer tilkoplinga klar for neste førespurnad med
-            # ein gong i staden for i neste runde av lykkja.
-            hvis c["ut"] == "" og _skriv_ferdig(c, no) == 1 { returner fram + 1 }
         }
         fase = c["fase"]
     }
