@@ -1383,7 +1383,12 @@ funksjon vm_disk_scope_sti(namn: tekst, args) -> tekst {
 }
 
 funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
-    la cap = vm_capability_for(namn)
+    la fast = vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann"
+    returner vm_security_enforce_c(functions, namn, args, vm_capability_for(namn), fast)
+}
+
+// Spor D: same kontroll med capability-namnet og fast-flagget rekna ut av kallaren.
+funksjon vm_security_enforce_c(functions, namn: tekst, args, cap: tekst, fast: boolsk) -> heiltall {
     hvis cap == "" { returner 0 }
     la policy = functions["__vm_security_policy__"]
     la decision = runtime_security.krev(policy, cap)
@@ -1480,7 +1485,7 @@ funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
         functions["__vm_metrics__"]["last_security_denial"] = cap + ":" + decision["reason"]
         kast "Sikkerheitsfeil: " + namn + " manglar capability " + cap + " (" + decision["reason"] + ")"
     }
-    vm_metric_inc(functions, "security_allowed")
+    hvis ikkje fast { vm_metric_add_i(functions["__vm_metrics__"], "security_allowed", 1) }
     returner 0
 }
 
@@ -3117,7 +3122,15 @@ funksjon vm_ms_til_iso(ms: heiltall) -> tekst {
     returner tekst_fra_heltall(y) + "-" + vm_pad2(m) + "-" + vm_pad2(d) + "T" + vm_pad2(timar) + ":" + vm_pad2(minutt) + ":" + vm_pad2(sekund) + "Z"
 }
 
+// Spor D: kall_innebygd_f tek fast-flagget frå kallaren (1 = fast, 0 = standard,
+// -1 = ukjent → les functions["__vm_fast_mode__"] som vm_metric_add gjer). Då slepp
+// køyr_funksjon at kvart builtin-kall slår opp flagget i det store functions-kartet,
+// og capability-namnet blir rekna ut éin gong (ikkje både for metrikk og tryggleik).
 funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
+    returner kall_innebygd_f(namn, args, active_functions, -1)
+}
+
+funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>, fast_tilstand: heiltall) -> tekst {
     // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
     mens builtin.starts_with(namn, "builtin.builtin.")
         namn = builtin.slice(namn, 8, lengde(namn))
@@ -3174,20 +3187,27 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner 0
     }
 
-    vm_metric_inc(active_functions, "builtin_calls")
+    la er_fast = fast_tilstand == 1
+    hvis fast_tilstand < 0 {
+        er_fast = vm_map_har_nokkel(active_functions, "__vm_fast_mode__") og active_functions["__vm_fast_mode__"] == "sann"
+    }
     la metric_cap = vm_capability_for(namn)
-    hvis builtin.starts_with(metric_cap, "disk.") {
-        vm_metric_inc(active_functions, "filesystem_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "net.") {
-        vm_metric_inc(active_functions, "network_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "process.") {
-        vm_metric_inc(active_functions, "process_calls")
-        vm_metric_inc(active_functions, "io_calls")
+    hvis ikkje er_fast {
+        la bi_metrics = active_functions["__vm_metrics__"]
+        vm_metric_add_i(bi_metrics, "builtin_calls", 1)
+        hvis builtin.starts_with(metric_cap, "disk.") {
+            vm_metric_add_i(bi_metrics, "filesystem_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        } ellers hvis builtin.starts_with(metric_cap, "net.") {
+            vm_metric_add_i(bi_metrics, "network_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        } ellers hvis builtin.starts_with(metric_cap, "process.") {
+            vm_metric_add_i(bi_metrics, "process_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        }
     }
 
-    vm_security_enforce(active_functions, namn, args)
+    vm_security_enforce_c(active_functions, namn, args, metric_cap, er_fast)
 
     hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" {
         returner _rt_har_nøkkel(args[0], args[1])
@@ -3207,6 +3227,31 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
     hvis builtin.starts_with(namn, "std.http.") {
         namn = "http." + builtin.slice(namn, 9, lengde(namn))
+    }
+
+    // Spor D: dei mest brukte reine tekst-/type-builtins låg 100+ greiner lenger
+    // nede i den lineære kjeda. Ingen grein mellom her og den gamle plassen
+    // matchar desse namna, so semantikken er uendra.
+    hvis namn == "builtin.trim" eller namn == "builtin.tekst_trim" {
+        returner builtin.trim(args[0])
+    }
+    hvis namn == "builtin.split" eller namn == "builtin.tekst_splitt" {
+        returner builtin.split(args[0], args[1])
+    }
+    hvis namn == "builtin.join" eller namn == "builtin.tekst_join" {
+        returner builtin.join(args[0], args[1])
+    }
+    hvis namn == "builtin.replace" eller namn == "builtin.tekst_erstatt" {
+        returner builtin.replace(args[0], args[1], args[2])
+    }
+    hvis namn == "builtin.upper" eller namn == "builtin.tekst_store" eller namn == "builtin.tekst_til_store" {
+        returner vm_ascii_upper(tekst(args[0]))
+    }
+    hvis namn == "builtin.lower" eller namn == "builtin.tekst_sma" eller namn == "builtin.tekst_til_liten" {
+        returner builtin.lower(args[0])
+    }
+    hvis namn == "builtin.type" eller namn == "builtin.type_av" {
+        returner builtin.type(args[0])
     }
 
     // Fil-eksistens må treffast tidleg for precompiled VM under eldre host-VM.
@@ -3938,24 +3983,6 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         }
         returner treff
     }
-    hvis namn == "builtin.trim" eller namn == "builtin.tekst_trim" {
-        returner builtin.trim(args[0])
-    }
-    hvis namn == "builtin.split" eller namn == "builtin.tekst_splitt" {
-        returner builtin.split(args[0], args[1])
-    }
-    hvis namn == "builtin.join" eller namn == "builtin.tekst_join" {
-        returner builtin.join(args[0], args[1])
-    }
-    hvis namn == "builtin.replace" eller namn == "builtin.tekst_erstatt" {
-        returner builtin.replace(args[0], args[1], args[2])
-    }
-    hvis namn == "builtin.upper" eller namn == "builtin.tekst_store" eller namn == "builtin.tekst_til_store" {
-        returner vm_ascii_upper(tekst(args[0]))
-    }
-    hvis namn == "builtin.lower" eller namn == "builtin.tekst_sma" eller namn == "builtin.tekst_til_liten" {
-        returner builtin.lower(args[0])
-    }
     hvis namn == "builtin.index_of" eller namn == "builtin.tekst_indeks" {
         returner builtin.index_of(args[0], args[1])
     }
@@ -4007,9 +4034,6 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // Type og konvertering
-    hvis namn == "builtin.type" eller namn == "builtin.type_av" {
-        returner builtin.type(args[0])
-    }
     hvis namn == "builtin.desimaltall" {
         returner builtin.desimaltall(args[0])
     }
@@ -6081,6 +6105,8 @@ funksjon køyr_funksjon(
     // I fast-modus er skuggeheap-id-lista alltid tom (berre standardmodus
     // legg til i henne), so ei lokal tom liste gjer same nytta utan oppslag.
     la vm_tomme_heap_ids: liste_tekst = []
+    la vm_fast_tilstand: heiltall = 0
+    hvis fast_mode { vm_fast_tilstand = 1 }
     // Modulglobalane blir henta ved første LOAD/STORE_GLOBAL og på nytt etter
     // kall ut av løkka (vm_globale_ok = usann), ikkje per instruksjon.
     la vm_globale = {}
@@ -7128,7 +7154,7 @@ funksjon køyr_funksjon(
                         vm_green_yield_ok = 0
                         hvis er_green_slice og op == "CALL" { vm_green_yield_ok = 1 }
                     }
-                    retur_verdi = kall_innebygd(mål_namn, call_args, functions)
+                    retur_verdi = kall_innebygd_f(mål_namn, call_args, functions, vm_fast_tilstand)
                     // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
                     // debug-abort); les dei hoista verdiane på nytt.
                     aktive_rammer = functions["__vm_active_frames__"]
