@@ -264,8 +264,28 @@ Fase 1–3. Porten fra `.nors`→`.no` er hovedsakelig syntaks (kolon-blokk → 
 > Aksept Fase 8: benchmark innan ein liten faktor av SQLite på same maskinvare (native) — krev 8a.
 
 ### Punkt 5d — ytelse og skjema-korrektheit (2026-10-04)
-Målt med `tools/norsdb_benchmark.no` (sjå tabell i commit-meldinga / rapporten), profil med
-`tools/norsdb_profil.no`. Endringar:
+Målt med `tools/norsdb_benchmark.no`, profil med `tools/norsdb_profil.no`. Maskina var sterkt
+lasta av andre jobbar (load 30–150 på 8 kjerner), så tala er grove; N=200 «før» er CPU-tid per
+fase (rekna som differanse mot ei køyring utan fasen), resten er veggtid.
+
+| Fase | N=200 før | N=200 etter | N=1000 før | N=1000 etter | N=10000 etter |
+|---|---|---|---|---|---|
+| 200/1000/10000 × INSERT | 8,4 s | 2,6 s | 153 s | 17 s | 261 s |
+| 100 × PK-oppslag | 49,5 s | 1,1 s | 679 s | 1,8 s | 2,7 s |
+| 20 × WHERE uindeksert | 9,3 s | 0,5 s | 152 s | 3,0 s | 39 s |
+| 20 × WHERE indeksert | ~0,1 s | 0,8 s¹ | 14,6 s | 0,5 s | 5,2 s |
+| ORDER BY heile tabellen | 21 s | 0,14 s | 802 s | 1,4 s | 24 s |
+| 5 × ORDER BY … LIMIT 10 | 37,5 s | 0,3 s | 1818 s | 2,1 s | 25 s |
+| 10 × ORDER BY … LIMIT m/indeks | 89 s | 0,2 s | — | 0,7 s | 3,1 s |
+| 50 × UPDATE på PK | 40 s | 0,6 s | — | 1,3 s | 2,1 s |
+| close + open | 4,9 s | 0,3 s | — | 3,7 s | 42 s |
+| checkpoint etter 1 endring | 6,5 s² | 0,001 s | — | 0,001 s | 0,002 s |
+
+¹ Målt før likskapsoppslaget i eitt pass (fee02ca); N=1000-talet er etter. ² Inkl. tom checkpoint.
+«Før» N=1000 er frå 04.10 (load ~50); main klarte ikkje N=10000 innan rimeleg tid (O(n²) INSERT).
+
+Endringar:
+
 - **Skjema overlever gjenopning**: constraints (NOT NULL/PK/UNIQUE/CHECK/FK/DEFAULT/rowid-alias),
   view, trigger, sekvensar og indeksar blir lagra (M/G/N-postar i WAL og checkpoint) og dekoda lat.
   DROP TABLE og ALTER TABLE blir logga (før: berre i minnet → borte etter krasj).
