@@ -4,6 +4,7 @@
 # UTAN socket. get/post/put/delete/patch med json=, data= (skjema), files= (multipart),
 # eigne headerar, ein cookie-jar som held cookies mellom kall, og lifespan (oppstart/
 # nedstenging). Svaret har status, headerar og json()/tekst() (som hjelpefunksjonar).
+# WebSocket: ws_kople(kl, sti, opp) opnar ei WS-tilkopling i same prosess (sjå nedst).
 #
 # NB: ikkje std/testklient.no (prosjekt-test-køyraren frå #212). Denne er app-testklienten.
 #
@@ -19,6 +20,7 @@
 
 bruk std.apptenar som _app
 bruk std.apptenar_serde som _serde
+bruk std.apptenar_ws som _ws
 
 # ─── Klient og lifespan ──────────────────────────────────────────────────────
 
@@ -272,4 +274,192 @@ funksjon header(res: ordbok, namn: tekst) -> tekst {
     la l = builtin.lower(namn)
     hvis har_nokkel(h, l) { returner tekst(h[l]) }
     returner ""
+}
+
+# ─── WebSocket (5c) ──────────────────────────────────────────────────────────
+#
+# Opnar ei WebSocket-tilkopling mot apptenar-rutene i same prosess, utan nettverk:
+# handtrykket går gjennom same ruting, vakter og validering som på ein socket (med
+# cookie-jar og faste headerar frå klienten), og rammene går gjennom protokollmotoren i
+# std/apptenar_ws.no.
+#
+#   la kl = test.klient({"logg": "ingen"})
+#   la k = test.ws_kople(kl, "/chat", {})   # k["status"] == 101 ved godkjent handtrykk
+#   test.ws_send_tekst(k, "hei")            # maskert tekstramme
+#   la r = test.ws_motta(k)                 # {"fin", "op", "type", "data", "kode"} eller null
+#   test.ws_lukk(k, 1000, "ferdig")
+#
+# Tilkoplingsobjektet på tenarsida ligg i k["t"]. opp["headerar"] blir lagde til eller
+# overstyrer standardheaderane; ein header med verdien "" blir utelaten (for testar av
+# avviste handtrykk). Klientrammer blir maskerte med ei maske som skiftar per ramme;
+# ws_send_rå sender byte heilt utan omforming (for ugyldige rammer).
+
+funksjon _ws_kb(s: tekst, i: heltall) -> heltall {
+    returner builtin.char_code(builtin.slice(s, i, i + 1))
+}
+
+# Handtrykksførespurnaden (standard: RFC 6455-eksempelnøkkelen).
+funksjon ws_handtrykk(kl: ordbok, sti: tekst, opp: ordbok) -> tekst {
+    la h = {"Host": "testserver", "Upgrade": "websocket", "Connection": "Upgrade",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13"}
+    la ck = _cookie_header(kl)
+    hvis ck != "" { h["Cookie"] = ck }
+    la kilder = [kl["headerar"]]
+    hvis opp != null og har_nokkel(opp, "headerar") og builtin.type(opp["headerar"]) == "ordbok" { legg_til(kilder, opp["headerar"]) }
+    la ki = 0
+    mens ki < lengde(kilder) {
+        la eh = kilder[ki]
+        la ek = nøkler(eh)
+        la i = 0
+        mens i < lengde(ek) {
+            la funne = usann
+            la hk = nøkler(h)
+            la j = 0
+            mens j < lengde(hk) {
+                hvis builtin.lower(tekst(hk[j])) == builtin.lower(tekst(ek[i])) {
+                    h[hk[j]] = tekst(eh[ek[i]])
+                    funne = sann
+                }
+                j = j + 1
+            }
+            hvis ikkje funne { h[tekst(ek[i])] = tekst(eh[ek[i]]) }
+            i = i + 1
+        }
+        ki = ki + 1
+    }
+    la ut = "GET " + sti + " HTTP/1.1\r\n"
+    la ks = nøkler(h)
+    la n = 0
+    mens n < lengde(ks) {
+        la v = tekst(h[ks[n]])
+        hvis v != "" { ut = ut + tekst(ks[n]) + ": " + v + "\r\n" }
+        n = n + 1
+    }
+    returner ut + "\r\n"
+}
+
+# Opne ei tilkopling. Gjev {"status", "svar", "headers" (små bokstavar), "body", "t", "inn"}.
+funksjon ws_kople(kl: ordbok, sti: tekst, opp: ordbok) -> ordbok {
+    returner ws_kople_rå(ws_handtrykk(kl, sti, opp))
+}
+
+# Opne frå ein heilt rå førespurnad (t.d. HTTP/1.0 eller POST).
+funksjon ws_kople_rå(førespurnad: tekst) -> ordbok {
+    la r = _app.ws_opne_rå(førespurnad)
+    la p = _parse(tekst(r["svar"]))
+    returner {"status": r["status"], "svar": r["svar"], "headers": p["headers"], "body": p["body"],
+              "t": r["t"], "inn": "", "maske_nr": 0}
+}
+
+funksjon _ws_krev_t(k: ordbok) -> ordbok {
+    hvis k["t"] == null { kast "apptest ws: handtrykket vart avvist (status " + tekst(k["status"]) + ")" }
+    returner k["t"]
+}
+
+# Send byte utan omforming til tenaren.
+funksjon ws_send_rå(k: ordbok, data: tekst) -> heltall {
+    _ws.mat(_ws_krev_t(k), data)
+    returner 1
+}
+
+# Ei maskert klientramme (byte-tekst). Brukar og aukar k["maske_nr"].
+funksjon ws_ramme(k: ordbok, fin: bool, op: heltall, data: tekst) -> tekst {
+    k["maske_nr"] = k["maske_nr"] + 1
+    la m = k["maske_nr"]
+    la maske = builtin.chr((m * 37 + 11) & 255) + builtin.chr((m * 101 + 53) & 255) +
+        builtin.chr((m * 59 + 197) & 255) + builtin.chr((m * 13 + 89) & 255)
+    la b0 = op & 15
+    hvis fin { b0 = b0 | 128 }
+    la n = lengde(data)
+    la ut = builtin.chr(b0)
+    hvis n < 126 {
+        ut = ut + builtin.chr(128 | n)
+    } ellers hvis n < 65536 {
+        ut = ut + builtin.chr(128 | 126) + builtin.chr((n >> 8) & 255) + builtin.chr(n & 255)
+    } ellers {
+        ut = ut + builtin.chr(128 | 127) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0) +
+            builtin.chr((n >> 24) & 255) + builtin.chr((n >> 16) & 255) + builtin.chr((n >> 8) & 255) + builtin.chr(n & 255)
+    }
+    # Eiga XOR-lykkje (ikkje _ws.masker), så ein feil i motoren ikkje blir kansellert her.
+    la delar = []
+    la i = 0
+    mens i < n {
+        legg_til(delar, builtin.chr(_ws_kb(data, i) ^ _ws_kb(maske, i % 4)))
+        i = i + 1
+    }
+    returner ut + maske + builtin.join(delar, "")
+}
+
+funksjon ws_send_ramme(k: ordbok, fin: bool, op: heltall, data: tekst) -> heltall {
+    returner ws_send_rå(k, ws_ramme(k, fin, op, data))
+}
+
+funksjon ws_send_tekst(k: ordbok, s: tekst) -> heltall { returner ws_send_ramme(k, sann, 1, s) }
+funksjon ws_send_bytes(k: ordbok, data: tekst) -> heltall { returner ws_send_ramme(k, sann, 2, data) }
+funksjon ws_ping(k: ordbok, data: tekst) -> heltall { returner ws_send_ramme(k, sann, 9, data) }
+
+funksjon ws_lukk(k: ordbok, kode: heltall, grunn: tekst) -> heltall {
+    returner ws_send_ramme(k, sann, 8, builtin.chr((kode >> 8) & 255) + builtin.chr(kode & 255) + grunn)
+}
+
+# Neste ramme frå tenaren: {"fin", "op", "type" ("tekst", "binær", "kontinuasjon", "lukk",
+# "ping", "pong"), "data", "kode" (berre for lukk; 1005 når close-ramma er tom)} eller null
+# når ingenting ventar. Kastar om tenaren maskerer (tenarrammer skal vere umaskerte).
+# Les frå k["t"]["ut"] (motoren) og k["inn"] (det som alt er motteke).
+funksjon ws_motta(k: ordbok) {
+    la t = _ws_krev_t(k)
+    hvis t["ut"] != "" {
+        k["inn"] = k["inn"] + t["ut"]
+        t["ut"] = ""
+    }
+    la b = k["inn"]
+    la n = lengde(b)
+    hvis n < 2 { returner null }
+    la b0 = _ws_kb(b, 0)
+    la b1 = _ws_kb(b, 1)
+    hvis (b1 & 128) != 0 { kast "apptest ws: tenaren sende ei maskert ramme" }
+    la len = b1 & 127
+    la pos = 2
+    hvis len == 126 {
+        hvis n < 4 { returner null }
+        len = (_ws_kb(b, 2) << 8) | _ws_kb(b, 3)
+        pos = 4
+    } ellers hvis len == 127 {
+        hvis n < 10 { returner null }
+        len = (_ws_kb(b, 6) << 24) | (_ws_kb(b, 7) << 16) | (_ws_kb(b, 8) << 8) | _ws_kb(b, 9)
+        pos = 10
+    }
+    hvis n < pos + len { returner null }
+    la data = builtin.slice(b, pos, pos + len)
+    k["inn"] = builtin.slice(b, pos + len, n)
+    la op = b0 & 15
+    la typ = "kontinuasjon"
+    hvis op == 1 { typ = "tekst" }
+    hvis op == 2 { typ = "binær" }
+    hvis op == 8 { typ = "lukk" }
+    hvis op == 9 { typ = "ping" }
+    hvis op == 10 { typ = "pong" }
+    la r = {"fin": (b0 & 128) != 0, "op": op, "type": typ, "data": data, "kode": 0}
+    hvis op == 8 {
+        hvis len >= 2 {
+            r["kode"] = (_ws_kb(data, 0) << 8) | _ws_kb(data, 1)
+            r["data"] = builtin.slice(data, 2, len)
+        } ellers {
+            r["kode"] = 1005
+        }
+    }
+    returner r
+}
+
+# Data i neste ramme ("" når ingenting ventar).
+funksjon ws_motta_tekst(k: ordbok) -> tekst {
+    la r = ws_motta(k)
+    hvis r == null { returner "" }
+    returner tekst(r["data"])
+}
+
+# Er tilkoplinga avslutta på tenarsida (close-handtrykk ferdig eller protokollfeil)?
+funksjon ws_er_lukka(k: ordbok) -> bool {
+    hvis k["t"] == null { returner sann }
+    returner k["t"]["ferdig"]
 }

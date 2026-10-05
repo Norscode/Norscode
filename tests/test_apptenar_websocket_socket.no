@@ -1,0 +1,168 @@
+# 5c: WebSocket i std/apptenar.no over ekte socket. Barne-`nc run` med
+# tests/fixtures/apptenar_ws_app.no; klienten er std.socket i denne prosessen.
+# Dekkjer det in-process-testen (test_apptenar_websocket.no) ikkje når: 101 på
+# socketen, rammer over TCP (òg rammer i same segment som handtrykket), heartbeat-ping,
+# kringkasting mellom to socketar, at TCP blir lukka etter close-handtrykket og etter
+# ein protokollfeil, og at vanleg HTTP framleis verkar ved sida av.
+bruk tests.fixtures.apptenar_hjelp som ah
+bruk std.socket som socket
+bruk std.apptest som at
+
+funksjon nøkkel_hs(sti: tekst) -> tekst {
+    returner "GET " + sti + " HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+}
+
+# Klienttilstand: socket + buffer i forma at.ws_motta forventar.
+funksjon kople(port: heltall, sti: tekst, første: tekst) -> ordbok {
+    la s = ah.koble(port)
+    ah.send(s, nøkkel_hs(sti) + første)
+    la r = ah.les_til(s, "", "\r\n\r\n", 10000)
+    la data = r["data"]
+    la slutt = builtin.index_of(data, "\r\n\r\n")
+    hvis slutt < 0 {
+        skriv("ingen 101 frå " + sti + ": " + data + "\n")
+        assert(usann)
+    }
+    la hovud = builtin.slice(data, 0, slutt)
+    assert(builtin.starts_with(hovud, "HTTP/1.1 101 "))
+    assert(builtin.index_of(hovud, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") >= 0)
+    returner {"s": s, "t": {"ut": "", "ferdig": usann}, "inn": builtin.slice(data, slutt + 4, lengde(data)), "maske_nr": 100}
+}
+
+funksjon send_ramme(k: ordbok, fin: bool, op: heltall, data: tekst) -> heltall {
+    returner ah.send(k["s"], at.ws_ramme(k, fin, op, data))
+}
+
+# Neste ramme innan `ms` (null ved tidsavbrot eller EOF).
+funksjon motta(k: ordbok, ms: heltall) {
+    la frist = builtin.tid_ms() + ms
+    mens sann {
+        la r = at.ws_motta(k)
+        hvis r != null { returner r }
+        hvis builtin.tid_ms() > frist { returner null }
+        la q = socket.native_les(k["s"], 65536)
+        hvis q["status"] == "ok" {
+            k["inn"] = k["inn"] + tekst(q["data"])
+        } ellers hvis q["status"] == "ventende" {
+            socket.native_poll_vent(k["s"], 1, 20)
+        } ellers {
+            returner null
+        }
+    }
+    returner null
+}
+
+# Neste ramme som ikkje er ein heartbeat-ping.
+funksjon motta_data(k: ordbok, ms: heltall) {
+    la r = motta(k, ms)
+    mens r != null og r["type"] == "ping" { r = motta(k, ms) }
+    returner r
+}
+
+funksjon krev(namn: tekst, r, typ: tekst, data: tekst) -> heltall {
+    hvis r == null {
+        skriv(namn + ": venta " + typ + " «" + data + "», fekk inga ramme\n")
+        assert(usann)
+    }
+    hvis r["type"] != typ eller r["data"] != data {
+        skriv(namn + ": venta " + typ + " «" + data + "», fekk " + tekst(r["type"]) + " «" + tekst(r["data"]) + "»\n")
+        assert(usann)
+    }
+    returner 0
+}
+
+funksjon køyr(port: heltall) -> heltall {
+    # ── Ekko, og ei ramme i same segment som handtrykket ──
+    la a = kople(port, "/ekko", "")
+    send_ramme(a, sann, 1, "hei")
+    krev("ekko", motta_data(a, 10000), "tekst", "ekko: hei")
+    la b = kople(port, "/ekko", at.ws_ramme({"maske_nr": 7}, sann, 1, "straks"))
+    krev("same segment", motta_data(b, 10000), "tekst", "ekko: straks")
+    la bin = builtin.chr(0) + builtin.chr(255) + builtin.chr(10) + builtin.chr(13)
+    send_ramme(b, sann, 2, bin)
+    la rb = motta_data(b, 10000)
+    assert_eq(rb["type"], "binær")
+    assert(rb["data"] == bin)
+    skriv("socket: 101 + ekko, ramme i same segment som handtrykket, binær med NUL/CR/LF\n")
+
+    # ── Ping/pong og heartbeat-ping frå tenaren (APPTENAR_WS_PING_MS=300) ──
+    send_ramme(a, sann, 9, "p")
+    la p = motta(a, 10000)
+    mens p != null og p["type"] == "ping" { p = motta(a, 10000) }
+    krev("pong", p, "pong", "p")
+    la hb = motta(a, 5000)
+    assert(hb != null)
+    assert_eq(hb["type"], "ping")
+    skriv("socket: pong på ping, heartbeat-ping frå tenaren\n")
+
+    # ── Rom mellom to socketar ──
+    la c1 = kople(port, "/chat/r1", "")
+    la c2 = kople(port, "/chat/r1", "")
+    send_ramme(c1, sann, 1, "til alle")
+    krev("rom c1", motta_data(c1, 10000), "tekst", "til alle")
+    krev("rom c2", motta_data(c2, 10000), "tekst", "til alle")
+    skriv("socket: kringkasting i rom til to socketar\n")
+
+    # ── Vanleg HTTP ved sida av opne WebSocket-tilkoplingar ──
+    la st = ah.kall(port, "GET", "/status", {}, "")
+    assert_eq(st["status"], 200)
+    assert(builtin.index_of(st["body"], "ws=4") >= 0)
+    la v = ah.kall(port, "GET", "/ekko", {}, "")
+    assert_eq(v["status"], 426)
+    skriv("socket: " + st["body"] + " medan HTTP svarar; vanleg GET mot WS-ruta gav 426\n")
+
+    # ── Klienten lukkar: close-ekko og TCP lukka ──
+    send_ramme(c2, sann, 8, builtin.chr(3) + builtin.chr(232) + "ha det")
+    la lc = motta_data(c2, 10000)
+    assert_eq(lc["type"], "lukk")
+    assert_eq(lc["kode"], 1000)
+    assert(ah.lukka_innan(c2["s"], 3000))
+    socket.native_lukk(c2["s"])
+    # ── Tenaren lukkar (4000), klienten svarar, TCP lukka ──
+    la l = kople(port, "/lukk", "")
+    la lr = motta_data(l, 10000)
+    assert_eq(lr["type"], "lukk")
+    assert_eq(lr["kode"], 4000)
+    send_ramme(l, sann, 8, builtin.chr(15) + builtin.chr(160))
+    assert(ah.lukka_innan(l["s"], 3000))
+    socket.native_lukk(l["s"])
+    # ── Protokollfeil (umaskert): close 1002 og TCP lukka ──
+    ah.send(b["s"], builtin.chr(129) + builtin.chr(1) + "x")
+    la pf = motta_data(b, 10000)
+    assert_eq(pf["type"], "lukk")
+    assert_eq(pf["kode"], 1002)
+    assert(ah.lukka_innan(b["s"], 3000))
+    socket.native_lukk(b["s"])
+    # ── TCP broten utan close: tenaren ryddar (status viser færre ws) ──
+    socket.native_lukk(c1["s"])
+    socket.native_lukk(a["s"])
+    la vent = builtin.tid_ms() + 3000
+    la st2 = ah.kall(port, "GET", "/status", {}, "")
+    mens builtin.index_of(st2["body"], "ws=0") < 0 og builtin.tid_ms() < vent {
+        st2 = ah.kall(port, "GET", "/status", {}, "")
+    }
+    assert(builtin.index_of(st2["body"], "ws=0") >= 0)
+    skriv("socket: close-ekko 1000, tenar-close 4000, 1002 på umaskert, TCP lukka i alle tre; brotne TCP rydda (" + st2["body"] + ")\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    la data = ah.ny_datamappe("websocket")
+    la app = ah.start_app("tests/fixtures/apptenar_ws_app.no", data, {
+        "APPTENAR_WS_PING_MS": "300",
+        "APPTENAR_WS_LUKK_MS": "2000",
+        "APPTENAR_MS": "150000"
+    })
+    hvis app["status"] != "kjorer" {
+        skriv("apptenaren starta ikkje:\n" + tekst(app["ut"]) + "\n")
+        assert(usann)
+    }
+    la h = app["h"]
+    køyr(app["port"])
+    assert_eq(ah.kall(app["port"], "POST", "/stopp", {}, "")["status"], 200)
+    assert_eq(ah.vent_slutt(h, 10000), 0)
+    ah.stopp(h)
+    skriv("test_apptenar_websocket_socket OK\n")
+    returner 0
+}

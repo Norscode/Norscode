@@ -2,6 +2,9 @@
 
 Bruk `std.metrics` for counters, gauges og enkle histogrammer.
 
+For etikettar, histogram med bøtter, Prometheus-endepunktet `/metrics` i apptenaren og
+OTLP-eksport: sjå `std.metrikk` og [APPTENAR_METRIKK.md](../APPTENAR_METRIKK.md).
+
 ## Counters
 
 ```norscode
