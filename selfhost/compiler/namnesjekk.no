@@ -1,0 +1,252 @@
+// Norscode Selfhost — valfri namnesjekk ved kompilering (R1 F06)
+//
+// Aktiv berre med NORSCODE_STRICT_NAMN=1 (sjå semantic.analyser_program). Utan
+// flagget blir modulen ikkje køyrd, og kompileringa er uendra.
+//
+// Reglane er medvite konservative:
+//   1. Ein toppnivåfunksjon (inkl. Type.metode) kan berre deklarerast éin gong.
+//   2. `la x` to gonger direkte i same blokk er feil. (`la _` er unntatt.)
+//   3. Eit namn brukt som VERDI må vere deklarert: parameter, la/destrukturering,
+//      tilordning i gammal stil (x = …), for-/fang-/komprehensjonsvariabel,
+//      lambda-parameter, modulglobal, funksjon, struktur, enum, grensesnitt,
+//      importalias (eller første ledd i ein importert modulsti) eller eit kjent
+//      innebygd namn. `la` er funksjonsskopa, så rekkjefølgja i funksjonen
+//      spelar inga rolle.
+// Kallmål (f(…), a.b(…)) blir IKKJE sjekka: innebygde funksjonar har ikkje noko
+// register ved kompilering, og ukjende kall blir framleis kompilerte som
+// builtin.<namn>.
+
+funksjon nk_aktiv() -> boolsk {
+    la flagg = ""
+    prøv { flagg = miljo_hent("NORSCODE_STRICT_NAMN") } fang (e) { flagg = "" }
+    returner flagg == "1"
+}
+
+funksjon nk_er_node(node) -> boolsk {
+    hvis node == null { returner usann }
+    returner builtin.type(node) == "ordbok"
+}
+
+funksjon nk_feil(tabell, node, melding: tekst) -> heiltall {
+    legg_til(tabell["namnefeil"], "Namnefeil " + tekst(node["linje"]) + ":" + tekst(node["kolonne"]) + " - " + melding)
+    returner 0
+}
+
+// Namn som alltid er gyldige som verdi utan deklarasjon.
+funksjon nk_innebygd_verdi(namn: tekst) -> boolsk {
+    hvis namn == "builtin" eller namn == "self" eller namn == "skriv" { returner sann }
+    hvis namn == "tekst" eller namn == "heltall" eller namn == "heiltall" eller namn == "desimaltall" { returner sann }
+    hvis namn == "bool" eller namn == "boolsk" eller namn == "liste" eller namn == "ordbok" { returner sann }
+    hvis namn == "assert" eller namn == "assert_eq" eller namn == "assert_ne" { returner sann }
+    returner usann
+}
+
+// Kopier alle nøklar frå `frå` inn i ein ny ordbok saman med `til`.
+funksjon nk_union(a, b) {
+    la ut = {}
+    la ak = nøkler(a)
+    la i: heiltall = 0
+    mens i < lengde(ak) {
+        ut[ak[i]] = sann
+        i = i + 1
+    }
+    la bk = nøkler(b)
+    la j: heiltall = 0
+    mens j < lengde(bk) {
+        ut[bk[j]] = sann
+        j = j + 1
+    }
+    returner ut
+}
+
+// Samlar namn deklarerte i ei kropp (funksjonsskopa). Går ikkje inn i
+// lambdaer eller nøsta funksjonar (eigne skop), men namnet på ein nøsta
+// funksjon blir deklarert i den ytre kroppen.
+funksjon nk_samle_dekl(node, ut) -> heiltall {
+    hvis ikkje nk_er_node(node) { returner 0 }
+    la t = node["type"]
+    hvis t == "Lambda" { returner 0 }
+    hvis t == "Funksjon" {
+        ut[node["verdi"]] = sann
+        returner 0
+    }
+    hvis t == "La" eller t == "For" eller t == "ForRange" eller t == "ListeKomprehensjon" eller t == "PrøvFang" {
+        ut[node["verdi"]] = sann
+    }
+    hvis t == "LaDestrukt" {
+        la mål = node["barn"][0]
+        la mi: heiltall = 0
+        mens mi < lengde(mål["barn"]) {
+            ut[mål["barn"][mi]["verdi"]] = sann
+            mi = mi + 1
+        }
+    }
+    hvis t == "Sett" eller t == "AugSett" {
+        la m = node["barn"][0]
+        hvis nk_er_node(m) og m["type"] == "Ident" { ut[m["verdi"]] = sann }
+    }
+    la barn = node["barn"]
+    hvis barn == null { returner 0 }
+    hvis builtin.type(barn) != "liste" { returner 0 }
+    la i: heiltall = 0
+    mens i < lengde(barn) {
+        nk_samle_dekl(barn[i], ut)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon nk_param_namn(param_node) {
+    la ut = {}
+    hvis ikkje nk_er_node(param_node) { returner ut }
+    la i: heiltall = 0
+    mens i < lengde(param_node["barn"]) {
+        ut[param_node["barn"][i]["verdi"]] = sann
+        i = i + 1
+    }
+    returner ut
+}
+
+// Skop for ein funksjon eller lambda: ytre skop + parametrar + deklarasjonar
+// i kroppen.
+funksjon nk_kropp_skop(ytre, fn_node) {
+    la eige = nk_param_namn(fn_node["barn"][0])
+    la bi: heiltall = 1
+    mens bi < lengde(fn_node["barn"]) {
+        la b = fn_node["barn"][bi]
+        hvis nk_er_node(b) og b["type"] == "Blokk" { nk_samle_dekl(b, eige) }
+        bi = bi + 1
+    }
+    returner nk_union(ytre, eige)
+}
+
+funksjon nk_sjekk_barn(tabell, node, skop) -> heiltall {
+    la barn = node["barn"]
+    hvis barn == null { returner 0 }
+    hvis builtin.type(barn) != "liste" { returner 0 }
+    la i: heiltall = 0
+    mens i < lengde(barn) {
+        nk_sjekk(tabell, barn[i], skop)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon nk_sjekk_blokk_dupl(tabell, blokk) -> heiltall {
+    la sett = {}
+    la i: heiltall = 0
+    mens i < lengde(blokk["barn"]) {
+        la b = blokk["barn"][i]
+        hvis nk_er_node(b) og b["type"] == "La" og b["verdi"] != "_" {
+            hvis har_nokkel(sett, b["verdi"]) {
+                nk_feil(tabell, b, "'" + tekst(b["verdi"]) + "' er alt deklarert med la i same blokk")
+            }
+            sett[b["verdi"]] = sann
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon nk_sjekk(tabell, node, skop) -> heiltall {
+    hvis ikkje nk_er_node(node) { returner 0 }
+    la t = node["type"]
+    hvis t == "Ident" {
+        la namn = tekst(node["verdi"])
+        hvis har_nokkel(skop, namn) { returner 0 }
+        hvis nk_innebygd_verdi(namn) { returner 0 }
+        nk_feil(tabell, node, "ukjent namn '" + namn + "'")
+        returner 0
+    }
+    // Deklarasjonar, typar og signaturar inneheld ingen verdireferansar.
+    hvis t == "Type" eller t == "Returtype" eller t == "Parametere" eller t == "Bruk" eller t == "Struktur" eller t == "Enum" eller t == "Grensesnitt" eller t == "Mål" {
+        returner 0
+    }
+    hvis t == "Kall" {
+        la mål = node["barn"][0]
+        // Kallmål som er namn eller feltkjeder blir ikkje sjekka (sjå toppen).
+        hvis nk_er_node(mål) og mål["type"] != "Ident" og mål["type"] != "Felt" {
+            nk_sjekk(tabell, mål, skop)
+        }
+        nk_sjekk(tabell, node["barn"][1], skop)
+        returner 0
+    }
+    hvis t == "Sett" {
+        la m = node["barn"][0]
+        hvis nk_er_node(m) og m["type"] != "Ident" { nk_sjekk(tabell, m, skop) }
+        nk_sjekk(tabell, node["barn"][1], skop)
+        returner 0
+    }
+    hvis t == "Lambda" eller t == "Funksjon" {
+        la indre = nk_kropp_skop(skop, node)
+        la bi: heiltall = 1
+        mens bi < lengde(node["barn"]) {
+            nk_sjekk(tabell, node["barn"][bi], indre)
+            bi = bi + 1
+        }
+        returner 0
+    }
+    hvis t == "Blokk" {
+        nk_sjekk_blokk_dupl(tabell, node)
+    }
+    nk_sjekk_barn(tabell, node, skop)
+    returner 0
+}
+
+// Køyr namnesjekken på eit program og kast den første namnefeilen.
+funksjon nk_koyr(program_node) -> heiltall {
+    la tabell = {"namnefeil": []}
+    la globale = {}
+    la funksjonar = {}
+    la barn = program_node["barn"]
+    la i: heiltall = 0
+    mens i < lengde(barn) {
+        la node = barn[i]
+        la t = node["type"]
+        hvis t == "Funksjon" {
+            la fn_namn = tekst(node["verdi"])
+            hvis har_nokkel(funksjonar, fn_namn) {
+                nk_feil(tabell, node, "funksjonen '" + fn_namn + "' er deklarert fleire gonger")
+            }
+            funksjonar[fn_namn] = sann
+            globale[fn_namn] = sann
+        } ellers hvis t == "Struktur" eller t == "Enum" eller t == "Grensesnitt" {
+            globale[node["verdi"]] = sann
+        } ellers hvis t == "Bruk" {
+            la alias = tekst(node["barn"][0]["verdi"])
+            hvis alias == tekst(node["verdi"]) {
+                la delar = builtin.split(alias, ".")
+                alias = delar[lengde(delar) - 1]
+            }
+            globale[alias] = sann
+            // Første ledd i modulstien (std.x.y, selfhost.a.b) kan òg vere rot i
+            // ei kvalifisert feltkjede.
+            la sti_delar = builtin.split(tekst(node["verdi"]), ".")
+            globale[sti_delar[0]] = sann
+        } ellers hvis t != "Test" {
+            // Toppnivåsetningar: deklarasjonane deira er modulglobale.
+            nk_samle_dekl(node, globale)
+        }
+        i = i + 1
+    }
+    la j: heiltall = 0
+    mens j < lengde(barn) {
+        la node = barn[j]
+        la t = node["type"]
+        hvis t == "Funksjon" {
+            nk_sjekk(tabell, node, globale)
+        } ellers hvis t == "Test" {
+            la test_skop = {}
+            nk_samle_dekl(node, test_skop)
+            nk_sjekk(tabell, node, nk_union(globale, test_skop))
+        } ellers hvis t != "Struktur" og t != "Enum" og t != "Grensesnitt" og t != "Bruk" {
+            nk_sjekk(tabell, node, globale)
+        }
+        j = j + 1
+    }
+    la feilliste = tabell["namnefeil"]
+    hvis lengde(feilliste) > 0 {
+        feil(feilliste[0])
+    }
+    returner 0
+}

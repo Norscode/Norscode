@@ -983,6 +983,9 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
         la kandidat = enclosing_namn[ci]
         hvis har_nokkel(body_idents, kandidat) og ikkje har_nokkel(param_sett, kandidat)
             legg_til(captures, kandidat)
+            // Fanga namn er lokale i lambda-ramma (F04: metodekall på fanga self).
+            la fanga_lokale = komp["current_locals"]
+            fanga_lokale[kandidat] = sann
         slutt
         ci = ci + 1
     slutt
@@ -1033,7 +1036,8 @@ funksjon ny_komp()
     komp["modul"] = "__main__" // gjeldande modul-namn
     komp["funk_kart"] = {}     // name → params (for CALL-resolving)
     komp["funk_defaults"] = {} // name → liste med standard-uttrykk (eller null) per parameter
-    komp["enum_kart"] = {}     // enum-namn → ordbok {variant → heiltalsindeks}
+    komp["enum_kart"] = {}     // enum-namn → enum-info {"variantar": {variant → indeks}, "namn": [...]}
+    komp["modul_enum_kart"] = {} // importert modulnamn → {enum-namn → enum-info}
     komp["funk_vararg"] = {}   // name → tal faste parametrar før vararg-parameteren (siste ...p)
     komp["grensesnitt_kart"] = {} // grensesnitt-namn → liste med påkravde metodenamn
     komp["struktur_impl"] = []    // liste med [struktur-namn, grensesnitt-namn] for validering
@@ -1044,6 +1048,7 @@ funksjon ny_komp()
     komp["lambda_teller"] = 0
     komp["loop_start"] = []    // stack: start-etiketter for løkker (continue)
     komp["loop_slutt"] = []    // stack: slutt-etiketter for løkker (break)
+    komp["prov_stakk"] = []    // stack: opne prøv-blokker (F03, sjå emit_lykkjestyring)
     komp["defer_blocks"] = []
     // Modulglobale namn er eksplisitte i NCB. Dette hindrar at toppnivå-`la`
     // blir kasta vekk og at native backend må gjette globale namn frå prefiks.
@@ -1149,14 +1154,125 @@ funksjon emit_liste(komp, node, kode) -> boolsk {
     returner sann
 }
 
+// Enum-info for ein Enum-AST-node: {"variantar": {variant → indeks},
+// "namn": [variantnamn i deklarasjonsrekkjefølgje]}. Lista finst fordi
+// kompilatoren ikkje skal vere avhengig av nøkkeliterasjon over ordbøker.
+funksjon lag_enum_info(enum_node) {
+    la variantar = {}
+    la namn = []
+    la vi: heiltall = 0
+    mens vi < lengde(enum_node["barn"]) {
+        la vn = enum_node["barn"][vi]["verdi"]
+        variantar[vn] = vi
+        legg_til(namn, vn)
+        vi = vi + 1
+    }
+    returner {"variantar": variantar, "namn": namn}
+}
+
+// Enum-oppslag ved kompilering. Gjev enum-info for eit uttrykk som namngjev
+// ein enum, elles null:
+//   Farge         — enum i same modul (ikkje skugga av ein lokal variabel)
+//   fg.Farge      — enum i importert modul (bruk ggmod.fargar som fg)
+funksjon enum_info_for(komp, obj) {
+    hvis obj["type"] == "Ident" {
+        la namn = obj["verdi"]
+        hvis har_nokkel(komp["enum_kart"], namn) og ikkje har_nokkel(komp["current_locals"], namn) {
+            returner komp["enum_kart"][namn]
+        }
+        returner null
+    }
+    hvis obj["type"] == "Felt" og obj["barn"][0]["type"] == "Ident" {
+        la alias = obj["barn"][0]["verdi"]
+        hvis har_nokkel(komp["import_alias"], alias) og ikkje har_nokkel(komp["current_locals"], alias) {
+            la modul_namn = komp["import_alias"][alias]
+            hvis har_nokkel(komp["modul_enum_kart"], modul_namn) {
+                la mk = komp["modul_enum_kart"][modul_namn]
+                hvis har_nokkel(mk, obj["verdi"]) { returner mk[obj["verdi"]] }
+            }
+        }
+    }
+    returner null
+}
+
+funksjon enum_namn_tekst(obj) -> tekst {
+    hvis obj["type"] == "Felt" { returner tekst(obj["barn"][0]["verdi"]) + "." + tekst(obj["verdi"]) }
+    returner tekst(obj["verdi"])
+}
+
+funksjon enum_feil(node, melding: tekst) {
+    kast "Enumfeil " + tekst(node["linje"]) + ":" + tekst(node["kolonne"]) + " - " + melding
+}
+
+// Enum.metode(args): verdiar() → [0, 1, …], namn(v) → variantnamnet,
+// fraa_tekst(t) → indeksen (ingenting om t ikkje er ein variant). Gjev usann når
+// kallet ikkje er på ein enum, slik at vanleg kall-kompilering held fram.
+funksjon emit_enum_kall(komp, node, kode) -> boolsk {
+    la fn_ident = node["barn"][0]
+    la info = enum_info_for(komp, fn_ident["barn"][0])
+    hvis info == null { returner usann }
+    la metode = fn_ident["verdi"]
+    la args = node["barn"][1]["barn"]
+    la namn = info["namn"]
+    la enum_namn = enum_namn_tekst(fn_ident["barn"][0])
+    hvis metode == "verdiar" eller metode == "verdier" {
+        hvis lengde(args) != 0 { enum_feil(node, enum_namn + ".verdiar() tek ingen argument") }
+        la i: heiltall = 0
+        mens i < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", i))
+            i = i + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(namn)))
+        returner sann
+    }
+    hvis metode == "namn" eller metode == "navn" {
+        hvis lengde(args) != 1 { enum_feil(node, enum_namn + ".namn(v) tek eitt argument") }
+        la k: heiltall = 0
+        mens k < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", namn[k]))
+            k = k + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(namn)))
+        emit_uttrykk(komp, args[0], kode)
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    }
+    hvis metode == "fraa_tekst" eller metode == "frå_tekst" eller metode == "fra_tekst" {
+        hvis lengde(args) != 1 { enum_feil(node, enum_namn + ".fraa_tekst(t) tek eitt argument") }
+        la j: heiltall = 0
+        mens j < lengde(namn) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", namn[j]))
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", j))
+            j = j + 1
+        }
+        legg_til(kode, json_instruksjon_med_int("BUILD_MAP", lengde(namn)))
+        emit_uttrykk(komp, args[0], kode)
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    }
+    enum_feil(node, "ukjend enum-metode " + enum_namn + "." + metode + "() (kjende: verdiar, namn, fraa_tekst)")
+    returner usann
+}
+
 // Feltoppslag obj.felt. Spesialfall: EnumNamn.Variant → PUSH_CONST med
-// variant-indeksen (kompileringstid-konstant). Elles obj["felt"] via INDEX_GET.
+// variant-indeksen (kompileringstid-konstant), og ukjend variant er
+// kompileringsfeil. EnumNamn.Variant.namn → variantnamnet som tekst.
+// Elles obj["felt"] via INDEX_GET.
 funksjon emit_felt(komp, node, kode) -> boolsk {
     la obj = node["barn"][0]
-    hvis obj["type"] == "Ident" og har_nokkel(komp["enum_kart"], obj["verdi"]) {
-        la variantar = komp["enum_kart"][obj["verdi"]]
+    la info = enum_info_for(komp, obj)
+    hvis info != null {
+        la variantar = info["variantar"]
         hvis har_nokkel(variantar, node["verdi"]) {
             legg_til(kode, json_instruksjon_med_int("PUSH_CONST", variantar[node["verdi"]]))
+            returner sann
+        }
+        enum_feil(node, "ukjend variant " + enum_namn_tekst(obj) + "." + tekst(node["verdi"]))
+    }
+    hvis obj["type"] == "Felt" og (node["verdi"] == "namn" eller node["verdi"] == "navn") {
+        la ei = enum_info_for(komp, obj["barn"][0])
+        hvis ei != null og har_nokkel(ei["variantar"], obj["verdi"]) {
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", obj["verdi"]))
             returner sann
         }
     }
@@ -1164,6 +1280,48 @@ funksjon emit_felt(komp, node, kode) -> boolsk {
     legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
     legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
     returner sann
+}
+
+// Uttømmande match over enum: når kvart case-mønster er EnumNamn.Variant for
+// same enum og det ikkje finst `ellers`/`case _`, må alle variantane vere dekte.
+// Elles kompileringsfeil. Andre match-former blir ikkje sjekka.
+funksjon sjekk_enum_match_dekning(komp, node) -> heiltall {
+    la info = null
+    la enum_tekst = ""
+    la dekt = {}
+    la ci: heiltall = 1
+    mens ci < lengde(node["barn"]) {
+        la case_node = node["barn"][ci]
+        hvis case_node["type"] == "MatchElse" eller case_node["verdi"] == "wildcard" { returner 0 }
+        la mønster = case_node["barn"][0]
+        hvis mønster["type"] != "Felt" { returner 0 }
+        la mi = enum_info_for(komp, mønster["barn"][0])
+        hvis mi == null { returner 0 }
+        la mt = enum_namn_tekst(mønster["barn"][0])
+        hvis info == null {
+            info = mi
+            enum_tekst = mt
+        } ellers hvis mt != enum_tekst {
+            returner 0
+        }
+        dekt[mønster["verdi"]] = sann
+        ci = ci + 1
+    }
+    hvis info == null { returner 0 }
+    la manglar = ""
+    la namn = info["namn"]
+    la ni: heiltall = 0
+    mens ni < lengde(namn) {
+        hvis ikkje har_nokkel(dekt, namn[ni]) {
+            hvis manglar != "" { manglar = manglar + ", " }
+            manglar = manglar + namn[ni]
+        }
+        ni = ni + 1
+    }
+    hvis manglar != "" {
+        enum_feil(node, "match over " + enum_tekst + " er ikkje uttømmande, manglar " + manglar + " (legg til case eller ellers)")
+    }
+    returner 0
 }
 
 funksjon emit_load_namn(komp, kode, namn: tekst) -> heiltall {
@@ -1347,6 +1505,21 @@ slutt
 // ─── Kompiler uttrykk ────────────────────────────────────────────────────────
 // Appendar instruksjonar til `kode`-lista
 
+// `a ?? b`: a om a ikkje er ingenting, elles b. b blir berre evaluert når a
+// er ingenting (kortslutting). Same null-test som OptionalFelt (DUP + COMPARE_EQ).
+funksjon emit_nullish(komp, node, kode) -> boolsk {
+    la ferdig = ny_etikett(komp)
+    emit_uttrykk(komp, node["barn"][0], kode)
+    legg_til(kode, json_instruksjon_uten_arg("DUP"))
+    legg_til(kode, "[\"PUSH_CONST\",null]")
+    legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+    legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ferdig))
+    legg_til(kode, json_instruksjon_uten_arg("POP"))
+    emit_uttrykk(komp, node["barn"][1], kode)
+    legg_til(kode, json_instruksjon_med_tekst("LABEL", ferdig))
+    returner sann
+}
+
 funksjon emit_listekomprehensjon(komp, node, kode) -> boolsk {
     la n = tekst_fra_heltall(komp["teller"])
     komp["teller"] = komp["teller"] + 1
@@ -1453,6 +1626,9 @@ funksjon emit_uttrykk(komp, node, kode)
     slutt
 
     hvis t == "Binop"
+        hvis node["verdi"] == "NULLISH"
+            returner emit_nullish(komp, node, kode)
+        slutt
         opcode = binop_til_opcode(node["verdi"])
 
         // Short-circuit AND
@@ -1640,30 +1816,21 @@ funksjon emit_uttrykk(komp, node, kode)
         argumenter = node["barn"][1]
         arg_antal = lengde(argumenter["barn"])
 
-        // Metode-kall: p.metode(args) der p er ein LOKAL variabel (struktur-instans,
-        // ikkje ein modul). Dispatch dynamisk på __type__ via ncb_call_fn:
-        //   ncb_call_fn(modul + "." + p["__type__"] + ".metode", p, args…)
-        // Stacken må vere [fn_namn, self, args…], so dette må skje FØR arg-løkka.
-        hvis fn_ident["type"] == "Felt" og fn_ident["barn"][0]["type"] == "Ident" og har_nokkel(komp["current_locals"], fn_ident["barn"][0]["verdi"])
-            la metode_namn = fn_ident["verdi"]
-            // fn_namn = modul + "." + p["__type__"] + "." + metode
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", komp["modul"] + "."))
-            emit_uttrykk(komp, fn_ident["barn"][0], kode)
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
-            legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
-            legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "." + metode_namn))
-            legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-            // self
-            emit_uttrykk(komp, fn_ident["barn"][0], kode)
-            // metode-argument
-            la mai = 0
-            mens mai < arg_antal
-                emit_uttrykk(komp, argumenter["barn"][mai], kode)
-                mai = mai + 1
+        // Enum.verdiar() / Enum.namn(v) / Enum.fraa_tekst(t) blir løyst ved kompilering.
+        hvis fn_ident["type"] == "Felt"
+            hvis emit_enum_kall(komp, node, kode)
+                returner sann
             slutt
-            legg_til(kode, json_kall("builtin.ncb_call_fn", arg_antal + 2))
-            returner sann
+        slutt
+
+        // Metode-kall: mott.metode(args) der mott er ein verdi (lokal variabel,
+        // feltkjede frå ein lokal, kall- eller indeksresultat …), ikkje ein
+        // modulsti. Dispatch dynamisk på __type__, sjå emit_metodekall (F04).
+        // Stacken må vere [fn_namn, self, args…], so dette må skje FØR arg-løkka.
+        hvis fn_ident["type"] == "Felt"
+            hvis er_metode_mottakar(komp, fn_ident["barn"][0])
+                returner emit_metodekall(komp, node, kode)
+            slutt
         slutt
 
         // Varargs: kallar vi ein kjend vararg-funksjon, pakk overskotet av
@@ -1716,6 +1883,17 @@ funksjon emit_uttrykk(komp, node, kode)
                 returner sann
             slutt
             legg_til(kode, json_kall("builtin." + modul_del + "." + fn_del, arg_antal))
+            returner sann
+        slutt
+
+        // Kall på eit uttrykksresultat (m["f"](x), f()(x), (funksjon(..){..})(x)):
+        // argumenta ligg alt på stacken; evaluer kallaren og bruk CALL_VALUE (F04).
+        // Berre ekte uttrykkstypar: `null()` (Null-node med namnet null) skal
+        // framleis kalle ein brukarfunksjon som heiter null (std/storttal.no).
+        la kallar_type = fn_ident["type"]
+        hvis kallar_type == "Indeks" eller kallar_type == "Kall" eller kallar_type == "Lambda" eller kallar_type == "IfUttrykk" eller kallar_type == "OptionalFelt"
+            emit_uttrykk(komp, fn_ident, kode)
+            legg_til(kode, json_instruksjon_med_int("CALL_VALUE", arg_antal))
             returner sann
         slutt
 
@@ -1826,6 +2004,141 @@ funksjon fjern_ubrukte_literal_setning(kode, start_ip: heiltall) -> boolsk
     returner sann
 slutt
 
+// ─── Metodekall på vilkårlege mottakarar (F04) ──────────────────────────────
+// Rot-identifikatoren i ei feltkjede (a.b.c → "a"), eller "" om kjeda ikkje
+// startar i eit namn (t.d. f().b eller l[0].b).
+funksjon felt_kjede_rot(node) -> tekst {
+    la n = node
+    mens n["type"] == "Felt" {
+        n = n["barn"][0]
+    }
+    hvis n["type"] == "Ident" { returner tekst(n["verdi"]) }
+    returner ""
+}
+
+// Er `mott` i `mott.metode(...)` ein verdi (struktur-instans) og ikkje ein
+// modulsti (modul.fn, std.x.fn, builtin.x.fn)?
+//   - lokal variabel (inkl. parameter, for- og fang-variabel): metode
+//   - feltkjede med rot i ein lokal verdi: metode
+//   - feltkjede med rot i builtin, eit importalias, ein modulglobal eller eit
+//     ukjent namn: uendra (modulsti; globale mottakarar er ikkje dekte enno)
+//   - alle andre uttrykk (kall, indeks, …): metode
+funksjon er_metode_mottakar(komp, mott) -> boolsk {
+    la t = mott["type"]
+    hvis t == "Ident" {
+        la namn = mott["verdi"]
+        hvis har_nokkel(komp["current_locals"], namn) { returner sann }
+        returner usann
+    }
+    hvis t == "Felt" {
+        la rot = felt_kjede_rot(mott)
+        hvis rot == "" { returner sann }
+        hvis rot == "builtin" { returner usann }
+        hvis har_nokkel(komp["current_locals"], rot) { returner sann }
+        returner usann
+    }
+    returner sann
+}
+
+// mott.metode(args) med dynamisk dispatch på __type__ via ncb_call_fn:
+//   ncb_call_fn(modul + "." + mott["__type__"] + ".metode", mott, args…)
+// Mottakaren blir evaluert éin gong (til ein ramme-lokal temp når han ikkje er
+// eit enkelt namn).
+funksjon emit_metodekall(komp, node, kode) -> boolsk {
+    la fn_ident = node["barn"][0]
+    la mott = fn_ident["barn"][0]
+    la args = node["barn"][1]["barn"]
+    la mott_namn = ""
+    hvis mott["type"] != "Ident" {
+        mott_namn = "__mott_" + tekst_fra_heltall(komp["teller"]) + "__"
+        komp["teller"] = komp["teller"] + 1
+        emit_uttrykk(komp, mott, kode)
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", mott_namn))
+    }
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", komp["modul"] + "."))
+    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
+    legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "." + fn_ident["verdi"]))
+    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
+    la ai: heiltall = 0
+    mens ai < lengde(args) {
+        emit_uttrykk(komp, args[ai], kode)
+        ai = ai + 1
+    }
+    legg_til(kode, json_kall("builtin.ncb_call_fn", lengde(args) + 2))
+    returner sann
+}
+
+// Registrer eit namn som ramme-lokalt (for-/fang-variabel) slik at seinare
+// oppslag ikkje går til ein modulglobal med same namn, og slik at metodekall
+// på variabelen blir dynamisk dispatcha.
+funksjon merk_lokal(komp, namn) -> heiltall {
+    hvis komp["in_module_init"] { returner 0 }
+    la lokale = komp["current_locals"]
+    lokale[namn] = sann
+    returner 0
+}
+
+// ─── bryt/fortsett ut av prøv/endeleg (F03) ─────────────────────────────────
+// komp["prov_stakk"] held ein post per prøv-blokk som er under kompilering:
+// {"har_fang", "har_endeleg", "i_fang", "ctl", "etter", "loop_djupn"}.
+// Ein bryt/fortsett kryssar alle prøv-postar som vart opna inne i den
+// gjeldande løkka (loop_djupn == talet opne løkker). For kvar slik post:
+//   - handleren (TRY_BEGIN) blir fjerna med TRY_END, om han framleis er aktiv
+//     (i fang-blokka er han alt fjerna);
+//   - har posten endeleg, blir kontrollvariabelen sett (1 = bryt,
+//     2 = fortsett) og endeleg-blokka køyrt via FINALLY_RUN. Etter endeleg
+//     les prøv-setninga kontrollvariabelen og gjer bryt/fortsett på nytt i
+//     den ytre konteksten (sjå emit_prov_fang).
+
+// Sann om blokka inneheld ein bryt/fortsett som høyrer til ei løkke utanfor
+// blokka (dvs. ikkje inne i ei nøsta løkke, lambda eller funksjon).
+funksjon prov_har_lykkjestyring(node) -> boolsk {
+    hvis node == null { returner usann }
+    hvis builtin.type(node) != "ordbok" { returner usann }
+    la t = node["type"]
+    hvis t == "Bryt" eller t == "Fortsett" { returner sann }
+    hvis t == "For" eller t == "ForRange" eller t == "Mens" eller t == "Lambda" eller t == "Funksjon" eller t == "ListeKomprehensjon" { returner usann }
+    la barn = node["barn"]
+    hvis barn == null { returner usann }
+    hvis builtin.type(barn) != "liste" { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(barn) {
+        hvis prov_har_lykkjestyring(barn[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Emitterer bryt (kind 1) eller fortsett (kind 2) frå gjeldande stad.
+funksjon emit_lykkjestyring(komp, kind: heiltall, kode) -> heiltall {
+    la mål = gjeldande_loop_slutt(komp)
+    hvis kind == 2 { mål = gjeldande_loop_start(komp) }
+    hvis mål == "" { returner 0 }
+    la djupn: heiltall = lengde(komp["loop_start"])
+    la ps = komp["prov_stakk"]
+    la pi: heiltall = lengde(ps) - 1
+    mens pi >= 0 {
+        la p = ps[pi]
+        hvis p["loop_djupn"] != djupn { bryt }
+        hvis p["har_fang"] og ikkje p["i_fang"] {
+            legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
+        }
+        hvis p["har_endeleg"] og p["ctl"] != "" {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", kind))
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", p["ctl"]))
+            legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", p["etter"]))
+            returner 0
+        }
+        pi = pi - 1
+    }
+    legg_til(kode, json_instruksjon_med_tekst("JUMP", mål))
+    returner 0
+}
+
 funksjon emit_prov_fang(komp, node, kode) -> boolsk {
     la catch_lbl = ny_etikett(komp)
     la after_lbl = ny_etikett(komp)
@@ -1839,6 +2152,20 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
 
     la har_fang = node["has_catch"] != usann
     la har_endeleg = node["has_finally"] == sann
+    // F03: kontrollvariabel berre når ein bryt/fortsett kan forlate prøv- eller
+    // fang-blokka gjennom endeleg. Elles er NCB-en uendra.
+    la ctl_var = ""
+    hvis har_endeleg {
+        la kryssar = prov_har_lykkjestyring(node["barn"][0])
+        hvis ikkje kryssar og har_fang { kryssar = prov_har_lykkjestyring(node["barn"][1]) }
+        hvis kryssar {
+            ctl_var = "__prov_ctl_" + tekst_fra_heltall(komp["teller"]) + "__"
+            komp["teller"] = komp["teller"] + 1
+        }
+    }
+    la post = {"har_fang": har_fang, "har_endeleg": har_endeleg, "i_fang": usann, "ctl": ctl_var, "etter": after_lbl, "loop_djupn": lengde(komp["loop_start"])}
+    legg_til(komp["prov_stakk"], post)
+
     hvis har_endeleg {
         legg_til(kode, json_instruksjon_med_tekst("FINALLY_PUSH", finally_lbl))
     }
@@ -1846,6 +2173,10 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
     emit_blokk(komp, node["barn"][0], kode)
     hvis har_fang { legg_til(kode, json_instruksjon_uten_arg("TRY_END")) }
     hvis har_endeleg {
+        hvis ctl_var != "" {
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", ctl_var))
+        }
         legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
     } ellers {
         legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
@@ -1855,13 +2186,21 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
         legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
         legg_til(kode, json_instruksjon_uten_arg("LOAD_EXCEPTION"))
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+        merk_lokal(komp, node["verdi"])
+        post["i_fang"] = sann
         emit_blokk(komp, node["barn"][1], kode)
         hvis har_endeleg {
+            hvis ctl_var != "" {
+                legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
+                legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", ctl_var))
+            }
             legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
         } ellers {
             legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
         }
     }
+    // Endeleg-blokka og alt etter prøv-setninga er utanfor denne posten.
+    fjern_siste(komp["prov_stakk"])
     hvis har_endeleg {
         legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_lbl))
         emit_blokk(komp, node["barn"][2], kode)
@@ -1876,6 +2215,23 @@ funksjon emit_prov_fang(komp, node, kode) -> boolsk {
         legg_til(kode, json_instruksjon_uten_arg("THROW"))
     }
     legg_til(kode, json_instruksjon_med_tekst("LABEL", after_lbl))
+    hvis ctl_var != "" {
+        // Etter endeleg: hald fram med bryt (1) / fortsett (2) i ytre kontekst.
+        la ikkje_bryt_lbl = ny_etikett(komp)
+        la ikkje_fortsett_lbl = ny_etikett(komp)
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", ctl_var))
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 1))
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ikkje_bryt_lbl))
+        emit_lykkjestyring(komp, 1, kode)
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", ikkje_bryt_lbl))
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", ctl_var))
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 2))
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ikkje_fortsett_lbl))
+        emit_lykkjestyring(komp, 2, kode)
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", ikkje_fortsett_lbl))
+    }
     returner sann
 }
 
@@ -1888,6 +2244,7 @@ funksjon emit_for_range(komp, node, kode) -> boolsk {
 
     emit_uttrykk(komp, node["barn"][0], kode)
     legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+    merk_lokal(komp, node["verdi"])
     push_loop(komp, loop_cont_lbl, loop_end_lbl)
     legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
     legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
@@ -1918,6 +2275,7 @@ funksjon emit_setning(komp, node, kode)
         hvis lengde(node["barn"]) == 0
             returner sann
         slutt
+        sjekk_enum_match_dekning(komp, node)
 
         subject_var = "match_subject_" + tekst_fra_heltall(komp["teller"])
         komp["teller"] = komp["teller"] + 1
@@ -2111,21 +2469,15 @@ funksjon emit_setning(komp, node, kode)
         returner sann
     slutt
 
-    // bryt
+    // bryt (ryddar opne prøv-blokker og køyrer endeleg, sjå emit_lykkjestyring)
     hvis t == "Bryt"
-        lbl = gjeldande_loop_slutt(komp)
-        hvis lbl != ""
-            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
-        slutt
+        emit_lykkjestyring(komp, 1, kode)
         returner sann
     slutt
 
     // fortsett
     hvis t == "Fortsett"
-        lbl = gjeldande_loop_start(komp)
-        hvis lbl != ""
-            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
-        slutt
+        emit_lykkjestyring(komp, 2, kode)
         returner sann
     slutt
 
@@ -2183,6 +2535,7 @@ funksjon emit_setning(komp, node, kode)
         legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", iter_idx_var))
 
+        merk_lokal(komp, node["verdi"])
         push_loop(komp, loop_cont_lbl, loop_end_lbl)
         legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
 
@@ -2325,6 +2678,15 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
 
     mens i < lengde(ast_barn)
         node = ast_barn[i]
+        // Enumar i importerte modular: fg.Farge.GRON blir konstant ved kompilering.
+        hvis node["type"] == "Enum"
+            la mek = komp["modul_enum_kart"]
+            hvis ikkje har_nokkel(mek, modul_namn)
+                mek[modul_namn] = {}
+            slutt
+            la modul_enumar = mek[modul_namn]
+            modul_enumar[node["verdi"]] = lag_enum_info(node)
+        slutt
         hvis node["type"] == "Funksjon"
             fn_namn = node["verdi"]
             fullt_namn = modul_namn + "." + fn_namn
@@ -2593,13 +2955,7 @@ funksjon kompiler_program(ast_program, modul_namn)
         slutt
         hvis node["type"] == "Enum" {
             la ek = komp["enum_kart"]
-            la variantar = {}
-            la vi: heiltall = 0
-            mens vi < lengde(node["barn"]) {
-                variantar[node["barn"][vi]["verdi"]] = vi
-                vi = vi + 1
-            }
-            ek[node["verdi"]] = variantar
+            ek[node["verdi"]] = lag_enum_info(node)
         }
         hvis node["type"] == "Grensesnitt" {
             la gk = komp["grensesnitt_kart"]
