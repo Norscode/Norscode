@@ -1,0 +1,74 @@
+// Punkt 5d: transaksjonar via angre-logg (begin er O(1), ikkje ein snapshot av heile
+// databasen). rollback skal reversere alt — INSERT/UPDATE/DELETE, CREATE/DROP TABLE,
+// CREATE INDEX, ALTER — også etter gjenopning av fila; commit skal bevare alt.
+
+bruk std.db som db
+bruk std.norsdb_sql som sql
+
+funksjon _rydd(sti: tekst) {
+    hvis builtin.fil_finnes(sti + ".cp") { builtin.fil_slett(sti + ".cp") }
+    hvis builtin.fil_finnes(sti + ".cp2") { builtin.fil_slett(sti + ".cp2") }
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+}
+
+funksjon start() -> heltall {
+    la sti = "/tmp/norsdb_tx_angre_test.db"
+    _rydd(sti)
+    la h = db.open(sti)
+    db.execute(h, "CREATE TABLE k (id INTEGER PRIMARY KEY, namn TEXT UNIQUE, saldo INTEGER)")
+    db.execute(h, "INSERT INTO k (namn, saldo) VALUES ('ada', 100)")
+    db.execute(h, "INSERT INTO k (namn, saldo) VALUES ('bo', 50)")
+    db.execute(h, "CREATE INDEX ix_saldo ON k (saldo)")
+
+    // ── rollback reverserer alt ──────────────────────────────────────
+    assert(db.begin(h))
+    assert_eq(db.execute(h, "INSERT INTO k (namn, saldo) VALUES ('cy', 10)"), 1)
+    assert_eq(db.execute(h, "UPDATE k SET saldo = saldo - 30 WHERE namn = 'ada'"), 1)
+    assert_eq(db.execute(h, "DELETE FROM k WHERE namn = 'bo'"), 1)
+    assert_eq(db.execute(h, "CREATE TABLE tmp (x TEXT)"), 0)
+    assert_eq(db.execute(h, "INSERT INTO tmp (x) VALUES ('y')"), 1)
+    assert_eq(db.execute(h, "ALTER TABLE k ADD COLUMN merk TEXT DEFAULT 'm'"), 0)
+    assert_eq(db.execute(h, "CREATE INDEX ix_namn ON k (namn)"), 0)
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM k"), 2)
+    assert(db.rollback(h))
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM k"), 2)
+    assert_eq(db.query_text(h, "SELECT saldo FROM k WHERE namn = 'ada'"), "100")
+    assert_eq(db.query_text(h, "SELECT saldo FROM k WHERE namn = 'bo'"), "50")
+    assert_eq(db.query_text(h, "SELECT COUNT(*) FROM k WHERE namn = 'cy'"), "0")
+    assert_eq(db.query_text(h, "SELECT merk FROM k WHERE namn = 'ada'"), "")
+    assert_eq(sql.explain(h, "SELECT * FROM k WHERE saldo = 50"), "SEARCH k USING INDEX (saldo)")
+    assert_eq(db.query_rader(h, "SELECT namn FROM k ORDER BY saldo DESC"), "ada\nbo")
+    // UNIQUE og auto-id er som før transaksjonen.
+    assert_eq(db.execute(h, "INSERT INTO k (namn, saldo) VALUES ('bo', 1)"), -1)
+    assert_eq(db.execute(h, "INSERT INTO k (namn, saldo) VALUES ('dag', 7)"), 1)
+    assert_eq(db.query_text(h, "SELECT id FROM k WHERE namn = 'dag'"), "3")
+    // rollback utan aktiv transaksjon er ein no-op som seier usann.
+    assert(db.rollback(h) == usann)
+
+    // ── Etter gjenopning er attenderullinga varig ────────────────────
+    la h2 = db.open(sti)
+    assert_eq(db.query_int(h2, "SELECT COUNT(*) FROM k"), 3)
+    assert_eq(db.query_text(h2, "SELECT saldo FROM k WHERE namn = 'ada'"), "100")
+    assert_eq(db.query_text(h2, "SELECT COUNT(*) FROM k WHERE namn = 'cy'"), "0")
+    assert_eq(db.execute(h2, "INSERT INTO tmp (x) VALUES ('z')"), -1)
+
+    // ── commit bevarer ───────────────────────────────────────────────
+    assert(db.begin(h2))
+    assert_eq(db.execute(h2, "UPDATE k SET saldo = 1 WHERE namn = 'dag'"), 1)
+    assert_eq(db.execute(h2, "INSERT INTO k (namn, saldo) VALUES ('eli', 2)"), 1)
+    assert(db.commit(h2))
+    la h3 = db.open(sti)
+    assert_eq(db.query_text(h3, "SELECT saldo FROM k WHERE namn = 'dag'"), "1")
+    assert_eq(db.query_text(h3, "SELECT id FROM k WHERE namn = 'eli'"), "4")
+    assert_eq(db.query_rader(h3, "SELECT namn FROM k ORDER BY saldo"), "dag\neli\nbo\nada")
+
+    // ── transaction(): ugyldig setning → alt rulla attende ───────────
+    assert_eq(db.transaction(h3, "INSERT INTO k (namn, saldo) VALUES ('fia', 3); INSERT INTO k (namn, saldo) VALUES ('ada', 9)"), 0)
+    assert_eq(db.query_text(h3, "SELECT COUNT(*) FROM k WHERE namn = 'fia'"), "0")
+    assert_eq(db.transaction(h3, "INSERT INTO k (namn, saldo) VALUES ('fia', 3)"), 1)
+    assert_eq(db.query_text(h3, "SELECT saldo FROM k WHERE namn = 'fia'"), "3")
+    assert(db.close(h3))
+
+    _rydd(sti)
+    returner 0
+}
