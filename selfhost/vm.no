@@ -1594,6 +1594,11 @@ funksjon vm_runtime_init(functions, reset: boolsk) -> heiltall {
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_jit_register__") {
         functions["__vm_jit_register__"] = {}
     }
+    // Spor D: generasjonsboks for kallmål-cachane i køyr_funksjon. Blir aldri
+    // bytt ut (heller ikkje ved reset), berre auka av vm_def_gen_auk.
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
     returner 0
 }
 
@@ -1687,6 +1692,9 @@ funksjon vm_module_load(functions, path: tekst, id: tekst, caps_raw: tekst, deps
         kast "Modulfeil: functions manglar"
     }
 
+    // Spor D: funksjonskartet blir endra under → ugyldiggjer kallmål-cachane
+    // til alle aktive køyr_funksjon-aktiveringar (sjå vm_def_gen_auk).
+    vm_def_gen_auk(functions)
     la modules = functions["__vm_modules__"]
     hvis vm_map_har_nokkel(modules, id) og ikkje reload { kast "Modulfeil: modul er allereie lasta" }
     hvis reload og ikkje vm_map_har_nokkel(modules, id) { kast "Modulfeil: kan ikkje reload ukjent modul" }
@@ -4566,6 +4574,59 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
     returner ""
 }
 
+// ─── Spor D: kallmål-cachar for køyr_funksjon ────────────────────────────────
+// Kvar køyr_funksjon-aktivering held små lokale kart: kallnamn → løyst namn
+// (òg negative treff, dvs. builtin-vegen), løyst namn → funksjonsdefinisjon og
+// løyst namn → label-kart. Dei erstattar finn_funksjon + fleire vm_map_get mot
+// det store functions-kartet per CALL (lineært på arm64-seedane), og i
+// standardmodus òg bygg_label_kart + vm_verifiser_kode av heile callee-koden
+// per kall. Resultata er reine funksjonar av functions-kartet sine
+// funksjonsoppføringar, som berre vm_module_load endrar medan VM-en køyrer;
+// han aukar generasjonsboksen, og aktiveringa tømer cachane sine når ho ser
+// ein ny generasjon (vm_def_gen_auk).
+funksjon vm_def_gen_auk(functions) -> heiltall {
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
+    la boks = functions["__vm_def_gen__"]
+    boks["n"] = boks["n"] + 1
+    returner boks["n"]
+}
+
+funksjon vm_def_gen_boks(functions) {
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
+    returner functions["__vm_def_gen__"]
+}
+
+funksjon vm_løys_kall(cache, functions, mål_namn: tekst) -> tekst {
+    hvis vm_map_har_nokkel(cache, mål_namn) { returner cache[mål_namn] }
+    la løyst = ""
+    hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
+        løyst = finn_funksjon(mål_namn, functions)
+    }
+    cache[mål_namn] = løyst
+    returner løyst
+}
+
+funksjon vm_def_hent(cache, functions, namn: tekst) {
+    hvis vm_map_har_nokkel(cache, namn) { returner cache[namn] }
+    la def = vm_map_get(functions, namn)
+    cache[namn] = def
+    returner def
+}
+
+funksjon vm_label_hent(cache, fn_def, kode, fn_namn: tekst, fast_mode: boolsk, trace_calls: boolsk) {
+    hvis vm_map_har_nokkel(cache, fn_namn) {
+        hvis trace_calls { skriv("VMCALL:" + fn_namn + "\n") }
+        returner cache[fn_namn]
+    }
+    la lk = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+    cache[fn_namn] = lk
+    returner lk
+}
+
 funksjon vm_opcode_fra_instr(instr: liste_tekst) -> tekst {
     la raw = instr[0]
     // C/json_parse_raw kan gi heiltall for enkelte felt. Tekst må ikkje gå
@@ -5945,6 +6006,13 @@ funksjon køyr_funksjon(
     // kall ut av løkka (vm_globale_ok = usann), ikkje per instruksjon.
     la vm_globale = {}
     la vm_globale_ok: boolsk = usann
+    // Kallmål-cachar (sjå vm_løys_kall) og generasjonen dei er gyldige for.
+    la vm_def_gen = vm_def_gen_boks(functions)
+    la vm_def_gen_sett = vm_def_gen["n"]
+    la vm_kall_cache = {}
+    la vm_def_cache = {}
+    la vm_label_cache = {}
+    la trace_calls = miljo_hent("NC_VM_TRACE_CALLS") == "1"
     la resume_state = functions["__vm_debug_resume_state__"]
     la resuming = resume_state["active"] == "sann"
     la function_start_ms = builtin.tid_ms()
@@ -5979,7 +6047,7 @@ funksjon køyr_funksjon(
         kast "Sikkerheitsfeil: maks kall-djupn overskreden — mogleg uendeleg rekursjon"
     }
 
-    la fn_def = vm_map_get(functions, fn_namn)
+    la fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
     // usann når ei continuation-ramme er teken attende (RETURN/unwind): då er
     // fn_def framleis callee sin, og LOAD/STORE_GLOBAL hentar kallaren sin
     // definisjon (modulen) frå fn_namn før bruk.
@@ -5995,7 +6063,7 @@ funksjon køyr_funksjon(
     } ellers {
         ramme["code"] = kode
         ramme["params"] = params
-        ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+        ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
         ramme["state"] = "running"
         ramme["started_ms"] = function_start_ms
         legg_til(aktive_rammer, ramme)
@@ -6132,7 +6200,14 @@ funksjon køyr_funksjon(
 
         hvis op == "STORE_GLOBAL" {
             hvis ikkje fn_def_ok {
-                fn_def = vm_map_get(functions, fn_namn)
+                hvis vm_def_gen["n"] != vm_def_gen_sett {
+                    // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                    vm_kall_cache = {}
+                    vm_def_cache = {}
+                    vm_label_cache = {}
+                    vm_def_gen_sett = vm_def_gen["n"]
+                }
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
             }
             la modul_namn = tekst(fn_def["module"])
@@ -6152,7 +6227,14 @@ funksjon køyr_funksjon(
 
         hvis op == "LOAD_GLOBAL" {
             hvis ikkje fn_def_ok {
-                fn_def = vm_map_get(functions, fn_namn)
+                hvis vm_def_gen["n"] != vm_def_gen_sett {
+                    // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                    vm_kall_cache = {}
+                    vm_def_cache = {}
+                    vm_label_cache = {}
+                    vm_def_gen_sett = vm_def_gen["n"]
+                }
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
             }
             la modul_namn = tekst(fn_def["module"])
@@ -6583,6 +6665,13 @@ funksjon køyr_funksjon(
 
         // ── Funksjonskall ────────────────────────────────────────────────
         hvis op == "CALL" eller op == "CALL_VALUE" {
+            hvis vm_def_gen["n"] != vm_def_gen_sett {
+                // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                vm_kall_cache = {}
+                vm_def_cache = {}
+                vm_label_cache = {}
+                vm_def_gen_sett = vm_def_gen["n"]
+            }
             // M3: CALL_VALUE deler heile CALL-maskineriet. Skilnaden er at
             // funksjonsnamnet og fanga variablar kjem frå ein closure-verdi
             // (ordbok med __lambda__/__capture__) øvst på stacken.
@@ -6642,7 +6731,7 @@ funksjon køyr_funksjon(
             la intern_feil: tekst = ""
             la dynamisk_kall = usann
             hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
-                løyst_namn = finn_funksjon(mål_namn, functions)
+                løyst_namn = vm_løys_kall(vm_kall_cache, functions, mål_namn)
             }
             hvis trace_ops { skriv("VM-CALL phase=resolved target=" + mål_namn + " resolved=" + løyst_namn + "\n") }
 
@@ -6715,7 +6804,7 @@ funksjon køyr_funksjon(
             // at det vert ruta til lokal/forelder try/fang (og `fang (e:
             // ArgumentFeil)` matchar på prefikset, sjå vm_exception_type).
             hvis løyst_namn != "" {
-                la kall_def = vm_map_get(functions, løyst_namn)
+                la kall_def = vm_def_hent(vm_def_cache, functions, løyst_namn)
                 hvis vm_map_har_nokkel(kall_def, "params") og lengde(call_args) != lengde(kall_def["params"]) {
                     la ar_forventa: heiltall = lengde(kall_def["params"])
                     la ar_fekk: heiltall = lengde(call_args)
@@ -6730,7 +6819,7 @@ funksjon køyr_funksjon(
                 la jit_used = usann
                 la jit_value = 0
                 hvis ikkje fast_mode {
-                    la jit_result = vm_jit_try(functions, løyst_namn, vm_map_get(functions, løyst_namn), call_args)
+                    la jit_result = vm_jit_try(functions, løyst_namn, vm_def_hent(vm_def_cache, functions, løyst_namn), call_args)
                     jit_used = jit_result["used"] == "sann"
                     hvis jit_used { jit_value = jit_result["value"] }
                 }
@@ -6784,7 +6873,7 @@ funksjon køyr_funksjon(
                 hvis ikkje vm_map_har_nokkel(vm_metrics_kart, function_instruction_key) {
                     vm_metrics_kart[function_instruction_key] = "0"
                 }
-                fn_def = vm_map_get(functions, fn_namn)
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
                 kode = fn_def["code"]
                 params = fn_def["params"]
@@ -6793,7 +6882,7 @@ funksjon køyr_funksjon(
                 vm_ramme_frigje_p(fast_mode, vm_ramme_pool, ferdig_tail_ramme)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+                ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
                 ramme["started_ms"] = function_start_ms
@@ -6879,7 +6968,7 @@ funksjon køyr_funksjon(
                 hvis ikkje vm_map_har_nokkel(vm_metrics_kart, function_instruction_key) {
                     vm_metrics_kart[function_instruction_key] = "0"
                 }
-                fn_def = vm_map_get(functions, fn_namn)
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
                 hvis trace_ops { skriv("VM-CALL phase=definition target=" + fn_namn + "\n") }
                 kode = fn_def["code"]
@@ -6887,7 +6976,7 @@ funksjon køyr_funksjon(
                 ramme = vm_ramme_hent_p(vm_ramme_pool, fn_namn, 0, fast_mode)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+                ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
                 hvis trace_ops { skriv("VM-CALL phase=labels target=" + fn_namn + "\n") }
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
