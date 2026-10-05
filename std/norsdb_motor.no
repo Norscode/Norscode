@@ -1,7 +1,14 @@
-// NorsDB ekte lagringsmotor — Fase 1: binært record-format.
-// Ingenting med JSON å gjøre. Rader kodast som type-tagga, lengde-prefikset binær.
-// Sjå docs/NORSDB_EKTE_MOTOR_PLAN.md. Denne modulen er MEDVITE lagt utanfor vm.no
-// for å ikkje tynge kald-kompileringa.
+// NorsDB ekte lagringsmotor — rader, indeksar, WAL og checkpoint.
+// Ingenting med JSON å gjøre. Sjå docs/NORSDB_EKTE_MOTOR_PLAN.md. Denne modulen er
+// MEDVITE lagt utanfor vm.no for å ikkje tynge kald-kompileringa.
+//
+// Lagring (NORSDB2, sjå «Fil-livssyklus» nedst): tekst-postformat med kontrollteikn
+// som skilje (strengar i runtimen er bytesekvensar, så det er byte-eksakt), append-
+// WAL og inkrementell checkpoint (delta-segment + kompaktering). Radlageret er ei
+// liste indeksert på rowid; indeksar er B-tre over (sorteringsnøkkel, rowid).
+//
+// Det binære record-formatet (enc_verdi/enc_rad, NORSDB1-ramme) er att for
+// bakoverkompatibilitet: gamle filer blir lesne og skrivne om til NORSDB2.
 //
 // Verdi-encoding (bytes = liste<heltall> 0-255):
 //   NULL    : [0]
@@ -418,229 +425,11 @@ funksjon _wal_delete(navn: tekst, rowid: heltall) -> liste<heltall> {
     returner r
 }
 
-// ── Interne mutasjonar (utan WAL-logging; brukt av replay + public ops) ──
-funksjon _opprett_intern(db, navn: tekst, kolonner) {
-    db["tabellar"][navn] = {
-        "navn": navn,
-        "kolonner": kolonner,
-        "next_rowid": 1,
-        "rader": {},
-        "btre": btre_ny()
-    }
-}
 
-funksjon _sett_inn_intern(db, navn: tekst, rowid: heltall, verdier) {
-    la t = db["tabellar"][navn]
-    // Ny rowid → inn i B-treet. Eksisterande (UPDATE/replay-overskriv) → berre
-    // oppdater rad-lagret, unngå duplikat B-tre-nøkkel.
-    la ny = ikke finnes_nøkkel(t["rader"], tekst_fra_heltall(rowid))
-    la rad = {}
-    la i: heltall = 0
-    mens i < lengde(t["kolonner"]) {
-        rad[t["kolonner"][i]["navn"]] = verdier[i]
-        i = i + 1
-    }
-    t["rader"][tekst_fra_heltall(rowid)] = rad
-    hvis ny {
-        t["btre"] = btre_sett_inn(t["btre"], rowid, rowid)
-        // Vedlikehald equality-indeksar for nye rader.
-        hvis finnes_nøkkel(t, "indeksar") {
-            la kols = nøkler(t["indeksar"])
-            la ci = 0
-            mens ci < lengde(kols) {
-                la kol = kols[ci]
-                la v = ""
-                hvis finnes_nøkkel(rad, kol) { v = rad[kol] }
-                hvis ikke finnes_nøkkel(t["indeksar"][kol], v) { t["indeksar"][kol][v] = [] }
-                legg_til(t["indeksar"][kol][v], rowid)
-                ci = ci + 1
-            }
-        }
-    }
-    hvis rowid + 1 > t["next_rowid"] {
-        t["next_rowid"] = rowid + 1
-    }
-}
-
-// Bygg equality-indeks (verdi → liste rowids) på ein kolonne. Ikkje persistert
-// (derivert; byggast på nytt via CREATE INDEX etter open).
-funksjon db_opprett_indeks(db, tabell: tekst, kolonne: tekst) {
-    la t = db["tabellar"][tabell]
-    hvis ikke finnes_nøkkel(t, "indeksar") { t["indeksar"] = {} }
-    la idx = {}
-    la orden = btre_i_orden(t["btre"])
-    la i = 0
-    mens i < lengde(orden) {
-        la nk = tekst_fra_heltall(orden[i])
-        hvis finnes_nøkkel(t["rader"], nk) {
-            la v = ""
-            hvis finnes_nøkkel(t["rader"][nk], kolonne) { v = t["rader"][nk][kolonne] }
-            hvis ikke finnes_nøkkel(idx, v) { idx[v] = [] }
-            legg_til(idx[v], orden[i])
-        }
-        i = i + 1
-    }
-    t["indeksar"][kolonne] = idx
-}
-
-// Er kolonnen indeksert? Spørjaren sjekkar dette før db_indeks_søk (elles full skann).
-funksjon db_har_indeks(db, tabell: tekst, kolonne: tekst) -> boolsk {
-    la t = db["tabellar"][tabell]
-    hvis ikke finnes_nøkkel(t, "indeksar") { returner usann }
-    returner finnes_nøkkel(t["indeksar"], kolonne)
-}
-
-// Indeks-oppslag: liste rowids for verdi (tom liste om ingen treff). Krev at
-// kolonnen er indeksert (sjekk db_har_indeks først).
-funksjon db_indeks_søk(db, tabell: tekst, kolonne: tekst, verdi: tekst) -> liste {
-    la idx = db["tabellar"][tabell]["indeksar"][kolonne]
-    hvis finnes_nøkkel(idx, verdi) { returner idx[verdi] }
-    returner []
-}
-
-// Alle distinkte indekserte verdiar (for range-oppslag: iterer og filtrer).
-funksjon db_indeks_nøkler(db, tabell: tekst, kolonne: tekst) -> liste {
-    returner nøkler(db["tabellar"][tabell]["indeksar"][kolonne])
-}
-
-funksjon _slett_intern(db, navn: tekst, rowid: heltall) {
-    la t = db["tabellar"][navn]
-    la nk = tekst_fra_heltall(rowid)
-    hvis finnes_nøkkel(t["rader"], nk) {
-        fjern_nokkel(t["rader"], nk)
-    }
-}
-
-// ── Public API ───────────────────────────────────────────────────────
-funksjon db_ny(sti: tekst) -> ordbok_tekst {
-    returner {"sti": sti, "tabellar": {}}
-}
-
-funksjon db_opprett_tabell(db, navn: tekst, kolonner) {
-    _opprett_intern(db, navn, kolonner)
-    hvis db["sti"] != "" {
-        logg_legg_til(db["sti"] + ".wal", _wal_create(navn, kolonner))
-    }
-}
-
-funksjon db_sett_inn(db, navn: tekst, verdier) -> heltall {
-    la t = db["tabellar"][navn]
-    la rowid = t["next_rowid"]
-    _sett_inn_intern(db, navn, rowid, verdier)
-    // Siste innsette rowid — les av SQL-funksjonen last_insert_rowid().
-    db["_siste_rowid"] = rowid
-    hvis db["sti"] != "" {
-        logg_legg_til(db["sti"] + ".wal", _wal_insert(navn, rowid, t["kolonner"], verdier))
-    }
-    returner rowid
-}
-
-funksjon db_slett(db, navn: tekst, rowid: heltall) -> boolsk {
-    la t = db["tabellar"][navn]
-    hvis ikke finnes_nøkkel(t["rader"], tekst_fra_heltall(rowid)) {
-        returner usann
-    }
-    hvis finnes_nøkkel(t, "indeksar") { fjern_nokkel(t, "indeksar") }
-    _slett_intern(db, navn, rowid)
-    hvis db["sti"] != "" {
-        logg_legg_til(db["sti"] + ".wal", _wal_delete(navn, rowid))
-    }
-    returner sann
-}
-
-funksjon db_hent(db, navn: tekst, rowid: heltall) -> ordbok_tekst {
-    la t = db["tabellar"][navn]
-    la nk = tekst_fra_heltall(rowid)
-    hvis finnes_nøkkel(t["rader"], nk) {
-        returner t["rader"][nk]
-    }
-    returner {}
-}
-
-funksjon db_finst(db, navn: tekst, rowid: heltall) -> boolsk {
-    returner finnes_nøkkel(db["tabellar"][navn]["rader"], tekst_fra_heltall(rowid))
-}
-
-funksjon db_tel(db, navn: tekst) -> heltall {
-    returner lengde(nøkler(db["tabellar"][navn]["rader"]))
-}
-
-// Rowid-ar (til stades) i rowid-orden. For UPDATE/DELETE som treng rad-identitet.
-funksjon db_rowids(db, navn: tekst) -> liste {
-    la t = db["tabellar"][navn]
-    la orden = btre_i_orden(t["btre"])
-    la ut = []
-    la i: heltall = 0
-    mens i < lengde(orden) {
-        hvis finnes_nøkkel(t["rader"], tekst_fra_heltall(orden[i])) {
-            legg_til(ut, orden[i])
-        }
-        i = i + 1
-    }
-    returner ut
-}
-
-// Oppdater rad ved gjeve rowid (overskriv). Loggar til WAL som insert-record ved
-// same rowid — replay overskriv.
-funksjon db_oppdater(db, navn: tekst, rowid: heltall, verdier) {
-    // Invalider indeksar (unngå foreldet oppslag) — byggast på nytt via CREATE INDEX.
-    la tt = db["tabellar"][navn]
-    hvis finnes_nøkkel(tt, "indeksar") { fjern_nokkel(tt, "indeksar") }
-    _sett_inn_intern(db, navn, rowid, verdier)
-    hvis db["sti"] != "" {
-        la t = db["tabellar"][navn]
-        logg_legg_til(db["sti"] + ".wal", _wal_insert(navn, rowid, t["kolonner"], verdier))
-    }
-}
-
-// Alle rader i rowid-orden (via B-tre in-order), hopp over sletta.
-funksjon db_alle(db, navn: tekst) -> liste {
-    la t = db["tabellar"][navn]
-    la orden = btre_i_orden(t["btre"])
-    la ut = []
-    la i: heltall = 0
-    mens i < lengde(orden) {
-        la nk = tekst_fra_heltall(orden[i])
-        hvis finnes_nøkkel(t["rader"], nk) {
-            legg_til(ut, t["rader"][nk])
-        }
-        i = i + 1
-    }
-    returner ut
-}
-
-// ── Serialiser / replay (checkpoint-mekanisme; fil-uavhengig) ────────
-// Payload = konkatenerte framed records: per tabell ein CREATE + ein INSERT per rad.
-funksjon db_serialiser(db) -> liste<heltall> {
-    la payload: liste<heltall> = []
-    la navn_liste = nøkler(db["tabellar"])
-    la ti: heltall = 0
-    mens ti < lengde(navn_liste) {
-        la navn = navn_liste[ti]
-        la t = db["tabellar"][navn]
-        _legg_til_alle(payload, _ramme(_wal_create(navn, t["kolonner"])))
-        la orden = btre_i_orden(t["btre"])
-        la ri: heltall = 0
-        mens ri < lengde(orden) {
-            la rowid = orden[ri]
-            la nk = tekst_fra_heltall(rowid)
-            hvis finnes_nøkkel(t["rader"], nk) {
-                la verdier = []
-                la ki: heltall = 0
-                mens ki < lengde(t["kolonner"]) {
-                    legg_til(verdier, t["rader"][nk][t["kolonner"][ki]["navn"]])
-                    ki = ki + 1
-                }
-                _legg_til_alle(payload, _ramme(_wal_insert(navn, rowid, t["kolonner"], verdier)))
-            }
-            ri = ri + 1
-        }
-        ti = ti + 1
-    }
-    returner payload
-}
-
-funksjon _replay_one(db, r) {
+// ── Eldre byte-replay (NORSDB1) — berre for å lese gamle filer ───────
+// Nye filer skriv tekst-postformatet NORSDB2 (sjå under). Ved open av ei gamal
+// fil blir innhaldet lese her og straks skrive om til NORSDB2 (db_checkpoint_full).
+funksjon _replay_ein_byte(db, r) {
     la op = r[0]
     hvis op == 3 {
         la p = _dec_tekst(r, 1)
@@ -666,47 +455,1610 @@ funksjon _replay_one(db, r) {
         la rowid = _les_u32(r, i)
         i = i + 4
         la dr = dec_rad(r, i)
-        _sett_inn_intern(db, navn, rowid, dr["verdiar"])
+        hvis finnes_nøkkel(db["tabellar"], navn) {
+            _sett_rad_felt(db, db["tabellar"][navn], rowid, dr["verdiar"], 0)
+        }
     } ellers hvis op == 2 {
         la p = _dec_tekst(r, 1)
         la navn = p["t"]
         la rowid = _les_u32(r, p["neste"])
-        _slett_intern(db, navn, rowid)
+        hvis finnes_nøkkel(db["tabellar"], navn) {
+            _slett_intern(db["tabellar"][navn], rowid)
+        }
     }
 }
 
-funksjon db_replay(db, payload) {
+funksjon _replay_bytes(db, payload) {
     la records = _les_framed(payload)
     la i: heltall = 0
     mens i < lengde(records) {
-        _replay_one(db, records[i])
+        _replay_ein_byte(db, records[i])
         i = i + 1
     }
 }
 
-// ── Fil-livssyklus: open (checkpoint + WAL-replay) / checkpoint ──────
-// db_åpne rekonstruerer tilstanden: checkpoint (siste kompakte snapshot) + replay av
-// WAL-en (endringar sidan checkpoint). Ein trunkert WAL-hale frå krasj ignorerast.
-funksjon db_åpne(sti: tekst) -> ordbok_tekst {
-    la db = db_ny(sti)
-    la cp = checkpoint_les(sti + ".cp")
-    hvis cp["gyldig"] {
-        db_replay(db, cp["payload"])
+// ── Sorteringsnøkkel (total orden som SQLite: NULL < tal < tekst) ────
+// Kvar verdi blir avbilda til ein tekst slik at vanleg tekst-samanlikning gjev
+// rett SQL-orden. Tal (heiltal og desimaltal, også negative) får ei
+// lengde-prefiksa desimalform, så samanlikninga er eksakt (ingen flyttal):
+//   NULL → "0"   negativt tal → "1" + komplement + "~"   tal ≥ 0 → "2" + …   tekst → "3" + tekst
+// Same reglar som _cmp i norsdb_sql (tal-bevisst når begge er numeriske).
+funksjon null_verdi() -> tekst { returner builtin.chr(1) + "NUL" + builtin.chr(1) }
+
+funksjon sorteringsnøkkel(v: tekst) -> tekst {
+    la n = lengde(v)
+    hvis n == 0 { returner "3" }
+    la c0 = builtin.char_code(v)
+    hvis c0 == 1 og v == null_verdi() { returner "0" }
+    hvis (c0 < 48 eller c0 > 57) og c0 != 45 og c0 != 46 { returner "3" + v }
+    // Rask veg: kanonisk ikkje-negativt heiltal utan leiande null (det vanlegaste).
+    hvis c0 >= 49 og n <= 17 {
+        prøv {
+            la iv = builtin.heltall_fra_tekst(v)
+            hvis tekst_fra_heltall(iv) == v {
+                hvis n < 10 { returner "20" + tekst_fra_heltall(n) + v }
+                returner "2" + tekst_fra_heltall(n) + v
+            }
+        } fang (e) { }
     }
-    la wal_records = logg_les_alle(sti + ".wal")
-    la i: heltall = 0
-    mens i < lengde(wal_records) {
-        _replay_one(db, wal_records[i])
+    // Mogleg tal: [-]siffer[.siffer]
+    la ch = builtin.split(v, "")
+    la i = 0
+    la neg = usann
+    hvis ch[0] == "-" {
+        hvis n == 1 { returner "3" + v }
+        neg = sann
+        i = 1
+    }
+    la heil_start = i
+    mens i < n og builtin.char_code(ch[i]) >= 48 og builtin.char_code(ch[i]) <= 57 { i = i + 1 }
+    la heil_slutt = i
+    la frak_start = i
+    la frak_slutt = i
+    hvis i < n og ch[i] == "." {
+        i = i + 1
+        frak_start = i
+        mens i < n og builtin.char_code(ch[i]) >= 48 og builtin.char_code(ch[i]) <= 57 { i = i + 1 }
+        frak_slutt = i
+    }
+    hvis i < n { returner "3" + v }
+    hvis heil_slutt == heil_start og frak_slutt == frak_start { returner "3" + v }
+    // Fjern leiande nullar i heiltalsdelen og etterfylgjande i brøken.
+    mens heil_start < heil_slutt - 1 og ch[heil_start] == "0" { heil_start = heil_start + 1 }
+    mens frak_slutt > frak_start og ch[frak_slutt - 1] == "0" { frak_slutt = frak_slutt - 1 }
+    la heil = builtin.slice(v, heil_start, heil_slutt)
+    hvis heil == "" { heil = "0" }
+    la frak = builtin.slice(v, frak_start, frak_slutt)
+    la hl = lengde(heil)
+    hvis hl > 99 { returner "3" + v }
+    la mag = ""
+    hvis hl < 10 { mag = "0" + tekst_fra_heltall(hl) + heil } ellers { mag = tekst_fra_heltall(hl) + heil }
+    hvis frak != "" { mag = mag + "." + frak }
+    hvis neg og (heil != "0" eller frak != "") {
+        // Komplement (9 - siffer) snur ordenen; "~" etter gjer at kortare (mindre
+        // absoluttverdi) kjem SIST, slik negative tal skal.
+        la mc = builtin.split(mag, "")
+        la ut = []
+        la j = 0
+        mens j < lengde(mc) {
+            hvis mc[j] == "." { legg_til(ut, ".") } ellers { legg_til(ut, builtin.chr(105 - builtin.char_code(mc[j]))) }
+            j = j + 1
+        }
+        returner "1" + builtin.join(ut, "") + "~"
+    }
+    returner "2" + mag
+}
+
+// ── Ordna indeks: B-tre over (sorteringsnøkkel, rowid) ───────────────
+// Kvar oppføring er eit unikt par; like nøklar blir ordna på rowid. Oppføringar
+// blir ALDRI sletta i treet: ei oppføring er «gyldig» berre om rada framleis
+// finst og har same nøkkel (db_indeks_*-lesarane verifiserer). Utdaterte
+// oppføringar blir talde (stale) og rydda ved kompaktering / ombygging.
+funksjon _ix_maks() -> heltall { returner 31 }
+
+funksjon _ix_ny() -> ordbok_tekst {
+    returner {"rot": {"k": [], "r": [], "c": [], "blad": sann}, "antall": 0, "stale": 0}
+}
+
+// Set inn (k, r) på posisjon p i noden (sist + forskyv).
+funksjon _ix_sett_pos(node, p: heltall, k: tekst, r: heltall) {
+    la ks = node["k"]
+    la rs = node["r"]
+    legg_til(ks, k)
+    legg_til(rs, r)
+    la j = lengde(ks) - 1
+    mens j > p {
+        ks[j] = ks[j - 1]
+        rs[j] = rs[j - 1]
+        j = j - 1
+    }
+    ks[p] = k
+    rs[p] = r
+}
+
+funksjon _ix_sett_barn_pos(node, p: heltall, barn) {
+    la cs = node["c"]
+    legg_til(cs, barn)
+    la j = lengde(cs) - 1
+    mens j > p {
+        cs[j] = cs[j - 1]
+        j = j - 1
+    }
+    cs[p] = barn
+}
+
+// Del fullt barn i av forelder: øvre halvdel → ny node, median opp.
+funksjon _ix_del_barn(forelder, i: heltall) {
+    la barn = forelder["c"][i]
+    la m = lengde(barn["k"])
+    la mid = m / 2
+    la ny = {"k": builtin.slice(barn["k"], mid + 1, m), "r": builtin.slice(barn["r"], mid + 1, m), "c": [], "blad": barn["blad"]}
+    hvis ikke barn["blad"] {
+        ny["c"] = builtin.slice(barn["c"], mid + 1, m + 1)
+        barn["c"] = builtin.slice(barn["c"], 0, mid + 1)
+    }
+    la mk = barn["k"][mid]
+    la mr = barn["r"][mid]
+    barn["k"] = builtin.slice(barn["k"], 0, mid)
+    barn["r"] = builtin.slice(barn["r"], 0, mid)
+    _ix_sett_barn_pos(forelder, i + 1, ny)
+    _ix_sett_pos(forelder, i, mk, mr)
+}
+
+// Første posisjon i noden med (k[i], r[i]) > (k, r).
+funksjon _ix_øvre(node, k: tekst, r: heltall) -> heltall {
+    la ks = node["k"]
+    la rs = node["r"]
+    la lo = 0
+    la hi = lengde(ks)
+    mens lo < hi {
+        la mid = (lo + hi) / 2
+        la km = ks[mid]
+        hvis km < k eller (km == k og rs[mid] <= r) { lo = mid + 1 } ellers { hi = mid }
+    }
+    returner lo
+}
+
+// Set inn (k, r) om paret ikkje finst frå før. Returnerer sann om ny.
+funksjon _ix_sett_inn(ix, k: tekst, r: heltall) -> boolsk {
+    la rot = ix["rot"]
+    hvis lengde(rot["k"]) >= _ix_maks() {
+        la ny = {"k": [], "r": [], "c": [rot], "blad": usann}
+        _ix_del_barn(ny, 0)
+        ix["rot"] = ny
+        rot = ny
+    }
+    la node = rot
+    mens sann {
+        la p = _ix_øvre(node, k, r)
+        hvis p > 0 og node["k"][p - 1] == k og node["r"][p - 1] == r { returner usann }
+        hvis node["blad"] {
+            _ix_sett_pos(node, p, k, r)
+            ix["antall"] = ix["antall"] + 1
+            returner sann
+        }
+        la barn = node["c"][p]
+        hvis lengde(barn["k"]) >= _ix_maks() {
+            _ix_del_barn(node, p)
+            la mk = node["k"][p]
+            la mr = node["r"][p]
+            hvis mk == k og mr == r { returner usann }
+            hvis mk < k eller (mk == k og mr < r) { p = p + 1 }
+            barn = node["c"][p]
+        }
+        node = barn
+    }
+    returner usann
+}
+
+// Samle opptil `maks` oppføringar strengt etter (sk, sr) i stigande orden
+// (har = usann → frå byrjinga). Resultat i uk/ur.
+funksjon _ix_asc(node, har: boolsk, sk: tekst, sr: heltall, maks: heltall, uk, ur) {
+    la ks = node["k"]
+    la rs = node["r"]
+    la n = lengde(ks)
+    la i = 0
+    hvis har {
+        la lo = 0
+        la hi = n
+        mens lo < hi {
+            la mid = (lo + hi) / 2
+            la km = ks[mid]
+            hvis km < sk eller (km == sk og rs[mid] <= sr) { lo = mid + 1 } ellers { hi = mid }
+        }
+        i = lo
+    }
+    la blad = node["blad"]
+    mens sann {
+        hvis ikke blad {
+            _ix_asc(node["c"][i], har, sk, sr, maks, uk, ur)
+            hvis lengde(uk) >= maks { returner 0 }
+        }
+        hvis i >= n { returner 0 }
+        legg_til(uk, ks[i])
+        legg_til(ur, rs[i])
+        hvis lengde(uk) >= maks { returner 0 }
+        i = i + 1
+        har = usann
+    }
+    returner 0
+}
+
+// Som _ix_asc, men strengt FØR (sk, sr) i synkande orden.
+funksjon _ix_desc(node, har: boolsk, sk: tekst, sr: heltall, maks: heltall, uk, ur) {
+    la ks = node["k"]
+    la rs = node["r"]
+    la n = lengde(ks)
+    la i = n - 1
+    hvis har {
+        la lo = 0
+        la hi = n
+        mens lo < hi {
+            la mid = (lo + hi) / 2
+            la km = ks[mid]
+            hvis km < sk eller (km == sk og rs[mid] < sr) { lo = mid + 1 } ellers { hi = mid }
+        }
+        i = lo - 1
+    }
+    la blad = node["blad"]
+    mens sann {
+        hvis ikke blad {
+            _ix_desc(node["c"][i + 1], har, sk, sr, maks, uk, ur)
+            hvis lengde(uk) >= maks { returner 0 }
+        }
+        hvis i < 0 { returner 0 }
+        legg_til(uk, ks[i])
+        legg_til(ur, rs[i])
+        hvis lengde(uk) >= maks { returner 0 }
+        i = i - 1
+        har = usann
+    }
+    returner 0
+}
+
+// Bygg eit B-tre nedanfrå frå sorterte (k, r)-lister. O(n).
+funksjon _ix_bygg(ks, rs) -> ordbok_tekst {
+    la ix = _ix_ny()
+    la n = lengde(ks)
+    ix["antall"] = n
+    hvis n <= _ix_maks() {
+        ix["rot"] = {"k": builtin.slice(ks, 0, n), "r": builtin.slice(rs, 0, n), "c": [], "blad": sann}
+        returner ix
+    }
+    // Blad på B element, med eitt skilje-element mellom kvart blad.
+    la b = 16
+    la noder = []
+    la sk = []
+    la sr = []
+    la i = 0
+    mens i < n {
+        la slutt = i + b
+        // Siste blad tek resten om det elles ville blitt for lite til eit skilje + blad.
+        hvis slutt + 1 >= n { slutt = n }
+        legg_til(noder, {"k": builtin.slice(ks, i, slutt), "r": builtin.slice(rs, i, slutt), "c": [], "blad": sann})
+        i = slutt
+        hvis i < n {
+            legg_til(sk, ks[i])
+            legg_til(sr, rs[i])
+            i = i + 1
+        }
+    }
+    // Byggjer oppover: kvar forelder tek opptil b+1 barn og b skilje.
+    mens lengde(noder) > 1 {
+        la nye = []
+        la nsk = []
+        la nsr = []
+        la j = 0
+        la nn = lengde(noder)
+        mens j < nn {
+            la slutt = j + b + 1
+            hvis slutt + 1 >= nn { slutt = nn }
+            legg_til(nye, {"k": builtin.slice(sk, j, slutt - 1), "r": builtin.slice(sr, j, slutt - 1), "c": builtin.slice(noder, j, slutt), "blad": usann})
+            j = slutt
+            hvis j < nn {
+                legg_til(nsk, sk[j - 1])
+                legg_til(nsr, sr[j - 1])
+            }
+        }
+        // Skilja mellom gruppene: sk[slutt-1] for kvar gruppe utanom siste.
+        noder = nye
+        sk = nsk
+        sr = nsr
+    }
+    ix["rot"] = noder[0]
+    returner ix
+}
+
+// Flettesortering av (k, r)-par (stabil; nøkkel, så rowid).
+funksjon _flett_par(ks, rs) -> ordbok_tekst {
+    la n = lengde(ks)
+    la a_k = builtin.slice(ks, 0, n)
+    la a_r = builtin.slice(rs, 0, n)
+    la b_k = builtin.slice(ks, 0, n)
+    la b_r = builtin.slice(rs, 0, n)
+    la bredde = 1
+    mens bredde < n {
+        la lo = 0
+        mens lo < n {
+            la mid = lo + bredde
+            hvis mid > n { mid = n }
+            la hi = lo + 2 * bredde
+            hvis hi > n { hi = n }
+            la i = lo
+            la j = mid
+            la o = lo
+            mens i < mid og j < hi {
+                la ki = a_k[i]
+                la kj = a_k[j]
+                hvis kj < ki eller (kj == ki og a_r[j] < a_r[i]) {
+                    b_k[o] = kj
+                    b_r[o] = a_r[j]
+                    j = j + 1
+                } ellers {
+                    b_k[o] = ki
+                    b_r[o] = a_r[i]
+                    i = i + 1
+                }
+                o = o + 1
+            }
+            mens i < mid { b_k[o] = a_k[i]; b_r[o] = a_r[i]; i = i + 1; o = o + 1 }
+            mens j < hi { b_k[o] = a_k[j]; b_r[o] = a_r[j]; j = j + 1; o = o + 1 }
+            lo = hi
+        }
+        la tk = a_k
+        a_k = b_k
+        b_k = tk
+        la tr = a_r
+        a_r = b_r
+        b_r = tr
+        bredde = bredde * 2
+    }
+    returner {"k": a_k, "r": a_r}
+}
+
+// Stabil flettesortering: returnerer permutasjonen av 0..n-1 som sorterer
+// nøklane (tekst-samanlikning) stigande eller synkande. Like nøklar held
+// opphavleg rekkjefølgje (som SQLite sin sorterar).
+funksjon sorter_indeksar(ks, asc: boolsk) -> liste {
+    la n = lengde(ks)
+    la a = []
+    la i = 0
+    mens i < n { legg_til(a, i); i = i + 1 }
+    hvis n < 2 { returner a }
+    la b = builtin.slice(a, 0, n)
+    la bredde = 1
+    mens bredde < n {
+        la lo = 0
+        mens lo < n {
+            la mid = lo + bredde
+            hvis mid > n { mid = n }
+            la hi = lo + 2 * bredde
+            hvis hi > n { hi = n }
+            la x = lo
+            la y = mid
+            la o = lo
+            hvis asc {
+                mens x < mid og y < hi {
+                    hvis ks[a[y]] < ks[a[x]] { b[o] = a[y]; y = y + 1 } ellers { b[o] = a[x]; x = x + 1 }
+                    o = o + 1
+                }
+            } ellers {
+                mens x < mid og y < hi {
+                    hvis ks[a[y]] > ks[a[x]] { b[o] = a[y]; y = y + 1 } ellers { b[o] = a[x]; x = x + 1 }
+                    o = o + 1
+                }
+            }
+            mens x < mid { b[o] = a[x]; x = x + 1; o = o + 1 }
+            mens y < hi { b[o] = a[y]; y = y + 1; o = o + 1 }
+            lo = hi
+        }
+        la t = a
+        a = b
+        b = t
+        bredde = bredde * 2
+    }
+    returner a
+}
+
+// Sorter heiltal stigande (t.d. rowid-kandidatar).
+funksjon sorter_tal(l) -> liste {
+    la n = lengde(l)
+    hvis n < 2 { returner l }
+    la a = builtin.slice(l, 0, n)
+    la b = builtin.slice(l, 0, n)
+    la bredde = 1
+    mens bredde < n {
+        la lo = 0
+        mens lo < n {
+            la mid = lo + bredde
+            hvis mid > n { mid = n }
+            la hi = lo + 2 * bredde
+            hvis hi > n { hi = n }
+            la x = lo
+            la y = mid
+            la o = lo
+            mens x < mid og y < hi {
+                hvis a[y] < a[x] { b[o] = a[y]; y = y + 1 } ellers { b[o] = a[x]; x = x + 1 }
+                o = o + 1
+            }
+            mens x < mid { b[o] = a[x]; x = x + 1; o = o + 1 }
+            mens y < hi { b[o] = a[y]; y = y + 1; o = o + 1 }
+            lo = hi
+        }
+        la t = a
+        a = b
+        b = t
+        bredde = bredde * 2
+    }
+    returner a
+}
+
+
+// ── NORSDB2: tekst-postformat ────────────────────────────────────────
+// Ein post = felt skilde med chr(31), avslutta med chr(30). Første felt er op:
+//   C navn tag kol tag kol …     opprett tabell        I navn rowid v1 v2 …  sett inn/overskriv
+//   D navn rowid                 slett                 M navn meta           tabell-metadata
+//   X navn                       drop tabell           G meta                db-metadata
+//   N navn kol [k r k r …]       indeks (med ferdig sorterte oppføringar i base)
+//   P navn next_rowid            rowid-teljar          A navn tag kol fyll   ADD COLUMN
+//   R navn gammal ny             RENAME COLUMN         Q navn kol            DROP COLUMN
+//   T gammal ny                  RENAME TABLE          E epoke               WAL-hovud
+//   S epoke / Z epoke            segment-start/-slutt i checkpoint-fila
+// Kontrollteikna chr(29..31) i verdiar blir escapa (chr(29)+a/b/c).
+// Strengar i denne runtimen er bytesekvensar, så fil_les/fil_append er byte-eksakte.
+funksjon _esc_alle(verdier) -> liste {
+    la e = builtin.chr(29)
+    la ut = []
+    la i = 0
+    mens i < lengde(verdier) {
+        la v = builtin.replace(verdier[i], e, e + "a")
+        v = builtin.replace(v, builtin.chr(30), e + "b")
+        v = builtin.replace(v, builtin.chr(31), e + "c")
+        legg_til(ut, v)
         i = i + 1
     }
+    returner ut
+}
+
+funksjon _unesc(v: tekst) -> tekst {
+    la e = builtin.chr(29)
+    hvis builtin.index_of(v, e) < 0 { returner v }
+    la ut = builtin.replace(v, e + "c", builtin.chr(31))
+    ut = builtin.replace(ut, e + "b", builtin.chr(30))
+    returner builtin.replace(ut, e + "a", e)
+}
+
+// Join felt til ein post (utan avsluttande chr(30)). Escapar berre ved behov.
+funksjon _post(felt) -> tekst {
+    la us = builtin.chr(31)
+    la p = builtin.join(felt, us)
+    hvis builtin.index_of(p, builtin.chr(29)) >= 0 eller builtin.index_of(p, builtin.chr(30)) >= 0 eller lengde(builtin.split(p, us)) != lengde(felt) {
+        p = builtin.join(_esc_alle(felt), us)
+    }
+    returner p
+}
+
+// Del ein post i felt (unescapar ved behov).
+funksjon _felt(post: tekst) -> liste {
+    la f = builtin.split(post, builtin.chr(31))
+    hvis builtin.index_of(post, builtin.chr(29)) >= 0 {
+        la i = 0
+        mens i < lengde(f) {
+            f[i] = _unesc(f[i])
+            i = i + 1
+        }
+    }
+    returner f
+}
+
+funksjon _post_create(navn: tekst, kolonner) -> tekst {
+    la f = ["C", navn]
+    la i = 0
+    mens i < lengde(kolonner) {
+        legg_til(f, tekst_fra_heltall(kolonner[i]["tag"]))
+        legg_til(f, kolonner[i]["navn"])
+        i = i + 1
+    }
+    returner _post(f)
+}
+
+funksjon _post_rad(navn: tekst, rowid: heltall, verdier) -> tekst {
+    la us = builtin.chr(31)
+    la kropp = builtin.join(verdier, us)
+    hvis builtin.index_of(kropp, builtin.chr(29)) >= 0 eller builtin.index_of(kropp, builtin.chr(30)) >= 0 eller lengde(builtin.split(kropp, us)) != lengde(verdier) {
+        kropp = builtin.join(_esc_alle(verdier), us)
+    }
+    returner "I" + us + navn + us + tekst_fra_heltall(rowid) + us + kropp
+}
+
+// ── Tabellar: radlager = liste indeksert på rowid ────────────────────
+// tabell = {"navn", "kolonner": [{navn, tag}], "kolnamn": [namn …], "next_rowid",
+//           "radliste": [rad-ordbok | {}], "finst": [0/1], "levande": tal,
+//           "meta": tekst, "indeksar": {kol → ordna indeks}, "indeks_kol": [kol …],
+//           "hash": {kol → {nøkkel → [rowid …]}} (latent, sjå db_hash_*)}
+// Rowid-ane er tette (tildelte frå next_rowid), så ei liste gjev O(1) oppslag
+// utan store ordbøker (som er trege i VM-en ved mange nøklar).
+funksjon _kolnamn_av(kolonner) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(kolonner) {
+        legg_til(ut, kolonner[i]["navn"])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _opprett_intern(db, navn: tekst, kolonner) {
+    db["tabellar"][navn] = {
+        "navn": navn,
+        "kolonner": kolonner,
+        "kolnamn": _kolnamn_av(kolonner),
+        "next_rowid": 1,
+        "radliste": [{}],
+        "finst": [0],
+        "levande": 0,
+        "meta": "",
+        "indeksar": {},
+        "indeks_kol": [],
+        "hash": {},
+        "hash_kol": []
+    }
+}
+
+// Sett rad ved rowid frå felt-liste f (verdiar frå posisjon off) — felles for
+// insert, update og replay. Vedlikeheld indeksar.
+funksjon _sett_rad_felt(db, t, rowid: heltall, f, off: heltall) {
+    la kn = t["kolnamn"]
+    la rad = {}
+    la nf = lengde(f)
+    la i = 0
+    mens i < lengde(kn) {
+        la j = off + i
+        hvis j < nf { rad[kn[i]] = f[j] } ellers { rad[kn[i]] = "" }
+        i = i + 1
+    }
+    _sett_rad(t, rowid, rad)
+}
+
+funksjon _sett_rad(t, rowid: heltall, rad) {
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    mens lengde(rl) <= rowid {
+        legg_til(rl, {})
+        legg_til(fl, 0)
+    }
+    la ny = fl[rowid] == 0
+    la gammal = rl[rowid]
+    rl[rowid] = rad
+    hvis ny {
+        fl[rowid] = 1
+        t["levande"] = t["levande"] + 1
+    }
+    la ik = t["indeks_kol"]
+    hvis lengde(ik) > 0 {
+        la ci = 0
+        mens ci < lengde(ik) {
+            la kol = ik[ci]
+            la v = ""
+            hvis finnes_nøkkel(rad, kol) { v = rad[kol] }
+            la ix = t["indeksar"][kol]
+            // nk[rowid] = noverande nøkkel → uendra nøkkel krev ikkje noko tre-arbeid,
+            // og lesarane verifiserer oppføringar utan å rekne nøkkelen på nytt.
+            la nk = ix["nk"]
+            mens lengde(nk) <= rowid { legg_til(nk, "") }
+            la k = sorteringsnøkkel(v)
+            la gml = nk[rowid]
+            hvis gml != k {
+                _ix_sett_inn(ix, k, rowid)
+                hvis gml != "" { ix["stale"] = ix["stale"] + 1 }
+                nk[rowid] = k
+            }
+            ci = ci + 1
+        }
+    }
+    la hk = t["hash_kol"]
+    hvis lengde(hk) > 0 {
+        la hi = 0
+        mens hi < lengde(hk) {
+            la kol = hk[hi]
+            la v = ""
+            hvis finnes_nøkkel(rad, kol) { v = rad[kol] }
+            _hash_legg(t["hash"][kol], sorteringsnøkkel(v), rowid)
+            hi = hi + 1
+        }
+    }
+    hvis rowid + 1 > t["next_rowid"] {
+        t["next_rowid"] = rowid + 1
+    }
+}
+
+funksjon _hash_legg(h, k: tekst, rowid: heltall) {
+    hvis finnes_nøkkel(h, k) {
+        la l = h[k]
+        la i = 0
+        mens i < lengde(l) {
+            hvis l[i] == rowid { returner 0 }
+            i = i + 1
+        }
+        legg_til(l, rowid)
+    } ellers {
+        h[k] = [rowid]
+    }
+    returner 0
+}
+
+funksjon _slett_intern(t, rowid: heltall) {
+    hvis rowid < lengde(t["finst"]) og t["finst"][rowid] == 1 {
+        t["finst"][rowid] = 0
+        t["radliste"][rowid] = {}
+        t["levande"] = t["levande"] - 1
+        la ik = t["indeks_kol"]
+        la ci = 0
+        mens ci < lengde(ik) {
+            la ix = t["indeksar"][ik[ci]]
+            ix["stale"] = ix["stale"] + 1
+            hvis rowid < lengde(ix["nk"]) { ix["nk"][rowid] = "" }
+            ci = ci + 1
+        }
+    }
+}
+
+funksjon _rad_verdiar(t, rad) -> liste {
+    la kn = t["kolnamn"]
+    la ut = []
+    la i = 0
+    mens i < lengde(kn) {
+        la v = ""
+        hvis finnes_nøkkel(rad, kn[i]) { v = rad[kn[i]] }
+        legg_til(ut, v)
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── WAL-skriving ─────────────────────────────────────────────────────
+// Kvar endring blir lagd til WAL-fila (durable append). Første post i ei ny WAL
+// er E <epoke>; checkpoint-fila hugsar kva epoke ho har absorbert, så ei WAL som
+// alt er med i checkpointet (krasj midt i checkpoint) blir hoppa over ved open.
+funksjon _wal(db, post: tekst) {
+    hvis db["sti"] == "" { returner 0 }
+    la rs = builtin.chr(30)
+    la ut = post + rs
+    hvis ikke db["_wal_hovud"] {
+        ut = "E" + builtin.chr(31) + tekst_fra_heltall(db["_epoke"]) + rs + ut
+        db["_wal_hovud"] = sann
+    }
+    builtin.fil_append(db["sti"] + ".wal", ut)
+    db["_wal_bytes"] = db["_wal_bytes"] + lengde(ut)
+    returner 0
+}
+
+funksjon _er_temp(t) -> boolsk {
+    returner finnes_nøkkel(t, "temp") og t["temp"]
+}
+
+// ── Indeks-API ───────────────────────────────────────────────────────
+funksjon _bygg_indeks_frå_rader(t, kolonne: tekst) -> ordbok_tekst {
+    la ks = []
+    la rs = []
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    la r = 1
+    mens r < lengde(fl) {
+        hvis fl[r] == 1 {
+            la rad = rl[r]
+            la v = ""
+            hvis finnes_nøkkel(rad, kolonne) { v = rad[kolonne] }
+            legg_til(ks, sorteringsnøkkel(v))
+            legg_til(rs, r)
+        }
+        r = r + 1
+    }
+    la s = _flett_par(ks, rs)
+    la ix = _ix_bygg(s["k"], s["r"])
+    _ix_fyll_nk(t, ix, s["k"], s["r"])
+    returner ix
+}
+
+// nk[rowid] = nøkkelen rada har i indeksen ("" = ingen), frå sorterte (k, r)-lister.
+funksjon _ix_fyll_nk(t, ix, ks, rs) {
+    la nk = []
+    la n = lengde(t["finst"])
+    la i = 0
+    mens i < n { legg_til(nk, ""); i = i + 1 }
+    i = 0
+    mens i < lengde(ks) {
+        hvis rs[i] < n { nk[rs[i]] = ks[i] }
+        i = i + 1
+    }
+    ix["nk"] = nk
+}
+
+funksjon _sett_indeks(t, kolonne: tekst, ix) {
+    hvis ikke finnes_nøkkel(t["indeksar"], kolonne) { legg_til(t["indeks_kol"], kolonne) }
+    t["indeksar"][kolonne] = ix
+}
+
+// Opprett (eller bygg om) ordna indeks på ein kolonne. Persistert: overlever
+// gjenopning (N-post i WAL/checkpoint).
+funksjon db_opprett_indeks(db, tabell: tekst, kolonne: tekst) {
+    la t = db["tabellar"][tabell]
+    hvis finnes_nøkkel(db, "_undo") og ikke _er_temp(t) {
+        la har = finnes_nøkkel(t["indeksar"], kolonne)
+        la gml = {}
+        hvis har { gml = t["indeksar"][kolonne] }
+        _angre_legg(db, {"op": "indeks", "tab": tabell, "kol": kolonne, "har": har, "ix": gml})
+    }
+    _sett_indeks(t, kolonne, _bygg_indeks_frå_rader(t, kolonne))
+    hvis ikke _er_temp(t) { _wal(db, _post(["N", tabell, kolonne])) }
+}
+
+funksjon db_har_indeks(db, tabell: tekst, kolonne: tekst) -> boolsk {
+    hvis ikke finnes_nøkkel(db["tabellar"], tabell) { returner usann }
+    returner finnes_nøkkel(db["tabellar"][tabell]["indeksar"], kolonne)
+}
+
+funksjon db_slett_indeks(db, tabell: tekst, kolonne: tekst) {
+    la t = db["tabellar"][tabell]
+    hvis finnes_nøkkel(t["indeksar"], kolonne) {
+        fjern_nokkel(t["indeksar"], kolonne)
+        la nye = []
+        la i = 0
+        mens i < lengde(t["indeks_kol"]) {
+            hvis t["indeks_kol"][i] != kolonne { legg_til(nye, t["indeks_kol"][i]) }
+            i = i + 1
+        }
+        t["indeks_kol"] = nye
+    }
+}
+
+// Er oppføringa (k, r) framleis gyldig (rada finst og har same nøkkel)?
+funksjon _ix_gyldig(t, kolonne: tekst, k: tekst, r: heltall) -> boolsk {
+    hvis finnes_nøkkel(t["indeksar"], kolonne) {
+        la nk = t["indeksar"][kolonne]["nk"]
+        returner r < lengde(nk) og nk[r] == k
+    }
+    hvis r >= lengde(t["finst"]) eller t["finst"][r] == 0 { returner usann }
+    la rad = t["radliste"][r]
+    la v = ""
+    hvis finnes_nøkkel(rad, kolonne) { v = rad[kolonne] }
+    returner sorteringsnøkkel(v) == k
+}
+
+// Rå skann av den ordna indeksen: opptil `maks` oppføringar etter/før (sk, sr)
+// (har_start = usann → frå starten/slutten). Returnerer {"k", "r", "gyldig"}:
+// gyldig[i] = 1 om oppføringa er levande. Kallaren held fram frå siste (k, r).
+funksjon db_indeks_skann(db, tabell: tekst, kolonne: tekst, asc: boolsk, har_start: boolsk, sk: tekst, sr: heltall, maks: heltall) -> ordbok_tekst {
+    la t = db["tabellar"][tabell]
+    la ix = t["indeksar"][kolonne]
+    la uk = []
+    la ur = []
+    hvis asc {
+        _ix_asc(ix["rot"], har_start, sk, sr, maks, uk, ur)
+    } ellers {
+        _ix_desc(ix["rot"], har_start, sk, sr, maks, uk, ur)
+    }
+    la g = []
+    la i = 0
+    mens i < lengde(uk) {
+        hvis _ix_gyldig(t, kolonne, uk[i], ur[i]) { legg_til(g, 1) } ellers { legg_til(g, 0) }
+        i = i + 1
+    }
+    returner {"k": uk, "r": ur, "gyldig": g}
+}
+
+// Rowids (levande) med nøkkel i [lo, hi] (inkl./ekskl. per flagg); tom lo/hi = open ende.
+funksjon db_indeks_område(db, tabell: tekst, kolonne: tekst, har_lo: boolsk, lo: tekst, lo_inkl: boolsk, har_hi: boolsk, hi: tekst, hi_inkl: boolsk) -> liste {
+    la ut = []
+    la sk = lo
+    la sr = -1
+    hvis har_lo og ikke lo_inkl { sr = 2000000000000000 }
+    la har = har_lo
+    mens sann {
+        la b = db_indeks_skann(db, tabell, kolonne, sann, har, sk, sr, 256)
+        la n = lengde(b["k"])
+        hvis n == 0 { returner ut }
+        la i = 0
+        mens i < n {
+            la k = b["k"][i]
+            hvis har_hi og (k > hi eller (k == hi og ikke hi_inkl)) { returner ut }
+            hvis b["gyldig"][i] == 1 { legg_til(ut, b["r"][i]) }
+            i = i + 1
+        }
+        sk = b["k"][n - 1]
+        sr = b["r"][n - 1]
+        har = sann
+        hvis n < 256 { returner ut }
+    }
+    returner ut
+}
+
+// Equality-oppslag (tal-bevisst som WHERE): levande rowids med verdi == verdi.
+funksjon db_indeks_søk(db, tabell: tekst, kolonne: tekst, verdi: tekst) -> liste {
+    la k = sorteringsnøkkel(verdi)
+    hvis k == "0" { returner [] }
+    returner db_indeks_område(db, tabell, kolonne, sann, k, sann, sann, k, sann)
+}
+
+// Alle distinkte verdiar (levande) i indeks-orden.
+funksjon db_indeks_nøkler(db, tabell: tekst, kolonne: tekst) -> liste {
+    la t = db["tabellar"][tabell]
+    la rowids = db_indeks_område(db, tabell, kolonne, usann, "", sann, usann, "", sann)
+    la ut = []
+    la sist = ""
+    la første = sann
+    la i = 0
+    mens i < lengde(rowids) {
+        la rad = t["radliste"][rowids[i]]
+        la v = ""
+        hvis finnes_nøkkel(rad, kolonne) { v = rad[kolonne] }
+        hvis første eller v != sist { legg_til(ut, v) }
+        sist = v
+        første = usann
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Hash-indeks (latent, for UNIQUE/FK-oppslag) ──────────────────────
+// {sorteringsnøkkel → [rowid …]}. Ikkje persistert: byggast ved første bruk
+// (O(n)) og vedlikehaldast ved insert/update. Oppføringar kan vere utdaterte
+// (ved UPDATE/DELETE) — kallaren verifiserer. Ei ordbok per kolonne er rask for
+// tusenvis av distinkte verdiar; svært store tabellar bør bruke ordna indeks.
+funksjon db_hash_sikre(db, tabell: tekst, kolonne: tekst) {
+    la t = db["tabellar"][tabell]
+    hvis finnes_nøkkel(t["hash"], kolonne) { returner 0 }
+    la h = {}
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    la r = 1
+    mens r < lengde(fl) {
+        hvis fl[r] == 1 {
+            la rad = rl[r]
+            la v = ""
+            hvis finnes_nøkkel(rad, kolonne) { v = rad[kolonne] }
+            _hash_legg(h, sorteringsnøkkel(v), r)
+        }
+        r = r + 1
+    }
+    t["hash"][kolonne] = h
+    legg_til(t["hash_kol"], kolonne)
+    returner 0
+}
+
+// Kandidat-rowids (levande) der kolonnen har same sorteringsnøkkel som verdi.
+funksjon db_hash_søk(db, tabell: tekst, kolonne: tekst, verdi: tekst) -> liste {
+    db_hash_sikre(db, tabell, kolonne)
+    la t = db["tabellar"][tabell]
+    la k = sorteringsnøkkel(verdi)
+    la h = t["hash"][kolonne]
+    hvis ikke finnes_nøkkel(h, k) { returner [] }
+    la l = h[k]
+    la ut = []
+    la i = 0
+    mens i < lengde(l) {
+        hvis _ix_gyldig(t, kolonne, k, l[i]) { legg_til(ut, l[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+funksjon db_ny(sti: tekst) -> ordbok_tekst {
+    returner {"sti": sti, "tabellar": {}, "meta": "", "_meta_v": 0, "_epoke": 1, "_absorbert": 0,
+              "_wal_hovud": usann, "_wal_bytes": 0, "_cp_base": 0, "_cp_delta": 0}
+}
+
+funksjon db_opprett_tabell(db, navn: tekst, kolonner) {
+    hvis finnes_nøkkel(db, "_undo") {
+        la har = finnes_nøkkel(db["tabellar"], navn)
+        la gml = {}
+        hvis har { gml = db["tabellar"][navn] }
+        _angre_legg(db, {"op": "tabell", "tab": navn, "har": har, "t": gml})
+    }
+    _opprett_intern(db, navn, kolonner)
+    _wal(db, _post_create(navn, kolonner))
+}
+
+// Mellombels tabell (CTE o.l.): aldri logga eller checkpointa.
+funksjon db_opprett_temp(db, navn: tekst, kolonner) {
+    _opprett_intern(db, navn, kolonner)
+    db["tabellar"][navn]["temp"] = sann
+}
+
+funksjon db_slett_tabell(db, navn: tekst) {
+    hvis finnes_nøkkel(db["tabellar"], navn) {
+        la temp = _er_temp(db["tabellar"][navn])
+        hvis ikke temp { _angre_legg(db, {"op": "tabell", "tab": navn, "har": sann, "t": db["tabellar"][navn]}) }
+        fjern_nokkel(db["tabellar"], navn)
+        hvis ikke temp { _wal(db, _post(["X", navn])) }
+    }
+}
+
+// Tabell-metadata (ugjennomsiktig tekst; SQL-laget lagrar constraints her).
+funksjon db_tabell_meta(db, navn: tekst) -> tekst {
+    returner db["tabellar"][navn]["meta"]
+}
+
+funksjon db_sett_tabell_meta(db, navn: tekst, meta: tekst) {
+    la t = db["tabellar"][navn]
+    hvis ikke _er_temp(t) { _angre_legg(db, {"op": "meta", "tab": navn, "gml": t["meta"]}) }
+    t["meta"] = meta
+    hvis ikke _er_temp(t) { _wal(db, _post(["M", navn, meta])) }
+}
+
+// Database-metadata (ugjennomsiktig tekst; SQL-laget lagrar view/trigger/sekvens her).
+funksjon db_meta(db) -> tekst {
+    returner db["meta"]
+}
+
+funksjon db_sett_meta(db, meta: tekst) {
+    _angre_legg(db, {"op": "dbmeta", "gml": db["meta"]})
+    db["meta"] = meta
+    _wal(db, _post(["G", meta]))
+}
+
+funksjon _sett_inn_ved(db, navn: tekst, rowid: heltall, verdier) -> heltall {
+    la t = db["tabellar"][navn]
+    hvis finnes_nøkkel(db, "_undo") og ikke _er_temp(t) { _angre_rad(db, navn, t, rowid) }
+    _sett_rad_felt(db, t, rowid, verdier, 0)
+    // Siste innsette rowid — les av SQL-funksjonen last_insert_rowid().
+    db["_siste_rowid"] = rowid
+    hvis ikke _er_temp(t) { _wal(db, _post_rad(navn, rowid, verdier)) }
+    returner rowid
+}
+
+funksjon db_sett_inn(db, navn: tekst, verdier) -> heltall {
+    returner _sett_inn_ved(db, navn, db["tabellar"][navn]["next_rowid"], verdier)
+}
+
+// Sett inn ved ein bestemt (ledig) rowid — brukt for INTEGER PRIMARY KEY-alias.
+funksjon db_sett_inn_ved(db, navn: tekst, rowid: heltall, verdier) -> heltall {
+    returner _sett_inn_ved(db, navn, rowid, verdier)
+}
+
+funksjon db_slett(db, navn: tekst, rowid: heltall) -> boolsk {
+    la t = db["tabellar"][navn]
+    hvis rowid < 1 eller rowid >= lengde(t["finst"]) eller t["finst"][rowid] == 0 {
+        returner usann
+    }
+    hvis finnes_nøkkel(db, "_undo") og ikke _er_temp(t) { _angre_rad(db, navn, t, rowid) }
+    _slett_intern(t, rowid)
+    hvis ikke _er_temp(t) { _wal(db, _post(["D", navn, tekst_fra_heltall(rowid)])) }
+    returner sann
+}
+
+funksjon db_hent(db, navn: tekst, rowid: heltall) -> ordbok_tekst {
+    la t = db["tabellar"][navn]
+    hvis rowid >= 1 og rowid < lengde(t["finst"]) og t["finst"][rowid] == 1 {
+        returner t["radliste"][rowid]
+    }
+    returner {}
+}
+
+funksjon db_finst(db, navn: tekst, rowid: heltall) -> boolsk {
+    la t = db["tabellar"][navn]
+    returner rowid >= 1 og rowid < lengde(t["finst"]) og t["finst"][rowid] == 1
+}
+
+funksjon db_tel(db, navn: tekst) -> heltall {
+    returner db["tabellar"][navn]["levande"]
+}
+
+funksjon db_next_rowid(db, navn: tekst) -> heltall {
+    returner db["tabellar"][navn]["next_rowid"]
+}
+
+// Rowid-ar (til stades) i rowid-orden.
+funksjon db_rowids(db, navn: tekst) -> liste {
+    la fl = db["tabellar"][navn]["finst"]
+    la ut = []
+    la r = 1
+    la n = lengde(fl)
+    mens r < n {
+        hvis fl[r] == 1 { legg_til(ut, r) }
+        r = r + 1
+    }
+    returner ut
+}
+
+// Oppdater rad ved gjeve rowid (overskriv). Loggast som I-post ved same rowid.
+funksjon db_oppdater(db, navn: tekst, rowid: heltall, verdier) {
+    la t = db["tabellar"][navn]
+    hvis finnes_nøkkel(db, "_undo") og ikke _er_temp(t) { _angre_rad(db, navn, t, rowid) }
+    _sett_rad_felt(db, t, rowid, verdier, 0)
+    hvis ikke _er_temp(t) { _wal(db, _post_rad(navn, rowid, verdier)) }
+}
+
+// Alle rader i rowid-orden, hopp over sletta.
+funksjon db_alle(db, navn: tekst) -> liste {
+    la t = db["tabellar"][navn]
+    la fl = t["finst"]
+    la rl = t["radliste"]
+    la ut = []
+    la r = 1
+    la n = lengde(fl)
+    mens r < n {
+        hvis fl[r] == 1 { legg_til(ut, rl[r]) }
+        r = r + 1
+    }
+    returner ut
+}
+
+// ── ALTER TABLE (loggast, så dei kan spelast av att) ─────────────────
+funksjon _alter_legg_kolonne(t, kolnavn: tekst, tag: heltall, fyll: tekst) {
+    legg_til(t["kolonner"], {"navn": kolnavn, "tag": tag})
+    t["kolnamn"] = _kolnamn_av(t["kolonner"])
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    la r = 1
+    mens r < lengde(fl) {
+        hvis fl[r] == 1 { rl[r][kolnavn] = fyll }
+        r = r + 1
+    }
+}
+
+funksjon _alter_rename_kolonne(t, gammal: tekst, ny: tekst) {
+    la i = 0
+    mens i < lengde(t["kolonner"]) {
+        hvis t["kolonner"][i]["navn"] == gammal { t["kolonner"][i]["navn"] = ny }
+        i = i + 1
+    }
+    t["kolnamn"] = _kolnamn_av(t["kolonner"])
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    la r = 1
+    mens r < lengde(fl) {
+        hvis fl[r] == 1 og finnes_nøkkel(rl[r], gammal) {
+            rl[r][ny] = rl[r][gammal]
+            fjern_nokkel(rl[r], gammal)
+        }
+        r = r + 1
+    }
+    hvis finnes_nøkkel(t["indeksar"], gammal) {
+        la ix = t["indeksar"][gammal]
+        db_slett_indeks_t(t, gammal)
+        _sett_indeks(t, ny, ix)
+    }
+    t["hash"] = {}
+    t["hash_kol"] = []
+}
+
+funksjon db_slett_indeks_t(t, kolonne: tekst) {
+    hvis finnes_nøkkel(t["indeksar"], kolonne) {
+        fjern_nokkel(t["indeksar"], kolonne)
+        la nye = []
+        la i = 0
+        mens i < lengde(t["indeks_kol"]) {
+            hvis t["indeks_kol"][i] != kolonne { legg_til(nye, t["indeks_kol"][i]) }
+            i = i + 1
+        }
+        t["indeks_kol"] = nye
+    }
+}
+
+funksjon _alter_drop_kolonne(t, kn: tekst) {
+    la nykol = []
+    la i = 0
+    mens i < lengde(t["kolonner"]) {
+        hvis t["kolonner"][i]["navn"] != kn { legg_til(nykol, t["kolonner"][i]) }
+        i = i + 1
+    }
+    t["kolonner"] = nykol
+    t["kolnamn"] = _kolnamn_av(nykol)
+    la rl = t["radliste"]
+    la fl = t["finst"]
+    la r = 1
+    mens r < lengde(fl) {
+        hvis fl[r] == 1 og finnes_nøkkel(rl[r], kn) { fjern_nokkel(rl[r], kn) }
+        r = r + 1
+    }
+    db_slett_indeks_t(t, kn)
+    t["hash"] = {}
+    t["hash_kol"] = []
+}
+
+funksjon _angre_rad(db, navn: tekst, t, rowid: heltall) {
+    hvis rowid < lengde(t["finst"]) og t["finst"][rowid] == 1 {
+        _angre_legg(db, {"op": "rad", "tab": navn, "r": rowid, "gml": t["radliste"][rowid]})
+    } ellers {
+        _angre_legg(db, {"op": "ny", "tab": navn, "r": rowid, "next": t["next_rowid"]})
+    }
+}
+
+funksjon _angre_tabell(db, navn: tekst, t) {
+    hvis finnes_nøkkel(db, "_undo") og ikke _er_temp(t) { _angre_legg(db, {"op": "tabell", "tab": navn, "har": sann, "t": _kopi_tabell(t)}) }
+}
+
+funksjon db_legg_til_kolonne(db, navn: tekst, kolnavn: tekst, tag: heltall, fyll: tekst) {
+    la t = db["tabellar"][navn]
+    _angre_tabell(db, navn, t)
+    _alter_legg_kolonne(t, kolnavn, tag, fyll)
+    hvis ikke _er_temp(t) { _wal(db, _post(["A", navn, tekst_fra_heltall(tag), kolnavn, fyll])) }
+}
+
+funksjon db_rename_kolonne(db, navn: tekst, gammal: tekst, ny: tekst) {
+    la t = db["tabellar"][navn]
+    _angre_tabell(db, navn, t)
+    _alter_rename_kolonne(t, gammal, ny)
+    hvis ikke _er_temp(t) { _wal(db, _post(["R", navn, gammal, ny])) }
+}
+
+funksjon db_drop_kolonne(db, navn: tekst, kn: tekst) {
+    la t = db["tabellar"][navn]
+    _angre_tabell(db, navn, t)
+    _alter_drop_kolonne(t, kn)
+    hvis ikke _er_temp(t) { _wal(db, _post(["Q", navn, kn])) }
+}
+
+funksjon db_rename_tabell(db, gammal: tekst, ny: tekst) {
+    hvis ikke finnes_nøkkel(db["tabellar"], gammal) { returner 0 }
+    la t = db["tabellar"][gammal]
+    hvis ikke _er_temp(t) { _angre_legg(db, {"op": "rename", "gml": gammal, "ny": ny}) }
+    fjern_nokkel(db["tabellar"], gammal)
+    t["navn"] = ny
+    db["tabellar"][ny] = t
+    hvis ikke _er_temp(t) { _wal(db, _post(["T", gammal, ny])) }
+    returner 0
+}
+
+
+// ── Transaksjonar: angre-logg ────────────────────────────────────────
+// begin lagar ein tom angre-logg; kvar mutasjon legg inn korleis han blir
+// reversert (gamal rad, gamal metadata, kopi av tabellen før ALTER …). commit
+// kastar loggen; rollback spelar han baklengs. Kostnaden er proporsjonal med
+// endringane i transaksjonen — ikkje med databasestorleiken (før: heile
+// databasen vart serialisert ved kvar begin).
+funksjon db_tx_start(db) {
+    db["_undo"] = []
+}
+
+funksjon db_tx_aktiv(db) -> boolsk {
+    returner finnes_nøkkel(db, "_undo")
+}
+
+funksjon db_tx_slutt(db) {
+    hvis finnes_nøkkel(db, "_undo") { fjern_nokkel(db, "_undo") }
+}
+
+funksjon _angre_legg(db, post) {
+    hvis finnes_nøkkel(db, "_undo") { legg_til(db["_undo"], post) }
+}
+
+// Djup kopi av ein tabell (rader + skjema) — før ALTER i ein transaksjon.
+funksjon _kopi_tabell(t) -> ordbok_tekst {
+    la kol = []
+    la i = 0
+    mens i < lengde(t["kolonner"]) {
+        legg_til(kol, {"navn": t["kolonner"][i]["navn"], "tag": t["kolonner"][i]["tag"]})
+        i = i + 1
+    }
+    la rl = []
+    la r = 0
+    mens r < lengde(t["radliste"]) {
+        la gml = t["radliste"][r]
+        la ny = {}
+        la kn = nøkler(gml)
+        la k = 0
+        mens k < lengde(kn) {
+            ny[kn[k]] = gml[kn[k]]
+            k = k + 1
+        }
+        legg_til(rl, ny)
+        r = r + 1
+    }
+    returner {"navn": t["navn"], "kolonner": kol, "kolnamn": _kolnamn_av(kol), "next_rowid": t["next_rowid"],
+              "radliste": rl, "finst": builtin.slice(t["finst"], 0, lengde(t["finst"])), "levande": t["levande"],
+              "meta": t["meta"], "indeksar": {}, "indeks_kol": builtin.slice(t["indeks_kol"], 0, lengde(t["indeks_kol"])),
+              "hash": {}, "hash_kol": []}
+}
+
+// Kast avleidde cachar som SQL-laget har lagt på tabellen (t.d. alias-info).
+funksjon _ugyldig_cache(t) {
+    la kn = nøkler(t)
+    la i = 0
+    mens i < lengde(kn) {
+        hvis builtin.slice(kn[i], 0, 1) == "_" { fjern_nokkel(t, kn[i]) }
+        i = i + 1
+    }
+}
+
+// Rull attende alle endringar sidan db_tx_start (i minnet; kallaren skriv så ein
+// full checkpoint, sidan WAL-en inneheld dei attenderulla endringane).
+funksjon db_tx_angre(db) {
+    hvis ikke finnes_nøkkel(db, "_undo") { returner 0 }
+    la u = db["_undo"]
+    fjern_nokkel(db, "_undo")
+    la i = lengde(u) - 1
+    mens i >= 0 {
+        la e = u[i]
+        la op = e["op"]
+        hvis op == "ny" {
+            hvis finnes_nøkkel(db["tabellar"], e["tab"]) {
+                la t = db["tabellar"][e["tab"]]
+                _slett_intern(t, e["r"])
+                t["next_rowid"] = e["next"]
+                _ugyldig_cache(t)
+            }
+        } ellers hvis op == "rad" {
+            hvis finnes_nøkkel(db["tabellar"], e["tab"]) {
+                la t = db["tabellar"][e["tab"]]
+                _sett_rad(t, e["r"], e["gml"])
+                _ugyldig_cache(t)
+            }
+        } ellers hvis op == "tabell" {
+            hvis e["har"] {
+                la t = e["t"]
+                // Kopiar (ALTER) har ikkje indeks-tre: bygg dei frå radene.
+                la ik = t["indeks_kol"]
+                la ci = 0
+                mens ci < lengde(ik) {
+                    hvis ikke finnes_nøkkel(t["indeksar"], ik[ci]) { t["indeksar"][ik[ci]] = _bygg_indeks_frå_rader(t, ik[ci]) }
+                    ci = ci + 1
+                }
+                _ugyldig_cache(t)
+                db["tabellar"][e["tab"]] = t
+            } ellers hvis finnes_nøkkel(db["tabellar"], e["tab"]) {
+                fjern_nokkel(db["tabellar"], e["tab"])
+            }
+        } ellers hvis op == "meta" {
+            hvis finnes_nøkkel(db["tabellar"], e["tab"]) {
+                la t = db["tabellar"][e["tab"]]
+                t["meta"] = e["gml"]
+                hvis finnes_nøkkel(t, "c") { fjern_nokkel(t, "c") }
+            }
+        } ellers hvis op == "dbmeta" {
+            db["meta"] = e["gml"]
+            db["_meta_v"] = db["_meta_v"] + 1
+        } ellers hvis op == "indeks" {
+            hvis finnes_nøkkel(db["tabellar"], e["tab"]) {
+                la t = db["tabellar"][e["tab"]]
+                hvis e["har"] { _sett_indeks(t, e["kol"], e["ix"]) } ellers { db_slett_indeks_t(t, e["kol"]) }
+            }
+        } ellers hvis op == "rename" {
+            hvis finnes_nøkkel(db["tabellar"], e["ny"]) {
+                la t = db["tabellar"][e["ny"]]
+                fjern_nokkel(db["tabellar"], e["ny"])
+                t["navn"] = e["gml"]
+                db["tabellar"][e["gml"]] = t
+            }
+        }
+        i = i - 1
+    }
+    returner 0
+}
+
+// ── Serialiser / replay ──────────────────────────────────────────────
+// Base-innhald: per tabell C [M] [P] I… [N med sorterte oppføringar], så G.
+// Returnerer postane som tekst (kvar avslutta med chr(30)).
+funksjon db_serialiser(db) -> tekst {
+    la rs = builtin.chr(30)
+    la deler = []
+    la navn_liste = nøkler(db["tabellar"])
+    la ti: heltall = 0
+    mens ti < lengde(navn_liste) {
+        la navn = navn_liste[ti]
+        la t = db["tabellar"][navn]
+        hvis ikke _er_temp(t) {
+            legg_til(deler, _post_create(navn, t["kolonner"]))
+            hvis t["meta"] != "" { legg_til(deler, _post(["M", navn, t["meta"]])) }
+            legg_til(deler, _post(["P", navn, tekst_fra_heltall(t["next_rowid"])]))
+            la rl = t["radliste"]
+            la fl = t["finst"]
+            la r = 1
+            mens r < lengde(fl) {
+                hvis fl[r] == 1 { legg_til(deler, _post_rad(navn, r, _rad_verdiar(t, rl[r]))) }
+                r = r + 1
+            }
+            la ik = t["indeks_kol"]
+            la ci = 0
+            mens ci < lengde(ik) {
+                la kol = ik[ci]
+                la f = ["N", navn, kol]
+                la nyk = []
+                la nyr = []
+                la alle = db_indeks_skann(db, navn, kol, sann, usann, "", 0, t["indeksar"][kol]["antall"] + 1)
+                la ei = 0
+                mens ei < lengde(alle["k"]) {
+                    hvis alle["gyldig"][ei] == 1 {
+                        legg_til(f, alle["k"][ei])
+                        legg_til(f, tekst_fra_heltall(alle["r"][ei]))
+                        legg_til(nyk, alle["k"][ei])
+                        legg_til(nyr, alle["r"][ei])
+                    }
+                    ei = ei + 1
+                }
+                legg_til(deler, _post(f))
+                // Rydd utdaterte oppføringar i minnet òg (same sorterte liste).
+                la nyix = _ix_bygg(nyk, nyr)
+                _ix_fyll_nk(t, nyix, nyk, nyr)
+                t["indeksar"][kol] = nyix
+                ci = ci + 1
+            }
+        }
+        ti = ti + 1
+    }
+    hvis db["meta"] != "" { legg_til(deler, _post(["G", db["meta"]])) }
+    hvis lengde(deler) == 0 { returner "" }
+    returner builtin.join(deler, rs) + rs
+}
+
+// Bruk éin post (felt-liste) på db.
+funksjon _bruk_post(db, f) {
+    la op = f[0]
+    hvis op == "I" {
+        la navn = f[1]
+        hvis finnes_nøkkel(db["tabellar"], navn) {
+            _sett_rad_felt(db, db["tabellar"][navn], builtin.heltall_fra_tekst(f[2]), f, 3)
+        }
+    } ellers hvis op == "D" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) { _slett_intern(db["tabellar"][f[1]], builtin.heltall_fra_tekst(f[2])) }
+    } ellers hvis op == "C" {
+        la kolonner = []
+        la i = 2
+        mens i + 1 < lengde(f) {
+            legg_til(kolonner, {"navn": f[i + 1], "tag": builtin.heltall_fra_tekst(f[i])})
+            i = i + 2
+        }
+        _opprett_intern(db, f[1], kolonner)
+    } ellers hvis op == "M" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) {
+            la t = db["tabellar"][f[1]]
+            t["meta"] = f[2]
+            // SQL-laget dekodar metadata på nytt (sjå _tab_c).
+            hvis finnes_nøkkel(t, "c") { fjern_nokkel(t, "c") }
+        }
+    } ellers hvis op == "P" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) {
+            la t = db["tabellar"][f[1]]
+            la nr = builtin.heltall_fra_tekst(f[2])
+            hvis nr > t["next_rowid"] { t["next_rowid"] = nr }
+        }
+    } ellers hvis op == "N" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) {
+            la t = db["tabellar"][f[1]]
+            hvis lengde(f) > 3 {
+                // Ferdig sorterte oppføringar frå base-segmentet: bygg direkte.
+                la ks = []
+                la rr = []
+                la i = 3
+                mens i + 1 < lengde(f) {
+                    legg_til(ks, f[i])
+                    legg_til(rr, builtin.heltall_fra_tekst(f[i + 1]))
+                    i = i + 2
+                }
+                la nix = _ix_bygg(ks, rr)
+                _ix_fyll_nk(t, nix, ks, rr)
+                _sett_indeks(t, f[2], nix)
+            } ellers {
+                _sett_indeks(t, f[2], _bygg_indeks_frå_rader(t, f[2]))
+            }
+        }
+    } ellers hvis op == "X" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) { fjern_nokkel(db["tabellar"], f[1]) }
+    } ellers hvis op == "G" {
+        db["meta"] = f[1]
+        db["_meta_v"] = db["_meta_v"] + 1
+    } ellers hvis op == "A" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) {
+            la fyll = ""
+            hvis lengde(f) > 4 { fyll = f[4] }
+            _alter_legg_kolonne(db["tabellar"][f[1]], f[3], builtin.heltall_fra_tekst(f[2]), fyll)
+        }
+    } ellers hvis op == "R" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) { _alter_rename_kolonne(db["tabellar"][f[1]], f[2], f[3]) }
+    } ellers hvis op == "Q" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) { _alter_drop_kolonne(db["tabellar"][f[1]], f[2]) }
+    } ellers hvis op == "T" {
+        hvis finnes_nøkkel(db["tabellar"], f[1]) {
+            la t = db["tabellar"][f[1]]
+            fjern_nokkel(db["tabellar"], f[1])
+            t["navn"] = f[2]
+            db["tabellar"][f[2]] = t
+        }
+    }
+}
+
+// Spel av postar (tekst) eller eit gammalt byte-payload (liste) inn i db.
+funksjon db_replay(db, payload) {
+    hvis builtin.type(payload) == "liste" {
+        _replay_bytes(db, payload)
+        returner 0
+    }
+    la poster = builtin.split(payload, builtin.chr(30))
+    la i = 0
+    mens i < lengde(poster) {
+        hvis poster[i] != "" { _bruk_post(db, _felt(poster[i])) }
+        i = i + 1
+    }
+    returner 0
+}
+
+// ── Fil-livssyklus ───────────────────────────────────────────────────
+// Filer:  <sti>.cp   checkpoint: "NORSDB2"-hovud + segment (S … Z). Første segment
+//                    er base (heile databasen); seinare segment er delta (WAL-ar som
+//                    er absorberte ved inkrementell checkpoint).
+//         <sti>.wal  endringar sidan siste checkpoint (E-hovud + postar).
+//         <sti>.cp2  mellombels ved kompaktering (skrive ferdig før .cp blir skrive
+//                    om — ein krasj midt i kompakteringa mistar difor aldri data).
+// Gamle NORSDB1-filer (binære) blir lesne og skrivne om til NORSDB2 ved open.
+
+funksjon _cp_hovud() -> tekst { returner "NORSDB2" }
+
+// Er teksten eit gyldig NORSDB2-checkpoint med minst eitt komplett segment?
+funksjon _cp_gyldig(t: tekst) -> boolsk {
+    hvis lengde(t) < 7 eller builtin.slice(t, 0, 7) != _cp_hovud() { returner usann }
+    returner builtin.index_of(t, builtin.chr(30) + "Z" + builtin.chr(31)) >= 0
+}
+
+// Les NORSDB2-checkpoint inn i db. Ufullstendig siste segment (krasj) ignorerast.
+funksjon _les_cp_tekst(db, t: tekst) {
+    la poster = builtin.split(t, builtin.chr(30))
+    // Siste komplette segment-slutt.
+    la siste_z = lengde(poster) - 1
+    mens siste_z > 0 og builtin.slice(poster[siste_z], 0, 1) != "Z" { siste_z = siste_z - 1 }
+    la base = 0
+    la delta = 0
+    la i_base = sann
+    la i = 1
+    mens i <= siste_z {
+        la p = poster[i]
+        la ln = lengde(p) + 1
+        hvis i_base { base = base + ln } ellers { delta = delta + ln }
+        la op = builtin.slice(p, 0, 1)
+        hvis op == "Z" {
+            la f = _felt(p)
+            la e = builtin.heltall_fra_tekst(f[1])
+            hvis e > db["_absorbert"] { db["_absorbert"] = e }
+            i_base = usann
+        } ellers hvis op != "S" og p != "" {
+            _bruk_post(db, _felt(p))
+        }
+        i = i + 1
+    }
+    db["_cp_base"] = base
+    db["_cp_delta"] = delta
+    // Noko etter siste komplette segment (avbrote delta-skriv)? Då må fila
+    // kompakterast, elles ville neste delta-segment blitt limt til halen.
+    hvis siste_z < lengde(poster) - 2 eller poster[lengde(poster) - 1] != "" { db["_cp_skitten"] = sann }
+}
+
+// Finst det ein database på stien (checkpoint eller WAL)?
+funksjon db_fil_finst(sti: tekst) -> boolsk {
+    returner builtin.fil_finnes(sti + ".cp") eller builtin.fil_finnes(sti + ".cp2") eller builtin.fil_finnes(sti + ".wal")
+}
+
+// db_åpne rekonstruerer tilstanden: checkpoint (base + delta-segment) + WAL.
+funksjon db_åpne(sti: tekst) -> ordbok_tekst {
+    la db = db_ny(sti)
+    la legacy = usann
+    // Fullfør ei avbroten kompaktering.
+    hvis builtin.fil_finnes(sti + ".cp2") {
+        la t2 = builtin.fil_les(sti + ".cp2")
+        hvis _cp_gyldig(t2) { builtin.fil_skriv(sti + ".cp", t2) }
+        builtin.fil_slett(sti + ".cp2")
+    }
+    hvis builtin.fil_finnes(sti + ".cp") {
+        la t = builtin.fil_les(sti + ".cp")
+        hvis lengde(t) >= 7 og builtin.slice(t, 0, 7) == "NORSDB1" {
+            la cp = checkpoint_les(sti + ".cp")
+            hvis cp["gyldig"] { _replay_bytes(db, cp["payload"]) }
+            legacy = sann
+        } ellers hvis _cp_gyldig(t) {
+            _les_cp_tekst(db, t)
+        }
+    }
+    hvis builtin.fil_finnes(sti + ".wal") {
+        la w = builtin.fil_les(sti + ".wal")
+        hvis lengde(w) > 0 og builtin.char_code(w) < 32 {
+            // Gammal binær WAL (u32-ramme).
+            la recs = logg_les_alle(sti + ".wal")
+            la i = 0
+            mens i < lengde(recs) {
+                _replay_ein_byte(db, recs[i])
+                i = i + 1
+            }
+            legacy = sann
+        } ellers hvis lengde(w) > 0 {
+            la poster = builtin.split(w, builtin.chr(30))
+            la n = lengde(poster)
+            // Siste element er "" om fila endar på chr(30); elles ein trunkert hale.
+            la hale = poster[n - 1] != ""
+            la start = 0
+            la epoke = -1
+            hvis builtin.slice(poster[0], 0, 1) == "E" {
+                epoke = builtin.heltall_fra_tekst(_felt(poster[0])[1])
+                start = 1
+            }
+            hvis epoke >= 0 og epoke <= db["_absorbert"] {
+                // Alt absorbert i checkpointet (krasj etter checkpoint, før WAL-sletting).
+                builtin.fil_slett(sti + ".wal")
+            } ellers {
+                la i = start
+                mens i < n - 1 {
+                    hvis poster[i] != "" { _bruk_post(db, _felt(poster[i])) }
+                    i = i + 1
+                }
+                hvis epoke >= 0 { db["_epoke"] = epoke }
+                db["_wal_hovud"] = sann
+                db["_wal_bytes"] = lengde(w)
+                hvis hale {
+                    // Skriv WAL-en om utan den trunkerte halen, så nye postar ikkje
+                    // blir limte til eit halvt skrive post.
+                    la gyldig = builtin.slice(poster, 0, n - 1)
+                    la ny = builtin.join(gyldig, builtin.chr(30)) + builtin.chr(30)
+                    builtin.fil_skriv(sti + ".wal", ny)
+                    db["_wal_bytes"] = lengde(ny)
+                }
+            }
+        }
+    }
+    hvis ikke db["_wal_hovud"] { db["_epoke"] = db["_absorbert"] + 1 }
+    hvis legacy eller finnes_nøkkel(db, "_cp_skitten") { db_checkpoint_full(db) }
     returner db
 }
 
-// db_checkpoint skriv eit kompakt snapshot og tømmer WAL-en. Bind WAL-storleiken.
+// Inkrementell checkpoint: WAL-en (berre endringane sidan sist) blir lagd til
+// checkpoint-fila som eit delta-segment, og WAL-en sletta. Når delta-segmenta
+// til saman blir større enn basen, blir fila kompaktert (full omskriving).
 funksjon db_checkpoint(db) {
-    hvis db["sti"] == "" {
-        returner
+    hvis db["sti"] == "" { returner 0 }
+    la sti = db["sti"]
+    hvis (ikke builtin.fil_finnes(sti + ".cp")) eller db["_cp_delta"] + db["_wal_bytes"] > db["_cp_base"] {
+        db_checkpoint_full(db)
+        returner 0
     }
-    checkpoint_skriv(db["sti"] + ".cp", db_serialiser(db))
-    logg_tøm(db["sti"] + ".wal")
+    hvis db["_wal_bytes"] == 0 eller ikke builtin.fil_finnes(sti + ".wal") { returner 0 }
+    la w = builtin.fil_les(sti + ".wal")
+    la poster = builtin.split(w, builtin.chr(30))
+    // Dropp E-hovudet og ein evt. trunkert hale; resten er komplette postar.
+    la start = 0
+    hvis lengde(poster) > 0 og builtin.slice(poster[0], 0, 1) == "E" { start = 1 }
+    la kropp = builtin.join(builtin.slice(poster, start, lengde(poster) - 1), builtin.chr(30))
+    la us = builtin.chr(31)
+    la rs = builtin.chr(30)
+    la e = tekst_fra_heltall(db["_epoke"])
+    la seg = "S" + us + e + rs
+    hvis kropp != "" { seg = seg + kropp + rs }
+    seg = seg + "Z" + us + e + rs
+    builtin.fil_append(sti + ".cp", seg)
+    builtin.fil_slett(sti + ".wal")
+    db["_cp_delta"] = db["_cp_delta"] + lengde(seg)
+    db["_absorbert"] = db["_epoke"]
+    db["_epoke"] = db["_epoke"] + 1
+    db["_wal_hovud"] = usann
+    db["_wal_bytes"] = 0
+    returner 0
+}
+
+// Full checkpoint (kompaktering): skriv heile databasen som eitt base-segment.
+// Skriv først <sti>.cp2 ferdig, så <sti>.cp, så slett .cp2 og WAL.
+funksjon db_checkpoint_full(db) {
+    hvis db["sti"] == "" { returner 0 }
+    la sti = db["sti"]
+    la us = builtin.chr(31)
+    la rs = builtin.chr(30)
+    la e = tekst_fra_heltall(db["_epoke"])
+    la base = db_serialiser(db)
+    la innhald = _cp_hovud() + rs + "S" + us + e + rs + base + "Z" + us + e + rs
+    builtin.fil_skriv(sti + ".cp2", innhald)
+    builtin.fil_skriv(sti + ".cp", innhald)
+    builtin.fil_slett(sti + ".cp2")
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+    db["_cp_base"] = lengde(innhald)
+    db["_cp_delta"] = 0
+    db["_absorbert"] = db["_epoke"]
+    db["_epoke"] = db["_epoke"] + 1
+    db["_wal_hovud"] = usann
+    db["_wal_bytes"] = 0
+    returner 0
+}
+
+// Skriv eit sjølvstendig checkpoint av heile databasen til `sti` (backup).
+// Fila kan leggjast som <mål>.cp og opnast som ein vanleg database.
+funksjon db_backup(db, sti: tekst) {
+    la us = builtin.chr(31)
+    la rs = builtin.chr(30)
+    la innhald = _cp_hovud() + rs + "S" + us + "0" + rs + db_serialiser(db) + "Z" + us + "0" + rs
+    builtin.fil_skriv(sti, innhald)
 }
