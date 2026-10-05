@@ -1,0 +1,121 @@
+// NorsDB-profil (punkt 5d): statistisk profil av ein NorsDB-arbeidslast via
+// VM-profileraren. Profileraren er AV i raskmodus, så køyr UTAN NORSCODE_VM_FAST:
+//
+//   NORSCODE_VM_SAMPLE_INTERVAL=256 ./bin/nc run tools/norsdb_profil.no
+//
+// Miljø: NORSDB_PROFIL_N    — rader i tabellen (standard 200)
+//        NORSDB_PROFIL_LAST — insert | pk | where | where_idx | order | order_limit | update | checkpoint
+//                             (standard pk)
+// Skriv topp-25 funksjonar etter eigen tid (self) og inkluderande tid (stack).
+
+bruk std.db som db
+bruk std.norsdb_motor som motor
+
+funksjon _env(namn: tekst, standard: tekst) -> tekst {
+    prøv {
+        la v = builtin.miljo_hent(namn)
+        hvis v != "" { returner v }
+    } fang (e) {}
+    returner standard
+}
+
+funksjon _t(n: heltall) -> tekst { returner tekst_fra_heltall(n) }
+
+funksjon _fyll(h, n: heltall) {
+    la i = 0
+    mens i < n {
+        db.execute(h, "INSERT INTO p (k, s, v) VALUES (" + _t(i % 10) + ", " + _t((i * 7919) % n) + ", 'rad" + _t(i) + "')")
+        i = i + 1
+    }
+}
+
+funksjon _topp(tal, tittel: tekst, total: heltall) {
+    la namn = nøkler(tal)
+    la brukt = {}
+    skriv("── " + tittel + " (av " + _t(total) + " samples) ──\n")
+    la r = 0
+    mens r < 25 og r < lengde(namn) {
+        la best = ""
+        la best_n = -1
+        la i = 0
+        mens i < lengde(namn) {
+            hvis (ikke finnes_nøkkel(brukt, namn[i])) og tal[namn[i]] > best_n {
+                best = namn[i]
+                best_n = tal[namn[i]]
+            }
+            i = i + 1
+        }
+        brukt[best] = 1
+        skriv("  " + _t(best_n * 100 / total) + "%  " + _t(best_n) + "  " + best + "\n")
+        r = r + 1
+    }
+}
+
+funksjon start() -> heltall {
+    la n = builtin.heltall_fra_tekst(_env("NORSDB_PROFIL_N", "200"))
+    la last = _env("NORSDB_PROFIL_LAST", "pk")
+    la sti = "/tmp/norsdb_profil.db"
+    hvis builtin.fil_finnes(sti + ".cp") { builtin.fil_slett(sti + ".cp") }
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+    la h = db.open(sti)
+    db.execute(h, "CREATE TABLE p (id INTEGER PRIMARY KEY, k INTEGER, s INTEGER, v TEXT)")
+    hvis last != "insert" { _fyll(h, n) }
+
+    builtin.vm_profiler_reset()
+    la t0 = builtin.tid_ms()
+    hvis last == "insert" {
+        _fyll(h, n)
+    } ellers hvis last == "pk" {
+        la q = 0
+        mens q < 10 { db.query_text(h, "SELECT v FROM p WHERE id = " + _t(q + 1)); q = q + 1 }
+    } ellers hvis last == "where" {
+        la q = 0
+        mens q < 5 { db.query_int(h, "SELECT COUNT(*) FROM p WHERE k = 4"); q = q + 1 }
+    } ellers hvis last == "where_idx" {
+        db.execute(h, "CREATE INDEX idx_k ON p (k)")
+        builtin.vm_profiler_reset()
+        la q = 0
+        mens q < 5 { db.query_int(h, "SELECT COUNT(*) FROM p WHERE k = 4"); q = q + 1 }
+    } ellers hvis last == "order" {
+        db.query_rader(h, "SELECT id, s FROM p ORDER BY s")
+    } ellers hvis last == "order_limit" {
+        db.query_rader(h, "SELECT id, s FROM p ORDER BY s DESC LIMIT 10")
+    } ellers hvis last == "update" {
+        la q = 0
+        mens q < 10 { db.execute(h, "UPDATE p SET v = 'x' WHERE id = " + _t(q + 1)); q = q + 1 }
+    } ellers hvis last == "checkpoint" {
+        motor.db_checkpoint(h)
+    }
+    la ms = builtin.tid_ms() - t0
+    // Kopi: lista er levande og veks medan aggregeringa under køyrer.
+    la levande = builtin.vm_profiler_samples()
+    la samples = builtin.slice(levande, 0, lengde(levande))
+    skriv("PROFIL last=" + last + " n=" + _t(n) + " tid=" + _t(ms) + " ms samples=" + _t(lengde(samples)) + "\n")
+
+    la self_tal = {}
+    la inkl_tal = {}
+    la i = 0
+    mens i < lengde(samples) {
+        la s = samples[i]
+        la f = tekst(s["function"])
+        hvis finnes_nøkkel(self_tal, f) { self_tal[f] = self_tal[f] + 1 } ellers { self_tal[f] = 1 }
+        la sett = {}
+        la deler = builtin.split(tekst(s["stack"]), ";")
+        la j = 0
+        mens j < lengde(deler) {
+            la d = deler[j]
+            hvis ikke finnes_nøkkel(sett, d) {
+                sett[d] = 1
+                hvis finnes_nøkkel(inkl_tal, d) { inkl_tal[d] = inkl_tal[d] + 1 } ellers { inkl_tal[d] = 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    hvis lengde(samples) > 0 {
+        _topp(self_tal, "self", lengde(samples))
+        _topp(inkl_tal, "inkluderande", lengde(samples))
+    }
+    db.close(h)
+    returner 0
+}
