@@ -607,9 +607,18 @@ funksjon vm_gc_safe_point_f(fast: boolsk, functions, metrics, heap, force: bools
     returner 0
 }
 
-funksjon vm_function_finish_f(fast: boolsk, functions, fn_namn: tekst, start_ms: heiltall) -> heiltall {
+// Same som vm_function_finish, med hoista trace-liste og metrikkart.
+funksjon vm_function_finish_f(fast: boolsk, trace_events, metrics, fn_namn: tekst, start_ms: heiltall) -> heiltall {
     hvis fast { returner 0 }
-    returner vm_function_finish(functions, fn_namn, start_ms)
+    la brukt = builtin.tid_ms() - start_ms
+    hvis brukt < 0 { brukt = 0 }
+    la event = {"name": fn_namn, "cat": "norscode.vm", "ph": "X", "ts": start_ms * 1000, "dur": brukt * 1000, "pid": 1, "tid": 1}
+    hvis lengde(trace_events) < 10000 {
+        legg_til(trace_events, event)
+    } ellers {
+        vm_metric_add_i(metrics, "trace_events_dropped", 1)
+    }
+    returner vm_metric_add_i(metrics, "function_wall_ms." + fn_namn, brukt)
 }
 
 // Skuggeheap-id-en til siste returverdi blir berre lesen av rot-synken i
@@ -5062,6 +5071,68 @@ funksjon vm_jit_try(functions, fn_namn: tekst, fn_def, args) -> ordbok_tekst {
     returner {"used": "sann", "value": result["value"]}
 }
 
+// Spor D: same som vm_jit_try, men med hoista debug-kart, policy-svar, caps-
+// og registerkart frå køyr_funksjon, og med funksjonen sin numeriske kind
+// (vm_jit_function_numeric_kind skannar heile koden) cacha per aktivering.
+funksjon vm_jit_try_i(functions, debug, tillatt: boolsk, caps, register, kind_cache, fn_namn: tekst, fn_def, args) -> ordbok_tekst {
+    la miss = {"used": "usann"}
+    hvis debug["enabled"] == "sann" { returner miss }
+    hvis ikkje tillatt { returner miss }
+    hvis vm_map_har_nokkel(caps, fn_namn) og builtin.index_of(caps[fn_namn], "|jit.execute|") < 0 { returner miss }
+    la numeric_kind = vm_jit_arg_numeric_kind(args)
+    hvis numeric_kind == "invalid" { returner miss }
+    hvis ikkje vm_map_har_nokkel(kind_cache, fn_namn) { kind_cache[fn_namn] = {} }
+    la per_fn = kind_cache[fn_namn]
+    hvis vm_map_har_nokkel(per_fn, numeric_kind) {
+        numeric_kind = per_fn[numeric_kind]
+    } ellers {
+        la fn_kind = vm_jit_function_numeric_kind(fn_def, numeric_kind)
+        per_fn[numeric_kind] = fn_kind
+        numeric_kind = fn_kind
+    }
+    hvis numeric_kind == "invalid" { returner miss }
+    la register_key = fn_namn + "|" + numeric_kind
+    hvis ikkje vm_map_har_nokkel(register, register_key) {
+        la lowered = vm_jit_lower(functions, fn_namn, fn_def, 0, numeric_kind)
+        lowered["calls"] = "0"
+        lowered["handle"] = ""
+        register[register_key] = lowered
+    }
+    la entry = register[register_key]
+    hvis entry["eligible"] != "sann" { returner miss }
+    entry["calls"] = tekst_fra_heltall(heltall_fra_tekst(entry["calls"]) + 1)
+    la threshold: heiltall = 50
+    la raw_threshold = miljo_hent("NORSCODE_VM_JIT_THRESHOLD")
+    hvis raw_threshold != "" og vm_er_heltallstekst(raw_threshold) {
+        la configured = heltall_fra_tekst(raw_threshold)
+        hvis configured >= 2 { threshold = configured }
+    }
+    hvis entry["handle"] == "" og heltall_fra_tekst(entry["calls"]) >= threshold {
+        la compile_request = {"abi": "norscode-jit-v1", "operation": "compile", "operations": entry["operations"], "arity": entry["arity"], "result_kind": entry["result_kind"], "numeric_kind": entry["numeric_kind"]}
+        la compiled = builtin.jit_operation(compile_request)
+        hvis compiled["status"] == "ferdig" {
+            entry["handle"] = compiled["handle"]
+            vm_metric_inc(functions, "jit_compiles")
+            hvis vm_map_har_nokkel(entry, "folded") { vm_metric_add(functions, "jit_folded_ops", heltall_fra_tekst(entry["folded"])) }
+            hvis vm_map_har_nokkel(entry, "inline_count") { vm_metric_add(functions, "jit_inlined_calls", heltall_fra_tekst(entry["inline_count"])) }
+        } ellers {
+            entry["eligible"] = "usann"
+            vm_metric_inc(functions, "jit_compile_failures")
+            returner miss
+        }
+    }
+    hvis entry["handle"] == "" { returner miss }
+    la run_request = {"abi": "norscode-jit-v1", "operation": "run", "handle": entry["handle"], "arguments": args}
+    la result = builtin.jit_operation(run_request)
+    hvis result["status"] != "ferdig" {
+        entry["handle"] = ""
+        vm_metric_inc(functions, "jit_deoptimizations")
+        returner miss
+    }
+    vm_metric_inc(functions, "jit_calls")
+    returner {"used": "sann", "value": result["value"]}
+}
+
 // ─── Grøne trådar: planleggar, slice og ventearmar ──────────────────────────
 // Sjå kommentaren ved vm_green_*-globalane. Trådpost (ordbok):
 //   id, gid (2^30+n), fn (løyst namn), args, functions, state
@@ -5996,6 +6067,14 @@ funksjon køyr_funksjon(
     la vm_debug_kart = functions["__vm_debug__"]
     la vm_heap = functions["__vm_runtime_heap__"]
     la vm_sample_intervall: heiltall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+    la vm_trace_events = functions["__vm_trace_events__"]
+    // JIT-tilstand for standardmodus (vm_jit_try_i): blir henta ved første
+    // brukarkall og på nytt etter kall ut av løkka (vm_jit_ok = usann).
+    la vm_jit_ok: boolsk = usann
+    la vm_jit_tillatt: boolsk = usann
+    la vm_jit_caps = {}
+    la vm_jit_register = {}
+    la vm_jit_kind_cache = {}
     la aktive_rammer = functions["__vm_active_frames__"]
     la vm_ramme_pool = functions["__vm_frame_pool__"]
     la vm_arg_pool = functions["__vm_arg_pool__"]
@@ -6141,6 +6220,8 @@ funksjon køyr_funksjon(
                         vm_debug_kart = functions["__vm_debug__"]
                         vm_heap = functions["__vm_runtime_heap__"]
                         vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
                     }
                 }
             }
@@ -6205,6 +6286,7 @@ funksjon køyr_funksjon(
                     vm_kall_cache = {}
                     vm_def_cache = {}
                     vm_label_cache = {}
+                    vm_jit_kind_cache = {}
                     vm_def_gen_sett = vm_def_gen["n"]
                 }
                 fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
@@ -6232,6 +6314,7 @@ funksjon køyr_funksjon(
                     vm_kall_cache = {}
                     vm_def_cache = {}
                     vm_label_cache = {}
+                    vm_jit_kind_cache = {}
                     vm_def_gen_sett = vm_def_gen["n"]
                 }
                 fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
@@ -6670,6 +6753,7 @@ funksjon køyr_funksjon(
                 vm_kall_cache = {}
                 vm_def_cache = {}
                 vm_label_cache = {}
+                vm_jit_kind_cache = {}
                 vm_def_gen_sett = vm_def_gen["n"]
             }
             // M3: CALL_VALUE deler heile CALL-maskineriet. Skilnaden er at
@@ -6819,7 +6903,14 @@ funksjon køyr_funksjon(
                 la jit_used = usann
                 la jit_value = 0
                 hvis ikkje fast_mode {
-                    la jit_result = vm_jit_try(functions, løyst_namn, vm_def_hent(vm_def_cache, functions, løyst_namn), call_args)
+                    hvis ikkje vm_jit_ok {
+                        vm_jit_tillatt = runtime_security.har(functions["__vm_security_policy__"], "jit.execute")
+                        vm_jit_caps = functions["__vm_function_caps__"]
+                        vm_jit_register = functions["__vm_jit_register__"]
+                        vm_jit_ok = sann
+                    }
+                    la jit_result = vm_jit_try_i(functions, vm_debug_kart, vm_jit_tillatt, vm_jit_caps, vm_jit_register,
+                                                 vm_jit_kind_cache, løyst_namn, vm_def_hent(vm_def_cache, functions, løyst_namn), call_args)
                     jit_used = jit_result["used"] == "sann"
                     hvis jit_used { jit_value = jit_result["value"] }
                 }
@@ -6863,7 +6954,7 @@ funksjon køyr_funksjon(
                 }
                 ramme["state"] = "tail_returned"
                 fjern_siste(aktive_rammer)
-                vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
                 vm_metric_inc_f(fast_mode, vm_metrics_kart, "tail_calls")
 
                 fn_namn = løyst_namn
@@ -7025,6 +7116,8 @@ funksjon køyr_funksjon(
                         vm_debug_kart = functions["__vm_debug__"]
                         vm_heap = functions["__vm_runtime_heap__"]
                         vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
                     }
                     green_på = vm_green_på_i(functions)
                 } ellers {
@@ -7045,6 +7138,8 @@ funksjon køyr_funksjon(
                         vm_debug_kart = functions["__vm_debug__"]
                         vm_heap = functions["__vm_runtime_heap__"]
                         vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
                     }
                     green_på = vm_green_på_i(functions)
                     // Ventetilstand (vent_frist/vent_data) frå eit tidlegare
@@ -7065,6 +7160,8 @@ funksjon køyr_funksjon(
                     vm_debug_kart = functions["__vm_debug__"]
                     vm_heap = functions["__vm_runtime_heap__"]
                     vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                    vm_trace_events = functions["__vm_trace_events__"]
+                    vm_jit_ok = usann
                 }
             }
 
@@ -7087,6 +7184,8 @@ funksjon køyr_funksjon(
                     vm_debug_kart = functions["__vm_debug__"]
                     vm_heap = functions["__vm_runtime_heap__"]
                     vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                    vm_trace_events = functions["__vm_trace_events__"]
+                    vm_jit_ok = usann
                 }
                 hvis hovud_await["ok"] == "sann" {
                     call_failed = usann
@@ -7231,7 +7330,7 @@ funksjon køyr_funksjon(
             vm_siste_retur_sett(fast_mode, functions, ret_heap_id)
             ramme["state"] = "returned"
             fjern_siste(aktive_rammer)
-            vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+            vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
             la ferdig_ramme = ramme
             hvis trace_frames {
                 skriv("VM-FRAME RETURN " + fn_namn +
@@ -7358,7 +7457,7 @@ funksjon køyr_funksjon(
                 vm_siste_retur_sett(fast_mode, functions, "")
                 ramme["state"] = "thrown"
                 fjern_siste(aktive_rammer)
-                vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
                 la handtert = usann
                 mens lengde(continuations) > 0 og ikkje handtert {
                     la forelder = continuations[lengde(continuations) - 1]
@@ -7415,7 +7514,7 @@ funksjon køyr_funksjon(
                     hvis ikkje handtert {
                         forelder["state"] = "unwound"
                         fjern_siste(aktive_rammer)
-                        vm_function_finish_f(fast_mode, functions, forelder["namn"], forelder["started_ms"])
+                        vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, forelder["namn"], forelder["started_ms"])
                     }
                 }
                 hvis handtert {
@@ -7435,7 +7534,7 @@ funksjon køyr_funksjon(
                 vm_siste_retur_sett(fast_mode, functions, "")
                 fjern_siste(aktive_rammer)
                 vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
-                vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
                 kast unntak_melding
             }
 
@@ -7467,7 +7566,7 @@ funksjon køyr_funksjon(
             ramme["state"] = "halted"
             fjern_siste(aktive_rammer)
             vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
-            vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+            vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
             returner 0
         }
 
@@ -7480,7 +7579,7 @@ funksjon køyr_funksjon(
     ramme["state"] = "returned"
     fjern_siste(aktive_rammer)
     vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
-    vm_function_finish_f(fast_mode, functions, fn_namn, function_start_ms)
+    vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
     returner 0
 }
 
