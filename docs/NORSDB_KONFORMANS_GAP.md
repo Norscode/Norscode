@@ -21,6 +21,13 @@
   ekte `SS.SSS` (t.d. `56.789`, `56.500`), medan `SS.000` står ved manglande fraksjon.
   `datetime()/time()` droppar framleis fraksjon (heiltals-sekund), som SQLite. `julianday` reknar
   no i ms internt (fraksjons-korrekt). Verifisert i `tests/test_norsdb_konformans_gap.no`.
+- **Punkt 5d (2026-10-04)**: skjema (UNIQUE/NOT NULL/CHECK/DEFAULT/FK, view, trigger, indeks, sekvens)
+  overlever gjenopning; `DEFAULT (uttrykk)`/`CURRENT_TIMESTAMP`/`TRUE`; UTF-8-identifikatorar; `VARCHAR(n)`/
+  `DECIMAL(p, s)` i kolonnedefinisjonar; fleire rader i éin `INSERT … VALUES (…), (…)`; NULL i
+  INTEGER PRIMARY KEY gjev auto-id; auto-id etter eksplisitt id er største+1; UNIQUE tillèt fleire NULL;
+  ORDER BY i SQL-orden (NULL < tal < tekst, også REAL) med stabile likskapar. Testar:
+  `test_norsdb_skjema_persist`, `test_norsdb_orden`, `test_norsdb_enkel_plan`, `test_norsdb_checkpoint`,
+  `test_norsdb_tx_angre`.
 
 ## Manglande funksjonar (parser/motor støttar ikkje)
 
