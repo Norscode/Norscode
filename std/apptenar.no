@@ -13,6 +13,9 @@
 #   - headerar utan omsyn til store og små bokstavar (ctx får namna i små bokstavar);
 #   - modulglobalar og tilstand mellom førespurnader (éin langliva prosess);
 #   - Server-Sent Events via apptenar.sse(kanal) og apptenar.send_hending(...).
+#   - WebSocket (RFC 6455) via ruter med web.route("WS /sti"): vakter før oppgradering,
+#     rammer, ping/pong, close, 1007/1009 og rom. Sjå std/apptenar_ws.no og
+#     docs/02-standard-library/APPTENAR_WEBSOCKET.md.
 #   - metrikk og spor: app.slå_på_metrikk() gjev /metrics (Prometheus 0.0.4) med
 #     http_requests_total og http_request_duration_seconds per rutemønster; app.slå_på_spor()
 #     samlar éin OTLP-span per førespurnad (sjå std/metrikk.no og docs/APPTENAR_METRIKK.md).
@@ -43,6 +46,7 @@ bruk std.apptenar_di som _di
 bruk std.apptenar_cors som _cors
 bruk std.apptenar_statisk som _statisk
 bruk std.http_cache som _hc
+bruk std.apptenar_ws som _ws
 bruk std.metrikk som _metrikk
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
@@ -89,7 +93,13 @@ funksjon konfig_standard() -> ordbok {
         "periodisk": null,
         "statisk": null,
         "logg": "feil",
-        "klar_melding": sann
+        "klar_melding": sann,
+        "ws_maks_ramme": 1048576,
+        "ws_maks_melding": 4194304,
+        "ws_ping_ms": 30000,
+        "ws_lukk_ms": 5000,
+        "ws_origins": [],
+        "ws_maks_utbuffer": 4194304
     }
 }
 
@@ -334,6 +344,7 @@ funksjon ctx_frå(req: ordbok, kropp: tekst) -> ordbok {
         "__body__": kropp,
         "__params__": {},
         "__request_id__": "r" + tekst(_t_int("req_nr")),
+        "__versjon__": req["versjon"],
         "__lh__": sann
     }
 }
@@ -476,6 +487,7 @@ funksjon _mw(nøkkel: tekst, konf_nøkkel: tekst) -> liste {
 # ─── Responskontrakt ─────────────────────────────────────────────────────────
 
 funksjon _status_tekst(s: heltall) -> tekst {
+    hvis s == 101 { returner "Switching Protocols" }
     hvis s == 200 { returner "OK" }
     hvis s == 201 { returner "Created" }
     hvis s == 202 { returner "Accepted" }
@@ -499,6 +511,7 @@ funksjon _status_tekst(s: heltall) -> tekst {
     hvis s == 414 { returner "URI Too Long" }
     hvis s == 415 { returner "Unsupported Media Type" }
     hvis s == 422 { returner "Unprocessable Content" }
+    hvis s == 426 { returner "Upgrade Required" }
     hvis s == 429 { returner "Too Many Requests" }
     hvis s == 431 { returner "Request Header Fields Too Large" }
     hvis s == 500 { returner "Internal Server Error" }
@@ -919,6 +932,20 @@ funksjon _respons_mw(d: ordbok) -> ordbok {
     returner d
 }
 
+# Første «WS»-rute som passar stien: {"r": rute, "p": parametrar} eller null.
+funksjon _ws_rute(ruter: liste, seg: liste) {
+    la i = 0
+    mens i < lengde(ruter) {
+        la r = ruter[i]
+        hvis r["m"] == "ws" {
+            la p = _match(r, seg)
+            hvis p != null { returner {"r": r, "p": p} }
+        }
+        i = i + 1
+    }
+    returner null
+}
+
 funksjon _allow(ruter: liste, seg: liste) -> tekst {
     la sett = {}
     la ut = []
@@ -926,6 +953,7 @@ funksjon _allow(ruter: liste, seg: liste) -> tekst {
     mens i < lengde(ruter) {
         hvis _match(ruter[i], seg) != null {
             la m = ruter[i]["M"]
+            hvis m == "WS" { m = "GET" }
             hvis ikkje har_nokkel(sett, m) {
                 sett[m] = sann
                 legg_til(ut, m)
@@ -1163,8 +1191,10 @@ funksjon dispatch(ctx0: ordbok) -> ordbok {
         ctx["__traceparent__"] = _metrikk.traceparent(span)
     }
     la d = _rut(ctx, start_ms)
-    hvis builtin.type(d) == "ordbok" og har_nokkel(d, "__sse__") {
-        hvis mål eller span != null { _mål(ctx, start_ms, 200, mål, span) }
+    hvis builtin.type(d) == "ordbok" og (har_nokkel(d, "__sse__") eller har_nokkel(d, "__ws__")) {
+        la st_opp = 200
+        hvis har_nokkel(d, "__ws__") { st_opp = 101 }
+        hvis mål eller span != null { _mål(ctx, start_ms, st_opp, mål, span) }
         returner d
     }
     d = _ferdigstill(ctx, d)
@@ -1369,6 +1399,15 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     la treff = null
     la treff_p = null
     la i = 0
+    # WebSocket (5c): GET med «Upgrade: websocket» går til ei «WS»-rute på stien.
+    hvis metode == "get" og _ws.er_oppgradering(ctx) {
+        la wo = _ws_rute(ruter, seg)
+        hvis wo != null {
+            fann_sti = sann
+            treff_p = wo["p"]
+            treff = wo["r"]
+        }
+    }
     mens i < lengde(ruter) og treff == null {
         la r = ruter[i]
         la p = _match(r, seg)
@@ -1395,6 +1434,15 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
             i = i + 1
         }
     }
+    # Vanleg GET (utan Upgrade) mot ei rute som berre finst som WS: handtrykket under
+    # gjev 426 Upgrade Required.
+    hvis treff == null og metode == "get" og fann_sti {
+        la wt = _ws_rute(ruter, seg)
+        hvis wt != null {
+            treff_p = wt["p"]
+            treff = wt["r"]
+        }
+    }
     hvis treff == null {
         hvis metode == "options" og fann_sti {
             returner {"status": 204, "body": "", "allow": _allow(ruter, seg)}
@@ -1414,6 +1462,13 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
     }
     ctx["__params__"] = treff_p
     _t["rute"] = treff["mønster"]
+    # WebSocket: handtrykket blir validert før vaktene (400/405/426/403), men sjølve
+    # oppgraderinga skjer først når vakter og avhengnader har godkjent førespurnaden.
+    la er_ws = treff["m"] == "ws"
+    hvis er_ws {
+        la hf = _ws.handtrykk_feil(ctx, _k("ws_origins"))
+        hvis hf != null { returner _feil_mw(hf) }
+    }
     # Vakter: totale og aritetskontrollerte. Ei vakt kan returnere eit eige svar som
     # kortsluttar (t.d. 401 + WWW-Authenticate, 1.3). Unntak blir mappa (HTTPFeil →
     # status, ValideringsFeil → 422, elles 500); tenaren lever. Alt anna enn sann gjev 403.
@@ -1451,6 +1506,9 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         returner _feil_mw(_feil_frå_unntak(e))
     }
     la fn = treff["fn"]
+    hvis er_ws {
+        returner {"__ws__": fn, "__ws_ctx__": ctx, "__ws_deps__": dep_values}
+    }
     la d = null
     prøv {
         la svar = _di.kall_handlar(fn, ctx, dep_values)
@@ -1487,10 +1545,126 @@ funksjon handsam_rå(rå: tekst) -> tekst {
     la ctx = ctx_frå(req, kropp)
     la d = dispatch(ctx)
     hvis har_nokkel(d, "__sse__") { _etter_svar()  returner "SSE " + tekst(d["__sse__"]) }
+    hvis har_nokkel(d, "__ws__") {
+        la t = _ws_start(d)
+        _etter_svar()
+        _ws.opna(t)
+        returner _ws.svar_101(d["__ws_ctx__"])
+    }
     la ut = til_http_trygt(d, ctx["__method__"] == "head", req["keep_alive"])
     # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga (1.2/1.7).
     _etter_svar()
     returner ut
+}
+
+# ─── WebSocket (5c) ──────────────────────────────────────────────────────────
+
+funksjon _ws_start(d: ordbok) -> ordbok {
+    returner _ws.ny(tekst(d["__ws__"]), d["__ws_ctx__"], d["__ws_deps__"], _konf)
+}
+
+# Opnar ei WebSocket-tilkopling frå ein rå førespurnad, utan socket (app-testklienten i
+# std/apptest.no). Gjev {"status", "svar" (HTTP-teksten), "t"}: t er tilkoplings-
+# objektet ved 101, elles null. Byte etter hovudet blir mata inn som rammer.
+funksjon ws_opne_rå(rå: tekst) -> ordbok {
+    la slutt = builtin.index_of(rå, "\r\n\r\n")
+    hvis slutt < 0 { returner {"status": 400, "svar": til_http(_feil(400, "Ufullstendig hovud"), usann, usann), "t": null} }
+    la req = tolk_hovud(builtin.slice(rå, 0, slutt))
+    hvis ikkje req["ok"] { returner {"status": req["status"], "svar": til_http(_feil(req["status"], req["grunn"]), usann, usann), "t": null} }
+    la ctx = ctx_frå(req, "")
+    la d = dispatch(ctx)
+    hvis har_nokkel(d, "__ws__") {
+        la t = _ws_start(d)
+        _etter_svar()
+        la svar = _ws.svar_101(d["__ws_ctx__"])
+        _ws.opna(t)
+        la rest = builtin.slice(rå, slutt + 4, lengde(rå))
+        hvis rest != "" { _ws.mat(t, rest) }
+        returner {"status": 101, "svar": svar, "t": t}
+    }
+    hvis har_nokkel(d, "__sse__") {
+        _etter_svar()
+        returner {"status": 200, "svar": "SSE " + tekst(d["__sse__"]), "t": null}
+    }
+    la ut = til_http_trygt(d, usann, usann)
+    _etter_svar()
+    returner {"status": d["status"], "svar": ut, "t": null}
+}
+
+# Flytt det motoren har lagt i t["ut"] over i utbufferen til socketen.
+funksjon _ws_flytt(c: ordbok) -> heltall {
+    la t = c["ws"]
+    hvis t["ut"] != "" {
+        c["ut"] = c["ut"] + t["ut"]
+        t["ut"] = ""
+    }
+    returner 0
+}
+
+# Eitt steg for ei oppgradert tilkopling.
+funksjon _ws_steg(c: ordbok, no: heltall) -> heltall {
+    la t = c["ws"]
+    la fram = 0
+    _ws_flytt(c)
+    hvis c["ut"] != "" {
+        la n = _skriv_ut(c)
+        hvis n < 0 {
+            _lukk(c)
+            returner 1
+        }
+        hvis n > 0 { fram = fram + 1 }
+        hvis lengde(c["ut"]) > _k("ws_maks_utbuffer") {
+            _logg("feil", "treg WebSocket-mottakar lukka (" + c["id"] + ")")
+            _lukk(c)
+            returner 1
+        }
+    }
+    hvis t["ferdig"] {
+        # Close-handtrykket er ferdig (eller protokollfeil): lukk TCP når alt er skrive.
+        hvis c["ut"] == "" {
+            _lukk(c)
+            returner fram + 1
+        }
+        hvis c["frist"] == 0 { c["frist"] = no + _k("skriv_ms") }
+        hvis no > c["frist"] {
+            _lukk(c)
+            returner fram + 1
+        }
+        returner fram
+    }
+    la r = builtin.network_operation(c["rq"])
+    la st = tekst(r["status"])
+    hvis st == "ok" {
+        la data = tekst(r["data"])
+        hvis data != "" {
+            fram = fram + 1
+            _ws.mat(t, data)
+            _ws_flytt(c)
+            hvis c["ut"] != "" og _skriv_ut(c) < 0 {
+                _lukk(c)
+                returner fram + 1
+            }
+        }
+    } ellers hvis st == "eof" eller st == "feil" {
+        _lukk(c)
+        returner fram + 1
+    }
+    hvis t["ferdig"] {
+        c["frist"] = 0
+        returner fram
+    }
+    # Vi sende close, men klienten svarar ikkje innan "ws_lukk_ms".
+    hvis t["lukk_sendt"] og t["lukk_frist"] > 0 og no > t["lukk_frist"] {
+        _lukk(c)
+        returner fram + 1
+    }
+    # Heartbeat-ping held mellomtenarar og NAT-ar opne og avslører daude klientar.
+    hvis ikkje t["lukk_sendt"] og no >= c["hb"] {
+        _ws.ping(t, "")
+        c["hb"] = no + _k("ws_ping_ms")
+        fram = fram + 1
+    }
+    returner fram
 }
 
 # ─── SSE ─────────────────────────────────────────────────────────────────────
@@ -1572,6 +1746,7 @@ funksjon _ny_tilk(h: ordbok, no: heltall) -> ordbok {
         "kanal": "",
         "hb": 0,
         "req": null,
+        "ws": null,
         "open": sann
     }
     _tilk[id] = c
@@ -1583,6 +1758,7 @@ funksjon _lukk(c: ordbok) -> heltall {
         c["open"] = usann
         prøv { socket.native_lukk(c["h"]) } fang (e) { }
         hvis c["kanal"] != "" { _kanal_fjern(c["kanal"], c["id"]) }
+        hvis har_nokkel(c, "ws") og c["ws"] != null { _ws.tcp_lukka(c["ws"]) }
         hvis har_nokkel(_tilk, c["id"]) { fjern_nokkel(_tilk, c["id"]) }
     }
     returner 0
@@ -1669,6 +1845,24 @@ funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
     # Opprydding (yield-deps, omvend) og bakgrunnsoppgåver etter at svaret er laga,
     # i tenarløkka utan trådar (1.2/1.7).
     _etter_svar()
+    hvis har_nokkel(d, "__ws__") {
+        # 101 Switching Protocols: tilkoplinga går over til WebSocket-rammer.
+        la t = _ws_start(d)
+        c["ut"] = c["ut"] + _ws.svar_101(d["__ws_ctx__"])
+        c["fase"] = "ws"
+        c["ws"] = t
+        c["req"] = null
+        c["frist"] = 0
+        c["hb"] = no + _k("ws_ping_ms")
+        _ws.opna(t)
+        hvis c["inn"] != "" {
+            la rest = c["inn"]
+            c["inn"] = ""
+            _ws.mat(t, rest)
+        }
+        _ws_flytt(c)
+        returner 1
+    }
     hvis har_nokkel(d, "__sse__") {
         la kanal = tekst(d["__sse__"])
         hvis tal_i_kanal(kanal) >= _k("maks_sse_per_kanal") {
@@ -1700,6 +1894,7 @@ funksjon _prøv_førespurnad(c: ordbok, no: heltall) -> heltall {
 
 # Eitt steg for éi tilkopling. Gjev talet på framgangar (0 = ingenting skjedde).
 funksjon _steg(c: ordbok, no: heltall) -> heltall {
+    hvis c["fase"] == "ws" { returner _ws_steg(c, no) }
     la fram = 0
     la fase = c["fase"]
     # Skriv først (svar, SSE-hendingar, heartbeat)
@@ -1798,7 +1993,7 @@ funksjon _neste_frist(no: heltall) -> heltall {
     mens i < lengde(ks) {
         la c = _tilk[ks[i]]
         la x = c["frist"]
-        hvis c["fase"] == "sse" { x = c["hb"] }
+        hvis c["fase"] == "sse" eller c["fase"] == "ws" { x = c["hb"] }
         hvis x < f { f = x }
         i = i + 1
     }
@@ -1825,6 +2020,7 @@ funksjon status() -> ordbok {
         "port": _t_int("port"),
         "tilkoplingar": lengde(nøkler(_tilk)),
         "sse": sse,
+        "ws": _ws.tal_opne(),
         "forespurnader": _t_int("handsama"),
         "avviste": _t_int("avviste")
     }
@@ -1935,7 +2131,18 @@ funksjon lytt(konf: ordbok) -> heltall {
     la ks2 = nøkler(_tilk)
     la j = 0
     mens j < lengde(ks2) {
-        hvis har_nokkel(_tilk, ks2[j]) { _lukk(_tilk[ks2[j]]) }
+        hvis har_nokkel(_tilk, ks2[j]) {
+            la c = _tilk[ks2[j]]
+            # WebSocket: send close 1001 (going away) før TCP blir lukka.
+            hvis c["fase"] == "ws" {
+                prøv {
+                    _ws.lukk(c["ws"], 1001, "tenaren stoppar")
+                    _ws_flytt(c)
+                    _skriv_ut(c)
+                } fang (e) { }
+            }
+            _lukk(c)
+        }
         j = j + 1
     }
     _periodisk(builtin.tid_ms(), sann)

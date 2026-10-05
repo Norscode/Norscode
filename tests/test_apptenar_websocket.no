@@ -1,0 +1,476 @@
+# 5c: WebSocket i std/apptenar.no (RFC 6455), i same prosess via app-testklienten
+# (std/apptest.no ws_*): handtrykk og Sec-WebSocket-Accept, avviste handtrykk,
+# maskert ekko, fragmentering, ping/pong, close-handtrykket, 1009, 1007, 1002, rom og
+# vakter som avviser før oppgraderinga.
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.apptenar_ws som ws
+bruk std.apptest som at
+
+la _hend: ordbok = {"l": []}
+la _kl: ordbok = {"k": null}
+
+funksjon _logg(s: tekst) -> heltall {
+    legg_til(_hend["l"], s)
+    returner 0
+}
+
+funksjon _har_logg(s: tekst) -> bool {
+    la l = _hend["l"]
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == s { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon ekko(t: ordbok) -> heltall {
+    web.route("WS /ekko")
+    la h = ws.hending(t)
+    hvis h == "open" { _logg("open " + ws.id(t)) }
+    hvis h == "melding" {
+        la m = ws.motta(t)
+        hvis m["type"] == "binær" {
+            ws.send_bytes(t, m["data"])
+        } ellers {
+            ws.send_tekst(t, "ekko: " + m["data"])
+        }
+    }
+    hvis h == "lukk" { _logg("lukk " + ws.id(t) + " " + tekst(ws.lukkekode(t))) }
+    returner 0
+}
+
+funksjon chat(t: ordbok) -> heltall {
+    web.route("WS /chat/{rom}")
+    la rom = ws.param(t, "rom")
+    la h = ws.hending(t)
+    hvis h == "open" { ws.bli_med(t, rom) }
+    hvis h == "melding" { ws.rom_send(rom, ws.motta_tekst(t)) }
+    returner 0
+}
+
+funksjon berre_admin(ctx: ordbok) -> bool {
+    web.guard()
+    returner app.header(ctx, "x-rolle") == "admin"
+}
+
+funksjon admin(t: ordbok) -> heltall {
+    web.use_guard("berre_admin")
+    web.route("WS /admin")
+    hvis ws.hending(t) == "open" {
+        _logg("admin open")
+        ws.send_tekst(t, "velkomen, admin")
+    }
+    returner 0
+}
+
+funksjon lukkar(t: ordbok) -> heltall {
+    web.route("WS /lukk")
+    hvis ws.hending(t) == "open" { ws.lukk(t, 4000, "ferdig") }
+    hvis ws.hending(t) == "lukk" { _logg("lukkar " + tekst(ws.lukkekode(t))) }
+    returner 0
+}
+
+funksjon kastar(t: ordbok) -> heltall {
+    web.route("WS /kastar")
+    hvis ws.hending(t) == "melding" { kast "handlaren feila" }
+    returner 0
+}
+
+funksjon vanleg(ctx: ordbok) -> tekst {
+    web.route("GET /vanleg")
+    returner "vanleg"
+}
+
+funksjon nullstill(ekstra: ordbok) -> heltall {
+    la k = {"logg": "ingen", "ws_maks_ramme": 1000, "ws_maks_melding": 2000}
+    la ks = nøkler(ekstra)
+    la i = 0
+    mens i < lengde(ks) {
+        k[ks[i]] = ekstra[ks[i]]
+        i = i + 1
+    }
+    _kl["k"] = at.klient(k)
+    returner 0
+}
+
+funksjon kople(sti: tekst, h: ordbok) -> ordbok {
+    returner at.ws_kople(_kl["k"], sti, {"headerar": h})
+}
+
+funksjon krev_lukk(k: ordbok, kode: heltall, namn: tekst) -> heltall {
+    la r = at.ws_motta(k)
+    hvis r == null {
+        skriv(namn + ": venta close " + tekst(kode) + ", fekk ingen ramme\n")
+        assert(usann)
+    }
+    hvis r["type"] != "lukk" eller r["kode"] != kode {
+        skriv(namn + ": venta close " + tekst(kode) + ", fekk " + tekst(r["type"]) + " " + tekst(r["kode"]) + "\n")
+        assert(usann)
+    }
+    assert(at.ws_er_lukka(k))
+    returner 0
+}
+
+funksjon test_handtrykk() -> heltall {
+    nullstill({})
+    # RFC 6455 1.3: eksempelnøkkelen
+    assert_eq(ws.aksept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    la k = kople("/ekko", {})
+    assert_eq(k["status"], 101)
+    assert(builtin.starts_with(k["svar"], "HTTP/1.1 101 Switching Protocols\r\n"))
+    assert_eq(k["headers"]["sec-websocket-accept"], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    assert_eq(builtin.lower(k["headers"]["upgrade"]), "websocket")
+    assert_eq(builtin.lower(k["headers"]["connection"]), "upgrade")
+    assert(k["t"] != null)
+    assert(_har_logg("open " + ws.id(k["t"])))
+    # Ein annan nøkkel gjev ein annan accept-verdi (accept er rekna, ikkje fast)
+    la k2 = kople("/ekko", {"Sec-WebSocket-Key": "AAAAAAAAAAAAAAAAAAAAAA=="})
+    assert_eq(k2["status"], 101)
+    assert(k2["headers"]["sec-websocket-accept"] != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    assert_eq(k2["headers"]["sec-websocket-accept"], ws.aksept("AAAAAAAAAAAAAAAAAAAAAA=="))
+    # Header-kasus og fleire token i Connection (t.d. Firefox: «keep-alive, Upgrade»)
+    la k3 = kople("/ekko", {"Connection": "keep-alive, Upgrade", "Upgrade": "WebSocket"})
+    assert_eq(k3["status"], 101)
+    skriv("handtrykk: 101 med rett Sec-WebSocket-Accept for RFC-eksempelet\n")
+    returner 0
+}
+
+funksjon test_avvist_handtrykk() -> heltall {
+    nullstill({})
+    # Vanleg GET mot ei WS-rute: 426 med Upgrade og versjon
+    la v = kople("/ekko", {"Upgrade": "", "Connection": ""})
+    assert_eq(v["status"], 426)
+    assert_eq(v["headers"]["sec-websocket-version"], "13")
+    assert_eq(v["headers"]["upgrade"], "websocket")
+    assert(v["t"] == null)
+    # Feil versjon: 426
+    assert_eq(kople("/ekko", {"Sec-WebSocket-Version": "8"})["status"], 426)
+    # Manglande eller ugyldig nøkkel: 400
+    assert_eq(kople("/ekko", {"Sec-WebSocket-Key": ""})["status"], 400)
+    assert_eq(kople("/ekko", {"Sec-WebSocket-Key": "kort"})["status"], 400)
+    assert_eq(kople("/ekko", {"Sec-WebSocket-Key": "!!!!!!!!!!!!!!!!!!!!!!=="})["status"], 400)
+    # Connection utan upgrade: 400
+    assert_eq(kople("/ekko", {"Connection": "keep-alive"})["status"], 400)
+    # HTTP/1.0: 400
+    la h10 = "GET /ekko HTTP/1.0\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    assert_eq(at.ws_kople_rå(h10)["status"], 400)
+    # POST mot WS-ruta: 405 med Allow: GET
+    la p = at.ws_kople_rå("POST /ekko HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(p["status"], 405)
+    assert(builtin.index_of(p["headers"]["allow"], "GET") >= 0)
+    # Ukjend sti: 404; vanleg rute med Upgrade-header blir handsama som vanleg GET
+    assert_eq(kople("/finst-ikkje", {})["status"], 404)
+    la vg = kople("/vanleg", {})
+    assert_eq(vg["status"], 200)
+    assert_eq(vg["body"], "vanleg")
+    # Origin-allowlist: 403 for andre Origin
+    nullstill({"ws_origins": ["https://ok.example"]})
+    assert_eq(kople("/ekko", {"Origin": "https://vond.example"})["status"], 403)
+    assert_eq(kople("/ekko", {})["status"], 403)
+    assert_eq(kople("/ekko", {"Origin": "https://ok.example"})["status"], 101)
+    nullstill({})
+    skriv("avvist handtrykk: 426 (ingen Upgrade, versjon 8), 400 (nøkkel, Connection, HTTP/1.0), 405, 404, 403 (Origin)\n")
+    returner 0
+}
+
+funksjon test_ekko() -> heltall {
+    nullstill({})
+    la k = kople("/ekko", {})
+    at.ws_send_tekst(k, "hei")
+    la r = at.ws_motta(k)
+    assert(r != null)
+    assert_eq(r["type"], "tekst")
+    assert(r["fin"])
+    assert_eq(r["data"], "ekko: hei")
+    # UTF-8 og ein lengre melding (16-bit lengdefelt)
+    at.ws_send_tekst(k, "blåbærsyltetøy")
+    assert_eq(at.ws_motta_tekst(k), "ekko: blåbærsyltetøy")
+    la lang = ""
+    la i = 0
+    mens i < 30 {
+        lang = lang + "0123456789"
+        i = i + 1
+    }
+    at.ws_send_tekst(k, lang)
+    la rl = at.ws_motta(k)
+    assert_eq(lengde(rl["data"]), 306)
+    assert_eq(rl["data"], "ekko: " + lang)
+    # Binær med NUL og høge byte, uendra tilbake
+    la bin = builtin.chr(0) + builtin.chr(255) + builtin.chr(128) + "x" + builtin.chr(0)
+    at.ws_send_bytes(k, bin)
+    la rb = at.ws_motta(k)
+    assert_eq(rb["type"], "binær")
+    assert_eq(lengde(rb["data"]), 5)
+    assert(rb["data"] == bin)
+    assert(at.ws_motta(k) == null)
+    # To rammer i same TCP-segment blir begge handsama
+    at.ws_send_rå(k, at.ws_ramme(k, sann, 1, "a") + at.ws_ramme(k, sann, 1, "b"))
+    assert_eq(at.ws_motta_tekst(k), "ekko: a")
+    assert_eq(at.ws_motta_tekst(k), "ekko: b")
+    # Ei ramme som kjem i bitar (delvis hovud, så resten)
+    la heil = at.ws_ramme(k, sann, 1, "delt")
+    at.ws_send_rå(k, builtin.slice(heil, 0, 3))
+    assert(at.ws_motta(k) == null)
+    at.ws_send_rå(k, builtin.slice(heil, 3, lengde(heil)))
+    assert_eq(at.ws_motta_tekst(k), "ekko: delt")
+    # Umaskert ramme frå klienten: 1002
+    at.ws_send_rå(k, builtin.chr(129) + builtin.chr(2) + "hi")
+    krev_lukk(k, 1002, "umaskert")
+    skriv("ekko: tekst, UTF-8, 16-bit lengd, binær med NUL, to rammer per segment, delt ramme; umaskert gav 1002\n")
+    returner 0
+}
+
+funksjon test_fragmentering() -> heltall {
+    nullstill({})
+    la k = kople("/ekko", {})
+    at.ws_send_ramme(k, usann, 1, "frag")
+    at.ws_send_ramme(k, usann, 0, "men")
+    # Ping midt i ei fragmentert melding er lov og får pong straks
+    at.ws_ping(k, "midt")
+    la p = at.ws_motta(k)
+    assert_eq(p["type"], "pong")
+    assert_eq(p["data"], "midt")
+    assert(at.ws_motta(k) == null)
+    at.ws_send_ramme(k, sann, 0, "tert")
+    assert_eq(at.ws_motta_tekst(k), "ekko: fragmentert")
+    # Binær i fragment
+    at.ws_send_ramme(k, usann, 2, builtin.chr(1))
+    at.ws_send_ramme(k, sann, 0, builtin.chr(2))
+    la rb = at.ws_motta(k)
+    assert_eq(rb["type"], "binær")
+    assert(rb["data"] == builtin.chr(1) + builtin.chr(2))
+    # Ny melding midt i ei fragmentert: 1002
+    at.ws_send_ramme(k, usann, 1, "a")
+    at.ws_send_ramme(k, sann, 1, "b")
+    krev_lukk(k, 1002, "ny melding midt i fragment")
+    # Kontinuasjon utan start: 1002
+    la k2 = kople("/ekko", {})
+    at.ws_send_ramme(k2, sann, 0, "x")
+    krev_lukk(k2, 1002, "kontinuasjon utan start")
+    # Fragmentert kontrollramme: 1002
+    la k3 = kople("/ekko", {})
+    at.ws_send_ramme(k3, usann, 9, "x")
+    krev_lukk(k3, 1002, "fragmentert ping")
+    # RSV-bit og ukjend opkode: 1002
+    la k4 = kople("/ekko", {})
+    at.ws_send_ramme(k4, sann, 3, "x")
+    krev_lukk(k4, 1002, "opkode 3")
+    skriv("fragmentering: tekst over tre rammer med ping imellom, binær i to; feil rekkjefølgje gav 1002\n")
+    returner 0
+}
+
+funksjon test_ping_pong() -> heltall {
+    nullstill({})
+    la k = kople("/ekko", {})
+    at.ws_ping(k, "abc")
+    la p = at.ws_motta(k)
+    assert_eq(p["type"], "pong")
+    assert_eq(p["data"], "abc")
+    at.ws_ping(k, "")
+    la p2 = at.ws_motta(k)
+    assert_eq(p2["type"], "pong")
+    assert_eq(p2["data"], "")
+    # Pong frå klienten (uoppfordra) blir ignorert
+    at.ws_send_ramme(k, sann, 10, "x")
+    assert(at.ws_motta(k) == null)
+    assert(ikkje at.ws_er_lukka(k))
+    # Kontrollramme over 125 byte: 1002
+    la lang = ""
+    la i = 0
+    mens i < 13 {
+        lang = lang + "0123456789"
+        i = i + 1
+    }
+    at.ws_ping(k, lang)
+    krev_lukk(k, 1002, "lang ping")
+    skriv("ping/pong: pong med same nyttelast, tom ping, uoppfordra pong ignorert, 130 byte ping gav 1002\n")
+    returner 0
+}
+
+funksjon test_close_handtrykk() -> heltall {
+    nullstill({})
+    # Klienten lukkar: tenaren svarar med same kode, handlaren får "lukk"
+    la k = kople("/ekko", {})
+    la id = ws.id(k["t"])
+    at.ws_lukk(k, 1000, "ha det")
+    krev_lukk(k, 1000, "klient-lukk")
+    assert(_har_logg("lukk " + id + " 1000"))
+    assert_eq(ws.lukkegrunn(k["t"]), "ha det")
+    # Rammer etter close blir ikkje handsama
+    assert_eq(ws.mat(k["t"], at.ws_ramme(k, sann, 1, "etter")), 0)
+    assert(at.ws_motta(k) == null)
+    # Tenaren ekkoar klienten sin kode (ikkje alltid 1000)
+    la k1 = kople("/ekko", {})
+    at.ws_lukk(k1, 4321, "")
+    krev_lukk(k1, 4321, "klient-lukk 4321")
+    # Tom close-ramme: tenaren svarar med tom close (1005 i klienten)
+    la k2 = kople("/ekko", {})
+    at.ws_send_ramme(k2, sann, 8, "")
+    krev_lukk(k2, 1005, "tom close")
+    # Ugyldig lukkekode (1005 skal aldri stå i ei ramme) og 1 byte nyttelast: 1002
+    la k3 = kople("/ekko", {})
+    at.ws_lukk(k3, 1005, "")
+    krev_lukk(k3, 1002, "kode 1005")
+    la k4 = kople("/ekko", {})
+    at.ws_send_ramme(k4, sann, 8, "x")
+    krev_lukk(k4, 1002, "1 byte close")
+    # Tenaren lukkar: close 4000 først, klienten svarar, tilkoplinga er ferdig
+    la k5 = kople("/lukk", {})
+    la c = at.ws_motta(k5)
+    assert_eq(c["type"], "lukk")
+    assert_eq(c["kode"], 4000)
+    assert_eq(c["data"], "ferdig")
+    assert(ikkje at.ws_er_lukka(k5))
+    # Etter close sender ikkje tenaren data
+    assert_eq(ws.send_tekst(k5["t"], "for seint"), 0)
+    assert(at.ws_motta(k5) == null)
+    at.ws_lukk(k5, 4000, "")
+    assert(at.ws_er_lukka(k5))
+    assert(at.ws_motta(k5) == null)
+    assert(_har_logg("lukkar 4000"))
+    # Handlar som kastar: 1011
+    la k6 = kople("/kastar", {})
+    at.ws_send_tekst(k6, "x")
+    krev_lukk(k6, 1011, "handlar kasta")
+    skriv("close-handtrykk: klient 1000 ekko, tom close, 1005/1-byte gav 1002, tenar 4000, handlarfeil 1011\n")
+    returner 0
+}
+
+funksjon test_for_stor_ramme() -> heltall {
+    nullstill({"ws_maks_ramme": 100, "ws_maks_melding": 150})
+    la k = kople("/ekko", {})
+    la ok = ""
+    la i = 0
+    mens i < 10 {
+        ok = ok + "0123456789"
+        i = i + 1
+    }
+    # Akkurat på grensa går gjennom
+    at.ws_send_tekst(k, ok)
+    assert_eq(at.ws_motta_tekst(k), "ekko: " + ok)
+    # Éin byte over: 1009
+    at.ws_send_tekst(k, ok + "x")
+    krev_lukk(k, 1009, "for stor ramme")
+    # Hovudet åleine er nok: tenaren ventar ikkje på nyttelasta
+    la k2 = kople("/ekko", {})
+    at.ws_send_rå(k2, builtin.chr(129) + builtin.chr(128 | 126) + builtin.chr(255) + builtin.chr(255))
+    krev_lukk(k2, 1009, "berre hovud (65535)")
+    # 64-bit lengd: 1009
+    la k3 = kople("/ekko", {})
+    at.ws_send_rå(k3, builtin.chr(130) + builtin.chr(255) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0) + builtin.chr(1) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0) + builtin.chr(0))
+    krev_lukk(k3, 1009, "64-bit lengd")
+    # Melding over grensa i fragment (kvar ramme under rammegrensa): 1009
+    la k4 = kople("/ekko", {})
+    at.ws_send_ramme(k4, usann, 1, ok)
+    at.ws_send_ramme(k4, sann, 0, ok)
+    krev_lukk(k4, 1009, "for stor fragmentert melding")
+    nullstill({})
+    skriv("for stor: 100 byte ok, 101 byte gav 1009, hovud med 65535 og 64-bit lengd gav 1009, fragmentert 200 > 150 gav 1009\n")
+    returner 0
+}
+
+funksjon test_utf8() -> heltall {
+    nullstill({})
+    assert(ws.gyldig_utf8("hei æøå €" + builtin.chr(240) + builtin.chr(159) + builtin.chr(152) + builtin.chr(128)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(255)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(192) + builtin.chr(128)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(224) + builtin.chr(128) + builtin.chr(128)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(237) + builtin.chr(160) + builtin.chr(128)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(244) + builtin.chr(144) + builtin.chr(128) + builtin.chr(128)))
+    assert(ikkje ws.gyldig_utf8("a" + builtin.chr(195)))
+    assert(ikkje ws.gyldig_utf8(builtin.chr(128)))
+    # Gyldig 4-byte-teikn går gjennom
+    la k = kople("/ekko", {})
+    la emoji = builtin.chr(240) + builtin.chr(159) + builtin.chr(152) + builtin.chr(128)
+    at.ws_send_tekst(k, emoji)
+    assert_eq(at.ws_motta_tekst(k), "ekko: " + emoji)
+    # Ugyldig UTF-8 i ei tekstramme: 1007
+    at.ws_send_tekst(k, "ok" + builtin.chr(255))
+    krev_lukk(k, 1007, "ugyldig byte")
+    # Surrogat delt over to fragment: 1007 når meldinga er heil
+    la k2 = kople("/ekko", {})
+    at.ws_send_ramme(k2, usann, 1, builtin.chr(237))
+    assert(at.ws_motta(k2) == null)
+    at.ws_send_ramme(k2, sann, 0, builtin.chr(160) + builtin.chr(128))
+    krev_lukk(k2, 1007, "surrogat i fragment")
+    # Binær treng ikkje vere UTF-8
+    la k3 = kople("/ekko", {})
+    at.ws_send_bytes(k3, builtin.chr(255))
+    assert_eq(at.ws_motta(k3)["type"], "binær")
+    # Ugyldig UTF-8 i lukkegrunnen: 1007
+    at.ws_lukk(k3, 1000, builtin.chr(255))
+    krev_lukk(k3, 1007, "lukkegrunn")
+    skriv("UTF-8: streng validering (overlang, surrogat, > U+10FFFF, avkorta); tekst og lukkegrunn gav 1007, binær ikkje\n")
+    returner 0
+}
+
+funksjon test_rom() -> heltall {
+    nullstill({})
+    la a = kople("/chat/lobby", {})
+    la b = kople("/chat/lobby", {})
+    la c = kople("/chat/anna", {})
+    assert_eq(ws.tal_i_rom("lobby"), 2)
+    assert_eq(ws.tal_i_rom("anna"), 1)
+    at.ws_send_tekst(a, "hei alle")
+    assert_eq(at.ws_motta_tekst(a), "hei alle")
+    assert_eq(at.ws_motta_tekst(b), "hei alle")
+    assert(at.ws_motta(c) == null)
+    at.ws_send_tekst(c, "berre anna")
+    assert_eq(at.ws_motta_tekst(c), "berre anna")
+    assert(at.ws_motta(a) == null)
+    assert(at.ws_motta(b) == null)
+    # Direkte frå tenarkode, og unnateke avsendaren
+    assert_eq(ws.rom_send("lobby", "kunngjering"), 2)
+    assert_eq(at.ws_motta_tekst(a), "kunngjering")
+    assert_eq(at.ws_motta_tekst(b), "kunngjering")
+    assert_eq(ws.rom_send_unntatt("lobby", "til dei andre", a["t"]), 1)
+    assert(at.ws_motta(a) == null)
+    assert_eq(at.ws_motta_tekst(b), "til dei andre")
+    # Lukka tilkoplingar går ut av romma
+    at.ws_lukk(b, 1000, "")
+    krev_lukk(b, 1000, "b lukkar")
+    assert_eq(ws.tal_i_rom("lobby"), 1)
+    at.ws_send_tekst(a, "aleine")
+    assert_eq(at.ws_motta_tekst(a), "aleine")
+    assert(at.ws_motta(b) == null)
+    at.ws_lukk(a, 1000, "")
+    at.ws_lukk(c, 1000, "")
+    assert_eq(ws.tal_i_rom("lobby"), 0)
+    skriv("rom: kringkasting til to klientar i lobby, ikkje til anna; unntak for avsendar; lukka tilkopling går ut\n")
+    returner 0
+}
+
+funksjon test_vakt() -> heltall {
+    nullstill({})
+    _hend["l"] = []
+    # Vakta avviser før oppgraderinga: 403, ingen tilkopling, handlaren vart aldri kalla
+    la nei = kople("/admin", {})
+    assert_eq(nei["status"], 403)
+    assert(nei["t"] == null)
+    assert(ikkje _har_logg("admin open"))
+    assert_eq(ws.tal_opne() >= 0, sann)
+    # Med rett header: 101 og velkomstmelding frå "open"
+    la ja = kople("/admin", {"X-Rolle": "admin"})
+    assert_eq(ja["status"], 101)
+    assert(_har_logg("admin open"))
+    assert_eq(at.ws_motta_tekst(ja), "velkomen, admin")
+    skriv("vakt: 403 utan rolle (handlaren ikkje kalla), 101 med rolle\n")
+    returner 0
+}
+
+funksjon start() -> heltall {
+    test_handtrykk()
+    test_avvist_handtrykk()
+    test_ekko()
+    test_fragmentering()
+    test_ping_pong()
+    test_close_handtrykk()
+    test_for_stor_ramme()
+    test_utf8()
+    test_rom()
+    test_vakt()
+    skriv("test_apptenar_websocket OK\n")
+    returner 0
+}
