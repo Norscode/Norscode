@@ -34,10 +34,17 @@ Dette er databasen som faktisk brukes fra Norscode-programmer via `std.db`.
   CHECK/FK/UPSERT), `ALTER`/`VIEW`/`TRIGGER`, prepared statements, `CREATE INDEX`.
 - **Handle:** eit ugjennomsiktig objekt (`ordbok`), ikkje ein streng — per-handle-state
   ligg i objektet (unngår modul-globalt register, som kodegen ikkje handterer påliteleg).
-- **Transaksjoner:** snapshot via `db_serialiser`/`db_replay` (`begin`/`commit`/`rollback`).
+- **Transaksjoner:** angre-logg i motoren (`begin` O(1), `rollback` spelar loggen baklengs).
 - **Connection pool:** `pool` / `pool_acquire` / `pool_size` / `pool_close`.
-- **Persistens = binærformat** (B-tre/WAL + checkpoint), ikkje JSON-blob. `open()` på ei
-  gamal JSON-`.db`-fil auto-migrerer til binær (`migrer_json`).
+- **Persistens = NORSDB2** (sidan 2026-10-04, punkt 5d): tekst-postformat med kontrollteikn
+  som skilje (byte-eksakt), append-WAL (`<sti>.wal`) og **inkrementell checkpoint** i `<sti>.cp`
+  (base-segment + delta-segment, kompaktering når delta > base; `.cp2` gjer kompakteringa
+  krasjtrygg). Skjemaet (constraints, DEFAULT, view, trigger, sekvensar, indeksar) blir lagra og
+  overlever gjenopning. Gamle NORSDB1-filer (binære) blir lesne og skrivne om ved open; ei gamal
+  JSON-`.db`-fil auto-migrerer (`migrer_json`). Ikkje JSON.
+- **Radlager** = liste indeksert på rowid (ikkje ordbok); `CREATE INDEX` = B-tre over
+  (sorteringsnøkkel, rowid), brukt for `=`, område og `ORDER BY … [LIMIT]`. INTEGER PRIMARY KEY
+  ligg på rowid == id (O(1) oppslag), UNIQUE-sjekk via latent hash-indeks.
 - **Åtferdsavvik frå gamal JSON-motor** (SQLite-troskap, golden vs `sqlite3 3.51.0`):
   `migrate` dedupliserer **ikkje**; `query_rader`/`query_text` gjev **REAL** AVG (t.d. 40.5),
   medan `query_int(AVG)` framleis trunkerer til heiltal.

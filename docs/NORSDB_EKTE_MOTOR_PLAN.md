@@ -254,13 +254,59 @@ Fase 1–3. Porten fra `.nors`→`.no` er hovedsakelig syntaks (kolon-blokk → 
       flaskehalsen; sjå [[arm64-fullhost-codegen]]). Ikkje byggbart frå SQL-modul-sida.
 - [ ] **8b Ekte pager (Fase 6)** — 🚧 BLOKKERT på native `fil_les_ved`/`fil_skriv_ved` (pread/pwrite);
       krev 8a-toolchain. Spor A (log-strukturert) dekkjer app-nivå i mellomtida.
-- [~] **8c Generisk B-tre-indeks** — ✅ equality- + range- + BETWEEN-indeks brukt i spørring
-      (`_indeks_kandidatar`). Gjenstår: ekte ordna sekundær-B-tre (O(log n+k) i staden for O(n)-nøkkelskann),
-      multi-kolonne, uttrykk-indeks — marginal nytte medan runtimen er tolka (8a-avhengig).
-- [ ] **8d WAL-optimering** — inkrementell checkpoint, mmap, unngå O(n)-tx-klon. *(8a/8b-avhengig)*
+- [~] **8c Generisk B-tre-indeks** — ✅ ordna sekundær-B-tre over (sorteringsnøkkel, rowid) brukt
+      for `=`, område, BETWEEN og `ORDER BY … [LIMIT]` (punkt 5d). Gjenstår: multi-kolonne- og
+      uttrykk-indeks.
+- [x] **8d WAL-optimering** — inkrementell checkpoint (delta-segment + kompaktering) og
+      angre-logg i staden for O(n)-tx-klon: gjort i punkt 5d (sjå under). mmap står att (8b).
 - [x] **8e Prepared statements + plan-cache** — `prepar()` pre-tokeniserer éin gong; `kjor_forberedt_*`
       bind `?`-params (nytt `?`-token + `_bind_toks`) og køyr fleire gonger. Test: `test_norsdb_plan.no`.
 > Aksept Fase 8: benchmark innan ein liten faktor av SQLite på same maskinvare (native) — krev 8a.
+
+### Punkt 5d — ytelse og skjema-korrektheit (2026-10-04)
+Målt med `tools/norsdb_benchmark.no`, profil med `tools/norsdb_profil.no`. Maskina var sterkt
+lasta av andre jobbar (load 30–150 på 8 kjerner), så tala er grove; N=200 «før» er CPU-tid per
+fase (rekna som differanse mot ei køyring utan fasen), resten er veggtid.
+
+| Fase | N=200 før | N=200 etter | N=1000 før | N=1000 etter | N=10000 etter |
+|---|---|---|---|---|---|
+| 200/1000/10000 × INSERT | 8,4 s | 2,6 s | 153 s | 17 s | 261 s |
+| 100 × PK-oppslag | 49,5 s | 1,1 s | 679 s | 1,8 s | 2,7 s |
+| 20 × WHERE uindeksert | 9,3 s | 0,5 s | 152 s | 3,0 s | 39 s |
+| 20 × WHERE indeksert | ~0,1 s | 0,8 s¹ | 14,6 s | 0,5 s | 5,2 s |
+| ORDER BY heile tabellen | 21 s | 0,14 s | 802 s | 1,4 s | 24 s |
+| 5 × ORDER BY … LIMIT 10 | 37,5 s | 0,3 s | 1818 s | 2,1 s | 25 s |
+| 10 × ORDER BY … LIMIT m/indeks | 89 s | 0,2 s | — | 0,7 s | 3,1 s |
+| 50 × UPDATE på PK | 40 s | 0,6 s | — | 1,3 s | 2,1 s |
+| close + open | 4,9 s | 0,3 s | — | 3,7 s | 42 s |
+| checkpoint etter 1 endring | 6,5 s² | 0,001 s | — | 0,001 s | 0,002 s |
+
+¹ Målt før likskapsoppslaget i eitt pass (fee02ca); N=1000-talet er etter. ² Inkl. tom checkpoint.
+«Før» N=1000 er frå 04.10 (load ~50); main klarte ikkje N=10000 innan rimeleg tid (O(n²) INSERT).
+
+Endringar:
+
+- **Skjema overlever gjenopning**: constraints (NOT NULL/PK/UNIQUE/CHECK/FK/DEFAULT/rowid-alias),
+  view, trigger, sekvensar og indeksar blir lagra (M/G/N-postar i WAL og checkpoint) og dekoda lat.
+  DROP TABLE og ALTER TABLE blir logga (før: berre i minnet → borte etter krasj).
+- **DEFAULT-parsing**: `DEFAULT (uttrykk)`, `DEFAULT -1`, `CURRENT_TIMESTAMP`, `TRUE/FALSE`, evaluert
+  ved kvar INSERT. Rotårsaka til auth_session-feilen: `DEFAULT (datetime('now'))` gav verdien `(`
+  og den indre `)` avslutta kolonnelista (kolonnane etter forsvann); i tillegg vart UTF-8-namn som
+  `utgår` splitta i to token. Same feilklasse for `VARCHAR(255)`/`DECIMAL(10, 2)`.
+- **Radlager** = liste på rowid (ikkje ordbok med tekst-nøklar), `COUNT` O(1).
+- **Indeksar**: B-tre over (sorteringsnøkkel, rowid) med `nk`-liste for O(1) verifisering; vedlikehald
+  ved UPDATE/DELETE (før: indeksen vart sletta ved første UPDATE). INTEGER PRIMARY KEY ligg på
+  rowid == id; UNIQUE/FK-sjekk via latent hash-indeks (før: full skann per INSERT → O(n²)).
+- **ORDER BY**: stabil flettesortering med sorteringsnøklar (før: utvalssortering O(n²), og REAL
+  kræsja); indeks-skann i orden med stopp etter LIMIT; topp-k utan indeks; rowid-orden for PK.
+- **WHERE**: enkle predikat (`kol op literal [AND …]`) utan uttrykks-evaluatoren; indeks-kandidatar
+  for toppnivå-konjunktar; UPDATE/DELETE brukar dei òg.
+- **Tokenisering** med native strengoperasjonar + token-cache per handle.
+- **NORSDB2-filformat** + inkrementell checkpoint (delta-segment, kompaktering, `.cp2`, epoke).
+- **Transaksjonar** med angre-logg (begin O(1)).
+Står att: sjå rapporten (tokenisering/parse per setning er framleis den faste kostnaden; ordbøker med
+svært mange distinkte UNIQUE-verdiar (>30k) er trege i VM-en; WAL-en har ikkje tx-markørar, så ein
+krasj midt i ein transaksjon kan etterlate delvis effekt).
 
 ## Fase 9 — PostgreSQL-nivå (server RDBMS)  — *anna arkitektur, år*
 - [ ] **9a Klient/server** — nettverks-lag + wire protocol; NorsDB som daemon.

@@ -1,0 +1,97 @@
+// Punkt 5d (korrektheit): skjemaet skal overleve gjenopning — både etter close
+// (checkpoint) og etter krasj (berre WAL). Før forsvann UNIQUE/NOT NULL/CHECK/
+// DEFAULT/rowid-alias, view, trigger, indeksar og sekvensar etter open, og
+// «DEFAULT (datetime('now'))» vart parsa som verdien «(» — og den indre «)»
+// avslutta heile kolonnelista, så kolonnane etter forsvann (auth_session-feilen).
+
+bruk std.db som db
+bruk std.norsdb_sql som sql
+
+funksjon _rydd(sti: tekst) {
+    hvis builtin.fil_finnes(sti + ".cp") { builtin.fil_slett(sti + ".cp") }
+    hvis builtin.fil_finnes(sti + ".cp2") { builtin.fil_slett(sti + ".cp2") }
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+}
+
+funksjon start() -> heltall {
+    la sti = "/tmp/norsdb_skjema_persist_test.db"
+    _rydd(sti)
+
+    // ── DEFAULT-parsing (auth_session-forma) ─────────────────────────
+    la h = db.open(sti)
+    assert_eq(db.execute(h, "CREATE TABLE auth_session (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, brukar_id INTEGER NOT NULL, oppretta TEXT DEFAULT (datetime('now')), utgår TEXT, aktiv TEXT DEFAULT 'sann', n INTEGER DEFAULT -1, namn VARCHAR(40) DEFAULT 'x', pris DECIMAL(10, 2) DEFAULT 0, CHECK (n >= -1))"), 0)
+    assert_eq(db.execute(h, "INSERT INTO auth_session (token, brukar_id) VALUES ('t1', 7)"), 1)
+    // Kolonnane etter «DEFAULT (…)» finst og fekk rett DEFAULT.
+    assert_eq(db.query_text(h, "SELECT aktiv FROM auth_session WHERE token = 't1'"), "sann")
+    assert_eq(db.query_text(h, "SELECT n FROM auth_session WHERE token = 't1'"), "-1")
+    assert_eq(db.query_text(h, "SELECT namn FROM auth_session WHERE token = 't1'"), "x")
+    assert_eq(db.query_text(h, "SELECT pris FROM auth_session WHERE token = 't1'"), "0")
+    la opp = db.query_text(h, "SELECT oppretta FROM auth_session WHERE token = 't1'")
+    assert_eq(lengde(opp), 19)
+    assert_eq(builtin.slice(opp, 4, 5), "-")
+    // UTF-8-kolonnenamn er éitt token (før: «utg» + «r»).
+    assert_eq(db.execute(h, "UPDATE auth_session SET utgår = '2030-01-01' WHERE token = 't1'"), 1)
+    assert_eq(db.query_text(h, "SELECT utgår FROM auth_session WHERE token = 't1'"), "2030-01-01")
+    assert_eq(db.execute(h, "INSERT INTO auth_session (token, brukar_id) VALUES ('t1', 8)"), -1)
+    // DEFAULT CURRENT_TIMESTAMP og TRUE.
+    assert_eq(db.execute(h, "CREATE TABLE hending (namn TEXT, ts TEXT DEFAULT CURRENT_TIMESTAMP, ok INTEGER DEFAULT TRUE)"), 0)
+    assert_eq(db.execute(h, "INSERT INTO hending (namn) VALUES ('a')"), 1)
+    assert_eq(lengde(db.query_text(h, "SELECT ts FROM hending")), 19)
+    assert_eq(db.query_text(h, "SELECT ok FROM hending"), "1")
+
+    // View, trigger, indeks, sekvens.
+    db.execute(h, "CREATE TABLE logg (melding TEXT)")
+    db.execute(h, "CREATE VIEW aktive AS SELECT token FROM auth_session WHERE aktiv = 'sann'")
+    db.execute(h, "CREATE TRIGGER t_ins AFTER INSERT ON auth_session BEGIN INSERT INTO logg (melding) VALUES (NEW.token); END")
+    db.execute(h, "CREATE INDEX idx_b ON auth_session (brukar_id)")
+    db.execute(h, "CREATE SEQUENCE sq START WITH 10")
+    assert_eq(db.query_text(h, "SELECT nextval('sq')"), "10")
+    assert(db.close(h))
+
+    // ── Gjenopning etter close: heile skjemaet er der ────────────────
+    la h2 = db.open(sti)
+    assert_eq(db.execute(h2, "INSERT INTO auth_session (token, brukar_id) VALUES ('t1', 9)"), -1)
+    assert_eq(db.siste_feil(h2) != "", sann)
+    assert_eq(db.execute(h2, "INSERT INTO auth_session (brukar_id) VALUES (9)"), -1)
+    assert_eq(db.execute(h2, "INSERT INTO auth_session (token, brukar_id, n) VALUES ('t9', 9, -5)"), -1)
+    assert_eq(db.execute(h2, "INSERT INTO auth_session (token, brukar_id) VALUES ('t2', 9)"), 1)
+    assert_eq(db.query_text(h2, "SELECT aktiv FROM auth_session WHERE token = 't2'"), "sann")
+    assert_eq(db.query_text(h2, "SELECT n FROM auth_session WHERE token = 't2'"), "-1")
+    assert_eq(db.query_text(h2, "SELECT id FROM auth_session WHERE token = 't2'"), "2")
+    assert_eq(lengde(db.query_text(h2, "SELECT oppretta FROM auth_session WHERE token = 't2'")), 19)
+    assert_eq(db.query_text(h2, "SELECT COUNT(*) FROM aktive"), "2")
+    assert_eq(db.query_text(h2, "SELECT melding FROM logg"), "t2")
+    assert_eq(sql.explain(h2, "SELECT * FROM auth_session WHERE brukar_id = 9"), "SEARCH auth_session USING INDEX (brukar_id)")
+    assert_eq(db.query_text(h2, "SELECT nextval('sq')"), "11")
+    assert(db.close(h2))
+
+    // ── Krasj (ingen close): skjema og data frå WAL ──────────────────
+    la h3 = db.open(sti)
+    assert_eq(db.execute(h3, "CREATE TABLE b (k TEXT UNIQUE, v TEXT DEFAULT 'd')"), 0)
+    assert_eq(db.execute(h3, "INSERT INTO b (k) VALUES ('a')"), 1)
+    la h4 = db.open(sti)
+    assert_eq(db.execute(h4, "INSERT INTO b (k) VALUES ('a')"), -1)
+    assert_eq(db.query_text(h4, "SELECT v FROM b WHERE k = 'a'"), "d")
+    assert_eq(db.execute(h4, "INSERT INTO b (k) VALUES ('c')"), 1)
+    assert_eq(db.query_text(h4, "SELECT v FROM b WHERE k = 'c'"), "d")
+
+    // ── ALTER TABLE blir logga og overlever ──────────────────────────
+    assert_eq(db.execute(h4, "ALTER TABLE b ADD COLUMN w TEXT DEFAULT 'ny'"), 0)
+    assert_eq(db.execute(h4, "ALTER TABLE b RENAME COLUMN v TO vv"), 0)
+    assert_eq(db.execute(h4, "DROP TABLE hending"), 0)
+    la h5 = db.open(sti)
+    assert_eq(db.query_text(h5, "SELECT w FROM b WHERE k = 'a'"), "ny")
+    assert_eq(db.query_text(h5, "SELECT vv FROM b WHERE k = 'a'"), "d")
+    assert_eq(db.execute(h5, "INSERT INTO b (k) VALUES ('a')"), -1)
+    assert_eq(db.execute(h5, "INSERT INTO b (k) VALUES ('e')"), 1)
+    assert_eq(db.query_text(h5, "SELECT vv FROM b WHERE k = 'e'"), "d")
+    assert_eq(db.query_text(h5, "SELECT w FROM b WHERE k = 'e'"), "ny")
+    // DROP TABLE overlevde: IF NOT EXISTS lagar ein ny tabell med kolonnen x.
+    assert_eq(db.execute(h5, "CREATE TABLE IF NOT EXISTS hending (x TEXT)"), 0)
+    assert_eq(db.execute(h5, "INSERT INTO hending (x) VALUES ('y')"), 1)
+    assert_eq(db.query_text(h5, "SELECT x FROM hending"), "y")
+    assert(db.close(h5))
+
+    _rydd(sti)
+    returner 0
+}

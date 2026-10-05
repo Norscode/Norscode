@@ -1,0 +1,195 @@
+// NorsDB-benchmark (punkt 5d): måler dei operasjonane ein app faktisk gjer mot
+// den kanoniske motoren (std.db → norsdb_sql + norsdb_motor), på ei fil-database.
+//
+// Køyr:  NORSCODE_VM_FAST=1 ./bin/nc run tools/norsdb_benchmark.no
+// Miljø: NORSDB_BENCH_N      — tal på rader (standard 1000)
+//        NORSDB_BENCH_STI    — databasesti (standard /tmp/norsdb_bench_<N>.db)
+//        NORSDB_BENCH_FASAR  — kommaseparert delmengd av fasane (standard alle)
+//
+// Kvar fase skriv «fase: <ms> ms (<detalj>)» og assertar resultatet, slik at ein
+// rask men feil motor ikkje ser grøn ut. Mål før/etter i same økt (maskina kan
+// vere lasta av andre jobbar).
+
+bruk std.db som db
+bruk std.norsdb_motor som motor
+
+funksjon _env(namn: tekst, standard: tekst) -> tekst {
+    prøv {
+        la v = builtin.miljo_hent(namn)
+        hvis v != "" { returner v }
+    } fang (e) {}
+    returner standard
+}
+
+funksjon _t(n: heltall) -> tekst { returner tekst_fra_heltall(n) }
+
+funksjon _rapport(fase: tekst, ms: heltall, detalj: tekst) {
+    skriv("BENCH " + fase + ": " + _t(ms) + " ms (" + detalj + ")\n")
+}
+
+funksjon _med(fasar: tekst, fase: tekst) -> boolsk {
+    hvis fasar == "alle" { returner sann }
+    la deler = builtin.split(fasar, ",")
+    la i = 0
+    mens i < lengde(deler) {
+        hvis builtin.trim(deler[i]) == fase { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _slett_filer(sti: tekst) {
+    hvis builtin.fil_finnes(sti + ".cp") { builtin.fil_slett(sti + ".cp") }
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+    hvis builtin.fil_finnes(sti) { builtin.fil_slett(sti) }
+}
+
+// Deterministisk «tilfeldig» permutasjon av 0..n-1 (s = (i * 7919) % n er ein
+// bijeksjon når n ikkje er deleleg med 7919), så ORDER BY s har reelt arbeid.
+funksjon _s_av(i: heltall, n: heltall) -> heltall { returner (i * 7919) % n }
+
+funksjon start() -> heltall {
+    la n = builtin.heltall_fra_tekst(_env("NORSDB_BENCH_N", "1000"))
+    la sti = _env("NORSDB_BENCH_STI", "/tmp/norsdb_bench_" + _t(n) + ".db")
+    la fasar = _env("NORSDB_BENCH_FASAR", "alle")
+    _slett_filer(sti)
+    skriv("BENCH start n=" + _t(n) + " sti=" + sti + "\n")
+
+    la h = db.open(sti)
+    assert_eq(db.execute(h, "CREATE TABLE bench (id INTEGER PRIMARY KEY, k INTEGER, s INTEGER, v TEXT)"), 0)
+
+    // ── insert: N enkelt-INSERT (kvar loggar til WAL) ────────────────
+    la t0 = builtin.tid_ms()
+    la i = 0
+    mens i < n {
+        la r = db.execute(h, "INSERT INTO bench (k, s, v) VALUES (" + _t(i % 10) + ", " + _t(_s_av(i, n)) + ", 'rad" + _t(i) + "')")
+        hvis r != 1 { skriv("insert feila ved i=" + _t(i) + ": " + db.siste_feil(h) + "\n"); returner 1 }
+        i = i + 1
+    }
+    _rapport("insert", builtin.tid_ms() - t0, _t(n) + " rader")
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM bench"), n)
+
+    // ── pk_oppslag: 100 punktoppslag på primærnøkkel ─────────────────
+    hvis _med(fasar, "pk_oppslag") {
+        la t1 = builtin.tid_ms()
+        la q = 0
+        mens q < 100 {
+            la id = (q * 37) % n + 1
+            assert_eq(db.query_text(h, "SELECT v FROM bench WHERE id = " + _t(id)), "rad" + _t(id - 1))
+            q = q + 1
+        }
+        _rapport("pk_oppslag", builtin.tid_ms() - t1, "100 oppslag")
+    }
+
+    // ── where_uindeksert: 20 COUNT med likskap på uindeksert kolonne ─
+    hvis _med(fasar, "where_uindeksert") {
+        la t2 = builtin.tid_ms()
+        la q = 0
+        mens q < 20 {
+            assert_eq(db.query_int(h, "SELECT COUNT(*) FROM bench WHERE k = 4"), n / 10)
+            q = q + 1
+        }
+        _rapport("where_uindeksert", builtin.tid_ms() - t2, "20 spørjingar k=4")
+    }
+
+    // ── where_indeksert: same spørjing etter CREATE INDEX ────────────
+    hvis _med(fasar, "where_indeksert") {
+        la ti = builtin.tid_ms()
+        db.execute(h, "CREATE INDEX idx_k ON bench (k)")
+        _rapport("create_index", builtin.tid_ms() - ti, "på k")
+        la t3 = builtin.tid_ms()
+        la q = 0
+        mens q < 20 {
+            assert_eq(db.query_int(h, "SELECT COUNT(*) FROM bench WHERE k = 4"), n / 10)
+            q = q + 1
+        }
+        _rapport("where_indeksert", builtin.tid_ms() - t3, "20 spørjingar k=4")
+    }
+
+    // ── order_full: ORDER BY s utan LIMIT (heile tabellen) ───────────
+    hvis _med(fasar, "order_full") {
+        la t4 = builtin.tid_ms()
+        la ut = db.query_rader(h, "SELECT id, s FROM bench ORDER BY s")
+        _rapport("order_full", builtin.tid_ms() - t4, "1 spørjing, " + _t(lengde(ut)) + " teikn")
+        // Fyrste rad har s=0 → id=1 (i=0).
+        assert_eq(db.query_text(h, "SELECT id FROM bench ORDER BY s LIMIT 1"), "1")
+    }
+
+    // ── order_limit: ORDER BY s DESC LIMIT 10, uindeksert ────────────
+    hvis _med(fasar, "order_limit") {
+        la t5 = builtin.tid_ms()
+        la q = 0
+        mens q < 5 {
+            assert_eq(db.query_text(h, "SELECT s FROM bench ORDER BY s DESC LIMIT 10"), _t(n - 1))
+            q = q + 1
+        }
+        _rapport("order_limit", builtin.tid_ms() - t5, "5 spørjingar LIMIT 10")
+    }
+
+    // ── order_limit_idx: same med indeks på s ────────────────────────
+    hvis _med(fasar, "order_limit_idx") {
+        db.execute(h, "CREATE INDEX idx_s ON bench (s)")
+        la t6 = builtin.tid_ms()
+        la q = 0
+        mens q < 5 {
+            assert_eq(db.query_text(h, "SELECT s FROM bench ORDER BY s DESC LIMIT 10"), _t(n - 1))
+            assert_eq(db.query_text(h, "SELECT id FROM bench ORDER BY s LIMIT 1 OFFSET 1"), _t(_inv_s(1, n) + 1))
+            q = q + 1
+        }
+        _rapport("order_limit_idx", builtin.tid_ms() - t6, "5×2 spørjingar LIMIT med indeks på s")
+    }
+
+    // ── update: 50 UPDATE … WHERE id = X ─────────────────────────────
+    hvis _med(fasar, "update") {
+        la t7 = builtin.tid_ms()
+        la q = 0
+        mens q < 50 {
+            la id = (q * 53) % n + 1
+            assert_eq(db.execute(h, "UPDATE bench SET v = 'ny" + _t(q) + "' WHERE id = " + _t(id)), 1)
+            q = q + 1
+        }
+        _rapport("update", builtin.tid_ms() - t7, "50 UPDATE på pk")
+        assert_eq(db.query_text(h, "SELECT v FROM bench WHERE id = 1"), "ny0")
+    }
+
+    // ── close (skriv checkpoint) + reopen (les checkpoint + WAL) ────
+    hvis _med(fasar, "reopen") {
+        la t8 = builtin.tid_ms()
+        db.close(h)
+        _rapport("close", builtin.tid_ms() - t8, "checkpoint ved lukking")
+        la t9 = builtin.tid_ms()
+        h = db.open(sti)
+        _rapport("reopen", builtin.tid_ms() - t9, "open etter close")
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM bench"), n)
+    }
+
+    // ── checkpoint: éi lita endring + checkpoint (bør vere inkrementell) ─
+    hvis _med(fasar, "checkpoint") {
+        db.execute(h, "INSERT INTO bench (k, s, v) VALUES (0, " + _t(n) + ", 'ekstra')")
+        la ta = builtin.tid_ms()
+        motor.db_checkpoint(h)
+        _rapport("checkpoint", builtin.tid_ms() - ta, "1 endra rad")
+        la tb = builtin.tid_ms()
+        motor.db_checkpoint(h)
+        _rapport("checkpoint_tom", builtin.tid_ms() - tb, "ingen endringar")
+        db.close(h)
+        h = db.open(sti)
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM bench"), n + 1)
+        assert_eq(db.query_text(h, "SELECT v FROM bench WHERE s = " + _t(n)), "ekstra")
+    }
+
+    db.close(h)
+    _slett_filer(sti)
+    skriv("BENCH OK\n")
+    returner 0
+}
+
+// i slik at _s_av(i, n) == s (lineært søk; berre brukt for éin verdi i assert).
+funksjon _inv_s(s: heltall, n: heltall) -> heltall {
+    la i = 0
+    mens i < n {
+        hvis _s_av(i, n) == s { returner i }
+        i = i + 1
+    }
+    returner -1
+}
