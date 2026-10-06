@@ -256,6 +256,137 @@ funksjon vm_aritet_melding(fn_namn: tekst, forventa: heiltall, fekk: heiltall, d
     returner "ArgumentFeil: Aritetsfeil ved " + kva + fn_namn + ": forventa " + tekst_fra_heltall(forventa) + " argument, fekk " + tekst_fra_heltall(fekk)
 }
 
+// ─── R2/F20: éin strukturrepresentasjon ─────────────────────────────────────
+// Ein struktur-instans er ei ordbok laga av den kompilerte konstruktøren
+// «modul.Namn» (sjå kompiler_konstruktør i ir_to_bytecode) med to skjulte merke:
+//   "__struktur__" = modulkvalifisert typenamn ("modul.Punkt"): nøkkelen for
+//                    eksakt metodeoppslag (funksjonen "modul.Punkt.metode");
+//   "__type__"     = kort typenamn ("Punkt"): `fang (e: Punkt)` og eldre kode.
+// Merka er usynlege i nøkler/verdier/lengde/for/json. Ei vanleg ordbok med eit
+// eige "__type__"-felt (std.cache, std.zip …) er IKKJE ein struktur og blir
+// ikkje filtrert.
+funksjon vm_er_struktur(v) -> boolsk {
+    hvis builtin.type(v) != "ordbok" { returner usann }
+    returner vm_map_har_nokkel(v, "__struktur__")
+}
+
+funksjon vm_er_strukturmerke(k) -> boolsk {
+    returner k == "__struktur__" eller k == "__type__"
+}
+
+funksjon vm_struktur_nøkler(v) {
+    la ut = []
+    la nk = nøkler(v)
+    la i: heiltall = 0
+    mens i < lengde(nk) {
+        hvis ikkje vm_er_strukturmerke(nk[i]) { legg_til(ut, nk[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_struktur_verdier(v) {
+    la ut = []
+    la nk = nøkler(v)
+    la i: heiltall = 0
+    mens i < lengde(nk) {
+        hvis ikkje vm_er_strukturmerke(nk[i]) { legg_til(ut, v[nk[i]]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Finst det ein struktur-instans nokon stad i v? (Avgrensa djupn: ei
+// sirkulær ordbok kan ikkje serialiserast uansett.)
+funksjon vm_har_struktur_djup(v, djupn: heiltall) -> boolsk {
+    hvis djupn > 256 { returner usann }
+    la t = builtin.type(v)
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(v, "__struktur__") { returner sann }
+        la nk = nøkler(v)
+        la i: heiltall = 0
+        mens i < lengde(nk) {
+            hvis vm_har_struktur_djup(v[nk[i]], djupn + 1) { returner sann }
+            i = i + 1
+        }
+        returner usann
+    }
+    hvis t == "liste" {
+        la j: heiltall = 0
+        mens j < lengde(v) {
+            hvis vm_har_struktur_djup(v[j], djupn + 1) { returner sann }
+            j = j + 1
+        }
+    }
+    returner usann
+}
+
+// Kopi av v utan strukturmerke (for json). Berre kalla når vm_har_struktur_djup
+// har funne ein struktur; elles blir originalen serialisert direkte.
+funksjon vm_utan_strukturmerke(v, djupn: heiltall) {
+    hvis djupn > 256 { returner v }
+    la t = builtin.type(v)
+    hvis t == "ordbok" {
+        la struktur = vm_map_har_nokkel(v, "__struktur__")
+        la ut = {}
+        la nk = nøkler(v)
+        la i: heiltall = 0
+        mens i < lengde(nk) {
+            la k = nk[i]
+            hvis ikkje (struktur og vm_er_strukturmerke(k)) { ut[k] = vm_utan_strukturmerke(v[k], djupn + 1) }
+            i = i + 1
+        }
+        returner ut
+    }
+    hvis t == "liste" {
+        la ul = []
+        la j: heiltall = 0
+        mens j < lengde(v) {
+            legg_til(ul, vm_utan_strukturmerke(v[j], djupn + 1))
+            j = j + 1
+        }
+        returner ul
+    }
+    returner v
+}
+
+funksjon vm_json_utan_merke(v) -> tekst {
+    hvis vm_har_struktur_djup(v, 0) { returner json_skriv(vm_utan_strukturmerke(v, 0)) }
+    returner json_skriv(v)
+}
+
+// Kort typenamn for meldingar: strukturnamnet for ein struktur, elles
+// runtime-typen.
+funksjon vm_verdi_typenamn(v) -> tekst {
+    hvis vm_er_struktur(v) { returner tekst(v["__type__"]) }
+    returner vm_type_name(v)
+}
+
+// mott.metode(args…): kompilatoren emitterer CALL builtin.kall_metode med
+// argumenta [mottakar, metodenamn, args…]. Oppslaget er EKSAKT:
+//   1. struktur: funksjonen "<__struktur__>.<metode>" i funksjonstabellen;
+//   2. ordbok (struktur eller ikkje) med eit felt <metode> som held ein
+//      closure: kall closuren med args (utan mottakaren), t.d. k.op(2, 3);
+//   3. elles ein fangbar MetodeFeil (òg for ingenting-mottakar).
+// Returnerer ["fn", namn], ["closure", verdi] eller ["feil", melding].
+funksjon vm_metode_løys(functions, mott, metode: tekst) {
+    hvis mott == null {
+        returner ["feil", "MetodeFeil: kan ikkje kalle metoden " + metode + "() på ingenting"]
+    }
+    la t = builtin.type(mott)
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(mott, "__struktur__") {
+            la fn_namn = tekst(mott["__struktur__"]) + "." + metode
+            hvis vm_map_har_nokkel(functions, fn_namn) { returner ["fn", fn_namn] }
+        }
+        hvis vm_map_har_nokkel(mott, metode) {
+            la felt = mott[metode]
+            hvis builtin.type(felt) == "ordbok" og vm_map_har_nokkel(felt, "__lambda__") { returner ["closure", felt] }
+        }
+    }
+    returner ["feil", "MetodeFeil: " + vm_verdi_typenamn(mott) + " har ingen metode " + metode + "()"]
+}
+
 // R1/F11: ein struktur-instans er ei ordbok merkt med __type__ (sjå
 // struktur-konstruktøren i kall_innebygd); eit ordbok-unntak skrive som
 // `kast {type: "X", melding: "…"}` har eit vanleg type-felt. Strukturmerket
@@ -315,7 +446,7 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
         la ni: heiltall = 0
         mens ni < lengde(nk) {
             la k = tekst(nk[ni])
-            hvis k != "__type__" og k != "type" og k != "årsak" og k != "cause" {
+            hvis k != "__type__" og k != "__struktur__" og k != "type" og k != "årsak" og k != "cause" {
                 legg_til(delar, k + "=" + tekst(verdi[k]))
             }
             ni = ni + 1
@@ -3139,7 +3270,12 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     // Reine, capability-frie intrinsics ligg i den varme compilerløypa.
     // Handter dei før metrikk-/security-dispatchen: den gamle lineære
     // dispatchen gjorde kvart lexer-teikn til hundrevis av VM-greiner.
-    hvis namn == "builtin.lengde" { returner lengde(args[0]) }
+    hvis namn == "builtin.lengde" {
+        // R2/F20: dei to strukturmerka tel ikkje med.
+        la len_v = args[0]
+        hvis builtin.type(len_v) == "ordbok" og vm_map_har_nokkel(len_v, "__struktur__") { returner lengde(len_v) - 2 }
+        returner lengde(len_v)
+    }
     hvis namn == "builtin.slice" { returner builtin.slice(args[0], args[1], args[2]) }
     hvis namn == "builtin.char_code" { returner builtin.char_code(args[0]) }
     hvis namn == "builtin.native_heap_bytes" { returner builtin.native_heap_bytes() }
@@ -3268,6 +3404,7 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
 
     // builtin.lengde
     hvis namn == "builtin.lengde" {
+        hvis vm_er_struktur(args[0]) { returner lengde(args[0]) - 2 }
         returner lengde(args[0])
     }
 
@@ -3350,11 +3487,13 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
 
     // builtin.nøkler
     hvis namn == "builtin.nøkler" {
+        hvis vm_er_struktur(args[0]) { returner vm_struktur_nøkler(args[0]) }
         returner nøkler(args[0])
     }
 
     // builtin.verdier
     hvis namn == "builtin.verdier" {
+        hvis vm_er_struktur(args[0]) { returner vm_struktur_verdier(args[0]) }
         returner verdier(args[0])
     }
 
@@ -3477,7 +3616,7 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         }
     }
     hvis namn == "builtin.json_skriv" {
-        returner json_skriv(args[0])
+        returner vm_json_utan_merke(args[0])
     }
 
     // builtin.json_stringify
@@ -3485,7 +3624,8 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         // Den dynamiske native-dispatchen har historisk brukt ein «smart»
         // legacy-serializer som tolkar tekst som "null", "0" og JSON-liknande
         // innhald som typed verdiar. VM-i-VM må bevare faktisk runtime-type.
-        returner json_skriv(args[0])
+        // R2/F20: strukturmerka blir ikkje serialiserte.
+        returner vm_json_utan_merke(args[0])
     }
 
     // Kompilering / host-bridge
@@ -4426,24 +4566,25 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         returner lengde(args[1])
     }
 
-    // Struktur-konstruktørar: stor forbokstav → ordbok merkt med __type__ (for
-    // metode-dispatch; feltoppslag/-lagring bruker vanlege nøklar, so __type__
-    // forstyrrar ikkje). C-æra-VM-en gav ei tom ordbok utan merke.
-    la første_ch = builtin.slice(namn, 0, 1)
-    hvis første_ch >= "A" og første_ch <= "Z" {
-        la obj: ordbok<tekst, tekst> = {}
-        obj["__type__"] = namn
-        returner obj
-    }
-    // Prefiks-stripping for kall som kjem via builtin.
-    hvis builtin.starts_with(namn, "builtin.") {
-        la kortnavn2 = builtin.slice(namn, 8, lengde(namn))
-        la første2 = builtin.slice(kortnavn2, 0, 1)
-        hvis første2 >= "A" og første2 <= "Z" {
-            la obj2: ordbok<tekst, tekst> = {}
-            obj2["__type__"] = kortnavn2
-            returner obj2
+    // R2/F20: struktur-konstruktørar er kompilerte funksjonar («modul.Namn»,
+    // sjå kompiler_konstruktør i ir_to_bytecode). Den gamle stor-bokstav-
+    // heuristikken her (ukjent kall med stor forbokstav → ordbok med __type__)
+    // er fjerna: ein skrivefeil som Pnukt() er ein kompileringsfeil.
+
+    // R2/F20: metodekall utanom CALL-opkoden (CALL-armen i køyr_funksjon
+    // løyser dei sjølv utan reentrant VM-kall).
+    hvis namn == "builtin.kall_metode" {
+        hvis lengde(args) < 2 { kast "MetodeFeil: kall_metode krev mottakar og metodenamn" }
+        la km_løys = vm_metode_løys(active_functions, args[0], tekst(args[1]))
+        hvis km_løys[0] == "feil" { kast km_løys[1] }
+        hvis km_løys[0] == "closure" { kast "MetodeFeil: closure-felt kan berre kallast via CALL" }
+        la km_args: liste = [km_løys[1], args[0]]
+        la km_i: heiltall = 2
+        mens km_i < lengde(args) {
+            legg_til(km_args, args[km_i])
+            km_i = km_i + 1
         }
+        returner kall_innebygd_web_og_ncb("builtin.ncb_call_fn", km_args, active_functions)
     }
 
     // Verts-innbakte funksjonar (fersk native seed): funksjonar som ikkje ligg i
@@ -6840,6 +6981,41 @@ funksjon køyr_funksjon(
             la løyst_namn = ""
             la intern_feil: tekst = ""
             la dynamisk_kall = usann
+            // R2/F20: mott.metode(args…) = CALL builtin.kall_metode med
+            // [mottakar, metodenamn, args…]. Eksakt oppslag (vm_metode_løys):
+            // strukturmetoden får [mottakar, args…], ein closure i feltet får
+            // [args…]; elles ein fangbar MetodeFeil via THROW-maskineriet.
+            hvis op == "CALL" og mål_namn == "builtin.kall_metode" og lengde(call_args) >= 2 {
+                la m_løys = vm_metode_løys(functions, call_args[0], tekst(call_args[1]))
+                hvis m_løys[0] == "feil" {
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                    stack_push(ramme, m_løys[1])
+                    tvungen_op = "THROW"
+                    fortsett
+                }
+                la m_args: liste = []
+                la m_heap: liste_tekst = []
+                la m_start: heiltall = 2
+                hvis m_løys[0] == "fn" {
+                    mål_namn = m_løys[1]
+                    legg_til(m_args, call_args[0])
+                    hvis lengde(call_heap_ids) > 0 { legg_til(m_heap, call_heap_ids[0]) }
+                } ellers {
+                    la m_clo = m_løys[1]
+                    mål_namn = tekst(m_clo["__lambda__"])
+                    hvis vm_map_har_nokkel(m_clo, "__capture__") { lambda_capture = m_clo["__capture__"] }
+                }
+                la mai: heiltall = m_start
+                mens mai < lengde(call_args) {
+                    legg_til(m_args, call_args[mai])
+                    hvis mai < lengde(call_heap_ids) { legg_til(m_heap, call_heap_ids[mai]) }
+                    mai = mai + 1
+                }
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                call_args = m_args
+                call_heap_ids = m_heap
+                dynamisk_kall = sann
+            }
             hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
                 løyst_namn = vm_løys_kall(vm_kall_cache, functions, mål_namn)
             }

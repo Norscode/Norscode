@@ -1041,6 +1041,12 @@ funksjon ny_komp()
     komp["funk_vararg"] = {}   // name → tal faste parametrar før vararg-parameteren (siste ...p)
     komp["grensesnitt_kart"] = {} // grensesnitt-namn → liste med påkravde metodenamn
     komp["struktur_impl"] = []    // liste med [struktur-namn, grensesnitt-namn] for validering
+    // R2/F20: strukturar i denne modulen (namn → Struktur-node) og i importerte
+    // modular (modulnamn → {namn → Struktur-node}). Ukvalifiserte importerte
+    // strukturnamn går via importert_struktur_kart (namn → modul eller __AMBIGUOUS__).
+    komp["struktur_kart"] = {}
+    komp["modul_struktur_kart"] = {}
+    komp["importert_struktur_kart"] = {}
     komp["import_alias"] = {}  // alias → fullt modulnamn
     komp["imported_funk_kart"] = {} // unqualified importert funksjon -> fullt namn
     komp["importert_modul_cache"] = {} // modulnamn -> sann
@@ -1889,6 +1895,11 @@ funksjon emit_uttrykk(komp, node, kode)
             slutt
             hvis har_nokkel(komp["import_alias"], modul_del)
                 fullt_modul = komp["import_alias"][modul_del]
+                // R2/F20: alias.Type(args) kallar konstruktøren i modulen.
+                la imp_s = importert_struktur(komp, fullt_modul, fn_del)
+                hvis imp_s != null
+                    returner emit_konstruktørkall(komp, imp_s, fullt_modul, arg_antal, kode)
+                slutt
                 legg_til(kode, json_kall(fullt_modul + "." + fn_del, arg_antal))
                 returner sann
             slutt
@@ -1917,6 +1928,19 @@ funksjon emit_uttrykk(komp, node, kode)
             emit_load_namn(komp, kode, fn_navn)
             legg_til(kode, json_instruksjon_med_int("CALL_VALUE", arg_antal))
             returner sann
+        slutt
+
+        // R2/F20: Namn(args) der Namn er ein struktur i denne modulen (eller
+        // eintydig importert ukvalifisert) kallar den kompilerte konstruktøren.
+        hvis fn_ident["type"] == "Ident" og har_nokkel(komp["struktur_kart"], fn_navn)
+            returner emit_konstruktørkall(komp, komp["struktur_kart"][fn_navn], modul, arg_antal, kode)
+        slutt
+        hvis fn_ident["type"] == "Ident" og har_nokkel(komp["importert_struktur_kart"], fn_navn) og ikkje har_nokkel(komp["funk_kart"], fn_navn)
+            la is_modul = komp["importert_struktur_kart"][fn_navn]
+            hvis is_modul == "__AMBIGUOUS__"
+                kast "Typefeil: strukturnamnet " + fn_navn + " er tvitydig (finst i fleire importerte modular); bruk alias." + fn_navn + "()"
+            slutt
+            returner emit_konstruktørkall(komp, komp["modul_struktur_kart"][is_modul][fn_navn], is_modul, arg_antal, kode)
         slutt
 
         // Sjekk om det er ein brukardefinert funksjon i same modul
@@ -2038,6 +2062,8 @@ funksjon er_metode_mottakar(komp, mott) -> boolsk {
     hvis t == "Ident" {
         la namn = mott["verdi"]
         hvis har_nokkel(komp["current_locals"], namn) { returner sann }
+        // R2/F20: ein modulglobal (som ikkje er eit importalias) er òg ein verdi.
+        hvis har_nokkel(komp["global_kart"], namn) og ikkje har_nokkel(komp["import_alias"], namn) { returner sann }
         returner usann
     }
     hvis t == "Felt" {
@@ -2045,41 +2071,141 @@ funksjon er_metode_mottakar(komp, mott) -> boolsk {
         hvis rot == "" { returner sann }
         hvis rot == "builtin" { returner usann }
         hvis har_nokkel(komp["current_locals"], rot) { returner sann }
+        hvis har_nokkel(komp["global_kart"], rot) og ikkje har_nokkel(komp["import_alias"], rot) { returner sann }
         returner usann
     }
     returner sann
 }
 
-// mott.metode(args) med dynamisk dispatch på __type__ via ncb_call_fn:
-//   ncb_call_fn(modul + "." + mott["__type__"] + ".metode", mott, args…)
-// Mottakaren blir evaluert éin gong (til ein ramme-lokal temp når han ikkje er
-// eit enkelt namn).
+// R2/F20: mott.metode(args) blir
+//   <mott> PUSH_CONST "metode" <args…> CALL builtin.kall_metode (n + 2)
+// Mottakaren blir evaluert éin gong. Runtime slår opp funksjonen
+// "<mott.__struktur__>.metode" EKSAKT (modulkvalifisert strukturmerke, sjå
+// kompiler_konstruktør); manglande metode eller ingenting-mottakar gjev ein
+// fangbar MetodeFeil. Ingen fuzzy siste-segment-oppslag.
 funksjon emit_metodekall(komp, node, kode) -> boolsk {
     la fn_ident = node["barn"][0]
     la mott = fn_ident["barn"][0]
     la args = node["barn"][1]["barn"]
-    la mott_namn = ""
-    hvis mott["type"] != "Ident" {
-        mott_namn = "__mott_" + tekst_fra_heltall(komp["teller"]) + "__"
-        komp["teller"] = komp["teller"] + 1
-        emit_uttrykk(komp, mott, kode)
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", mott_namn))
-    }
-    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", komp["modul"] + "."))
-    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
-    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
-    legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
-    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "." + fn_ident["verdi"]))
-    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-    hvis mott_namn == "" { emit_uttrykk(komp, mott, kode) } ellers { legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", mott_namn)) }
+    emit_uttrykk(komp, mott, kode)
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", fn_ident["verdi"]))
     la ai: heiltall = 0
     mens ai < lengde(args) {
         emit_uttrykk(komp, args[ai], kode)
         ai = ai + 1
     }
-    legg_til(kode, json_kall("builtin.ncb_call_fn", lengde(args) + 2))
+    legg_til(kode, json_kall("builtin.kall_metode", lengde(args) + 2))
     returner sann
+}
+
+// ─── Strukturar (R2/F20, F05) ───────────────────────────────────────────────
+// Ein struktur-instans er ei ordbok med to skjulte merke:
+//   "__struktur__" = modulkvalifisert typenamn ("modul.Punkt"), nøkkelen for
+//                    eksakt metodeoppslag ("modul.Punkt.metode");
+//   "__type__"     = kort typenamn ("Punkt") for `fang (e: Punkt)` og eldre kode.
+// VM-en gøymer merka i nøkler/verdier/lengde/for/json. Kvar struktur får ein
+// kompilert konstruktør «modul.Namn» med parametrane felt1..feltN, __antal__.
+// Kallstaden pushar dei gjevne argumenta (posisjonelt), fyller resten med
+// ingenting og pushar talet gjevne argument; konstruktøren evaluerer
+// standardverdien (`x: heltall = 5`) i strukturens eigen modul for kvart felt
+// utan argument. Felt utan argument og utan standardverdi er ingenting.
+
+funksjon struktur_felt(s_node) {
+    la ut = []
+    la i: heiltall = 0
+    mens i < lengde(s_node["barn"]) {
+        hvis s_node["barn"][i]["type"] == "Felt" { legg_til(ut, s_node["barn"][i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon kompiler_konstruktør(komp, s_node) -> tekst {
+    la namn = tekst(s_node["verdi"])
+    la modul = komp["modul"]
+    la felt = struktur_felt(s_node)
+    komp["current_function"] = namn
+    komp["current_locals"] = {}
+    komp["in_module_init"] = usann
+    komp["current_source_lines"] = []
+    komp["current_source_columns"] = []
+    komp["defer_blocks"] = []
+    la lokale = komp["current_locals"]
+    la params = []
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        legg_til(params, tekst(felt[i]["verdi"]))
+        lokale[tekst(felt[i]["verdi"])] = sann
+        i = i + 1
+    }
+    legg_til(params, "__antal__")
+    lokale["__antal__"] = sann
+
+    la kode = []
+    // Standardverdiar: hvis __antal__ <= i { felt_i = <standard> }
+    i = 0
+    mens i < lengde(felt) {
+        hvis lengde(felt[i]["barn"]) > 0 {
+            la ok_lbl = ny_etikett(komp)
+            legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", "__antal__"))
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", i))
+            legg_til(kode, json_instruksjon_uten_arg("COMPARE_LE"))
+            legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", ok_lbl))
+            emit_uttrykk(komp, felt[i]["barn"][0], kode)
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", tekst(felt[i]["verdi"])))
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", ok_lbl))
+        }
+        i = i + 1
+    }
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__type__"))
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", namn))
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__struktur__"))
+    legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", modul + "." + namn))
+    i = 0
+    mens i < lengde(felt) {
+        legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", tekst(felt[i]["verdi"])))
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", tekst(felt[i]["verdi"])))
+        i = i + 1
+    }
+    legg_til(kode, json_instruksjon_med_int("BUILD_MAP", lengde(felt) + 2))
+    legg_til(kode, json_instruksjon_uten_arg("RETURN"))
+
+    la fn_json = "{"
+    fn_json = fn_json + "\"name\":" + json_escape_tekst(namn) + ","
+    fn_json = fn_json + "\"module\":" + json_escape_tekst(modul) + ","
+    fn_json = fn_json + "\"params\":" + json_fra_tekstliste(params) + ","
+    fn_json = fn_json + "\"is_async\":false,\"struct\":true,"
+    fn_json = fn_json + "\"string_encoding\":\"decoded-v1\","
+    fn_json = fn_json + "\"code\":[" + builtin.join(kode, ",") + "],"
+    fn_json = fn_json + "\"source_lines\":[],\"source_columns\":[]"
+    fn_json = fn_json + "}"
+    returner modul + "." + namn + "|SEP|" + fn_json
+}
+
+// Kall av konstruktøren til s_node (i modulen fullt_modul). Argumenta ligg alt
+// på stacken; fyll manglande felt med ingenting og push talet gjevne argument.
+funksjon emit_konstruktørkall(komp, s_node, fullt_modul: tekst, arg_antal: heiltall, kode) -> boolsk {
+    la n_felt: heiltall = lengde(struktur_felt(s_node))
+    hvis arg_antal > n_felt {
+        kast "Typefeil: " + tekst(s_node["verdi"]) + " har " + tekst_fra_heltall(n_felt) + " felt, men konstruktøren fekk " + tekst_fra_heltall(arg_antal) + " argument"
+    }
+    la i: heiltall = arg_antal
+    mens i < n_felt {
+        legg_til(kode, "[\"PUSH_CONST\",null]")
+        i = i + 1
+    }
+    legg_til(kode, json_instruksjon_med_int("PUSH_CONST", arg_antal))
+    legg_til(kode, json_kall(fullt_modul + "." + tekst(s_node["verdi"]), n_felt + 1))
+    returner sann
+}
+
+// Struktur-noden for `namn` i den importerte modulen `modul_namn`, eller null.
+funksjon importert_struktur(komp, modul_namn: tekst, namn: tekst) {
+    la msk = komp["modul_struktur_kart"]
+    hvis ikkje har_nokkel(msk, modul_namn) { returner null }
+    la ms = msk[modul_namn]
+    hvis ikkje har_nokkel(ms, namn) { returner null }
+    returner ms[namn]
 }
 
 // Registrer eit namn som ramme-lokalt (for-/fang-variabel) slik at seinare
@@ -2697,6 +2823,24 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
             la modul_enumar = mek[modul_namn]
             modul_enumar[node["verdi"]] = lag_enum_info(node)
         slutt
+        // R2/F20/F05: strukturar i importerte modular — alias.Namn() og
+        // eintydige ukvalifiserte Namn() kallar konstruktøren «modul.Namn».
+        hvis node["type"] == "Struktur"
+            la msk = komp["modul_struktur_kart"]
+            hvis ikkje har_nokkel(msk, modul_namn)
+                msk[modul_namn] = {}
+            slutt
+            la modul_strukturar = msk[modul_namn]
+            modul_strukturar[node["verdi"]] = node
+            la isk = komp["importert_struktur_kart"]
+            hvis har_nokkel(isk, node["verdi"])
+                hvis isk[node["verdi"]] != modul_namn
+                    isk[node["verdi"]] = "__AMBIGUOUS__"
+                slutt
+            ellers
+                isk[node["verdi"]] = modul_namn
+            slutt
+        slutt
         hvis node["type"] == "Funksjon"
             fn_namn = node["verdi"]
             fullt_namn = modul_namn + "." + fn_namn
@@ -2980,6 +3124,10 @@ funksjon kompiler_program(ast_program, modul_namn)
         hvis node["type"] == "Struktur" og har_nokkel(node, "implementerer") {
             legg_til(komp["struktur_impl"], [node["verdi"], node["implementerer"]])
         }
+        hvis node["type"] == "Struktur" {
+            la sk = komp["struktur_kart"]
+            sk[node["verdi"]] = node
+        }
         hvis node["type"] == "La" {
             la global_namn = node["verdi"]
             hvis ikkje har_nokkel(komp["global_kart"], global_namn) {
@@ -3052,6 +3200,10 @@ funksjon kompiler_program(ast_program, modul_namn)
         hvis node["type"] == "Test"
             resultat = kompiler_test(komp, node)
             legg_til(test_json_par, resultat)
+        slutt
+        // R2/F20: konstruktøren «modul.Namn» for kvar struktur.
+        hvis node["type"] == "Struktur"
+            legg_til(funk_json_par, kompiler_konstruktør(komp, node))
         slutt
         j = j + 1
     slutt
