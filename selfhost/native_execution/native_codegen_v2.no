@@ -2164,6 +2164,15 @@ funksjon samle_strenger(fns) {
                     legg_til(strenger, s)
                 }
             }
+            // R2/F24: typenamnet i ein typa fang (TRY_BEGIN catch_type) er ein streng-NcVal i
+            // konstantsegmentet; handler-posten peikar på han (sjå throw_unwind).
+            hvis instr[0] == "TRY_BEGIN" og lengde(instr) >= 3 og builtin.type(instr[2]) == "tekst" {
+                la ct_s: tekst = tekst(instr[2])
+                hvis ikkje finnes_nøkkel(sett, ct_s) {
+                    sett[ct_s] = sann
+                    legg_til(strenger, ct_s)
+                }
+            }
             hvis instr[0] == "CALL" og lengde(instr) >= 2 og builtin.type(instr[1]) == "tekst" {
                 la kall_mål: tekst = instr[1]
                 hvis er_fail_closed_kall(kall_mål) og ikkje finnes_nøkkel(fns, kall_mål) {
@@ -2313,14 +2322,16 @@ funksjon emit_desimal_null_divisor_test(bytes) -> heiltall {
 
 // Kast `melding` frå eit desimal-atom som har pusha rbx, r12 (i den rekkjefølgja) og
 // elles står på inngangs-rsp. Restaurerer kallaren sine rbx/r12 før kastet (same regel
-// som assert-atomet), justerer stakken og hale-hoppar til throw_unwind.
+// som assert-atomet). R2/F23: [rsp] er då returadressa i kallaren, so meldinga får
+// «… ved <fn>» som VM-en (feil_kast_hale).
 funksjon emit_desimal_null_kast(bytes, atomics, melding: tekst) {
     copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
-    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8 (16-justert for kallet)
+    copy(bytes, [0x4C, 0x8B, 0x2C, 0x24])                 // mov r13,[rsp] (returadresse)
+    copy(bytes, [0x48, 0x83, 0xE4, 0xF0])                 // and rsp,-16
     emit_stakk_tekst(bytes, melding)                      // rax = melding
-    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
-    la kast_hopp = emit_jmp_placeholder(bytes)            // jmp throw_unwind
-    patch_jump(bytes, kast_hopp, atomics["throw_unwind"] - TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC3])                       // mov rbx,rax
+    la kast_hopp = emit_jmp_placeholder(bytes)            // jmp feil_kast_hale
+    patch_jump(bytes, kast_hopp, atomics["feil_kast_hale"] - TEXT_VA())
 }
 
 // Inn: r12 = rad i verts-funksjonstabellen ([cstr][VA][nargs]), rsi = arg-liste (0 = ingen).
@@ -3026,21 +3037,180 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 
     // ── Unnatak: throw_unwind(rdi=unntak-NcVal) — unwind til næraste handler ──────
     // Handler-stakk i utvida mmap-region: teljar @0x106F0000 (0-init av loader), last_exc
-    // @0x106F0008, frames @0x10600000 (32B: [catch_va][saved_rsp][saved_rbp][pad]).
-    // TRY_BEGIN pushar, TRY_END poppar. Kast → finn TOPP-handler (catch-all), sett last_exc,
-    // restore rsp/rbp, hopp til catch. Handler vert IKKJE poppa her — catch sin TRY_END gjer
-    // det (som VM-en, vm.no:6451). Ingen handler → jmp RT_THROW (skriv melding + avslutt).
+    // @0x106F0008, frames @0x10600000 (32B: [mål_va][saved_rsp][saved_rbp][kind]).
+    // R2/F24: kind = 0 → fang-alt; partal peikar → typa fang (streng-NcVal med typenamnet i
+    // konstantsegmentet); oddetal (slot << 1) | 1 → endeleg/utsett-post (FINALLY_PUSH), der
+    // slot er pending-sloten i ramma (pending_ctrl @ rbp−8·slot, pending_val @ rbp−8·(slot+1)).
+    // Kastet reknar unnakstypen éin gong (som vm_exception_type: tekst → prefikset før «:»
+    // når det finst; ordbok → «__type__» eller «type»), og går så postane frå toppen: første
+    // fang-alt, typa fang med same typenamn («tekst» fangar alle tekst-unnatak) eller
+    // endeleg-post vinn. Fang: count = i+1 (catch sin TRY_END poppar), restore rsp/rbp, hopp.
+    // Endeleg: count = i (posten blir popp), pending = kast (2) med unnaket, restore, hopp;
+    // FINALLY_END kastar same unnaket vidare (nøsta/kryss-ramme via iterasjon), so endeleg
+    // og utsett køyrer òg ved ufanga unnatak før prosessen avsluttar (VM: p09e). Ingen post
+    // → «norscode: Norscode unntak: …» + exit(1). Klobbar alt (returnerer aldri).
     atomics["throw_unwind"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rax,[count]
-    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
-    copy(bytes, [0x74, 0x1F])                      // jz .no_handler (+31)
-    copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax (index = count-1)
+    copy(bytes, [0x48, 0x89, 0x3C, 0x25]) u32(bytes, hl.HANDLER_LASTEXC_VA(X86_MAL())) // mov [last_exc],rdi
+    copy(bytes, [0x49, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF]) // mov r9,-1 (typelengd: ingen)
+    copy(bytes, [0x45, 0x31, 0xC0])                // xor r8d,r8d (typebytar)
+    copy(bytes, [0x45, 0x31, 0xE4])                // xor r12d,r12d (er_tekst)
+    copy(bytes, [0x48, 0x85, 0xFF])                // test rdi,rdi
+    la tu_walk1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x07])                // mov rax,[rdi] (type)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x02])          // cmp rax,2 (tekst)
+    la tu_ikkje_tekst = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x41, 0xBC, 0x01, 0x00, 0x00, 0x00]) // mov r12d,1
+    copy(bytes, [0x48, 0x8B, 0x77, 0x08])          // mov rsi,[rdi+8] (strdata)
+    copy(bytes, [0x48, 0x8B, 0x0E])                // mov rcx,[rsi] (lengd)
+    copy(bytes, [0x48, 0x8D, 0x56, 0x08])          // lea rdx,[rsi+8] (byte)
+    copy(bytes, [0x45, 0x31, 0xD2])                // xor r10d,r10d (i)
+    la tu_kolon = lengde(bytes)
+    copy(bytes, [0x4C, 0x39, 0xD1])                // cmp rcx,r10
+    la tu_walk2 = emit_jcc_placeholder(bytes, 0x86) // jbe walk (ingen «:» → berre «tekst»-fang)
+    copy(bytes, [0x42, 0x80, 0x3C, 0x12, 0x3A])    // cmp byte [rdx+r10],':'
+    la tu_har_kolon = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0xFF, 0xC2])                // inc r10
+    la tu_kj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tu_kj, tu_kolon)
+    patch_jump(bytes, tu_har_kolon, lengde(bytes))
+    copy(bytes, [0x4D, 0x85, 0xD2])                // test r10,r10 («:» først → ingen type)
+    la tu_walk3 = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xD0])                // mov r8,rdx
+    copy(bytes, [0x4D, 0x89, 0xD1])                // mov r9,r10
+    la tu_walk4 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tu_ikkje_tekst, lengde(bytes))
+    copy(bytes, [0x48, 0x83, 0xF8, 0x04])          // cmp rax,4 (ordbok)
+    la tu_walk5 = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x48, 0x8B, 0x77, 0x08])          // mov rsi,[rdi+8] (P)
+    la tu_walk_hopp: liste = [tu_walk1, tu_walk2, tu_walk3, tu_walk4, tu_walk5]
+    // Søk «__type__» (8 byte) og så «type» (4 byte) blant tekstnøklane.
+    la tu_søk: heiltall = 0
+    mens tu_søk < 2 {
+        copy(bytes, [0x48, 0x8B, 0x0E])            // mov rcx,[rsi] (count)
+        copy(bytes, [0x4C, 0x8B, 0x56, 0x10])      // mov r10,[rsi+16] (keys)
+        copy(bytes, [0x31, 0xD2])                  // xor edx,edx
+        la ts_l = lengde(bytes)
+        copy(bytes, [0x48, 0x39, 0xCA])            // cmp rdx,rcx
+        la ts_ferdig = emit_jcc_placeholder(bytes, 0x83)
+        copy(bytes, [0x49, 0x8B, 0x1C, 0xD2])      // mov rbx,[r10+rdx*8]
+        copy(bytes, [0x48, 0x85, 0xDB])            // test rbx,rbx
+        la ts_n1 = emit_je_placeholder(bytes)
+        copy(bytes, [0x48, 0x83, 0x3B, 0x02])      // cmp qword [rbx],2
+        la ts_n2 = emit_jcc_placeholder(bytes, 0x85)
+        copy(bytes, [0x48, 0x8B, 0x5B, 0x08])      // mov rbx,[rbx+8] (strdata)
+        hvis tu_søk == 0 {
+            copy(bytes, [0x48, 0x83, 0x3B, 0x08])  // cmp qword [rbx],8
+            la ts_n3 = emit_jcc_placeholder(bytes, 0x85)
+            copy(bytes, [0x49, 0xBB, 0x5F, 0x5F, 0x74, 0x79, 0x70, 0x65, 0x5F, 0x5F]) // movabs r11,"__type__"
+            copy(bytes, [0x4C, 0x39, 0x5B, 0x08])  // cmp [rbx+8],r11
+            la ts_funne = emit_je_placeholder(bytes)
+            patch_jump(bytes, ts_n3, lengde(bytes))
+            patch_jump(bytes, ts_n1, lengde(bytes))
+            patch_jump(bytes, ts_n2, lengde(bytes))
+            copy(bytes, [0x48, 0xFF, 0xC2])        // inc rdx
+            la ts_j = emit_jmp_placeholder(bytes)
+            patch_jump(bytes, ts_j, ts_l)
+            patch_jump(bytes, ts_funne, lengde(bytes))
+        } ellers {
+            copy(bytes, [0x48, 0x83, 0x3B, 0x04])  // cmp qword [rbx],4
+            la ts_n3 = emit_jcc_placeholder(bytes, 0x85)
+            copy(bytes, [0x81, 0x7B, 0x08, 0x74, 0x79, 0x70, 0x65]) // cmp dword [rbx+8],"type"
+            la ts_funne = emit_je_placeholder(bytes)
+            patch_jump(bytes, ts_n3, lengde(bytes))
+            patch_jump(bytes, ts_n1, lengde(bytes))
+            patch_jump(bytes, ts_n2, lengde(bytes))
+            copy(bytes, [0x48, 0xFF, 0xC2])        // inc rdx
+            la ts_j = emit_jmp_placeholder(bytes)
+            patch_jump(bytes, ts_j, ts_l)
+            patch_jump(bytes, ts_funne, lengde(bytes))
+        }
+        // funne: verdien må vere tekst → typebytar
+        copy(bytes, [0x48, 0x8B, 0x46, 0x18])      // mov rax,[rsi+24] (vals)
+        copy(bytes, [0x48, 0x8B, 0x04, 0xD0])      // mov rax,[rax+rdx*8]
+        copy(bytes, [0x48, 0x85, 0xC0])            // test rax,rax
+        legg_til(tu_walk_hopp, emit_je_placeholder(bytes))
+        copy(bytes, [0x48, 0x83, 0x38, 0x02])      // cmp qword [rax],2
+        legg_til(tu_walk_hopp, emit_jcc_placeholder(bytes, 0x85))
+        copy(bytes, [0x48, 0x8B, 0x40, 0x08])      // mov rax,[rax+8] (strdata)
+        copy(bytes, [0x4C, 0x8B, 0x08])            // mov r9,[rax] (lengd)
+        copy(bytes, [0x4C, 0x8D, 0x40, 0x08])      // lea r8,[rax+8]
+        legg_til(tu_walk_hopp, emit_jmp_placeholder(bytes))
+        patch_jump(bytes, ts_ferdig, lengde(bytes))
+        tu_søk = tu_søk + 1
+    }
+    // ── Gå postane frå toppen ──
+    la tu_walk = lengde(bytes)
+    la twi: heiltall = 0
+    mens twi < lengde(tu_walk_hopp) { patch_jump(bytes, tu_walk_hopp[twi], tu_walk)  twi = twi + 1 }
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rcx,[count]
+    la tu_wloop = lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xC9])                // test rcx,rcx
+    la tu_ingen = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0xFF, 0xC9])                // dec rcx
+    copy(bytes, [0x48, 0x89, 0xC8])                // mov rax,rcx
     copy(bytes, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
     copy(bytes, [0x48, 0x05]) u32(bytes, hl.HANDLER_FRAMES_VA(X86_MAL()))               // add rax,frames
-    copy(bytes, [0x48, 0x89, 0x3C, 0x25]) u32(bytes, hl.HANDLER_LASTEXC_VA(X86_MAL())) // mov [last_exc],rdi
-    copy(bytes, [0x48, 0x8B, 0x68, 0x10])          // mov rbp,[rax+16] (restore rbp)
-    copy(bytes, [0x48, 0x8B, 0x60, 0x08])          // mov rsp,[rax+8] (restore rsp)
-    copy(bytes, [0xFF, 0x20])                      // jmp [rax] (catch_va)
+    copy(bytes, [0x49, 0x89, 0xC5])                // mov r13,rax (post)
+    copy(bytes, [0x48, 0x8B, 0x58, 0x18])          // mov rbx,[rax+24] (kind)
+    copy(bytes, [0x48, 0x85, 0xDB])                // test rbx,rbx
+    la tu_fang1 = emit_je_placeholder(bytes)       // fang-alt
+    copy(bytes, [0xF6, 0xC3, 0x01])                // test bl,1
+    la tu_endeleg = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x48, 0x8B, 0x73, 0x08])          // mov rsi,[rbx+8] (strdata til fang-typen)
+    copy(bytes, [0x4C, 0x8B, 0x16])                // mov r10,[rsi] (lengd)
+    copy(bytes, [0x48, 0x83, 0xC6, 0x08])          // add rsi,8
+    copy(bytes, [0x4D, 0x85, 0xE4])                // test r12,r12
+    la tu_it1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x83, 0xFA, 0x05])          // cmp r10,5
+    la tu_it2 = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x81, 0x3E, 0x74, 0x65, 0x6B, 0x73]) // cmp dword [rsi],"teks"
+    la tu_it3 = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x80, 0x7E, 0x04, 0x74])          // cmp byte [rsi+4],'t'
+    la tu_fang2 = emit_je_placeholder(bytes)       // «tekst» fangar alle tekst-unnatak
+    la tu_ikkje_tf = lengde(bytes)
+    patch_jump(bytes, tu_it1, tu_ikkje_tf)
+    patch_jump(bytes, tu_it2, tu_ikkje_tf)
+    patch_jump(bytes, tu_it3, tu_ikkje_tf)
+    copy(bytes, [0x4D, 0x39, 0xD1])                // cmp r9,r10
+    la tu_neste1 = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x31, 0xD2])                      // xor edx,edx
+    la tu_bl = lengde(bytes)
+    copy(bytes, [0x4C, 0x39, 0xD2])                // cmp rdx,r10
+    la tu_fang3 = emit_jcc_placeholder(bytes, 0x83) // jae fang (alle byte like)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x04, 0x10])    // movzx eax,byte [r8+rdx]
+    copy(bytes, [0x3A, 0x04, 0x16])                // cmp al,[rsi+rdx]
+    la tu_neste2 = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x48, 0xFF, 0xC2])                // inc rdx
+    la tu_blj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tu_blj, tu_bl)
+    patch_jump(bytes, tu_neste1, tu_wloop)
+    patch_jump(bytes, tu_neste2, tu_wloop)
+    // fang: count = i + 1, restore, hopp til catch
+    la tu_fang = lengde(bytes)
+    patch_jump(bytes, tu_fang1, tu_fang)
+    patch_jump(bytes, tu_fang2, tu_fang)
+    patch_jump(bytes, tu_fang3, tu_fang)
+    copy(bytes, [0x48, 0xFF, 0xC1])                // inc rcx
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx
+    copy(bytes, [0x49, 0x8B, 0x6D, 0x10])          // mov rbp,[r13+16]
+    copy(bytes, [0x49, 0x8B, 0x65, 0x08])          // mov rsp,[r13+8]
+    copy(bytes, [0x41, 0xFF, 0x65, 0x00])          // jmp [r13]
+    // endeleg-post: count = i (poppa), pending = kast med unnaket, restore, hopp
+    patch_jump(bytes, tu_endeleg, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx
+    copy(bytes, [0x49, 0x8B, 0x6D, 0x10])          // mov rbp,[r13+16]
+    copy(bytes, [0x49, 0x8B, 0x65, 0x08])          // mov rsp,[r13+8]
+    copy(bytes, [0x48, 0xD1, 0xEB])                // shr rbx,1 (slot)
+    copy(bytes, [0x48, 0xC1, 0xE3, 0x03])          // shl rbx,3
+    copy(bytes, [0x48, 0x89, 0xE8])                // mov rax,rbp
+    copy(bytes, [0x48, 0x29, 0xD8])                // sub rax,rbx (&pending_ctrl)
+    copy(bytes, [0x48, 0xC7, 0x00, 0x02, 0x00, 0x00, 0x00]) // mov qword [rax],2 (kast)
+    copy(bytes, [0x48, 0x8B, 0x14, 0x25]) u32(bytes, hl.HANDLER_LASTEXC_VA(X86_MAL())) // mov rdx,[last_exc]
+    copy(bytes, [0x48, 0x89, 0x50, 0xF8])          // mov [rax-8],rdx (pending_val)
+    copy(bytes, [0x41, 0xFF, 0x65, 0x00])          // jmp [r13]
+    // .no_handler
+    patch_jump(bytes, tu_ingen, lengde(bytes))
+    copy(bytes, [0x48, 0x8B, 0x3C, 0x25]) u32(bytes, hl.HANDLER_LASTEXC_VA(X86_MAL())) // mov rdi,[last_exc]
     // .no_handler: frosen RT_THROW er broten på same vis som RT_FEIL (skreiv ingenting,
     // tilfeldig exit-kode, korrupterte stakken i VM-vegen). Emittert i staden:
     // «norscode: Norscode unntak: <melding>\n» til stderr (write #1) + exit(1) (#60).
@@ -3076,10 +3246,153 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])    // mov edi,1
     emit_sys_clean7(bytes, 60) // exit(1)
 
+    // ── R2/F23 (x86-paritet): køyretidsfeil med VM-teksten ─────────────────────────
+    // feil_namn(rdi = returadresse) → rax = funksjonsnamnet som tekst-NcVal, eller 0: den
+    // bundla funksjonen med størst VA ≤ returadressa i verts-funksjonstabellen ([cstr][VA]
+    // [nargs] per rad, null-rad til slutt; tabellpeikaren blir lappa inn av
+    // emit_verts_funksjonstabell, 0 = ingen tabell). Lineært søk — berre på feilvegen.
+    atomics["feil_namn"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0xBE])                      // movabs rsi,TABELL
+    atomics["host_tbl_patch_feil"] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0x48, 0x85, 0xF6])                // test rsi,rsi
+    la fn_ingen1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x45, 0x31, 0xC0])                // xor r8d,r8d (beste VA)
+    copy(bytes, [0x45, 0x31, 0xC9])                // xor r9d,r9d (beste cstr)
+    la fn_l = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (cstr)
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la fn_ferdig = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x4E, 0x08])          // mov rcx,[rsi+8] (VA)
+    copy(bytes, [0x48, 0x39, 0xF9])                // cmp rcx,rdi
+    la fn_neste1 = emit_jcc_placeholder(bytes, 0x87) // ja neste
+    copy(bytes, [0x4C, 0x39, 0xC1])                // cmp rcx,r8
+    la fn_neste2 = emit_jcc_placeholder(bytes, 0x82) // jb neste
+    copy(bytes, [0x49, 0x89, 0xC8])                // mov r8,rcx
+    copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
+    la fn_neste = lengde(bytes)
+    patch_jump(bytes, fn_neste1, fn_neste)
+    patch_jump(bytes, fn_neste2, fn_neste)
+    copy(bytes, [0x48, 0x83, 0xC6, 0x18])          // add rsi,24
+    la fn_lj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, fn_lj, fn_l)
+    patch_jump(bytes, fn_ferdig, lengde(bytes))
+    copy(bytes, [0x4D, 0x85, 0xC9])                // test r9,r9
+    la fn_ingen2 = emit_je_placeholder(bytes)
+    copy(bytes, [0x31, 0xF6])                      // xor esi,esi (lengd)
+    la fn_sl = lengde(bytes)
+    copy(bytes, [0x41, 0x80, 0x3C, 0x31, 0x00])    // cmp byte [r9+rsi],0
+    la fn_slf = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0xFF, 0xC6])                // inc rsi
+    la fn_slj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, fn_slj, fn_sl)
+    patch_jump(bytes, fn_slf, lengde(bytes))
+    copy(bytes, [0x4C, 0x89, 0xCF])                // mov rdi,r9
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8 (align)
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())     // rax = namn
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])    // add rsp,8; ret
+    la fn_ingen = lengde(bytes)
+    patch_jump(bytes, fn_ingen1, fn_ingen)
+    patch_jump(bytes, fn_ingen2, fn_ingen)
+    copy(bytes, [0x31, 0xC0, 0xC3])                // xor eax,eax; ret
+
+    // Felles hale: rbx = melding (tekst-NcVal), r13 = returadresse → melding + " ved <fn>"
+    // (når namnet finst) → throw_unwind. Stakken er 16-aligna.
+    atomics["feil_kast_hale"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x4C, 0x89, 0xEF])                // mov rdi,r13
+    call_rel32(bytes, atomics["feil_namn"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la fh_utan = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax (namn)
+    emit_stakk_tekst(bytes, " ved ")
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x89, 0xC6]) // mov rdi,rbx; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7, 0x4C, 0x89, 0xE6]) // mov rdi,rax; mov rsi,r12
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC3])                // mov rbx,rax
+    patch_jump(bytes, fh_utan, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0xDF])                // mov rdi,rbx
+    la fh_kast = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, fh_kast, atomics["throw_unwind"] - TEXT_VA())
+
+    // feil_div / feil_mod: hoppa til frå div/mod-atoma med [rsp] = returadressa i kallaren.
+    la fdm: liste_tekst = ["feil_div", "DivisjonMedNull: divisjon med null", "feil_mod", "ModuloMedNull: modulo med null"]
+    la fdi: heiltall = 0
+    mens fdi < 4 {
+        atomics[fdm[fdi]] = TEXT_VA() + lengde(bytes)
+        copy(bytes, [0x4C, 0x8B, 0x2C, 0x24])      // mov r13,[rsp] (returadresse)
+        copy(bytes, [0x48, 0x83, 0xE4, 0xF0])      // and rsp,-16
+        emit_stakk_tekst(bytes, fdm[fdi + 1])
+        copy(bytes, [0x48, 0x89, 0xC3])            // mov rbx,rax
+        la fdj = emit_jmp_placeholder(bytes)
+        patch_jump(bytes, fdj, atomics["feil_kast_hale"] - TEXT_VA())
+        fdi = fdi + 2
+    }
+
+    // feil_indeks(rdi = indeks, rsi = lengd): [rsp] = returadressa i kallaren.
+    // «IndeksFeil: indeks <i> utanfor lista (lengde <n>) ved <fn>» (vm.no INDEX_GET/SET).
+    atomics["feil_indeks"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x4C, 0x8B, 0x2C, 0x24])          // mov r13,[rsp]
+    copy(bytes, [0x48, 0x83, 0xE4, 0xF0])          // and rsp,-16
+    copy(bytes, [0x49, 0x89, 0xF6])                // mov r14,rsi (lengd)
+    call_rel32(bytes, RT_INT(), TEXT_VA())         // rax = boks(indeks)
+    copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax (tekst(i))
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    call_rel32(bytes, RT_INT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (tekst(n))
+    emit_stakk_tekst(bytes, "IndeksFeil: indeks ")
+    copy(bytes, [0x48, 0x89, 0xC7, 0x4C, 0x89, 0xE6]) // mov rdi,rax; mov rsi,r12
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC3])                // mov rbx,rax
+    emit_stakk_tekst(bytes, " utanfor lista (lengde ")
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x89, 0xC6]) // mov rdi,rbx; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7, 0x4C, 0x89, 0xF6]) // mov rdi,rax; mov rsi,r14
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC3])                // mov rbx,rax
+    emit_stakk_tekst(bytes, ")")
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x89, 0xC6]) // mov rdi,rbx; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC3])                // mov rbx,rax
+    la fij = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, fij, atomics["feil_kast_hale"] - TEXT_VA())
+
+    // ── R2/F24: finally_retur(rdi=returverdi, rsi=handler-count ved inngang, rdx=pending-slot)
+    // RETURN i ein funksjon med endeleg/utsett: finst det ein endeleg-post (oddetals-kind) over
+    // inngangs-count (postane til denne ramma), blir han og alt over popp (count = i), pending =
+    // retur (1) med verdien, rsp frå posten, og så hopp til endeleg-blokka (som VM-en sin
+    // RETURN med ikkje-tom cleanup-stakk). Elles: rax = verdien, ret (vanleg epilog).
+    atomics["finally_retur"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rcx,[count]
+    la frt_l = lengde(bytes)
+    copy(bytes, [0x48, 0x39, 0xF1])                // cmp rcx,rsi
+    la frt_ingen = emit_jcc_placeholder(bytes, 0x86) // jbe ingen
+    copy(bytes, [0x48, 0xFF, 0xC9])                // dec rcx
+    copy(bytes, [0x48, 0x89, 0xC8])                // mov rax,rcx
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5
+    copy(bytes, [0x48, 0x05]) u32(bytes, hl.HANDLER_FRAMES_VA(X86_MAL()))               // add rax,frames
+    copy(bytes, [0xF6, 0x40, 0x18, 0x01])          // test byte [rax+24],1
+    la frt_neste = emit_je_placeholder(bytes)      // ikkje endeleg → neste
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx
+    copy(bytes, [0x48, 0x8B, 0x60, 0x08])          // mov rsp,[rax+8]
+    copy(bytes, [0x48, 0xC1, 0xE2, 0x03])          // shl rdx,3
+    copy(bytes, [0x49, 0x89, 0xE8])                // mov r8,rbp
+    copy(bytes, [0x49, 0x29, 0xD0])                // sub r8,rdx (&pending_ctrl)
+    copy(bytes, [0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00]) // mov qword [r8],1 (retur)
+    copy(bytes, [0x49, 0x89, 0x78, 0xF8])          // mov [r8-8],rdi (pending_val)
+    copy(bytes, [0xFF, 0x20])                      // jmp [rax]
+    patch_jump(bytes, frt_neste, frt_l)
+    patch_jump(bytes, frt_ingen, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0xF8, 0xC3])          // mov rax,rdi; ret
+
     // ── index_get_safe(rdi=container, rsi=nøkkel) → rax ─────────────────────────
     // Delt rutine (eitt eksemplar; inline per INDEX_GET-site sprengde .text i full
     // nc_main). Null-container → 0 (rå null-semantikk). Liste (type 3) + heiltals-
-    // nøkkel (type 1) utanfor [0,len) → kast fangbart «Indeks utanfor: N» via
+    // nøkkel (type 1) utanfor [0,len) → kast fangbart «IndeksFeil: …» (feil_indeks) via
     // throw_unwind (frosen RT_INDEX_GET→RT_FEIL krasja). Elles RT_INDEX_GET.
     atomics["index_get_safe"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
@@ -3105,26 +3418,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la igs_nullv = lengde(bytes)
     copy(bytes, [0x31, 0xC0, 0xC3])                       // xor eax,eax; ret
     la igs_oob = lengde(bytes)
-    legg_til(bytes, 0x56)                                 // push rsi (nøkkel)
-    copy(bytes, [0x48, 0x83, 0xEC, 0x20])                 // sub rsp,32
-    copy(bytes, [0x48, 0xB8, 0x49, 0x6E, 0x64, 0x65, 0x6B, 0x73, 0x20, 0x75])  // "Indeks u"
-    copy(bytes, [0x48, 0x89, 0x04, 0x24])                 // mov [rsp],rax
-    copy(bytes, [0x48, 0xB8, 0x74, 0x61, 0x6E, 0x66, 0x6F, 0x72, 0x3A, 0x20])  // "tanfor: "
-    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x08])           // mov [rsp+8],rax
-    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
-    copy(bytes, [0xBE, 0x10, 0x00, 0x00, 0x00])           // mov esi,16
-    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = prefiks
-    copy(bytes, [0x48, 0x83, 0xC4, 0x20])                 // add rsp,32
-    legg_til(bytes, 0x5E)                                 // pop rsi (nøkkel)
-    legg_til(bytes, 0x50)                                 // push rax (prefiks)
-    copy(bytes, [0x48, 0x89, 0xF7])                       // mov rdi,rsi
-    call_rel32(bytes, atomics["to_text"], TEXT_VA())      // rax = tekst(idx)
-    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
-    legg_til(bytes, 0x5F)                                 // pop rdi (prefiks)
-    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8 (align)
-    call_rel32(bytes, RT_CONCAT(), TEXT_VA())             // rax = melding
-    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
-    call_rel32(bytes, atomics["throw_unwind"], TEXT_VA()) // returnerer ikkje
+    // R2/F23: VM-teksten «IndeksFeil: indeks <i> utanfor lista (lengde <n>) ved <fn>»
+    // (før «Indeks utanfor: N»). [rsp] er returadressa i kallaren.
+    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax (indeks)
+    copy(bytes, [0x48, 0x89, 0xCE])                       // mov rsi,rcx (lengd)
+    la igs_feil = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, igs_feil, atomics["feil_indeks"] - TEXT_VA())
     patch_jump(bytes, igs_null, igs_nullv)
     patch_jump(bytes, igs_rt1, igs_rt)
     patch_jump(bytes, igs_rt2, igs_rt)
@@ -7230,7 +7529,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x85, 0xC9])                         // test rcx,rcx
-    copy(bytes, [0x74, 0x1E])                               // je 497
+    // R2/F23: heiltal / 0 kastar «DivisjonMedNull» (VM-en); før gav det 0.
+    la div_null = emit_je_placeholder(bytes)                // je feil_div
+    patch_jump(bytes, div_null, atomics["feil_div"] - TEXT_VA())
     copy(bytes, [0x48, 0x83, 0xF9, 0xFF])                   // cmp rcx,0xffffffffffffffff
     copy(bytes, [0x74, 0x0D])                               // je 48c
     copy(bytes, [0x48, 0x99])                               // cqo
@@ -7246,7 +7547,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     atomics["mod"] = TEXT_VA() + lengde(bytes)
     // Flyttalsveg FØRST (a12fix, same prolog som div): er ein av operandane type 6, gå
     // til desimal_mod (fmod; divisor ±0 kastar ModuloMedNull). Heiltalskroppen under er
-    // urørt (heiltal % 0 gjev framleis 0 i AOT; VM-en kastar — kjent, eldre avvik).
+    // heiltalskroppen (heiltal % 0 kastar ModuloMedNull sidan R2/F23, som VM-en).
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
     copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
     copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
@@ -7259,7 +7560,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x85, 0xC9])                         // test rcx,rcx
-    copy(bytes, [0x74, 0x13])                               // je 4be
+    // R2/F23: heiltal % 0 kastar «ModuloMedNull» (VM-en); før gav det 0.
+    la mod_null = emit_je_placeholder(bytes)                // je feil_mod
+    patch_jump(bytes, mod_null, atomics["feil_mod"] - TEXT_VA())
     copy(bytes, [0x48, 0x83, 0xF9, 0xFF])                   // cmp rcx,0xffffffffffffffff
     copy(bytes, [0x74, 0x0D])                               // je 4be
     copy(bytes, [0x48, 0x99])                               // cqo
@@ -7395,20 +7698,35 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x75, 0x05])                               // jne +5
     copy(bytes, [0xB8, 0x03, 0x00, 0x00, 0x00])             // mov eax,3
     copy(bytes, [0x48, 0x83, 0xF8, 0x04])                   // cmp rax,0x4
-    copy(bytes, [0x74, 0x1D])                               // je 555
+    la iset_map = emit_je_placeholder(bytes)                // je map
     copy(bytes, [0x48, 0x83, 0xF8, 0x03])                   // cmp rax,0x3
-    copy(bytes, [0x75, 0x1C])                               // jne 55a
+    la iset_ret1 = emit_jcc_placeholder(bytes, 0x85)        // jne ret
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x3B, 0x08])                         // cmp rcx,QWORD PTR [rax]
-    copy(bytes, [0x73, 0x0F])                               // jae 55a
+    la iset_ute = emit_jcc_placeholder(bytes, 0x83)         // jae ute
     copy(bytes, [0x48, 0x8B, 0x40, 0x10])                   // mov rax,QWORD PTR [rax+0x10]
     copy(bytes, [0x48, 0x89, 0x14, 0xC8])                   // mov QWORD PTR [rax+rcx*8],rdx
-    copy(bytes, [0xEB, 0x05])                               // jmp 55a
+    la iset_ret2 = emit_jmp_placeholder(bytes)              // jmp ret
+    patch_jump(bytes, iset_map, lengde(bytes))
     call_rel32(bytes, atomics["index_set_map"], TEXT_VA())          // call index_set_map (map_set + heiltalsnøkkel-paritet)
+    la iset_ret = lengde(bytes)
+    patch_jump(bytes, iset_ret1, iset_ret)
+    patch_jump(bytes, iset_ret2, iset_ret)
     copy(bytes, [0x48, 0x89, 0xD8])                         // mov rax,rbx
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
+    // R2/F23: liste-indeks utanfor [0, lengd) (òg negativ) kastar IndeksFeil som VM-en
+    // (før: stille no-op); bytes held fram som no-op.
+    patch_jump(bytes, iset_ute, lengde(bytes))
+    copy(bytes, [0x48, 0x83, 0x3B, 0x07])                   // cmp qword [rbx],7 (bytes?)
+    la iset_bytes = emit_je_placeholder(bytes)
+    patch_jump(bytes, iset_bytes, iset_ret)
+    copy(bytes, [0x48, 0x89, 0xCF])                         // mov rdi,rcx (indeks)
+    copy(bytes, [0x48, 0x8B, 0x30])                         // mov rsi,[rax] (lengd)
+    copy(bytes, [0x5B])                                     // pop rbx ([rsp] = returadressa)
+    la iset_feil = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, iset_feil, atomics["feil_indeks"] - TEXT_VA())
 
     atomics["concat"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53])                                     // push rbx
@@ -9722,6 +10040,12 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
     hvis detaljsporing { native_codegen_trace("kompiler_fn n_vars=" + tekst_fra_heltall(n_vars)) }
     prolog(buf, n_vars + 8, eiga_va, atomic_vas)
     hvis detaljsporing { native_codegen_trace("kompiler_fn prolog") }
+    // R2/F24: funksjonar med endeleg/utsett (FINALLY_PUSH) får RETURN via finally_retur.
+    la fn_brukar_finally = usann
+    la fbf_i: heiltall = 0
+    mens fbf_i < lengde(kode) {
+        hvis kode[fbf_i][0] == "FINALLY_PUSH" { fn_brukar_finally = sann  fbf_i = lengde(kode) } ellers { fbf_i = fbf_i + 1 }
+    }
 
     // Lagre parameter-register (System V: rdi, rsi, rdx, rcx)
     la param_regs: liste = [0xBD, 0xB5, 0x95, 0x8D]  // mov [rbp+disp], rdi/rsi/rdx/rcx
@@ -10115,14 +10439,27 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
         ellers hvis op == "RETURN"
             legg_til(buf, 0x58)  // pop rax (return value = NcVal*)
             tstack_drop(tstack, 1)
+            // R2/F24: RETURN gjennom endeleg/utsett (berre funksjonar med FINALLY_PUSH; elles
+            // byte-identisk): finally_retur hoppar til den inste endeleg-posten i ramma med
+            // pending = retur, elles kjem han attende med rax = verdien.
+            hvis fn_brukar_finally {
+                copy(buf, [0x48, 0x89, 0xC7])                                  // mov rdi,rax
+                copy(buf, [0x48, 0x8B, 0xB5]) u32(buf, rbp_off(n_vars + 9))   // mov rsi,[rbp-8·count_slot]
+                legg_til(buf, 0xBA) u32(buf, n_vars + 1)                       // mov edx,pending-slot
+                call_rel32(buf, atomic_vas["finally_retur"], eiga_va)
+            }
             epilog(buf, n_vars + 9)
         // ─── THROW ────────────────────────────────────────────────────────────
         ellers hvis op == "THROW"
             emit_rt_call_1(buf, atomic_vas["throw_unwind"], eiga_va)
 
-        // ─── TRY_BEGIN (push handler {catch_va, rsp, rbp}) ──────────────────────
+        // ─── TRY_BEGIN (push handler {catch_va, rsp, rbp, kind}) ─────────────────
+        // R2/F24: kind = 0 (fang-alt: "", "*", "alle") eller VA-en til typenamnet som
+        // streng-NcVal i konstantsegmentet (typa fang, sjå throw_unwind).
         ellers hvis op == "TRY_BEGIN"
             la catch_lbl3: tekst = tekst(instr[1])
+            la ct3: tekst = "*"
+            hvis lengde(instr) >= 3 og builtin.type(instr[2]) == "tekst" { ct3 = tekst(instr[2]) }
             copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rax,[count]
             copy(buf, [0x48, 0x89, 0xC1])                // mov rcx,rax
             copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
@@ -10133,6 +10470,13 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             copy(buf, [0x4C, 0x89, 0x00])                // mov [rax],r8 (catch_va)
             copy(buf, [0x48, 0x89, 0x60, 0x08])          // mov [rax+8],rsp
             copy(buf, [0x48, 0x89, 0x68, 0x10])          // mov [rax+16],rbp
+            hvis ct3 == "" eller ct3 == "*" eller ct3 == "alle" {
+                copy(buf, [0x48, 0xC7, 0x40, 0x18, 0x00, 0x00, 0x00, 0x00])           // mov qword [rax+24],0
+            } ellers {
+                hvis ikkje finnes_nøkkel(rd_offs, ct3) { kast "native_codegen_v2: fang-typen " + ct3 + " manglar i konstantsegmentet (samle_strenger)" }
+                copy(buf, [0x49, 0xB9]) u64(buf, DATA_VA() + rd_offs[ct3])            // mov r9,&typenamn
+                copy(buf, [0x4C, 0x89, 0x48, 0x18])                                    // mov [rax+24],r9
+            }
             copy(buf, [0x48, 0xFF, 0xC1])                // inc rcx
             copy(buf, [0x48, 0x89, 0x0C, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx (count++)
 
@@ -10149,6 +10493,53 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, hl.HANDLER_LASTEXC_VA(X86_MAL())) // mov rax,[last_exc]
             legg_til(buf, 0x50)                          // push rax
             legg_til(tstack, "any")
+
+        // ─── R2/F24: endeleg/utsett (FINALLY_*) ────────────────────────────────────
+        // Same handler-stakk som TRY_BEGIN: ein endeleg-post har kind = (slot << 1) | 1, der
+        // slot = n_vars + 1 er pending_ctrl (0 normal, 1 retur, 2 kast) og slot + 1 er
+        // pending_val — to av dei reserverte scratch-slottane i ramma (prolog n_vars + 8).
+        ellers hvis op == "FINALLY_PUSH"
+            la fin_lbl: tekst = tekst(instr[1])
+            copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rax,[count]
+            copy(buf, [0x48, 0x89, 0xC1])                // mov rcx,rax
+            copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
+            copy(buf, [0x48, 0x05]) u32(buf, hl.HANDLER_FRAMES_VA(X86_MAL()))               // add rax,frames
+            copy(buf, [0x49, 0xB8])                       // mov r8, imm64 (endeleg-VA — abs64-patch)
+            u64(buf, 0)
+            legg_til(patches, {"type": "abs64", "pos": lengde(buf) - 8, "lbl": fin_lbl})
+            copy(buf, [0x4C, 0x89, 0x00])                // mov [rax],r8
+            copy(buf, [0x48, 0x89, 0x60, 0x08])          // mov [rax+8],rsp
+            copy(buf, [0x48, 0x89, 0x68, 0x10])          // mov [rax+16],rbp
+            copy(buf, [0x48, 0xC7, 0x40, 0x18]) u32(buf, ((n_vars + 1) * 2) + 1)    // mov qword [rax+24],kind
+            copy(buf, [0x48, 0xFF, 0xC1])                // inc rcx
+            copy(buf, [0x48, 0x89, 0x0C, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx
+        ellers hvis op == "FINALLY_RUN"
+            // Normal fullføring: pop endeleg-posten (toppen), pending = normal, hopp dit.
+            copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rax,[count]
+            copy(buf, [0x48, 0xFF, 0xC8])                // dec rax
+            copy(buf, [0x48, 0x89, 0x04, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rax
+            copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5
+            copy(buf, [0x48, 0x05]) u32(buf, hl.HANDLER_FRAMES_VA(X86_MAL()))               // add rax,frames
+            copy(buf, [0x48, 0xC7, 0x85]) u32(buf, rbp_off(n_vars + 1)) u32(buf, 0)        // mov qword [pending_ctrl],0
+            copy(buf, [0xFF, 0x20])                      // jmp [rax]
+        ellers hvis op == "FINALLY_END"
+            // Etter endeleg-blokka: pending 1 → retur-etikett, 2 → kast-etikett, elles vidare.
+            copy(buf, [0x48, 0x8B, 0x85]) u32(buf, rbp_off(n_vars + 1))                    // mov rax,[pending_ctrl]
+            copy(buf, [0x48, 0x83, 0xF8, 0x01])          // cmp rax,1
+            la fe_ret = emit_je_placeholder(buf)
+            legg_til(patches, {"type": "jmp", "pos": fe_ret, "lbl": tekst(instr[2])})
+            copy(buf, [0x48, 0x83, 0xF8, 0x02])          // cmp rax,2
+            la fe_kast = emit_je_placeholder(buf)
+            legg_til(patches, {"type": "jmp", "pos": fe_kast, "lbl": tekst(instr[3])})
+            la fe_etter = emit_jmp_placeholder(buf)
+            legg_til(patches, {"type": "jmp", "pos": fe_etter, "lbl": tekst(instr[1])})
+        ellers hvis op == "LOAD_PENDING"
+            copy(buf, [0x48, 0x8B, 0x85]) u32(buf, rbp_off(n_vars + 2))                    // mov rax,[pending_val]
+            legg_til(buf, 0x50)                          // push rax
+            legg_til(tstack, "any")
+        ellers hvis op == "CLEAR_PENDING"
+            copy(buf, [0x48, 0xC7, 0x85]) u32(buf, rbp_off(n_vars + 1)) u32(buf, 0)        // mov qword [pending_ctrl],0
+            copy(buf, [0x48, 0xC7, 0x85]) u32(buf, rbp_off(n_vars + 2)) u32(buf, 0)        // mov qword [pending_val],0
 
         slutt
         ci = ci + 1
@@ -11313,6 +11704,8 @@ funksjon emit_verts_funksjonstabell(text, data_bytes, sorted, fn_vas, fns, atomi
     la ht_patch: liste = [atomic_vas["host_tbl_patch_finst"], atomic_vas["host_tbl_patch_kall"]]
     // R2: host_resolve (ncb_call_fn/CALL_VALUE) les same tabell.
     hvis finnes_nøkkel(atomic_vas, "host_tbl_patch_resolve") { legg_til(ht_patch, atomic_vas["host_tbl_patch_resolve"]) }
+    // R2/F23: feil_namn (funksjonsnamnet i «… ved <fn>») les same tabell.
+    hvis finnes_nøkkel(atomic_vas, "host_tbl_patch_feil") { legg_til(ht_patch, atomic_vas["host_tbl_patch_feil"]) }
     la ht_p: heltall = 0
     mens ht_p < lengde(ht_patch) {
         la ht_pos: heltall = ht_patch[ht_p]
