@@ -762,6 +762,8 @@ funksjon emit_ncval_alloc_int(native: liste_heiltall, val_reg: heiltall, dst_reg
 // Som emit_ncval_alloc, men lagrar heile 64-bit-peikaren i Xval_reg som `val`
 // (utan sxtw). Brukt for NcVal-strengar (type=3) der val er ein strdata-peikar.
 funksjon emit_ncval_alloc_ptr(native: liste_heiltall, ptr_reg: heiltall, dst_reg: heiltall, type_imm: heiltall) -> heiltall {
+    // F25: kart-boksen (tagg 5) er 32 byte — [5][mapdata][idx = 0][0] (sjå KART_IDX_GRENSE).
+    hvis type_imm == 5 { returner emit_kart_boks(native, ptr_reg, dst_reg) }
     hvis ncval_gc_på() {
         // A4: same kontrakt som utan GC (Xptr ≠ Xdst, Xptr ≠ x13); klobbar x13.
         legg_u32(native, 0xD2800000 | (type_imm << 5) | 13) // movz x13, #type
@@ -774,6 +776,23 @@ funksjon emit_ncval_alloc_ptr(native: liste_heiltall, ptr_reg: heiltall, dst_reg
     legg_u32(native, 0xF900038D)                    // str x13, [x28]
     legg_u32(native, 0xF9000780 | ptr_reg)          // str Xptr, [x28, #8]
     legg_u32(native, 0x9100439C)                    // add x28, x28, #16
+    returner 0
+}
+
+// F25: 32-byte kart-boks [5][Xptr][0][0] i Xdst (same kontrakt som emit_ncval_alloc_ptr:
+// Xptr ≠ Xdst, Xptr ≠ x13; klobbar x13).
+funksjon emit_kart_boks(native: liste_heiltall, ptr_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xD28000AD)                        // movz x13, #5
+    hvis ncval_gc_på() {
+        agc.alloc_imm(native, 32, dst_reg, ncval_gc_os)
+        legg_u32(native, agc.e_stp(13, ptr_reg, dst_reg, 0))   // stp x13, Xptr, [Xdst]
+        legg_u32(native, agc.e_stp(31, 31, dst_reg, 16))       // stp xzr, xzr, [Xdst, #16]
+        returner 0
+    }
+    legg_u32(native, 0xAA1C03E0 | dst_reg)              // mov Xdst, x28
+    legg_u32(native, agc.e_stp(13, ptr_reg, 28, 0))     // stp x13, Xptr, [x28]
+    legg_u32(native, agc.e_stp(31, 31, 28, 16))         // stp xzr, xzr, [x28, #16]
+    legg_u32(native, 0x9100839C)                        // add x28, x28, #32
     returner 0
 }
 
@@ -1943,80 +1962,31 @@ funksjon emit_fjern_siste(native: liste_heiltall, list_reg: heiltall, dst_reg: h
     returner 0
 }
 
-// Fase 8: fjern_nokkel(kart, nøkkel) — finn nøkkelen og fjern paret (skyv
-// resterande par ned 16 byte, dekrementer count). Muterer kartet på plass.
-// Scratch x0–x6, x9–x17.
-funksjon emit_fjern_nokkel(native: liste_heiltall, map_reg: heiltall, key_reg: heiltall) -> heiltall {
+// Fase 8 / F25: fjern_nokkel(kart, nøkkel) — finn paret typa via __kart_finn, skyv
+// resterande par ned 16 byte (innsetjingsrekkjefølgja blir bevart) og dekrementer count.
+// Muterer kartet på plass; __kart_indekser byggjer så hash-indeksen på nytt (eller slepp
+// han under KART_IDX_GRENSE). Scratch x0–x6, x9–x17.
+funksjon emit_fjern_nokkel_h(native: liste_heiltall, map_reg: heiltall, key_reg: heiltall, bl_patchar) -> heiltall {
+    ncd_kart_kall(native, map_reg, key_reg, "__kart_finn", bl_patchar)
+    la p_ikkje = lengde(native)
+    legg_u32(native, 0)                                 // cbz x16, ferdig
     legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8] (mapdata)
-    legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
-    legg_u32(native, 0x91002129)                       // add x9, x9, #8 (&par[0])
-    legg_u32(native, 0xF9400400 | (key_reg << 5) | 11) // ldr x11, [Xkey, #8] (nøkkel-strdata)
-    legg_u32(native, 0xF940016C)                       // ldr x12, [x11] (nøkkel-len)
-    legg_u32(native, 0x9100216B)                       // add x11, x11, #8 (nøkkel-bytes)
-    legg_u32(native, 0xD280000E)                       // movz x14, #0 (i)
-    la lbl_scan = lengde(native)
-    legg_u32(native, 0xEB0A01DF)                       // cmp x14, x10
-    la p_ge = lengde(native)
-    legg_u32(native, 0)                                // b.ge done
-    legg_u32(native, 0x8B0E112F)                       // add x15, x9, x14, lsl #4 (&par[i])
-    legg_u32(native, 0xF94001E0)                       // ldr x0, [x15] (lagra nøkkel)
-    legg_u32(native, 0xF9400401)                       // ldr x1, [x0, #8]
-    legg_u32(native, 0xF9400022)                       // ldr x2, [x1] (len)
-    legg_u32(native, 0xEB0C005F)                       // cmp x2, x12
-    la p_bne = lengde(native)
-    legg_u32(native, 0)                                // b.ne next
-    legg_u32(native, 0x91002021)                       // add x1, x1, #8
-    legg_u32(native, 0xAA0B03E3)                       // mov x3, x11
-    legg_u32(native, 0xAA0C03E4)                       // mov x4, x12
-    la p_cbz_match = lengde(native)
-    legg_u32(native, 0)                                // cbz x4, matched
-    la lbl_byte = lengde(native)
-    legg_u32(native, 0x39400025)                       // ldrb w5, [x1]
-    legg_u32(native, 0x39400066)                       // ldrb w6, [x3]
-    legg_u32(native, 0x6B0600BF)                       // cmp w5, w6
-    la p_bne2 = lengde(native)
-    legg_u32(native, 0)                                // b.ne next
-    legg_u32(native, 0x91000421)                       // add x1, x1, #1
-    legg_u32(native, 0x91000463)                       // add x3, x3, #1
-    legg_u32(native, 0xD1000484)                       // sub x4, x4, #1
-    la p_cbnz = lengde(native)
-    legg_u32(native, 0)                                // cbnz x4, byte
-    la lbl_matched = lengde(native)
-    legg_u32(native, 0x910041F0)                       // add x16, x15, #16 (src = &par[i+1])
-    legg_u32(native, 0xAA0F03F1)                       // mov x17, x15 (dst = &par[i])
-    legg_u32(native, 0xCB0E0140)                       // sub x0, x10, x14 (count-i)
-    legg_u32(native, 0xD1000400)                       // sub x0, x0, #1 (par å skyve)
-    legg_u32(native, 0x8B000000)                       // add x0, x0, x0 (*2 = slots)
-    la lbl_shift = lengde(native)
-    la p_cbz_shift = lengde(native)
-    legg_u32(native, 0)                                // cbz x0, shiftdone
-    legg_u32(native, 0xF9400201)                       // ldr x1, [x16]
-    legg_u32(native, 0xF9000221)                       // str x1, [x17]
-    legg_u32(native, 0x91002210)                       // add x16, x16, #8
-    legg_u32(native, 0x91002231)                       // add x17, x17, #8
-    legg_u32(native, 0xD1000400)                       // sub x0, x0, #1
-    la p_b_shift = lengde(native)
-    legg_u32(native, 0)                                // b shift
-    la lbl_shiftdone = lengde(native)
-    legg_u32(native, 0xD100054A)                       // sub x10, x10, #1 (ny count)
-    legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8]
-    legg_u32(native, 0xF900012A)                       // str x10, [x9]
-    la p_b_done = lengde(native)
-    legg_u32(native, 0)                                // b done
-    la lbl_next = lengde(native)
-    legg_u32(native, 0x910005CE)                       // add x14, x14, #1
-    la p_b_scan = lengde(native)
-    legg_u32(native, 0)                                // b scan
-    la lbl_done = lengde(native)
-    skriv_u32(native, p_ge,        0x5400000A | ((((lbl_done     - p_ge)        / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_bne,       0x54000001 | ((((lbl_next     - p_bne)       / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_cbz_match, 0xB4000004 | ((((lbl_matched  - p_cbz_match) / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_bne2,      0x54000001 | ((((lbl_next     - p_bne2)      / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_cbnz,      0xB5000004 | ((((lbl_byte     - p_cbnz)      / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_cbz_shift, 0xB4000000 | ((((lbl_shiftdone - p_cbz_shift)/ 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_b_shift,   0x14000000 |  (((lbl_shift    - p_b_shift)   / 4) & 0x03FFFFFF))
-    skriv_u32(native, p_b_done,    0x14000000 |  (((lbl_done     - p_b_done)    / 4) & 0x03FFFFFF))
-    skriv_u32(native, p_b_scan,    0x14000000 |  (((lbl_scan     - p_b_scan)    / 4) & 0x03FFFFFF))
+    legg_u32(native, agc.e_ldr(10, 9, 0))              // x10 = count
+    legg_u32(native, agc.e_add_i(11, 9, 8))
+    legg_u32(native, agc.e_add_lsl(11, 11, 10, 4))     // x11 = &par[count] (slutt)
+    legg_u32(native, agc.e_add_i(12, 16, 16))          // x12 = &par[i+1] (kjelde)
+    la l_skyv = lengde(native)
+    legg_u32(native, agc.e_cmp(12, 11))
+    la p_skyvd = lengde(native)
+    legg_u32(native, 0)                                 // b.hs skyvd
+    legg_u32(native, agc.e_ldr_post(13, 12, 8))
+    legg_u32(native, agc.e_str_post(13, 16, 8))
+    agc.b_til(native, l_skyv)
+    ncd_bcond(native, p_skyvd, lengde(native), 2)
+    legg_u32(native, agc.e_sub_i(10, 10, 1))
+    legg_u32(native, agc.e_str(10, 9, 0))              // count − 1
+    ncd_kart_kall(native, map_reg, 0 - 1, "__kart_indekser", bl_patchar)
+    agc.patch_cbz(native, p_ikkje, lengde(native), 16)
     returner 0
 }
 
@@ -2282,6 +2252,15 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
     legg_u32(native, 0)                                 // b.ge done
     legg_u32(native, 0x8B0F1131)                        // add x17, x9, x15, lsl #4  (par-base)
     legg_u32(native, 0xF9400220)                        // ldr x0, [x17]   (lagra nøkkel-NcVal)
+    // F25: kart kan no ha typa nøklar (heiltal, bool, …). Denne inline-vegen (rutinar
+    // og interne oppslag med tekstkonstant som nøkkel) samanliknar berre tekst; ein
+    // lagra ikkje-tekst-nøkkel blir hoppa over i staden for å bli deref-a som strdata.
+    la p_ikkje_tekst_null = lengde(native)
+    legg_u32(native, 0)                                 // cbz x0, nextpair
+    legg_u32(native, 0xF9400002)                        // ldr x2, [x0]    (lagra nøkkel-tagg)
+    legg_u32(native, 0xF1000C5F)                        // cmp x2, #3
+    la p_ikkje_tekst = lengde(native)
+    legg_u32(native, 0)                                 // b.ne nextpair
     legg_u32(native, 0xF9400401)                        // ldr x1, [x0, #8] (lagra nøkkel-strdata)
     // A5: internerte strengkonstantar deler strdata — same peikar = same nøkkel.
     legg_u32(native, 0xEB10003F)                        // cmp x1, x16
@@ -2347,11 +2326,416 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
     skriv_u32(native, p_cbnz_byte, 0xB5000004 | ((((lbl_byteloop  - p_cbnz_byte) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_done,    0x14000000 |  (((lbl_done      - p_b_done)    / 4) & 0x03FFFFFF))
     ncd_bcond(native, p_beq_ptr, lbl_matchpair, 0)
+    skriv_u32(native, p_ikkje_tekst_null, 0xB4000000 | ((((lbl_nextpair - p_ikkje_tekst_null) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(native, p_ikkje_tekst, lbl_nextpair, 1)
     ncd_bcond(native, p_blo_byte, lbl_byteloop, 3)
     ncd_bcond(native, p_bne_next3, lbl_nextpair, 1)
     ncd_b(native, p_b_ord, lbl_ordloop)
     skriv_u32(native, p_cbz_bytes, 0xB4000004 | ((((lbl_matchpair - p_cbz_bytes) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_outer,   0x14000000 |  (((lbl_outer     - p_b_outer)   / 4) & 0x03FFFFFF))
+    returner 0
+}
+
+// ─── F25: hasha kart med typa nøklar ────────────────────────────────────────────────
+// Kart-boksen (tagg 5) er 32 byte: [5][mapdata][idx][0]. mapdata er uendra
+// ([count][k0][v0][k1][v1]…, innsetjingsrekkjefølgje), so alle lesarar (nøkler, verdier,
+// json, for-løkker, capture-binding) verkar som før. idx er 0 (lite kart / ikkje bygd)
+// eller ein peikar til ein hash-indeks:
+//     [cap][n][mapdata][0][slot0]…[slot cap−1]      (32 + cap·8 byte)
+// cap = 2^k ≥ 2·count (open adressering, lineær sondering), slot = par-indeks + 1
+// (0 = tom). Indeksen gjeld berre når n == count OG mapdata == boksen sin mapdata; elles
+// (inline-vegar som legg til utan å oppdatere indeksen, fremd mapdata) er han stale, og
+// oppslaget går lineært til neste innsetjing byggjer han på nytt. Same idé som x86
+// (native_codegen_v2 map_hash/map_find), men utan å endre par-layouten.
+// Nøkkellikskap (som x86 map_keyeq): same tagg, og tekst → same bytes, anna → same
+// payload (heiltal/bool/desimal-bitar; liste/kart → identitet). Hash: FNV-1a 64 over
+// byta for tekst, payload · 0x9E3779B97F4A7C15 elles. Null (rå 0) og null-objektet
+// (tagg 0) er aldri nøklar: oppslag gjev «ikkje funne», INDEX_SET er no-op (som før).
+// Kart med færre enn KART_IDX_GRENSE par blir søkte lineært (ingen indeks).
+funksjon KART_IDX_GRENSE() -> heiltall { returner 16 }
+
+funksjon ncd_e_eor(d: heiltall, n: heiltall, m: heiltall) -> heiltall { returner 0xCA000000 | (m << 16) | (n << 5) | d }
+funksjon ncd_e_mul(d: heiltall, n: heiltall, m: heiltall) -> heiltall { returner 0x9B007C00 | (m << 16) | (n << 5) | d }
+funksjon ncd_e_and(d: heiltall, n: heiltall, m: heiltall) -> heiltall { returner 0x8A000000 | (m << 16) | (n << 5) | d }
+funksjon ncd_e_ldrb_post1(t: heiltall, n: heiltall) -> heiltall { returner 0x38401400 | (n << 5) | t }   // ldrb Wt, [Xn], #1
+funksjon ncd_e_cmp_w(n: heiltall, m: heiltall) -> heiltall { returner 0x6B00001F | (m << 16) | (n << 5) }
+
+// Xrd = 64-bit-konstant gjeven som fire 16-bit-bitar (låg → høg); unngår store literalar.
+funksjon ncd_konst4(k: liste_heiltall, rd: heiltall, h0: heiltall, h1: heiltall, h2: heiltall, h3: heiltall) -> heiltall {
+    legg_u32(k, 0xD2800000 | (h0 << 5) | rd)                    // movz Xrd, #h0
+    legg_u32(k, 0xF2A00000 | (h1 << 5) | rd)                    // movk Xrd, #h1, lsl 16
+    legg_u32(k, 0xF2C00000 | (h2 << 5) | rd)                    // movk Xrd, #h2, lsl 32
+    legg_u32(k, 0xF2E00000 | (h3 << 5) | rd)                    // movk Xrd, #h3, lsl 48
+    returner 0
+}
+
+// Xh = hash av nøkkelen med tagg i Xtag og payload i Xpay (begge bevarte).
+// Scratch: Xp, Xn, Xf, Xb (ulike, ikkje Xh/Xtag/Xpay).
+funksjon ncd_kart_hash(k: liste_heiltall, tag: heiltall, pay: heiltall, h: heiltall, p: heiltall, n: heiltall, f: heiltall, b: heiltall) -> heiltall {
+    agc.w32(k, agc.e_cmp_i(tag, 3))
+    la p_ikkje_tekst = agc.plass(k)                             // b.ne anna
+    agc.w32(k, agc.e_ldr(n, pay, 0))                            // Xn = lengd
+    agc.w32(k, agc.e_add_i(p, pay, 8))                          // Xp = byte
+    ncd_konst4(k, h, 0x2325, 0x8422, 0x9CE4, 0xCBF2)            // FNV-1a 64 offset
+    ncd_konst4(k, f, 0x01B3, 0x0000, 0x0100, 0x0000)            // FNV-1a 64 prime
+    la l_løkke = lengde(k)
+    la p_ferdig1 = agc.plass(k)                                 // cbz Xn, ferdig
+    agc.w32(k, ncd_e_ldrb_post1(b, p))
+    agc.w32(k, ncd_e_eor(h, h, b))
+    agc.w32(k, ncd_e_mul(h, h, f))
+    agc.w32(k, agc.e_sub_i(n, n, 1))
+    agc.b_til(k, l_løkke)
+    la l_anna = lengde(k)
+    agc.patch_bc(k, p_ikkje_tekst, l_anna, agc.C_NE())
+    ncd_konst4(k, f, 0x7C15, 0x7F4A, 0x79B9, 0x9E37)            // 0x9E3779B97F4A7C15
+    agc.w32(k, ncd_e_mul(h, pay, f))
+    la l_ferdig = lengde(k)
+    agc.patch_cbz(k, p_ferdig1, l_ferdig, n)
+    returner 0
+}
+
+// Nøkkellikskap: lagra nøkkel-NcVal i Xs mot søkenøkkelen (boks x17, tagg x0, payload x1).
+// Likt → b treff; ulikt → fell gjennom (posisjonane som skal til «ulik» blir returnerte).
+// Scratch: x2–x6 (Xs blir klobba når s = 2).
+funksjon ncd_kart_nøkkel_lik(k: liste_heiltall, s: heiltall, treff_hopp: liste_heiltall) -> liste_heiltall {
+    la ulik: liste_heiltall = []
+    agc.w32(k, agc.e_cmp(s, 17))
+    legg_til(treff_hopp, agc.plass(k))                          // b.eq treff (same boks)
+    legg_til(ulik, agc.plass(k))                                // cbz Xs, ulik
+    agc.w32(k, agc.e_ldr(3, s, 0))                              // x3 = lagra tagg
+    agc.w32(k, agc.e_cmp(3, 0))
+    legg_til(ulik, agc.plass(k))                                // b.ne ulik
+    agc.w32(k, agc.e_ldr(3, s, 8))                              // x3 = lagra payload
+    agc.w32(k, agc.e_cmp(3, 1))
+    legg_til(treff_hopp, agc.plass(k))                          // b.eq treff (same payload / same strdata)
+    agc.w32(k, agc.e_cmp_i(0, 3))
+    legg_til(ulik, agc.plass(k))                                // b.ne ulik (ikkje tekst: payload avgjer)
+    agc.w32(k, agc.e_ldr(4, 3, 0))                              // x4 = lagra lengd
+    agc.w32(k, agc.e_ldr(5, 1, 0))                              // x5 = søkelengd
+    agc.w32(k, agc.e_cmp(4, 5))
+    legg_til(ulik, agc.plass(k))                                // b.ne ulik
+    agc.w32(k, agc.e_add_i(3, 3, 8))
+    agc.w32(k, agc.e_add_i(6, 1, 8))
+    la l_ord = lengde(k)
+    agc.w32(k, agc.e_cmp_i(4, 8))
+    la p_byte = agc.plass(k)                                    // b.lo byte
+    agc.w32(k, agc.e_ldr_post(5, 3, 8))
+    agc.w32(k, agc.e_ldr_post(2, 6, 8))
+    agc.w32(k, agc.e_cmp(5, 2))
+    legg_til(ulik, agc.plass(k))                                // b.ne ulik
+    agc.w32(k, agc.e_sub_i(4, 4, 8))
+    agc.b_til(k, l_ord)
+    la l_byte = lengde(k)
+    agc.patch_bc(k, p_byte, l_byte, agc.C_LO())
+    legg_til(treff_hopp, agc.plass(k))                          // cbz x4, treff
+    agc.w32(k, ncd_e_ldrb_post1(5, 3))
+    agc.w32(k, ncd_e_ldrb_post1(2, 6))
+    agc.w32(k, ncd_e_cmp_w(5, 2))
+    legg_til(ulik, agc.plass(k))                                // b.ne ulik
+    agc.w32(k, agc.e_sub_i(4, 4, 1))
+    agc.b_til(k, l_byte)
+    // Kodar for hoppa: treff_hopp har (b.eq, b.eq, cbz x4) i rekkjefølgje; ulik har
+    // (cbz Xs, b.ne, b.ne, b.ne, b.ne, b.ne). Kallaren lappar via ncd_kart_lapp_*.
+    legg_til(ulik, s)                                           // siste element = Xs (for cbz)
+    returner ulik
+}
+
+funksjon ncd_kart_lapp_ulik(k: liste_heiltall, ulik: liste_heiltall, mål: heiltall) -> heiltall {
+    la s = ulik[lengde(ulik) - 1]
+    agc.patch_cbz(k, ulik[0], mål, s)
+    la i = 1
+    mens i < lengde(ulik) - 1 { agc.patch_bc(k, ulik[i], mål, agc.C_NE())  i = i + 1 }
+    returner 0
+}
+
+funksjon ncd_kart_lapp_treff(k: liste_heiltall, treff: liste_heiltall, mål: heiltall) -> heiltall {
+    // Tre hopp per likskapstest: b.eq, b.eq, cbz x4.
+    la i = 0
+    mens i < lengde(treff) {
+        hvis i % 3 == 2 { agc.patch_cbz(k, treff[i], mål, 4) } ellers { agc.patch_bc(k, treff[i], mål, agc.C_EQ()) }
+        i = i + 1
+    }
+    returner 0
+}
+
+// __kart_finn: x16 = kart-boks, x17 = nøkkel-boks → x16 = &par[i] (adressa til nøkkel-
+// slotten; verdien ligg på +8) eller 0. Ikkje-kart, null-kart, null-nøkkel og null-objekt-
+// nøkkel → 0. Blad-rutine: rører berre x0–x6, x9–x17 (som den inline emit_map_get).
+// Utan gyldig indeks og med minst KART_IDX_GRENSE par blir indeksen bygd (via
+// __kart_indekser) og oppslaget teke på nytt; då er rutinen ikkje lenger eit blad, so
+// x16/x17/x30 blir lagra på stakken rundt kallet.
+funksjon emit_kart_finn_routine(os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    la nil: liste_heiltall = []                                 // cbz/b.cond → nil (type i parallell liste)
+    la nil_type: liste_heiltall = []                            // −1 = b.ne, −2 = b.hs, ≥ 0 = cbz Xr
+    la l_start = lengde(k)
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, 16)         // cbz x16, nil
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, 17)         // cbz x17, nil
+    agc.w32(k, agc.e_ldr(9, 16, 0))
+    agc.w32(k, agc.e_cmp_i(9, 5))
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, -1)         // b.ne nil (ikkje kart)
+    agc.w32(k, agc.e_ldr(0, 17, 0))                             // x0 = søketagg
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, 0)          // cbz x0, nil (null-objektet)
+    agc.w32(k, agc.e_ldr(1, 17, 8))                             // x1 = søkepayload
+    agc.w32(k, agc.e_ldr(9, 16, 8))                             // x9 = mapdata
+    agc.w32(k, agc.e_ldr(10, 9, 0))                             // x10 = count
+    agc.w32(k, agc.e_ldr(11, 16, 16))                           // x11 = idx
+    la p_lin1 = agc.plass(k)                                    // cbz x11, lineær
+    agc.w32(k, agc.e_ldr(12, 11, 8))
+    agc.w32(k, agc.e_cmp(12, 10))
+    la p_lin2 = agc.plass(k)                                    // b.ne lineær (stale n)
+    agc.w32(k, agc.e_ldr(12, 11, 16))
+    agc.w32(k, agc.e_cmp(12, 9))
+    la p_lin3 = agc.plass(k)                                    // b.ne lineær (fremd mapdata)
+    agc.w32(k, agc.e_add_i(9, 9, 8))                            // x9 = &par[0]
+    ncd_kart_hash(k, 0, 1, 12, 2, 3, 4, 5)                      // x12 = hash
+    agc.w32(k, agc.e_ldr(13, 11, 0))
+    agc.w32(k, agc.e_sub_i(13, 13, 1))                          // x13 = maske
+    agc.w32(k, ncd_e_and(12, 12, 13))                           // x12 = slot
+    agc.w32(k, agc.e_add_i(14, 11, 32))                         // x14 = slots
+    la l_sond = lengde(k)
+    agc.w32(k, agc.e_ldr_reg3(15, 14, 12))                      // x15 = slot-innhald
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, 15)         // cbz x15, nil (tom slot)
+    agc.w32(k, agc.e_sub_i(15, 15, 1))
+    agc.w32(k, agc.e_add_lsl(15, 9, 15, 4))                     // x15 = &par[e]
+    agc.w32(k, agc.e_ldr(2, 15, 0))                             // x2 = lagra nøkkel
+    la treff: liste_heiltall = []
+    la ulik1 = ncd_kart_nøkkel_lik(k, 2, treff)
+    ncd_kart_lapp_ulik(k, ulik1, lengde(k))
+    agc.w32(k, agc.e_add_i(12, 12, 1))
+    agc.w32(k, ncd_e_and(12, 12, 13))
+    agc.b_til(k, l_sond)
+    // Lineært søk (lite kart / stale indeks).
+    la l_lin = lengde(k)
+    agc.patch_cbz(k, p_lin1, l_lin, 11)
+    agc.patch_bc(k, p_lin2, l_lin, agc.C_NE())
+    agc.patch_bc(k, p_lin3, l_lin, agc.C_NE())
+    agc.w32(k, agc.e_cmp_i(10, KART_IDX_GRENSE()))
+    la p_bygg = agc.plass(k)                                    // b.hs bygg
+    agc.w32(k, agc.e_add_i(9, 9, 8))                            // x9 = &par[0]
+    agc.w32(k, agc.e_movz(12, 0, 0))                            // i = 0
+    la l_lløkke = lengde(k)
+    agc.w32(k, agc.e_cmp(12, 10))
+    legg_til(nil, agc.plass(k))  legg_til(nil_type, -2)         // b.hs nil
+    agc.w32(k, agc.e_add_lsl(15, 9, 12, 4))                     // x15 = &par[i]
+    agc.w32(k, agc.e_ldr(2, 15, 0))
+    la ulik2 = ncd_kart_nøkkel_lik(k, 2, treff)
+    ncd_kart_lapp_ulik(k, ulik2, lengde(k))
+    agc.w32(k, agc.e_add_i(12, 12, 1))
+    agc.b_til(k, l_lløkke)
+    // Bygg indeksen (stort kart utan gyldig indeks) og prøv på nytt.
+    la l_bygg = lengde(k)
+    agc.patch_bc(k, p_bygg, l_bygg, agc.C_HS())
+    agc.w32(k, agc.e_stp_pre(16, 17, 31, -32))                  // stp x16, x17, [sp, #-32]!
+    agc.w32(k, agc.e_str(30, 31, 16))                           // str x30, [sp, #16]
+    la p_bl = agc.plass(k)                                      // bl __kart_indekser (lappa av kallaren)
+    agc.w32(k, agc.e_ldr(30, 31, 16))
+    agc.w32(k, agc.e_ldp_post(16, 17, 31, 32))                  // ldp x16, x17, [sp], #32
+    agc.b_til(k, l_start)
+    // Treff: x15 = &par[e].
+    la l_treff = lengde(k)
+    ncd_kart_lapp_treff(k, treff, l_treff)
+    agc.w32(k, agc.e_mov(16, 15))
+    agc.w32(k, agc.e_ret())
+    la l_nil = lengde(k)
+    la i = 0
+    mens i < lengde(nil) {
+        la t = nil_type[i]
+        hvis t == -1 { agc.patch_bc(k, nil[i], l_nil, agc.C_NE()) }
+        ellers hvis t == -2 { agc.patch_bc(k, nil[i], l_nil, agc.C_HS()) }
+        ellers { agc.patch_cbz(k, nil[i], l_nil, t) }
+        i = i + 1
+    }
+    agc.w32(k, agc.e_movz(16, 0, 0))
+    agc.w32(k, agc.e_ret())
+    // Posisjonen til den interne bl-en (kallaren lappar mot __kart_indekser).
+    legg_til(k, p_bl & 255)  legg_til(k, (p_bl >> 8) & 255)  legg_til(k, (p_bl >> 16) & 255)  legg_til(k, (p_bl >> 24) & 255)
+    returner k
+}
+
+// Sett inn par e (x12) i indeksen x11 (maske x13): hash av nøkkelen i par[e] (par-base x9),
+// sonder til tom slot og skriv e + 1. Null-/null-objekt-nøkkel får hash 0 (blir aldri
+// funnen, men slotten er brukt). Scratch: x0–x6, x14, x15.
+funksjon ncd_kart_idx_sett_inn(k: liste_heiltall) -> heiltall {
+    agc.w32(k, agc.e_add_lsl(15, 9, 12, 4))                     // x15 = &par[e]
+    agc.w32(k, agc.e_ldr(2, 15, 0))                             // x2 = nøkkel
+    agc.w32(k, agc.e_movz(6, 0, 0))                             // x6 = hash (0 for null)
+    la p_null = agc.plass(k)                                    // cbz x2, null
+    agc.w32(k, agc.e_ldr(0, 2, 0))
+    agc.w32(k, agc.e_ldr(1, 2, 8))
+    ncd_kart_hash(k, 0, 1, 6, 2, 3, 4, 5)
+    la l_null = lengde(k)
+    agc.patch_cbz(k, p_null, l_null, 2)
+    agc.w32(k, ncd_e_and(6, 6, 13))
+    agc.w32(k, agc.e_add_i(14, 11, 32))                         // x14 = slots
+    la l_sond = lengde(k)
+    agc.w32(k, agc.e_ldr_reg3(15, 14, 6))
+    la p_tom = agc.plass(k)                                     // cbz x15, tom
+    agc.w32(k, agc.e_add_i(6, 6, 1))
+    agc.w32(k, ncd_e_and(6, 6, 13))
+    agc.b_til(k, l_sond)
+    la l_tom = lengde(k)
+    agc.patch_cbz(k, p_tom, l_tom, 15)
+    agc.w32(k, agc.e_add_i(15, 12, 1))
+    agc.w32(k, agc.e_str_reg3(15, 14, 6))
+    returner 0
+}
+
+// __kart_indekser: x16 = kart-boks. Held indeksen i takt med mapdata etter ei endring:
+// under KART_IDX_GRENSE par → idx = 0; n == count − 1 (eitt par lagt til) og nok plass →
+// set inn det nye paret; elles bygg på nytt (gjenbruk blokka når cap ≥ 2·count, elles ny
+// blokk med cap = max(64, next_pow2(2·count))). Rører x0–x6, x9–x15, x17. Allokerer:
+// GC-modus via __gc_alloc ([HEAP_VA+72], bevarer alle andre register), elles frå x28
+// (16-aligna). Blir kalla frå INDEX_SET / fjern_nøkkel / __kart_finn — aldri inni ein
+// emitter som byggjer ein open payload ved x28.
+funksjon emit_kart_indekser_routine(os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    la gcm = ncval_gc_på()
+    agc.w32(k, agc.e_ldr(9, 16, 8))                             // x9 = mapdata
+    agc.w32(k, agc.e_ldr(10, 9, 0))                             // x10 = count
+    agc.w32(k, agc.e_ldr(11, 16, 16))                           // x11 = idx
+    agc.w32(k, agc.e_cmp_i(10, KART_IDX_GRENSE()))
+    la p_stor = agc.plass(k)                                    // b.hs stor
+    agc.w32(k, agc.e_str(31, 16, 16))                           // idx = 0
+    agc.w32(k, agc.e_ret())
+    la l_stor = lengde(k)
+    agc.patch_bc(k, p_stor, l_stor, agc.C_HS())
+    la p_ny1 = agc.plass(k)                                     // cbz x11, ny
+    agc.w32(k, agc.e_ldr(13, 11, 0))                            // x13 = cap
+    agc.w32(k, agc.e_lsl(14, 10, 1))
+    agc.w32(k, agc.e_cmp(14, 13))
+    la p_ny2 = agc.plass(k)                                     // b.hi ny (for full)
+    agc.w32(k, agc.e_ldr(12, 11, 8))                            // x12 = n
+    agc.w32(k, agc.e_sub_i(14, 10, 1))
+    agc.w32(k, agc.e_cmp(12, 14))
+    la p_fyll1 = agc.plass(k)                                   // b.ne fyll (stale → bygg i same blokk)
+    // Inkrementelt: set inn par n (= count − 1). Mapdata kan vere kopiert (vekst); par-
+    // indeksane er dei same, so berre mapdata-feltet blir oppdatert.
+    agc.w32(k, agc.e_add_i(9, 9, 8))                            // x9 = &par[0]
+    agc.w32(k, agc.e_sub_i(13, 13, 1))                          // x13 = maske
+    ncd_kart_idx_sett_inn(k)
+    agc.w32(k, agc.e_str(10, 11, 8))                            // n = count
+    agc.w32(k, agc.e_sub_i(9, 9, 8))
+    agc.w32(k, agc.e_str(9, 11, 16))                            // idx.mapdata
+    agc.w32(k, agc.e_ret())
+    // Ny blokk: cap = max(64, next_pow2(2·count)).
+    la l_ny = lengde(k)
+    agc.patch_cbz(k, p_ny1, l_ny, 11)
+    agc.patch_bc(k, p_ny2, l_ny, agc.C_HI())
+    agc.w32(k, agc.e_lsl(14, 10, 1))
+    agc.w32(k, agc.e_sub_i(14, 14, 1))
+    agc.w32(k, agc.e_clz(14, 14))
+    agc.w32(k, agc.e_neg(14, 14))
+    agc.w32(k, agc.e_movz(13, 1, 0))
+    agc.w32(k, agc.e_lslv(13, 13, 14))                          // x13 = next_pow2(2·count)
+    agc.w32(k, agc.e_movz(14, 64, 0))
+    agc.w32(k, agc.e_cmp(13, 14))
+    agc.w32(k, agc.e_csel(13, 14, 13, agc.C_LO()))              // x13 = max(64, …)
+    agc.w32(k, agc.e_lsl(11, 13, 3))
+    agc.w32(k, agc.e_add_i(11, 11, 32))                         // x11 = 32 + cap·8
+    hvis gcm {
+        agc.alloc_kall(k, 11, os)                               // x11 = blokk (16-aligna)
+    } ellers {
+        agc.w32(k, agc.e_add_i(14, 28, 15))
+        agc.w32(k, agc.e_and_not15(14, 14))                     // x14 = round16(x28)
+        agc.w32(k, agc.e_add(28, 14, 11))                       // x28 = blokk + storleik
+        agc.w32(k, agc.e_mov(11, 14))
+    }
+    agc.w32(k, agc.e_str(13, 11, 0))                            // cap
+    agc.w32(k, agc.e_str(31, 11, 24))
+    agc.w32(k, agc.e_str(11, 16, 16))                           // boks.idx = blokka
+    // Fyll: nullstill slotane og set inn alle par.
+    la l_fyll = lengde(k)
+    agc.patch_bc(k, p_fyll1, l_fyll, agc.C_NE())
+    agc.w32(k, agc.e_ldr(13, 11, 0))                            // x13 = cap
+    agc.w32(k, agc.e_add_i(14, 11, 32))
+    agc.w32(k, agc.e_mov(15, 13))
+    la l_null = lengde(k)
+    agc.w32(k, agc.e_str_post(31, 14, 8))                       // str xzr, [x14], #8
+    agc.w32(k, agc.e_subs_i(15, 15, 1))
+    agc.bc_til(k, l_null, agc.C_NE())
+    agc.w32(k, agc.e_sub_i(13, 13, 1))                          // x13 = maske
+    agc.w32(k, agc.e_add_i(9, 9, 8))                            // x9 = &par[0]
+    agc.w32(k, agc.e_movz(12, 0, 0))                            // e = 0
+    la l_fløkke = lengde(k)
+    agc.w32(k, agc.e_cmp(12, 10))
+    la p_fferdig = agc.plass(k)                                 // b.hs ferdig
+    ncd_kart_idx_sett_inn(k)
+    agc.w32(k, agc.e_add_i(12, 12, 1))
+    agc.b_til(k, l_fløkke)
+    la l_fferdig = lengde(k)
+    agc.patch_bc(k, p_fferdig, l_fferdig, agc.C_HS())
+    agc.w32(k, agc.e_str(10, 11, 8))                            // n = count
+    agc.w32(k, agc.e_sub_i(9, 9, 8))
+    agc.w32(k, agc.e_str(9, 11, 16))                            // idx.mapdata
+    agc.w32(k, agc.e_ret())
+    returner k
+}
+
+// Legg kart-rutinane til imaget når eit bl-mål peikar dit (felles for dei tre link-vegane).
+// __kart_finn kallar __kart_indekser internt, so han dreg den med seg.
+funksjon ncval_legg_til_kart(all_patchar, image: liste_heiltall, fn_start, os: tekst) -> heiltall {
+    la treng_finn = usann
+    la treng_idx = usann
+    for pt i all_patchar {
+        hvis pt[1] == "__kart_finn" { treng_finn = sann }
+        hvis pt[1] == "__kart_indekser" { treng_idx = sann }
+    }
+    hvis treng_finn { treng_idx = sann }
+    hvis ikkje treng_idx { returner 0 }
+    la idx_start = lengde(image)
+    fn_start["__kart_indekser"] = idx_start
+    for w i emit_kart_indekser_routine(os) { legg_til(image, w) }
+    hvis treng_finn {
+        la rut = emit_kart_finn_routine(os)
+        // Dei fire siste bytane er posisjonen til den interne bl-en (sjå emit_kart_finn_routine).
+        la n = lengde(rut) - 4
+        la p_bl = rut[n] | (rut[n + 1] << 8) | (rut[n + 2] << 16) | (rut[n + 3] << 24)
+        la start = lengde(image)
+        fn_start["__kart_finn"] = start
+        la i = 0
+        mens i < n { legg_til(image, rut[i])  i = i + 1 }
+        skriv_u32(image, start + p_bl, 0x94000000 | (((idx_start - (start + p_bl)) / 4) & 0x03FFFFFF))
+    }
+    returner 0
+}
+
+// Kallesekvens til ei kart-rutine: x16 = kart, x17 = nøkkel (key_reg < 0: ingen nøkkel),
+// x30 lagra rundt bl-en (gjeld òg inni rutinar der x30 er levande). Etterpå: x0–x6,
+// x9–x17 er daude, alt anna bevart.
+funksjon ncd_kart_kall(native: liste_heiltall, map_reg: heiltall, key_reg: heiltall, rutine: tekst, bl_patchar) -> heiltall {
+    hvis key_reg == 16 og map_reg == 17 {
+        legg_u32(native, agc.e_mov(9, 17))
+        legg_u32(native, agc.e_mov(17, 16))
+        legg_u32(native, agc.e_mov(16, 9))
+    } ellers hvis key_reg == 16 {
+        legg_u32(native, agc.e_mov(17, 16))
+        legg_u32(native, agc.e_mov(16, map_reg))
+    } ellers {
+        hvis map_reg != 16 { legg_u32(native, agc.e_mov(16, map_reg)) }
+        hvis key_reg >= 0 og key_reg != 17 { legg_u32(native, agc.e_mov(17, key_reg)) }
+    }
+    legg_u32(native, 0xF81F0FFE)                                // str x30, [sp, #-16]!
+    la p_bl = lengde(native)
+    legg_u32(native, 0x94000000)                                // bl rutine
+    legg_til(bl_patchar, [p_bl, rutine])
+    legg_u32(native, agc.e_ldr_post(30, 31, 16))                // ldr x30, [sp], #16
+    returner 0
+}
+
+// Hasha kart-oppslag (INDEX_GET-vegen, har_nokkel, map_get): same kontrakt som
+// emit_map_get (want_bool → bool-boks, elles verdipeikar eller 0 i Xdst).
+funksjon emit_map_get_h(native: liste_heiltall, map_reg: heiltall, key_reg: heiltall, dst_reg: heiltall, want_bool: boolsk, bl_patchar) -> heiltall {
+    ncd_kart_kall(native, map_reg, key_reg, "__kart_finn", bl_patchar)
+    hvis want_bool {
+        legg_u32(native, agc.e_cmp_i(16, 0))
+        legg_u32(native, 0x1A9F07E9)                            // cset w9, ne
+        emit_ncval_alloc(native, 9, dst_reg, 2)
+    } ellers {
+        legg_u32(native, 0xB4000050)                            // cbz x16, +2
+        legg_u32(native, agc.e_ldr(16, 16, 8))                  // x16 = verdi
+        legg_u32(native, agc.e_mov(dst_reg, 16))                // Xdst = verdi / 0
+    }
     returner 0
 }
 
@@ -2390,7 +2774,7 @@ funksjon ncd_lapp_kart_nokkel(native: liste_heiltall, key_reg: heiltall, hopp, m
     returner 0
 }
 
-funksjon emit_index_get(native: liste_heiltall, cont_reg: heiltall, idx_reg: heiltall, dst_reg: heiltall) -> heiltall {
+funksjon emit_index_get(native: liste_heiltall, cont_reg: heiltall, idx_reg: heiltall, dst_reg: heiltall, bl_patchar) -> heiltall {
     // Null-trygg: hopp til slutten når containeren er Norscode-null (0), elles
     // dereferens ldr x9,[Xcont] gjennom nullpeikaren (signal 139). Kallaren gjev
     // dst==cont, så dst er alt 0 (= null) på null-vegen — konsistent med x86_64.
@@ -2440,15 +2824,33 @@ funksjon emit_index_get(native: liste_heiltall, cont_reg: heiltall, idx_reg: hei
     legg_u32(native, 0xF100153F)                        // cmp x9, #5  (kart?)
     la p_bne_ikkjekart = lengde(native)
     legg_u32(native, 0)                                 // b.ne ikkje_kart
-    la kn_hopp = ncd_emit_kart_nokkel(native, idx_reg)
-    emit_map_get(native, cont_reg, idx_reg, dst_reg, usann)
+    // F25: typa nøkkel via __kart_finn (hash-indeks). Heiltalsnøkkel som ikkje finst, blir
+    // prøvd som tekst (x86 index_get_map: «d[0]» finn "0" i eit kart med tekstnøklar).
+    ncd_kart_kall(native, cont_reg, idx_reg, "__kart_finn", bl_patchar)
+    la p_funne1 = lengde(native)
+    legg_u32(native, 0)                                 // cbnz x16, funne
+    la p_null_nøkkel = lengde(native)
+    legg_u32(native, 0)                                 // cbz Xidx, ikkje_kart
+    legg_u32(native, 0xF9400000 | (idx_reg << 5) | 9)   // ldr x9, [Xidx]  (tagg)
+    legg_u32(native, 0xF100053F)                        // cmp x9, #1
+    la p_ikkje_int = lengde(native)
+    legg_u32(native, 0)                                 // b.ne ikkje_kart
+    emit_tekst_int(native, idx_reg, idx_reg)            // Xidx = tekst(nøkkel) (forbrukt operand)
+    ncd_kart_kall(native, cont_reg, idx_reg, "__kart_finn", bl_patchar)
+    la p_ikkje_funne2 = lengde(native)
+    legg_u32(native, 0)                                 // cbz x16, ikkje_kart
+    la lbl_funne = lengde(native)
+    legg_u32(native, agc.e_ldr(dst_reg, 16, 8))         // ldr Xdst, [x16, #8]  (verdi)
     la p_b_end3 = lengde(native)
     legg_u32(native, 0)                                 // b end
     la lbl_ikkjekart = lengde(native)
     legg_u32(native, 0xD2800000 | dst_reg)             // movz Xdst, #0  (→ null under)
-    ncd_lapp_kart_nokkel(native, idx_reg, kn_hopp, lbl_ikkjekart)
     la lbl_end = lengde(native)
     ncd_bcond(native, p_bne_ikkjekart, lbl_ikkjekart, 1)
+    agc.patch_cbnz(native, p_funne1, lbl_funne, 16)
+    agc.patch_cbz(native, p_null_nøkkel, lbl_ikkjekart, idx_reg)
+    ncd_bcond(native, p_ikkje_int, lbl_ikkjekart, 1)
+    agc.patch_cbz(native, p_ikkje_funne2, lbl_ikkjekart, 16)
     ncd_b(native, p_b_end3, lbl_end)
     // A5: manglande nøkkel / null-container gav peikaren 0 → det kanoniske null-objektet
     // (type() → «ingenting», og vidare typelesing krasjar ikkje).
@@ -2476,7 +2878,7 @@ funksjon ncd_kart_vakt_ord(native: liste_heiltall, dst: heiltall, mapdata: heilt
     returner 0
 }
 
-funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heiltall, val_reg: heiltall) -> heiltall {
+funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heiltall, val_reg: heiltall, bl_patchar) -> heiltall {
     // Null-trygg: hopp over heile skrivinga når containeren er Norscode-null (0).
     // Utan denne skreiv INDEX_SET gjennom nullpeikaren (ldr x9,[Xobj]) og gav
     // signal 139. Obj (0) blir ståande på stakken — same silent-null som INDEX_GET.
@@ -2505,7 +2907,50 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     legg_u32(native, 0xF100153F)                        // cmp x9, #5  (kart?)
     la p_bne_ikkjekart = lengde(native)
     legg_u32(native, 0)                                 // b.ne done
-    la kn_hopp_s = ncd_emit_kart_nokkel(native, idx_reg)   // heiltalsnøkkel → tekst; anna → no-op
+    // F25 (hasha veg, bl_patchar != null): nøkkelen blir slått opp typa via __kart_finn
+    // (x17 = funnen par-base eller 0, same kontrakt som den inline skannen under). Null-
+    // nøkkel og null-objektet er no-op. Heiltalsnøkkel: finst tekstnøkkelen alt (eit kart
+    // med "0", "1", … frå json/eldre kode), blir den oppdatert; elles blir heiltalet lagra
+    // typa (x86 index_set_map).
+    la hasha = bl_patchar != null
+    la kn_hopp_s = []
+    la p_scan_ge = 0 - 1
+    la p_bne_next = 0
+    la p_cbz_match = 0
+    la p_bne_next2 = 0
+    la p_cbnz_byte = 0
+    la p_b_scandone = 0
+    la p_b_scan = 0
+    la p_ikkje_tekst_s = 0
+    la p_ikkje_tekst_s0 = 0
+    la lbl_scan = 0
+    la lbl_byteloop = 0
+    la lbl_matched = 0
+    la lbl_next = 0
+    la hn_ferdig: liste_heiltall = []
+    hvis hasha {
+        legg_til(hn_ferdig, lengde(native))
+        legg_u32(native, 0)                                 // cbz Xidx, done
+        legg_u32(native, 0xF9400000 | (idx_reg << 5) | 9)   // ldr x9, [Xidx]  (tagg)
+        legg_til(hn_ferdig, lengde(native))
+        legg_u32(native, 0)                                 // cbz x9, done  (null-objektet)
+        legg_u32(native, 0xF100053F)                        // cmp x9, #1
+        la p_hn_typa = lengde(native)
+        legg_u32(native, 0)                                 // b.ne typa
+        legg_u32(native, agc.e_sub_sp(16))
+        legg_u32(native, agc.e_str(idx_reg, 31, 0))         // str Xidx, [sp]  (heiltalsnøkkelen)
+        emit_tekst_int(native, idx_reg, idx_reg)            // Xidx = tekst(nøkkel)
+        ncd_kart_kall(native, obj_reg, idx_reg, "__kart_finn", bl_patchar)
+        legg_u32(native, agc.e_ldr(idx_reg, 31, 0))         // Xidx = heiltalsnøkkelen att
+        legg_u32(native, agc.e_add_sp(16))
+        la p_hn_funne = lengde(native)
+        legg_u32(native, 0)                                 // cbnz x16, funne
+        ncd_bcond(native, p_hn_typa, lengde(native), 1)
+        ncd_kart_kall(native, obj_reg, idx_reg, "__kart_finn", bl_patchar)
+        agc.patch_cbnz(native, p_hn_funne, lengde(native), 16)
+        legg_u32(native, agc.e_mov(17, 16))                 // x17 = par-base / 0
+    } ellers {
+    kn_hopp_s = ncd_emit_kart_nokkel(native, idx_reg)   // heiltalsnøkkel → tekst; anna → no-op
     legg_u32(native, 0xF9400400 | (obj_reg << 5) | 9)   // ldr x9, [Xobj, #8] (mapdata)
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (count)
     legg_u32(native, 0x91002129)                        // add x9, x9, #8 (&par[0])
@@ -2514,41 +2959,49 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     legg_u32(native, 0x9100216B)                        // add x11, x11, #8 (nøkkel-bytes)
     legg_u32(native, 0xD280000E)                        // movz x14, #0  (i)
     legg_u32(native, 0xD2800011)                        // movz x17, #0  (funnen par-base, 0=nei)
-    la lbl_scan = lengde(native)
+    lbl_scan = lengde(native)
     legg_u32(native, 0xEB0A01DF)                        // cmp x14, x10
-    la p_scan_ge = lengde(native)
+    p_scan_ge = lengde(native)
     legg_u32(native, 0)                                 // b.ge scan_done
     legg_u32(native, 0x8B0E112F)                        // add x15, x9, x14, lsl #4  (&par[i])
     legg_u32(native, 0xF94001E0)                        // ldr x0, [x15]  (lagra nøkkel)
+    // F25: lagra ikkje-tekst-nøkkel (typa kart) → neste, ikkje deref som strdata.
+    p_ikkje_tekst_s0 = lengde(native)
+    legg_u32(native, 0)                                 // cbz x0, map_next
+    legg_u32(native, 0xF9400002)                        // ldr x2, [x0]   (lagra nøkkel-tagg)
+    legg_u32(native, 0xF1000C5F)                        // cmp x2, #3
+    p_ikkje_tekst_s = lengde(native)
+    legg_u32(native, 0)                                 // b.ne map_next
     legg_u32(native, 0xF9400401)                        // ldr x1, [x0, #8] (lagra nøkkel-strdata)
     legg_u32(native, 0xF9400022)                        // ldr x2, [x1]   (lagra nøkkel-len)
     legg_u32(native, 0xEB0C005F)                        // cmp x2, x12
-    la p_bne_next = lengde(native)
+    p_bne_next = lengde(native)
     legg_u32(native, 0)                                 // b.ne map_next
     legg_u32(native, 0x91002021)                        // add x1, x1, #8 (lagra nøkkel-bytes)
     legg_u32(native, 0xAA0B03E3)                        // mov x3, x11
     legg_u32(native, 0xAA0C03E4)                        // mov x4, x12
-    la p_cbz_match = lengde(native)
+    p_cbz_match = lengde(native)
     legg_u32(native, 0)                                 // cbz x4, matched
-    la lbl_byteloop = lengde(native)
+    lbl_byteloop = lengde(native)
     legg_u32(native, 0x39400025)                        // ldrb w5, [x1]
     legg_u32(native, 0x39400066)                        // ldrb w6, [x3]
     legg_u32(native, 0x6B0600BF)                        // cmp w5, w6
-    la p_bne_next2 = lengde(native)
+    p_bne_next2 = lengde(native)
     legg_u32(native, 0)                                 // b.ne map_next
     legg_u32(native, 0x91000421)                        // add x1, x1, #1
     legg_u32(native, 0x91000463)                        // add x3, x3, #1
     legg_u32(native, 0xD1000484)                        // sub x4, x4, #1
-    la p_cbnz_byte = lengde(native)
+    p_cbnz_byte = lengde(native)
     legg_u32(native, 0)                                 // cbnz x4, byteloop
-    la lbl_matched = lengde(native)
+    lbl_matched = lengde(native)
     legg_u32(native, 0xAA0F03F1)                        // mov x17, x15  (par-base funnen)
-    la p_b_scandone = lengde(native)
+    p_b_scandone = lengde(native)
     legg_u32(native, 0)                                 // b scan_done
-    la lbl_next = lengde(native)
+    lbl_next = lengde(native)
     legg_u32(native, 0x910005CE)                        // add x14, x14, #1
-    la p_b_scan = lengde(native)
+    p_b_scan = lengde(native)
     legg_u32(native, 0)                                 // b scan
+    }
     la lbl_scan_done = lengde(native)
     la p_cbz_grow = lengde(native)
     legg_u32(native, 0)                                 // cbz x17, grow
@@ -2683,26 +3136,36 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
         ncd_bcond(native, p_utan_vakt, lengde(native), 2)
     }
     legg_u32(native, 0xF9000400 | (obj_reg << 5) | 14)  // str x14, [Xobj, #8] (peik obj til nytt mapdata)
+    // F25: etter at eit par er lagt til (på staden eller ved kopi): hald hash-indeksen i takt.
+    la lbl_lagt_til = lengde(native)
+    hvis hasha { ncd_kart_kall(native, obj_reg, 0 - 1, "__kart_indekser", bl_patchar) }
     la lbl_done = lengde(native)
     hvis lengde(p_kv_ferdig) == 2 {
-        ncd_bcond(native, p_kv_ferdig[0], lbl_done, 2)
-        ncd_b(native, p_kv_ferdig[1], lbl_done)
+        ncd_bcond(native, p_kv_ferdig[0], lbl_lagt_til, 2)
+        ncd_b(native, p_kv_ferdig[1], lbl_lagt_til)
     }
     skriv_u32(native, p_cbz_null,    0xB4000000 | ((((lbl_done     - p_cbz_null)    / 4) & 0x7FFFF) << 5) | obj_reg)
     ncd_bcond(native, p_bne_ikkjekart, lbl_done, 1)
-    ncd_lapp_kart_nokkel(native, idx_reg, kn_hopp_s, lbl_done)
+    hvis hasha {
+        agc.patch_cbz(native, hn_ferdig[0], lbl_done, idx_reg)
+        agc.patch_cbz(native, hn_ferdig[1], lbl_done, 9)
+    } ellers {
+        ncd_lapp_kart_nokkel(native, idx_reg, kn_hopp_s, lbl_done)
+        skriv_u32(native, p_scan_ge,     0x5400000A | ((((lbl_scan_done - p_scan_ge)    / 4) & 0x7FFFF) << 5))
+        skriv_u32(native, p_bne_next,    0x54000001 | ((((lbl_next     - p_bne_next)    / 4) & 0x7FFFF) << 5))
+        skriv_u32(native, p_cbz_match,   0xB4000004 | ((((lbl_matched  - p_cbz_match)   / 4) & 0x7FFFF) << 5))
+        skriv_u32(native, p_bne_next2,   0x54000001 | ((((lbl_next     - p_bne_next2)   / 4) & 0x7FFFF) << 5))
+        skriv_u32(native, p_cbnz_byte,   0xB5000004 | ((((lbl_byteloop - p_cbnz_byte)   / 4) & 0x7FFFF) << 5))
+        skriv_u32(native, p_b_scandone,  0x14000000 |  (((lbl_scan_done - p_b_scandone) / 4) & 0x03FFFFFF))
+        skriv_u32(native, p_b_scan,      0x14000000 |  (((lbl_scan     - p_b_scan)      / 4) & 0x03FFFFFF))
+        agc.patch_cbz(native, p_ikkje_tekst_s0, lbl_next, 0)
+        ncd_bcond(native, p_ikkje_tekst_s, lbl_next, 1)
+    }
     skriv_u32(native, p_bne_map,     0x54000001 | ((((lbl_map      - p_bne_map)     / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_done1,     0x14000000 |  (((lbl_done     - p_b_done1)     / 4) & 0x03FFFFFF))
-    skriv_u32(native, p_scan_ge,     0x5400000A | ((((lbl_scan_done - p_scan_ge)    / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_bne_next,    0x54000001 | ((((lbl_next     - p_bne_next)    / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_cbz_match,   0xB4000004 | ((((lbl_matched  - p_cbz_match)   / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_bne_next2,   0x54000001 | ((((lbl_next     - p_bne_next2)   / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_cbnz_byte,   0xB5000004 | ((((lbl_byteloop - p_cbnz_byte)   / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_b_scandone,  0x14000000 |  (((lbl_scan_done - p_b_scandone) / 4) & 0x03FFFFFF))
-    skriv_u32(native, p_b_scan,      0x14000000 |  (((lbl_scan     - p_b_scan)      / 4) & 0x03FFFFFF))
     skriv_u32(native, p_cbz_grow,    0xB4000011 | ((((lbl_grow     - p_cbz_grow)    / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_done2,     0x14000000 |  (((lbl_done     - p_b_done2)     / 4) & 0x03FFFFFF))
-    hvis p_på_staden_ferdig >= 0 { ncd_b(native, p_på_staden_ferdig, lbl_done) }
+    hvis p_på_staden_ferdig >= 0 { ncd_b(native, p_på_staden_ferdig, lbl_lagt_til) }
     skriv_u32(native, p_cbz_copydone,0xB4000002 | ((((lbl_copydone - p_cbz_copydone)/ 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_copy,      0x14000000 |  (((lbl_copy     - p_b_copy)      / 4) & 0x03FFFFFF))
     returner 0
@@ -6199,8 +6662,29 @@ funksjon emit_json_stringify_routine(os: tekst) -> liste_heiltall {
     la lbl_sk2 = lengde(r)
     legg_u32(r, 0x8B161291)                          // add x17, x20, x22, lsl #4  (&par[i])
     legg_u32(r, 0xF9400220)                          // ldr x0, [x17]  (nøkkel)
+    // F25: typa nøkkel (heiltal, bool, …) → "\"<stringify>\"", so JSON-objektet held seg gyldig.
+    la p_nk_null = lengde(r)
+    legg_u32(r, 0)                                   // cbz x0, tekstnøkkel (stringify(null))
+    legg_u32(r, 0xF9400009)                          // ldr x9, [x0]  (tagg)
+    legg_u32(r, 0xF1000D3F)                          // cmp x9, #3
+    la p_nk_tekst = lengde(r)
+    legg_u32(r, 0)                                   // b.eq tekstnøkkel
+    emit_char_str(r, 34, 0)                          // "\""
+    emit_str_concat(r, 19, 0, 19)
+    legg_u32(r, 0x8B161291)                          // add x17, x20, x22, lsl #4
+    legg_u32(r, 0xF9400220)                          // ldr x0, [x17]  (nøkkel)
+    la p_bl2b = lengde(r)
+    legg_u32(r, 0x94000000)                          // bl self
+    emit_str_concat(r, 19, 0, 19)
+    emit_char_str(r, 34, 0)                          // "\""
+    la p_nk_ferdig = lengde(r)
+    legg_u32(r, 0)                                   // b nk_ferdig (concat under)
+    la lbl_nk_tekst = lengde(r)
+    ncd_bcond(r, p_nk_tekst, lbl_nk_tekst, 0)
+    skriv_u32(r, p_nk_null, 0xB4000000 | ((((lbl_nk_tekst - p_nk_null) / 4) & 0x7FFFF) << 5))
     la p_bl2 = lengde(r)
     legg_u32(r, 0x94000000)                          // bl self  (stringify(nøkkel) → "\"k\"")
+    ncd_b(r, p_nk_ferdig, lengde(r))
     emit_str_concat(r, 19, 0, 19)                    // acc += "\"k\""
     emit_char_str(r, 58, 0)                          // ":"
     emit_str_concat(r, 19, 0, 19)                    // acc += ":"
@@ -6238,6 +6722,7 @@ funksjon emit_json_stringify_routine(os: tekst) -> liste_heiltall {
     // patch sjølv-bl (mål = offset 0 = rutinestart)
     skriv_u32(r, p_bl1, 0x94000000 | (((0 - p_bl1) / 4) & 0x03FFFFFF))
     skriv_u32(r, p_bl2, 0x94000000 | (((0 - p_bl2) / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_bl2b, 0x94000000 | (((0 - p_bl2b) / 4) & 0x03FFFFFF))
     skriv_u32(r, p_bl3, 0x94000000 | (((0 - p_bl3) / 4) & 0x03FFFFFF))
     returner r
 }
@@ -7602,7 +8087,7 @@ funksjon emit_env_set_routine() -> liste_heiltall {
     legg_u32(r, 0xAA0003F3)                          // mov x19, x0 (kart)
     legg_u32(r, 0xAA0103F4)                          // mov x20, x1 (nøkkel)
     legg_u32(r, 0xAA0203F5)                          // mov x21, x2 (verdi)
-    emit_index_set(r, 19, 20, 21)                    // kart-upsert (grow repointar [x19+8])
+    emit_index_set(r, 19, 20, 21, null)              // kart-upsert (grow repointar [x19+8])
     legg_u32(r, 0xAA1303E0)                          // mov x0, x19 (returner kart)
     legg_u32(r, 0xA94053F3)                          // ldp x19, x20, [sp]
     legg_u32(r, 0xA9415BF5)                          // ldp x21, x22, [sp, #16]
@@ -9717,7 +10202,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal INDEX_GET krev container og indeks", "image": []} }
             la ig_c = opnd_les(native, djupn - 2, 0, memmode, home_off)
             la ig_i = opnd_les(native, djupn - 1, 1, memmode, home_off)
-            emit_index_get(native, ig_c, ig_i, ig_c)
+            emit_index_get(native, ig_c, ig_i, ig_c, bl_patchar)
             opnd_ut(native, djupn - 2, ig_c, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "INDEX_SET" {
@@ -9726,7 +10211,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la is_o = opnd_les(native, djupn - 3, 0, memmode, home_off)
             la is_i = opnd_les(native, djupn - 2, 1, memmode, home_off)
             la is_v = opnd_les(native, djupn - 1, 2, memmode, home_off)
-            emit_index_set(native, is_o, is_i, is_v)
+            emit_index_set(native, is_o, is_i, is_v, bl_patchar)
             opnd_ut(native, djupn - 3, is_o, memmode, home_off)
             djupn = djupn - 2
         } ellers hvis op == "STORE_NAME" {
@@ -10418,7 +10903,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "fjern_nokkel" eller kallnamn == "builtin.fjern_nokkel" eller kallnamn == "fjern_nøkkel" eller kallnamn == "builtin.fjern_nøkkel") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fjern_nokkel krev 2 arg", "image": []} }
-                    emit_fjern_nokkel(native, r2, r1)
+                    emit_fjern_nokkel_h(native, r2, r1, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "join" eller kallnamn == "builtin.join") og lengde(instr) == 3 og instr[2] == 2 {
@@ -10439,7 +10924,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "har_nokkel" eller kallnamn == "builtin.har_nokkel" eller kallnamn == "finnes_nøkkel" eller kallnamn == "builtin.finnes_nøkkel") og lengde(instr) == 3 og instr[2] == 2 {
                     // Fase 4: finnes_nøkkel(kart, nøkkel) → bool.
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal har_nokkel krev 2 arg", "image": []} }
-                    emit_map_get(native, r2, r1, r2, sann)
+                    emit_map_get_h(native, r2, r1, r2, sann, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "fil_skriv" eller kallnamn == "builtin.fil_skriv") og lengde(instr) == 3 og instr[2] == 2 {
@@ -10774,7 +11259,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "nøkkel_finnes" eller kallnamn == "builtin.nøkkel_finnes") og lengde(instr) == 3 og instr[2] == 2 {
                     // alias for finnes_nøkkel(kart, nøkkel) → bool
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal nøkkel_finnes krev 2 arg", "image": []} }
-                    emit_map_get(native, r2, r1, r2, sann)
+                    emit_map_get_h(native, r2, r1, r2, sann, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "json_skriv" eller kallnamn == "builtin.json_skriv") og lengde(instr) == 3 og instr[2] == 1 {
@@ -11168,13 +11653,13 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "map_get" eller kallnamn == "builtin.map_get") og lengde(instr) == 3 og instr[2] == 2 {
                     // A4-probar (x86-GC-matrisa): map_get(kart, nøkkel) = INDEX_GET på kart (null ved manglande nøkkel).
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal map_get krev 2 arg", "image": []} }
-                    emit_map_get(native, r2, r1, r2, usann)
+                    emit_map_get_h(native, r2, r1, r2, usann, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "map_set" eller kallnamn == "builtin.map_set") og lengde(instr) == 3 og instr[2] == 3 {
                     // A4-probar: map_set(kart, nøkkel, verdi) = INDEX_SET → kartet.
                     hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal map_set krev 3 arg", "image": []} }
-                    emit_index_set(native, r3, r2, r1)
+                    emit_index_set(native, r3, r2, r1, bl_patchar)
                     opnd_ut(native, djupn - 3, r3, memmode, home_off)
                     djupn = djupn - 2
                 } ellers hvis (kallnamn == "native_heap_bytes" eller kallnamn == "builtin.native_heap_bytes") og lengde(instr) == 3 og instr[2] == 0 {
@@ -12402,6 +12887,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         mens sc2 < lengde(rsc) { legg_til(image, rsc[sc2]) sc2 = sc2 + 1 }
     }
     ncval_legg_til_str_cmp(all_patchar, image, fn_start)
+    ncval_legg_til_kart(all_patchar, image, fn_start, os)
     // M6: typa unnataks-dispatch (bl-referert av THROW/feil/gap_stub).
     la treng_throwdisp = usann
     la ptd = 0
@@ -12780,6 +13266,7 @@ funksjon ncval_link(os: tekst, entries, globals) -> ordbok_tekst {
         la k = 0 mens k < lengde(rsc) { legg_til(image, rsc[k]) k = k + 1 }
     }
     ncval_legg_til_str_cmp(all_patchar, image, fn_start)
+    ncval_legg_til_kart(all_patchar, image, fn_start, os)
     // M6: typa unnataks-dispatch (batch). Treng __exc-globalindeksar frå planen.
     la treng_td = usann
     la ptdl = 0
@@ -12953,6 +13440,7 @@ funksjon ncval_link_flat(os: tekst, image, fn_meta, globals) -> ordbok_tekst {
         for w i rsc { legg_til(image, w) }
     }
     ncval_legg_til_str_cmp(all_patchar, image, fn_start)
+    ncval_legg_til_kart(all_patchar, image, fn_start, os)
     // M6: typa unnataks-dispatch (batch, flat). Treng __exc-globalindeksar frå planen.
     la treng_td = usann
     la ptdl = 0
