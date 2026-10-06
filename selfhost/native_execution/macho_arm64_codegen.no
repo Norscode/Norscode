@@ -940,6 +940,32 @@ funksjon ncd_strk_tildel(funksjonar, order, globals, gcount: heiltall) -> heilta
     returner n
 }
 
+// ─── R2/F14: modulkvalifiserte globalar ─────────────────────────────────────────────
+// Nøkkelen til ein modul-global i `globals` (x25-sloten) er "<modul>.<namn>", som x86
+// (native_codegen_v2 global_vas) og VM-en: like namn i ulike modular er ulike globalar.
+// LOAD_GLOBAL/STORE_GLOBAL kan ha ein tredje operand med modulen (alias.NAMN frå ein
+// annan modul); utan han gjeld modulen til funksjonen. Fri-variabel-vegen (LOAD_NAME/
+// STORE_NAME på ein global) brukar òg modulen til funksjonen.
+funksjon ncd_gnøkkel(modul: tekst, namn) -> tekst { returner modul + "." + tekst(namn) }
+
+funksjon ncd_global_op_nøkkel(instr, fn_modul: tekst) -> tekst {
+    hvis lengde(instr) >= 3 og builtin.type(instr[2]) == "tekst" { returner ncd_gnøkkel(tekst(instr[2]), instr[1]) }
+    returner ncd_gnøkkel(fn_modul, instr[1])
+}
+
+// Modulen til ein funksjon: "module"-feltet i NCB-en, elles alt før siste punktum.
+funksjon ncd_fn_modul(funksjonar, fname) -> tekst {
+    la def = funksjonar[fname]
+    hvis def != null og builtin.type(def) == "ordbok" og finnes_nøkkel(def, "module") og builtin.type(def["module"]) == "tekst" { returner tekst(def["module"]) }
+    la n = tekst(fname)
+    la i = lengde(n) - 1
+    mens i >= 0 {
+        hvis builtin.slice(n, i, i + 1) == "." { returner builtin.slice(n, 0, i) }
+        i = i - 1
+    }
+    returner "__main__"
+}
+
 // Last (eller allokér og cache) den internerte strengkonstanten `s` til Xdst.
 // Utan slot (t.d. kallarar utanfor ncval_compile_program) = gammal allokering.
 // Scratch: som emit_ncval_str_const (x9, x10, x13) + x9 for slot-offset.
@@ -2794,6 +2820,61 @@ funksjon ncd_feil_melding_namn(r: liste_heiltall, prefiks: tekst) -> heiltall {
     returner 0
 }
 
+// R2/F08/F20: Xdst = typenamnet til Xsrc for feilmeldingar, som vm_verdi_typenamn /
+// vm_type_name: «__type__» for ein struktur (ordbok med «__struktur__»), elles null,
+// heiltall, bool, tekst, liste, kart, desimaltall, bytes. Src/dst: x19–x24 (emit_map_get
+// klobbar x0–x6, x9–x17).
+funksjon ncd_feil_typenamn(r: liste_heiltall, src: heiltall, dst: heiltall) -> heiltall {
+    la namn: liste_tekst = ["null", "heiltall", "bool", "tekst", "liste", "kart", "desimaltall", "bytes"]
+    la til_ferdig: liste_heiltall = []
+    emit_ncval_str_const(r, "null", dst)
+    la p_null = lengde(r)
+    legg_u32(r, 0)                                              // cbz Xsrc, ferdig
+    la t = 0
+    mens t < lengde(namn) {
+        legg_u32(r, agc.e_ldr(9, src, 0))
+        legg_u32(r, agc.e_cmp_i(9, t))
+        la p_ne = lengde(r)
+        legg_u32(r, 0)                                          // b.ne neste
+        emit_ncval_str_const(r, namn[t], dst)
+        hvis t != 5 {
+            legg_til(til_ferdig, lengde(r))
+            legg_u32(r, 0)                                      // b ferdig
+        }
+        hvis t == 5 {
+            // kart: struktur → __type__
+            emit_ncval_str_const(r, "__struktur__", 11)
+            emit_map_get(r, src, 11, 12, usann)
+            legg_til(til_ferdig, lengde(r))
+            legg_u32(r, 0xB400000C)                             // cbz x12, ferdig (lappa under)
+            emit_ncval_str_const(r, "__type__", 11)
+            emit_map_get(r, src, 11, 12, usann)
+            legg_til(til_ferdig, lengde(r))
+            legg_u32(r, 0xB400000C)                             // cbz x12, ferdig
+            legg_u32(r, agc.e_ldr(9, 12, 0))
+            legg_u32(r, agc.e_cmp_i(9, 3))
+            legg_til(til_ferdig, lengde(r))
+            legg_u32(r, 0x54000001)                             // b.ne ferdig
+            legg_u32(r, agc.e_mov(dst, 12))
+            legg_til(til_ferdig, lengde(r))
+            legg_u32(r, 0)                                      // b ferdig
+        }
+        ncd_bcond(r, p_ne, lengde(r), 1)
+        t = t + 1
+    }
+    // ukjend tagg (closure o.l.): behald «null»-teksten? Bruk type() sitt namn.
+    emit_type_ncval(r, src, dst)
+    la l_ferdig = lengde(r)
+    agc.patch_cbz(r, p_null, l_ferdig, src)
+    for p i til_ferdig {
+        la ord = r[p] | (r[p + 1] << 8) | (r[p + 2] << 16) | (r[p + 3] << 24)
+        hvis ord == 0xB400000C { agc.patch_cbz(r, p, l_ferdig, 12) }
+        ellers hvis ord == 0x54000001 { ncd_bcond(r, p, l_ferdig, 1) }
+        ellers { ncd_b(r, p, l_ferdig) }
+    }
+    returner 0
+}
+
 // Feil-blokka: {"kode", "inngangar" (namn → offset), "td" (offset til bl __throw_dispatch__,
 // −1 utan unnataks-globalar)}. ev = globalindeksen til __exc_val__ eller −1.
 funksjon emit_feil_rutinar(os: tekst, ev: heiltall) -> ordbok {
@@ -2888,6 +2969,39 @@ funksjon emit_feil_rutinar(os: tekst, ev: heiltall) -> ordbok {
     emit_str_concat(r, 19, 20, 19)
     emit_str_concat(r, 19, 23, 19)
     legg_u32(r, agc.e_mov(0, 19))
+    legg_til(til_kast, agc.plass(r))                            // (assert_eq) b kast
+    // R2/F08: TypeFeil for aritmetikk på ikkje-tal (vm_aritmetikk_feil / UNARY_NEG i vm.no):
+    //   «TypeFeil: operatoren <op> krev <tal | tal eller tekst>, fekk <a> og <b>»
+    //   «TypeFeil: unær - krev eit tal, fekk <a>»
+    // Typenamna er strukturnamnet (__type__) for ein struktur, elles type().
+    la tf_hale: liste_heiltall = []
+    la tf_op: liste_tekst = ["__feil_type_add", "+", "tal eller tekst", "__feil_type_sub", "-", "tal", "__feil_type_mul", "*", "tal", "__feil_type_div", "/", "tal", "__feil_type_mod", "%", "tal"]
+    la tfi = 0
+    mens tfi < lengde(tf_op) {
+        inn[tf_op[tfi]] = lengde(r)
+        legg_u32(r, agc.e_mov(19, 0))
+        legg_u32(r, agc.e_mov(20, 1))
+        emit_ncval_str_const(r, "TypeFeil: operatoren " + tf_op[tfi + 1] + " krev " + tf_op[tfi + 2] + ", fekk ", 21)
+        legg_til(tf_hale, agc.plass(r))                         // b type_hale
+        tfi = tfi + 3
+    }
+    la l_tf_hale = lengde(r)
+    for p i tf_hale { agc.patch_b(r, p, l_tf_hale) }
+    ncd_feil_typenamn(r, 19, 22)
+    emit_str_concat(r, 21, 22, 21)
+    emit_ncval_str_const(r, " og ", 23)
+    emit_str_concat(r, 21, 23, 21)
+    ncd_feil_typenamn(r, 20, 22)
+    emit_str_concat(r, 21, 22, 21)
+    legg_u32(r, agc.e_mov(0, 21))
+    legg_til(til_kast, agc.plass(r))
+    inn["__feil_neg"] = lengde(r)
+    legg_u32(r, agc.e_mov(19, 0))
+    emit_ncval_str_const(r, "TypeFeil: unær - krev eit tal, fekk ", 21)
+    ncd_feil_typenamn(r, 19, 22)
+    emit_str_concat(r, 21, 22, 21)
+    legg_u32(r, agc.e_mov(0, 21))
+    legg_til(til_kast, agc.plass(r))
     // __feil_kast (x0 = melding)
     la l_kast = lengde(r)
     inn["__feil_kast"] = l_kast
@@ -2940,7 +3054,7 @@ funksjon ncval_legg_til_feil(all_patchar, image: liste_heiltall, fn_start, os: t
     la treng = usann
     for pt i all_patchar {
         la t = tekst(pt[1])
-        hvis t == "__feil_div" eller t == "__feil_mod" eller t == "__feil_indeks" eller t == "__feil_heiltall" eller t == "__assert" eller t == "__assert_eq" { treng = sann }
+        hvis t == "__feil_div" eller t == "__feil_mod" eller t == "__feil_indeks" eller t == "__feil_heiltall" eller t == "__assert" eller t == "__assert_eq" eller t == "__feil_neg" eller builtin.starts_with(t, "__feil_type_") { treng = sann }
     }
     hvis ikkje treng { returner 0 }
     la ev = 0 - 1
@@ -9869,7 +9983,7 @@ funksjon ncval_lambda_captures(funksjonar, order) -> ordbok {
 // bl_patchar samlar [pos_i_native, mål-namn(, kind)] for lenking av multi-
 // drivaren. kind == "lamaddr" → adr+movz/movk+add-sekvens (closure→fn-adresse);
 // elles bl. lam_captures = fanga-namn for DENNE funksjonen (om lambda) elles [].
-funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures, fn_namn: tekst) -> ordbok_tekst {
+funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures, fn_namn: tekst, fn_modul: tekst) -> ordbok_tekst {
     // F23: namne-bloben for feilmeldingane («… ved <fn>»), sjå ncd_namn_adr.
     la fnctx = [fn_namn, 0 - 1]
     hvis lam_captures == null { lam_captures = [] }
@@ -9913,7 +10027,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             // oppslag på tomme/populerte dict ustabile ikkje-null-verdiar.
             // Modul-globalar (registrert i `globals` av ncval_compile_program sin
             // fri-variabel-skann) er IKKJE lokale — STORE_NAME rutar til x25-slotet.
-            hvis ikkje finnes_nøkkel(variablar, kode[s][1]) og ikkje finnes_nøkkel(globals, kode[s][1]) {
+            hvis ikkje finnes_nøkkel(variablar, kode[s][1]) og ikkje finnes_nøkkel(globals, ncd_gnøkkel(fn_modul, kode[s][1])) {
                 variablar[kode[s][1]] = variabel_antal
                 variabel_antal = variabel_antal + 1
             }
@@ -10124,6 +10238,14 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0)                                 // b add_end
             la lbl_int = lengde(native)
             la p_add_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
+            // R2/F08: heiltal + heiltal her; tekst til høgre → tekst(venstre) + høgre ("1x");
+            // alt anna (bool, liste, ingenting …) → TypeFeil (vm.no BINARY_ADD).
+            legg_u32(native, agc.e_cmp_i(9, 1))
+            la p_add_v = lengde(native)
+            legg_u32(native, 0)                                 // b.ne seint
+            legg_u32(native, agc.e_cmp_i(10, 1))
+            la p_add_h = lengde(native)
+            legg_u32(native, 0)                                 // b.ne seint
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0x8B0A0129)                        // add x9, x9, x10
@@ -10132,7 +10254,27 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0)                                 // b add_end
             la lbl_add_des = lengde(native)
             emit_desimal_arit_kall(native, venstre, høgre, venstre, 0, bl_patchar, globals, os, fnctx)
+            la p_add_des_end = lengde(native)
+            legg_u32(native, 0)                                 // b add_end
+            la lbl_add_seint = lengde(native)
+            ncd_bcond(native, p_add_v, lbl_add_seint, 1)
+            ncd_bcond(native, p_add_h, lbl_add_seint, 1)
+            legg_u32(native, agc.e_cmp_i(10, 3))
+            la p_add_tf = lengde(native)
+            legg_u32(native, 0)                                 // b.ne typefeil
+            ncd_emit_tekst_d(native, venstre, venstre, funksjonar, bl_patchar)
+            emit_str_concat(native, venstre, høgre, venstre)
+            la p_add_tk_end = lengde(native)
+            legg_u32(native, 0)                                 // b add_end
+            ncd_bcond(native, p_add_tf, lengde(native), 1)
+            legg_u32(native, agc.e_mov(0, venstre))
+            legg_u32(native, agc.e_mov(1, høgre))
+            la p_add_tfbl = lengde(native)
+            legg_u32(native, 0x94000000)                        // bl __feil_type_add (returnerer aldri)
+            legg_til(bl_patchar, [p_add_tfbl, "__feil_type_add"])
             la lbl_end = lengde(native)
+            ncd_b(native, p_add_des_end, lbl_end)
+            ncd_b(native, p_add_tk_end, lbl_end)
             ncd_bcond(native, p_add_des, lbl_add_des, 0)
             ncd_b(native, p_add_int_end, lbl_end)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
@@ -10151,6 +10293,21 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis op == "BINARY_MOD" { des_kode = 4 }
             la p_ar_des = -1
             hvis des_kode >= 0 { p_ar_des = emit_desimal_vakt2(native, venstre, høgre) }
+            // R2/F08: − × / % krev tal (heiltal her; desimaltal over) → elles TypeFeil.
+            la p_tf_v = 0 - 1
+            la p_tf_h = 0 - 1
+            la tf_rutine = "__feil_type_sub"
+            hvis des_kode == 2 { tf_rutine = "__feil_type_mul" }
+            hvis des_kode == 3 { tf_rutine = "__feil_type_div" }
+            hvis des_kode == 4 { tf_rutine = "__feil_type_mod" }
+            hvis des_kode >= 1 {
+                legg_u32(native, agc.e_cmp_i(9, 1))
+                p_tf_v = lengde(native)
+                legg_u32(native, 0)                             // b.ne typefeil
+                legg_u32(native, agc.e_cmp_i(10, 1))
+                p_tf_h = lengde(native)
+                legg_u32(native, 0)                             // b.ne typefeil
+            }
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             hvis op == "BINARY_ADD" eller op == "ADD" {
@@ -10183,6 +10340,18 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0)                             // b ar_end
                 la lbl_ar_des = lengde(native)
                 emit_desimal_arit_kall(native, venstre, høgre, venstre, des_kode, bl_patchar, globals, os, fnctx)
+                hvis p_tf_v >= 0 {
+                    la p_des_slutt = lengde(native)
+                    legg_u32(native, 0)                         // b ar_end
+                    ncd_bcond(native, p_tf_v, lengde(native), 1)
+                    ncd_bcond(native, p_tf_h, lengde(native), 1)
+                    legg_u32(native, agc.e_mov(0, venstre))
+                    legg_u32(native, agc.e_mov(1, høgre))
+                    la p_tf_bl = lengde(native)
+                    legg_u32(native, 0x94000000)                // bl __feil_type_* (returnerer aldri)
+                    legg_til(bl_patchar, [p_tf_bl, tf_rutine])
+                    ncd_b(native, p_des_slutt, lengde(native))
+                }
                 la lbl_ar_end = lengde(native)
                 ncd_bcond(native, p_ar_des, lbl_ar_des, 0)
                 ncd_b(native, p_ar_int_end, lbl_ar_end)
@@ -10203,9 +10372,21 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_neg_end = lengde(native)
             legg_u32(native, 0)                                 // b slutt
             la lbl_neg_int = lengde(native)
+            // R2/F08: unær − på noko anna enn tal → TypeFeil (vm.no UNARY_NEG).
+            legg_u32(native, agc.e_cmp_i(10, 1))
+            la p_neg_tf = lengde(native)
+            legg_u32(native, 0)                                 // b.ne typefeil
             legg_u32(native, 0xCB0903E9)                        // neg x9, x9
             emit_ncval_alloc_ptr(native, 9, topp, 1)
+            la p_neg_end2 = lengde(native)
+            legg_u32(native, 0)                                 // b slutt
+            ncd_bcond(native, p_neg_tf, lengde(native), 1)
+            legg_u32(native, agc.e_mov(0, topp))
+            la p_neg_bl = lengde(native)
+            legg_u32(native, 0x94000000)                        // bl __feil_neg (returnerer aldri)
+            legg_til(bl_patchar, [p_neg_bl, "__feil_neg"])
             la lbl_neg_end = lengde(native)
+            ncd_b(native, p_neg_end2, lbl_neg_end)
             ncd_bcond(native, p_neg_int, lbl_neg_int, 1)
             ncd_b(native, p_neg_end, lbl_neg_end)
             opnd_ut(native, djupn - 1, topp, memmode, home_off)
@@ -10438,8 +10619,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             // Modul-global (NAME-opcode for ein global): skriv til x25-slotet, ikkje lokal.
-            hvis finnes_nøkkel(globals, instr[1]) {
-                la gslotn = globals[instr[1]]
+            hvis finnes_nøkkel(globals, ncd_gnøkkel(fn_modul, instr[1])) {
+                la gslotn = globals[ncd_gnøkkel(fn_modul, instr[1])]
                 legg_u32(native, 0xF9000320 | (gslotn << 10) | topp) // str Xtopp, [x25, #slot*8]
             } ellers {
                 la idx = variablar[instr[1]]
@@ -10455,9 +10636,9 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 // Modul-global via LOAD_NAME (kompilatoren emitterte NAME i staden for
                 // GLOBAL for ein modul-global): last frå x25-slotet. Registrert i
                 // `globals` av fri-variabel-skannen i ncval_compile_program.
-                hvis finnes_nøkkel(globals, ln) {
+                hvis finnes_nøkkel(globals, ncd_gnøkkel(fn_modul, ln)) {
                     hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
-                    la gslotl = globals[ln]
+                    la gslotl = globals[ncd_gnøkkel(fn_modul, ln)]
                     la gmåll = opnd_push_reg(djupn, memmode)
                     legg_u32(native, 0xF9400320 | (gslotl << 10) | gmåll) // ldr Xmål, [x25, #slot*8]
                     opnd_ut(native, djupn, gmåll, memmode, home_off)
@@ -10489,11 +10670,14 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
         } ellers hvis op == "STORE_GLOBAL" {
             // Fase 8: modul-global = [x25 + slot*8]. slot tildelt i ncval_compile_program.
-            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
+            // R2/F14: nøkkelen er modul + "." + namn (valfri tredje operand = modulen,
+            // alias.NAMN = v); før var han berre namnet, so like namn i ulike modular aliaserte.
+            hvis lengde(instr) < 2 eller lengde(instr) > 3 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
                 returner {"ok": "usann", "error": "NcVal STORE_GLOBAL krev namn og stakkverdi", "image": []}
             }
-            hvis ikkje finnes_nøkkel(globals, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend global: " + instr[1], "image": []} }
-            la gslot = globals[instr[1]]
+            la sg_nøkkel = ncd_global_op_nøkkel(instr, fn_modul)
+            hvis ikkje finnes_nøkkel(globals, sg_nøkkel) { returner {"ok": "usann", "error": "NcVal ukjend global: " + sg_nøkkel, "image": []} }
+            la gslot = globals[sg_nøkkel]
             la gtopp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000320 | (gslot << 10) | gtopp) // str Xtopp, [x25, #slot*8]
             djupn = djupn - 1
@@ -10503,12 +10687,13 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         hvis op_segment != 1 {
             // handtert i første segment
         } ellers hvis op == "LOAD_GLOBAL" {
-            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+            hvis lengde(instr) < 2 eller lengde(instr) > 3 eller builtin.type(instr[1]) != "tekst" {
                 returner {"ok": "usann", "error": "NcVal LOAD_GLOBAL krev namn", "image": []}
             }
-            hvis ikkje finnes_nøkkel(globals, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend global: " + instr[1], "image": []} }
+            la lg_nøkkel = ncd_global_op_nøkkel(instr, fn_modul)
+            hvis ikkje finnes_nøkkel(globals, lg_nøkkel) { returner {"ok": "usann", "error": "NcVal ukjend global: " + lg_nøkkel, "image": []} }
             hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
-            la gslot2 = globals[instr[1]]
+            la gslot2 = globals[lg_nøkkel]
             la gmål = opnd_push_reg(djupn, memmode)
             legg_u32(native, 0xF9400320 | (gslot2 << 10) | gmål) // ldr Xmål, [x25, #slot*8]
             opnd_ut(native, djupn, gmål, memmode, home_off)
@@ -12831,9 +13016,10 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         la gi = 0
         mens gi < lengde(gcode) {
             la gop = opcode(gcode[gi])
-            hvis (gop == "LOAD_GLOBAL" eller gop == "STORE_GLOBAL") og lengde(gcode[gi]) == 2 og builtin.type(gcode[gi][1]) == "tekst" {
-                hvis ikkje finnes_nøkkel(globals, gcode[gi][1]) {
-                    globals[gcode[gi][1]] = gcount
+            hvis (gop == "LOAD_GLOBAL" eller gop == "STORE_GLOBAL") og (lengde(gcode[gi]) == 2 eller lengde(gcode[gi]) == 3) og builtin.type(gcode[gi][1]) == "tekst" {
+                la gnk = ncd_global_op_nøkkel(gcode[gi], ncd_fn_modul(funksjonar, order[gf]))   // R2/F14: modul + namn
+                hvis ikkje finnes_nøkkel(globals, gnk) {
+                    globals[gnk] = gcount
                     gcount = gcount + 1
                 }
             }
@@ -12900,8 +13086,9 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         mens fgi < lengde(fgnavn) {
             la fgnm = tekst(fgnavn[fgi])
             hvis ikkje finnes_nøkkel(fglokale, fgnm) og fgnm != "null" og fgnm != "ingenting" og fgnm != "sann" og fgnm != "usann" og fgnm != "true" og fgnm != "false" {
-                hvis ikkje finnes_nøkkel(globals, fgnm) {
-                    globals[fgnm] = gcount
+                la fgnk = ncd_gnøkkel(ncd_fn_modul(funksjonar, order[fg]), fgnm)   // R2/F14
+                hvis ikkje finnes_nøkkel(globals, fgnk) {
+                    globals[fgnk] = gcount
                     gcount = gcount + 1
                 }
             }
@@ -12950,10 +13137,10 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         // Prøv rask reg-modus (x19–x24, byte-identisk med før). Sprekk operand-
         // stakken (>6), rekompiler funksjonen i mem-modus der operandane bur i
         // minne-heimar etter lokalvariablane (operand-spilling).
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname)
+        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname)
+            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         }
         // NC_BUILTIN_REPORT=1 (A1-review): ein funksjon som stoppar, blir notert (STOPPA),
         // og kompileringa held fram med neste, so rapporten dekkjer heile programmet.
@@ -13240,9 +13427,10 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
         la gi = 0
         mens gi < lengde(gcode) {
             la gop = opcode(gcode[gi])
-            hvis (gop == "LOAD_GLOBAL" eller gop == "STORE_GLOBAL") og lengde(gcode[gi]) == 2 og builtin.type(gcode[gi][1]) == "tekst" {
-                hvis ikkje finnes_nøkkel(globals, gcode[gi][1]) {
-                    globals[gcode[gi][1]] = gcount
+            hvis (gop == "LOAD_GLOBAL" eller gop == "STORE_GLOBAL") og (lengde(gcode[gi]) == 2 eller lengde(gcode[gi]) == 3) og builtin.type(gcode[gi][1]) == "tekst" {
+                la gnk = ncd_global_op_nøkkel(gcode[gi], ncd_fn_modul(funksjonar, order[gf]))   // R2/F14: modul + namn
+                hvis ikkje finnes_nøkkel(globals, gnk) {
+                    globals[gnk] = gcount
                     gcount = gcount + 1
                 }
             }
@@ -13306,8 +13494,9 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
         mens pfgi < lengde(pfgnavn) {
             la pfgnm = tekst(pfgnavn[pfgi])
             hvis ikkje finnes_nøkkel(pfglokale, pfgnm) og pfgnm != "null" og pfgnm != "ingenting" og pfgnm != "sann" og pfgnm != "usann" og pfgnm != "true" og pfgnm != "false" {
-                hvis ikkje finnes_nøkkel(globals, pfgnm) {
-                    globals[pfgnm] = gcount
+                la pfgnk = ncd_gnøkkel(ncd_fn_modul(funksjonar, order[pfg]), pfgnm)   // R2/F14
+                hvis ikkje finnes_nøkkel(globals, pfgnk) {
+                    globals[pfgnk] = gcount
                     gcount = gcount + 1
                 }
             }
@@ -13357,10 +13546,10 @@ funksjon ncval_compile_range(ncb, os: tekst, order, globals, start: heiltall, co
         la fn_caps = []
         hvis finnes_nøkkel(lambda_captures, fname) { fn_caps = lambda_captures[fname] }
         la bl_patchar = []
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname)
+        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname)
+            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         }
         hvis res["ok"] != "sann" { returner {"ok": "usann", "error": "[" + fname + "] " + tekst(res["error"]), "frags": []} }
         legg_til(frags, {"name": fname, "words": res["image"], "patches": bl_patchar})
