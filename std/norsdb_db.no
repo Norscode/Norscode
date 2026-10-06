@@ -23,12 +23,14 @@ funksjon _er_json(sti: tekst) -> boolsk {
     returner builtin.slice(t, 0, 1) == "{"
 }
 
-// open med format-deteksjon: binær (.cp) → opne; gamal JSON-.db → auto-migrer; elles fersk.
+// open med format-deteksjon: eksisterande motor-filer (.cp/.wal) → opne; gamal
+// JSON-.db → auto-migrer; elles fersk. (Ei .wal utan .cp — krasj før første
+// checkpoint — blir òg opna, så ingen endringar går tapt.)
 funksjon open(sti: tekst) -> ordbok_tekst {
     la h = motor.db_ny("")
     hvis sti == "" eller sti == ":memory:" {
         h = motor.db_ny("")
-    } ellers hvis builtin.fil_finnes(sti + ".cp") {
+    } ellers hvis motor.db_fil_finst(sti) {
         h = motor.db_åpne(sti)
     } ellers hvis builtin.fil_finnes(sti) og _er_json(sti) {
         migrer_json(sti, sti)
@@ -149,9 +151,8 @@ funksjon backup(handle, sti: tekst) -> bool {
     hvis sti == "" { returner usann }
     // Skriv eit sjølvstendig checkpoint DIREKTE til `sti` (ikkje sti+".cp"), slik
     // at backup-fila finst på den oppgjevne stien og kan kopierast/gjenopprettast
-    // som éi fil. Den gamle db_checkpoint-vegen skreiv sti+".cp" → backup-fila
-    // fanst aldri på `sti`, og restore («Kan ikkje opne fil») + fil_finnes feila.
-    motor.checkpoint_skriv(sti, motor.db_serialiser(handle))
+    // som éi fil (legg ho som <mål>.cp).
+    motor.db_backup(handle, sti)
     returner sann
 }
 
@@ -187,26 +188,31 @@ funksjon query_rader(handle, sql_str: tekst) -> tekst {
     returner sql.query_rader(handle, sql_str)
 }
 
-// ── Transaksjonar (snapshot via db_serialiser; in-place replay ved rollback) ──
+// ── Transaksjonar (angre-logg i motoren) ─────────────────────────────
+// begin er O(1) (før: heile databasen serialisert som snapshot ved kvar begin).
+// Endringane går til WAL-en som vanleg; rollback spelar angre-loggen baklengs.
 funksjon begin(handle) -> bool {
-    handle["_snap"] = motor.db_serialiser(handle)
+    motor.db_tx_start(handle)
     handle["_i_tx"] = sann
     returner sann
 }
 
+// commit: endringane ligg alt i WAL-en; checkpointet er inkrementelt (berre
+// endringane blir skrivne), så commit kostar ikkje ei omskriving av heile fila.
 funksjon commit(handle) -> bool {
+    motor.db_tx_slutt(handle)
     handle["_i_tx"] = usann
     motor.db_checkpoint(handle)
     returner sann
 }
 
 funksjon rollback(handle) -> bool {
-    hvis ikke finnes_nøkkel(handle, "_snap") { returner usann }
-    // In-place: tøm tabellane og replay snapshot inn i same objekt (kallaren held ref).
-    handle["tabellar"] = {}
-    motor.db_replay(handle, handle["_snap"])
+    hvis ikke motor.db_tx_aktiv(handle) { returner usann }
+    motor.db_tx_angre(handle)
     handle["_i_tx"] = usann
-    motor.db_checkpoint(handle)
+    // Full checkpoint: WAL-en inneheld dei attenderulla endringane, så han må
+    // ikkje bli lagd til som delta — skriv heile (attenderulla) tilstanden.
+    motor.db_checkpoint_full(handle)
     returner sann
 }
 

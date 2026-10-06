@@ -1,0 +1,129 @@
+// Punkt 5d: inkrementell checkpoint + krasjtryggleik i NORSDB2-formatet.
+//  - checkpoint skriv berre endringane (delta-segment), ikkje heile fila
+//  - kompaktering når delta-segmenta blir større enn basen
+//  - trunkert WAL-hale, avbrote delta-segment og ein attverande .cp2 (krasj midt i
+//    kompaktering) gjev ingen tap og ingen søppel
+//  - ei WAL som alt er absorbert i checkpointet blir ikkje spela av to gonger
+//  - gamle NORSDB1-filer (binære) blir lesne og skrivne om
+
+bruk std.norsdb_motor som motor
+bruk std.norsdb_sql som sql
+
+funksjon _rydd(sti: tekst) {
+    hvis builtin.fil_finnes(sti + ".cp") { builtin.fil_slett(sti + ".cp") }
+    hvis builtin.fil_finnes(sti + ".cp2") { builtin.fil_slett(sti + ".cp2") }
+    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+}
+
+funksjon _storleik(sti: tekst) -> heltall {
+    hvis ikke builtin.fil_finnes(sti) { returner 0 }
+    returner lengde(builtin.fil_les(sti))
+}
+
+funksjon start() -> heltall {
+    la sti = "/tmp/norsdb_checkpoint_test"
+    _rydd(sti)
+
+    la db = sql.opne(sti)
+    sql.exec(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT UNIQUE)")
+    la i = 0
+    mens i < 200 {
+        sql.exec(db, "INSERT INTO t (v) VALUES ('rad nummer " + tekst_fra_heltall(i) + " med litt fyll')")
+        i = i + 1
+    }
+    motor.db_checkpoint(db)
+    assert(builtin.fil_finnes(sti + ".wal") == usann)
+    la base = _storleik(sti + ".cp")
+    assert(base > 5000)
+
+    // ── Inkrementell: éi endring → fila veks med berre éin liten delta ─
+    sql.exec(db, "INSERT INTO t (v) VALUES ('ny')")
+    motor.db_checkpoint(db)
+    la etter = _storleik(sti + ".cp")
+    assert(etter > base)
+    assert(etter - base < 200)
+    // Ingen endringar → ingenting skrive.
+    motor.db_checkpoint(db)
+    assert_eq(_storleik(sti + ".cp"), etter)
+    la db2 = sql.opne(sti)
+    assert_eq(sql.query_int(db2, "SELECT COUNT(*) FROM t"), 201)
+    assert_eq(sql.query_text(db2, "SELECT id FROM t WHERE v = 'ny'"), "201")
+
+    // ── Kompaktering når delta > base ─────────────────────────────────
+    i = 0
+    mens i < 150 {
+        sql.exec(db, "UPDATE t SET v = 'endra " + tekst_fra_heltall(i) + " med endå meir fyll for å fylle delta' WHERE id = " + tekst_fra_heltall(i + 1))
+        i = i + 1
+    }
+    motor.db_checkpoint(db)
+    sql.exec(db, "DELETE FROM t WHERE id > 150")
+    motor.db_checkpoint(db)
+    la db3 = sql.opne(sti)
+    assert_eq(sql.query_int(db3, "SELECT COUNT(*) FROM t"), 150)
+    assert_eq(sql.query_text(db3, "SELECT v FROM t WHERE id = 7"), "endra 6 med endå meir fyll for å fylle delta")
+    // Etter kompaktering er fila om lag éin base (ikkje base + alle delta).
+    assert(_storleik(sti + ".cp") < 3 * base)
+
+    // ── Trunkert WAL-hale (krasj midt i skriving) ─────────────────────
+    sql.exec(db3, "INSERT INTO t (v) VALUES ('heil')")
+    builtin.fil_append(sti + ".wal", "I" + builtin.chr(31) + "t" + builtin.chr(31) + "999" + builtin.chr(31) + "halv")
+    la db4 = sql.opne(sti)
+    assert_eq(sql.query_int(db4, "SELECT COUNT(*) FROM t"), 151)
+    // Rowid-teljaren er persistert (id-ar blir ikkje gjenbrukte etter DELETE).
+    assert_eq(sql.query_text(db4, "SELECT id FROM t WHERE v = 'heil'"), "202")
+    // Nye skriv etter halen blir ikkje limte til det halve posten.
+    sql.exec(db4, "INSERT INTO t (v) VALUES ('etter hale')")
+    la db5 = sql.opne(sti)
+    assert_eq(sql.query_int(db5, "SELECT COUNT(*) FROM t"), 152)
+    assert_eq(sql.query_text(db5, "SELECT id FROM t WHERE v = 'etter hale'"), "203")
+
+    // ── WAL som alt er absorbert (krasj etter checkpoint, før WAL-sletting) ─
+    la wal_kopi = builtin.fil_les(sti + ".wal")
+    motor.db_checkpoint(db5)
+    builtin.fil_skriv(sti + ".wal", wal_kopi)
+    la db6 = sql.opne(sti)
+    assert_eq(sql.query_int(db6, "SELECT COUNT(*) FROM t"), 152)
+    assert(builtin.fil_finnes(sti + ".wal") == usann)
+
+    // ── Avbrote delta-segment i checkpoint-fila ──────────────────────
+    builtin.fil_append(sti + ".cp", "S" + builtin.chr(31) + "77" + builtin.chr(30) + "I" + builtin.chr(31) + "t" + builtin.chr(31) + "500" + builtin.chr(31) + "søppel")
+    la db7 = sql.opne(sti)
+    assert_eq(sql.query_int(db7, "SELECT COUNT(*) FROM t"), 152)
+    sql.exec(db7, "INSERT INTO t (v) VALUES ('etter avbrot')")
+    motor.db_checkpoint(db7)
+    la db8 = sql.opne(sti)
+    assert_eq(sql.query_int(db8, "SELECT COUNT(*) FROM t"), 153)
+    assert_eq(sql.query_text(db8, "SELECT COUNT(*) FROM t WHERE v = 'søppel'"), "0")
+
+    // ── Attverande .cp2 (krasj etter .cp2, før .cp vart skriven om) ──
+    la full = builtin.fil_les(sti + ".cp")
+    builtin.fil_skriv(sti + ".cp2", full)
+    builtin.fil_skriv(sti + ".cp", "NORSDB2" + builtin.chr(30) + "S" + builtin.chr(31) + "1")
+    la db9 = sql.opne(sti)
+    assert_eq(sql.query_int(db9, "SELECT COUNT(*) FROM t"), 153)
+    assert(builtin.fil_finnes(sti + ".cp2") == usann)
+    // Constraints overlever kompaktering og gjenoppretting.
+    assert_eq(sql.exec(db9, "INSERT INTO t (v) VALUES ('heil')"), -1)
+
+    // ── Gammalt NORSDB1-format (binært) blir lese og skrive om ───────
+    _rydd(sti)
+    la gml = []
+    la kol = [{"navn": "namn", "tag": motor.tag_tekst()}, {"navn": "alder", "tag": motor.tag_int()}]
+    la p1 = motor._ramme(motor._wal_create("folk", kol))
+    la p2 = motor._ramme(motor._wal_insert("folk", 1, kol, ["Ada", "37"]))
+    la p3 = motor._ramme(motor._wal_insert("folk", 2, kol, ["Linus", "55"]))
+    motor._legg_til_alle(gml, p1)
+    motor._legg_til_alle(gml, p2)
+    motor._legg_til_alle(gml, p3)
+    motor.checkpoint_skriv(sti + ".cp", gml)
+    motor.logg_legg_til(sti + ".wal", motor._wal_insert("folk", 3, kol, ["Bjørn", "29"]))
+    la dbl = sql.opne(sti)
+    assert_eq(sql.query_int(dbl, "SELECT COUNT(*) FROM folk"), 3)
+    assert_eq(sql.query_text(dbl, "SELECT namn FROM folk WHERE alder = 29"), "Bjørn")
+    assert_eq(builtin.slice(builtin.fil_les(sti + ".cp"), 0, 7), "NORSDB2")
+    la dbl2 = sql.opne(sti)
+    assert_eq(sql.query_text(dbl2, "SELECT namn FROM folk WHERE alder = 55"), "Linus")
+
+    _rydd(sti)
+    returner 0
+}
