@@ -1052,6 +1052,8 @@ funksjon ny_komp()
     // ukvalifiserte importerte grensesnittnamn (namn → modul / __AMBIGUOUS__).
     komp["modul_grensesnitt_kart"] = {}
     komp["importert_grensesnitt_kart"] = {}
+    // R2/F14: modulglobalar i importerte modular (modul → {namn → "la"/"konst"}).
+    komp["modul_global_kart"] = {}
     komp["import_alias"] = {}  // alias → fullt modulnamn
     komp["imported_funk_kart"] = {} // unqualified importert funksjon -> fullt namn
     komp["importert_modul_cache"] = {} // modulnamn -> sann
@@ -1287,10 +1289,41 @@ funksjon emit_felt(komp, node, kode) -> boolsk {
             returner sann
         }
     }
+    // R2/F14: alias.NAMN der NAMN er ein modulglobal i den importerte modulen
+    // → LOAD_GLOBAL NAMN modul (global i ein annan modul).
+    la mg = modulglobal_mål(komp, node)
+    hvis mg != "" {
+        legg_til(kode, "[\"LOAD_GLOBAL\"," + json_escape_tekst(node["verdi"]) + "," + json_escape_tekst(mg) + "]")
+        returner sann
+    }
     emit_uttrykk(komp, obj, kode)
     legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
     legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
     returner sann
+}
+
+// R2/F14: er Felt-noden alias.NAMN der alias er eit importalias (ikkje skugga av
+// ein lokal) og NAMN ein modulglobal i den modulen? Returnerer modulnamnet,
+// elles "".
+funksjon modulglobal_mål(komp, node) -> tekst {
+    la obj = node["barn"][0]
+    hvis obj["type"] != "Ident" { returner "" }
+    la alias = tekst(obj["verdi"])
+    hvis har_nokkel(komp["current_locals"], alias) eller ikkje har_nokkel(komp["import_alias"], alias) { returner "" }
+    la m = komp["import_alias"][alias]
+    hvis ikkje har_nokkel(komp["modul_global_kart"], m) { returner "" }
+    hvis ikkje har_nokkel(komp["modul_global_kart"][m], node["verdi"]) { returner "" }
+    returner m
+}
+
+// R2/F14/F15: STORE_GLOBAL til alias.NAMN (verdien ligg på stacken). Ein
+// konst i den andre modulen kan ikkje tilordnast.
+funksjon emit_modulglobal_lagring(komp, node, m: tekst, kode) -> heiltall {
+    hvis komp["modul_global_kart"][m][node["verdi"]] == "konst" {
+        kast "Konstfeil linje " + tekst(node["linje"]) + ": kan ikkje tilordne til konstanten " + m + "." + tekst(node["verdi"])
+    }
+    legg_til(kode, "[\"STORE_GLOBAL\"," + json_escape_tekst(node["verdi"]) + "," + json_escape_tekst(m) + "]")
+    returner 0
 }
 
 // Uttømmande match over enum: når kvart case-mønster er EnumNamn.Variant for
@@ -1336,6 +1369,12 @@ funksjon sjekk_enum_match_dekning(komp, node) -> heiltall {
 }
 
 funksjon emit_load_namn(komp, kode, namn: tekst) -> heiltall {
+    // R2/F14: i modul-init blir toppnivå-`la` lagra med STORE_GLOBAL, så seinare
+    // toppnivåkode (`la x = 2` så `skriv(x)`) må lese han med LOAD_GLOBAL òg.
+    hvis komp["in_module_init"] og har_nokkel(komp["global_kart"], namn) {
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_GLOBAL", namn))
+        returner 0
+    }
     hvis ikkje komp["in_module_init"] og har_nokkel(komp["global_kart"], namn) og ikkje har_nokkel(komp["current_locals"], namn) {
         legg_til(kode, json_instruksjon_med_tekst("LOAD_GLOBAL", namn))
     } ellers {
@@ -2061,6 +2100,12 @@ funksjon emit_sett_verdi(komp, mål, verdi_node, kode)
         legg_til(kode, json_instruksjon_uten_arg("INDEX_SET"))
         legg_til(kode, json_instruksjon_uten_arg("POP"))
     slutt
+    // R2/F14: alias.NAMN = verdi → STORE_GLOBAL NAMN modul.
+    hvis mål["type"] == "Felt" og modulglobal_mål(komp, mål) != ""
+        emit_uttrykk(komp, verdi_node, kode)
+        emit_modulglobal_lagring(komp, mål, modulglobal_mål(komp, mål), kode)
+        returner 0
+    slutt
     hvis mål["type"] == "Felt"
         // obj.felt = verdi → LOAD obj, PUSH felt, eval verdi, INDEX_SET, POP
         emit_uttrykk(komp, mål["barn"][0], kode)
@@ -2660,6 +2705,28 @@ funksjon emit_setning(komp, node, kode)
             legg_til(kode, json_instruksjon_uten_arg("INDEX_SET"))
             legg_til(kode, "[\"POP\"]")
         slutt
+
+        // R2/F14: alias.NAMN += expr (modulglobal) og obj.felt += expr. Før
+        // vart ein Felt-mål stilt hoppa over (ingen kode i det heile).
+        hvis mål["type"] == "Felt"
+            la aug_mg = modulglobal_mål(komp, mål)
+            hvis aug_mg != ""
+                emit_uttrykk(komp, mål, kode)
+                emit_uttrykk(komp, verdi_node, kode)
+                legg_til(kode, json_instruksjon_uten_arg(binop_opcode))
+                emit_modulglobal_lagring(komp, mål, aug_mg, kode)
+            ellers
+                emit_uttrykk(komp, mål["barn"][0], kode)
+                legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", mål["verdi"]))
+                emit_uttrykk(komp, mål["barn"][0], kode)
+                legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", mål["verdi"]))
+                legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+                emit_uttrykk(komp, verdi_node, kode)
+                legg_til(kode, json_instruksjon_uten_arg(binop_opcode))
+                legg_til(kode, json_instruksjon_uten_arg("INDEX_SET"))
+                legg_til(kode, "[\"POP\"]")
+            slutt
+        slutt
         returner sann
     slutt
 
@@ -2961,6 +3028,29 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
                 isk[node["verdi"]] = modul_namn
             slutt
         slutt
+        // R2/F14: modulglobalar i importerte modular (alias.NAMN les/skriv).
+        // Verdien er "konst" for konst-bindingar (F15), elles "la".
+        hvis node["type"] == "La" eller node["type"] == "LaDestrukt"
+            la mgl = komp["modul_global_kart"]
+            hvis ikkje har_nokkel(mgl, modul_namn)
+                mgl[modul_namn] = {}
+            slutt
+            la modul_globalar = mgl[modul_namn]
+            hvis node["type"] == "La"
+                hvis har_nokkel(node, "konst") og node["konst"] == sann
+                    modul_globalar[node["verdi"]] = "konst"
+                ellers
+                    modul_globalar[node["verdi"]] = "la"
+                slutt
+            ellers hvis lengde(node["barn"]) > 0
+                la dm = node["barn"][0]
+                la dmi = 0
+                mens dmi < lengde(dm["barn"])
+                    modul_globalar[dm["barn"][dmi]["verdi"]] = "la"
+                    dmi = dmi + 1
+                slutt
+            slutt
+        slutt
         // R2/F21: grensesnitt i importerte modular (er_instans / implementerer).
         hvis node["type"] == "Grensesnitt"
             la mgk = komp["modul_grensesnitt_kart"]
@@ -3132,6 +3222,34 @@ funksjon kompiler_funksjon(komp, fn_node)
     returner fullt_namn + "|SEP|" + fn_json
 slutt
 
+// R2/F14: er toppnivå-noden det gamle Python-idiomet `start()` nedst i fila?
+// Runtime kallar start() sjølv; når toppnivå-setningar no køyrer som modul-
+// init, ville start() elles køyrt to gonger. Kallet blir difor hoppa over.
+funksjon er_toppnivå_startkall(komp, node) -> boolsk {
+    hvis node["type"] != "Kall" { returner usann }
+    la f = node["barn"][0]
+    hvis f["type"] != "Ident" eller f["verdi"] != "start" { returner usann }
+    hvis lengde(node["barn"][1]["barn"]) != 0 { returner usann }
+    returner har_nokkel(komp["funk_kart"], "start")
+}
+
+// R2/F14: har programmet køyrbare toppnivå-setningar (ikkje berre
+// deklarasjonar og `la`)? Då treng modulen __module_init__ sjølv utan globalar.
+// Reine namn- og literaluttrykk (t.d. eldre `import x.y`-linjer) har ingen
+// verknad og tel ikkje.
+funksjon har_toppnivå_setning(komp, ast_program) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(ast_program["barn"]) {
+        la node = ast_program["barn"][i]
+        la t = node["type"]
+        hvis t != "Funksjon" og t != "Test" og t != "Bruk" og t != "Enum" og t != "Grensesnitt" og t != "Struktur" og t != "La" og t != "LaDestrukt" og t != "Ident" og t != "Felt" og t != "Tekst" og t != "Heltall" og t != "Desimal" og t != "Bool" og t != "Null" og ikkje er_toppnivå_startkall(komp, node) {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
 funksjon kompiler_modul_init(komp, ast_program) -> tekst {
     la kode = []
     komp["current_locals"] = {}
@@ -3142,7 +3260,7 @@ funksjon kompiler_modul_init(komp, ast_program) -> tekst {
         // Enum/Grensesnitt/Struktur er kompilerings-tids-deklarasjonar (ingen runtime-verdi);
         // emit_setning har ingen case for dei → fall-through til uvilkårleg POP →
         // modul-init-stakk-underflow. Hopp over dei som Funksjon/Test/Bruk.
-        hvis node["type"] != "Funksjon" og node["type"] != "Test" og node["type"] != "Bruk" og node["type"] != "Enum" og node["type"] != "Grensesnitt" og node["type"] != "Struktur" {
+        hvis node["type"] != "Funksjon" og node["type"] != "Test" og node["type"] != "Bruk" og node["type"] != "Enum" og node["type"] != "Grensesnitt" og node["type"] != "Struktur" og ikkje er_toppnivå_startkall(komp, node) {
             emit_setning(komp, node, kode)
         }
         i = i + 1
@@ -3329,8 +3447,18 @@ funksjon kompiler_program(ast_program, modul_namn)
     // Andre pass: kompiler kvar funksjon
     funk_json_par = []
     test_json_par = []
-    hvis lengde(komp["global_namn"]) > 0 {
+    // R2/F14: __module_init__ blir emittert når modulen har globalar ELLER
+    // toppnivå-setningar (t.d. ein modul som berre skriv ved init). Før vart
+    // toppnivå-setningar i ein modul utan globalar stilt kasta.
+    la toppnivå_setning = har_toppnivå_setning(komp, ast_program)
+    la treng_init = lengde(komp["global_namn"]) > 0 eller toppnivå_setning
+    hvis treng_init {
         legg_til(funk_json_par, kompiler_modul_init(komp, ast_program))
+    }
+    // R2/F14: skriptmodus — hovudmodulen utan start() men med toppnivå-
+    // setningar får ein tom start(); toppnivåkoden køyrer som modul-init.
+    hvis modul_namn == "__main__" og toppnivå_setning og ikkje har_nokkel(fk, "start") {
+        legg_til(funk_json_par, "__main__.start|SEP|{\"name\":\"start\",\"module\":\"__main__\",\"params\":[],\"is_async\":false,\"string_encoding\":\"decoded-v1\",\"code\":[[\"PUSH_CONST\",0],[\"RETURN\"]],\"source_lines\":[],\"source_columns\":[]}")
     }
     j = 0
     mens j < lengde(ast_program["barn"])
@@ -3396,7 +3524,7 @@ funksjon kompiler_program(ast_program, modul_namn)
     doc = doc + "\"format\":\"norscode-bytecode-v1\","
     doc = doc + "\"entry\":" + json_escape_tekst(entry) + ","
     la init_liste = []
-    hvis lengde(komp["global_namn"]) > 0 { legg_til(init_liste, modul_namn + ".__module_init__") }
+    hvis treng_init { legg_til(init_liste, modul_namn + ".__module_init__") }
     doc = doc + "\"module_initializers\":" + json_fra_tekstliste(init_liste) + ","
     doc = doc + "\"global_names\":{" + json_escape_tekst(modul_namn) + ":" + json_fra_tekstliste(komp["global_namn"]) + "},"
     doc = doc + "\"imports\":" + json_fra_tekstliste(samla_importar(ast_program)) + ","
