@@ -129,6 +129,59 @@ funksjon vm_arg_liste_frigje(functions, args, fast_mode: boolsk) -> heiltall {
     returner 0
 }
 
+// Spor D: same som vm_ramme_hent/-frigje og vm_arg_liste_hent/-frigje, men med
+// poolane hoista av køyr_funksjon (sjå vm_metric_add_i for grunngjevinga).
+funksjon vm_ramme_hent_p(pool, namn: tekst, ip: heiltall, fast_mode: boolsk) {
+    hvis ikkje fast_mode eller lengde(pool) == 0 {
+        returner ny_rammeverk(namn, ip, fast_mode)
+    }
+    la ramme = pool[lengde(pool) - 1]
+    fjern_siste(pool)
+    vm_tom_kart(ramme["vars"])
+    vm_tom_liste(ramme["stack"])
+    vm_tom_liste(ramme["heap_stack"])
+    vm_tom_kart(ramme["var_heap"])
+    vm_tom_liste(ramme["try_stack"])
+    vm_tom_liste(ramme["cleanup_stack"])
+    ramme["namn"] = namn
+    ramme["ip"] = ip
+    ramme["last_heap_id"] = ""
+    ramme["fast_mode"] = fast_mode
+    ramme["code"] = 0
+    ramme["params"] = 0
+    ramme["label_map"] = 0
+    ramme["pending_control"] = ""
+    ramme["pending_value"] = 0
+    ramme["pending_heap_id"] = ""
+    ramme["pending_target"] = ""
+    ramme["last_exception"] = ""
+    ramme["state"] = "ready"
+    ramme["caller_ip"] = -1
+    ramme["return_target"] = ""
+    ramme["started_ms"] = builtin.tid_ms()
+    returner ramme
+}
+
+funksjon vm_ramme_frigje_p(fast_mode: boolsk, pool, ramme) -> heiltall {
+    hvis ikkje fast_mode { returner 0 }
+    hvis lengde(pool) < 256 { legg_til(pool, ramme) }
+    returner 0
+}
+
+funksjon vm_arg_liste_hent_p(pool, fast_mode: boolsk) {
+    hvis ikkje fast_mode eller lengde(pool) == 0 { returner [] }
+    la args = pool[lengde(pool) - 1]
+    fjern_siste(pool)
+    returner args
+}
+
+funksjon vm_arg_liste_frigje_p(pool, args, fast_mode: boolsk) -> heiltall {
+    hvis ikkje fast_mode { returner 0 }
+    vm_tom_liste(args)
+    hvis lengde(pool) < 256 { legg_til(pool, args) }
+    returner 0
+}
+
 funksjon ramme_les_var(ramme, namn: tekst) {
     // Eldre stage-0-seedar serialiserer LOAD_NAME null som JSON-null. Pure VM
     // skal tolke denne på same måte som dei tekstlege null/ingenting-aliasa.
@@ -507,6 +560,77 @@ funksjon vm_gc_safe_point(functions, force: boolsk) -> heiltall {
         vm_metric_add(functions, "gc_pause_ms", builtin.tid_ms() - gc_start)
     }
     returner 0
+}
+
+// ─── Spor D (VM-fart): hjelparar for den varme løkka ────────────────────────
+// køyr_funksjon held fast_mode og referansane til metrikk-, heap- og pool-
+// karta som lokale verdiar (sjå «hoista VM-tilstand» der). Desse variantane
+// tek dei hoista verdiane direkte i staden for å slå opp functions["__vm_*"]
+// på nytt. På arm64-seedane er ordbokoppslag lineære, og VM-tilstanden ligg
+// SIST i functions-kartet (etter alle programfunksjonane); kvart oppslag kosta
+// difor O(talet på funksjonar) — i eit program på storleik med apptenar var
+// det mesteparten av tida per instruksjon. Semantikken er den same som i
+// vm_metric_add / vm_heap_track / vm_gc_safe_point / vm_ramme_* så lenge
+// fast-flagget og karta er dei same objekta som i functions (køyr_funksjon
+// les dei på nytt etter kvart kall ut av løkka, der dei kan bli bytte).
+funksjon vm_metric_add_i(metrics, key: tekst, delta: heiltall) -> heiltall {
+    hvis ikkje vm_map_har_nokkel(metrics, key) { metrics[key] = "0" }
+    la rå = metrics[key]
+    hvis rå == null eller tekst(rå) == "" eller tekst(rå) == "ingenting" { rå = "0" }
+    la verdi = heltall_fra_tekst(tekst(rå)) + delta
+    metrics[key] = tekst_fra_heltall(verdi)
+    returner verdi
+}
+
+funksjon vm_metric_inc_f(fast: boolsk, metrics, key: tekst) -> heiltall {
+    hvis fast { returner 0 }
+    returner vm_metric_add_i(metrics, key, 1)
+}
+
+funksjon vm_heap_track_f(fast: boolsk, heap, verdi) -> tekst {
+    hvis fast { returner "" }
+    la type_namn = builtin.type(verdi)
+    hvis type_namn != "liste" og type_namn != "ordbok" { returner "" }
+    la bytes: heiltall = 16 + lengde(verdi) * 16
+    returner runtime_memory.alloker(heap, type_namn, bytes)
+}
+
+funksjon vm_gc_safe_point_f(fast: boolsk, functions, metrics, heap, force: boolsk) -> heiltall {
+    hvis fast { returner 0 }
+    vm_metric_add_i(metrics, "gc_safe_points", 1)
+    hvis force eller runtime_memory.gc_trengs(heap) {
+        vm_heap_sync_roots(functions)
+        la gc_start = builtin.tid_ms()
+        runtime_memory.collect_auto(heap, force)
+        vm_metric_add_i(metrics, "gc_pause_ms", builtin.tid_ms() - gc_start)
+    }
+    returner 0
+}
+
+// Same som vm_function_finish, med hoista trace-liste og metrikkart.
+funksjon vm_function_finish_f(fast: boolsk, trace_events, metrics, fn_namn: tekst, start_ms: heiltall) -> heiltall {
+    hvis fast { returner 0 }
+    la brukt = builtin.tid_ms() - start_ms
+    hvis brukt < 0 { brukt = 0 }
+    la event = {"name": fn_namn, "cat": "norscode.vm", "ph": "X", "ts": start_ms * 1000, "dur": brukt * 1000, "pid": 1, "tid": 1}
+    hvis lengde(trace_events) < 10000 {
+        legg_til(trace_events, event)
+    } ellers {
+        vm_metric_add_i(metrics, "trace_events_dropped", 1)
+    }
+    returner vm_metric_add_i(metrics, "function_wall_ms." + fn_namn, brukt)
+}
+
+// Skuggeheap-id-en til siste returverdi blir berre lesen av rot-synken i
+// standardmodus (vm_heap_sync_roots); i fast-modus er feltet daudt.
+funksjon vm_siste_retur_sett(fast: boolsk, functions, heap_id: tekst) -> heiltall {
+    hvis ikkje fast { functions["__vm_last_return_heap_id__"] = heap_id }
+    returner 0
+}
+
+funksjon vm_siste_retur_hent(fast: boolsk, functions) -> tekst {
+    hvis fast { returner "" }
+    returner functions["__vm_last_return_heap_id__"]
 }
 
 funksjon vm_gc_finish(functions) -> heiltall {
@@ -1259,7 +1383,12 @@ funksjon vm_disk_scope_sti(namn: tekst, args) -> tekst {
 }
 
 funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
-    la cap = vm_capability_for(namn)
+    la fast = vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann"
+    returner vm_security_enforce_c(functions, namn, args, vm_capability_for(namn), fast)
+}
+
+// Spor D: same kontroll med capability-namnet og fast-flagget rekna ut av kallaren.
+funksjon vm_security_enforce_c(functions, namn: tekst, args, cap: tekst, fast: boolsk) -> heiltall {
     hvis cap == "" { returner 0 }
     la policy = functions["__vm_security_policy__"]
     la decision = runtime_security.krev(policy, cap)
@@ -1356,7 +1485,7 @@ funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
         functions["__vm_metrics__"]["last_security_denial"] = cap + ":" + decision["reason"]
         kast "Sikkerheitsfeil: " + namn + " manglar capability " + cap + " (" + decision["reason"] + ")"
     }
-    vm_metric_inc(functions, "security_allowed")
+    hvis ikkje fast { vm_metric_add_i(functions["__vm_metrics__"], "security_allowed", 1) }
     returner 0
 }
 
@@ -1479,6 +1608,11 @@ funksjon vm_runtime_init(functions, reset: boolsk) -> heiltall {
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_jit_register__") {
         functions["__vm_jit_register__"] = {}
     }
+    // Spor D: generasjonsboks for kallmål-cachane i køyr_funksjon. Blir aldri
+    // bytt ut (heller ikkje ved reset), berre auka av vm_def_gen_auk.
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
     returner 0
 }
 
@@ -1572,6 +1706,9 @@ funksjon vm_module_load(functions, path: tekst, id: tekst, caps_raw: tekst, deps
         kast "Modulfeil: functions manglar"
     }
 
+    // Spor D: funksjonskartet blir endra under → ugyldiggjer kallmål-cachane
+    // til alle aktive køyr_funksjon-aktiveringar (sjå vm_def_gen_auk).
+    vm_def_gen_auk(functions)
     la modules = functions["__vm_modules__"]
     hvis vm_map_har_nokkel(modules, id) og ikkje reload { kast "Modulfeil: modul er allereie lasta" }
     hvis reload og ikkje vm_map_har_nokkel(modules, id) { kast "Modulfeil: kan ikkje reload ukjent modul" }
@@ -2985,7 +3122,15 @@ funksjon vm_ms_til_iso(ms: heiltall) -> tekst {
     returner tekst_fra_heltall(y) + "-" + vm_pad2(m) + "-" + vm_pad2(d) + "T" + vm_pad2(timar) + ":" + vm_pad2(minutt) + ":" + vm_pad2(sekund) + "Z"
 }
 
+// Spor D: kall_innebygd_f tek fast-flagget frå kallaren (1 = fast, 0 = standard,
+// -1 = ukjent → les functions["__vm_fast_mode__"] som vm_metric_add gjer). Då slepp
+// køyr_funksjon at kvart builtin-kall slår opp flagget i det store functions-kartet,
+// og capability-namnet blir rekna ut éin gong (ikkje både for metrikk og tryggleik).
 funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
+    returner kall_innebygd_f(namn, args, active_functions, -1)
+}
+
+funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>, fast_tilstand: heiltall) -> tekst {
     // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
     mens builtin.starts_with(namn, "builtin.builtin.")
         namn = builtin.slice(namn, 8, lengde(namn))
@@ -3042,20 +3187,27 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner 0
     }
 
-    vm_metric_inc(active_functions, "builtin_calls")
+    la er_fast = fast_tilstand == 1
+    hvis fast_tilstand < 0 {
+        er_fast = vm_map_har_nokkel(active_functions, "__vm_fast_mode__") og active_functions["__vm_fast_mode__"] == "sann"
+    }
     la metric_cap = vm_capability_for(namn)
-    hvis builtin.starts_with(metric_cap, "disk.") {
-        vm_metric_inc(active_functions, "filesystem_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "net.") {
-        vm_metric_inc(active_functions, "network_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "process.") {
-        vm_metric_inc(active_functions, "process_calls")
-        vm_metric_inc(active_functions, "io_calls")
+    hvis ikkje er_fast {
+        la bi_metrics = active_functions["__vm_metrics__"]
+        vm_metric_add_i(bi_metrics, "builtin_calls", 1)
+        hvis builtin.starts_with(metric_cap, "disk.") {
+            vm_metric_add_i(bi_metrics, "filesystem_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        } ellers hvis builtin.starts_with(metric_cap, "net.") {
+            vm_metric_add_i(bi_metrics, "network_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        } ellers hvis builtin.starts_with(metric_cap, "process.") {
+            vm_metric_add_i(bi_metrics, "process_calls", 1)
+            vm_metric_add_i(bi_metrics, "io_calls", 1)
+        }
     }
 
-    vm_security_enforce(active_functions, namn, args)
+    vm_security_enforce_c(active_functions, namn, args, metric_cap, er_fast)
 
     hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" {
         returner _rt_har_nøkkel(args[0], args[1])
@@ -3075,6 +3227,31 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
     hvis builtin.starts_with(namn, "std.http.") {
         namn = "http." + builtin.slice(namn, 9, lengde(namn))
+    }
+
+    // Spor D: dei mest brukte reine tekst-/type-builtins låg 100+ greiner lenger
+    // nede i den lineære kjeda. Ingen grein mellom her og den gamle plassen
+    // matchar desse namna, so semantikken er uendra.
+    hvis namn == "builtin.trim" eller namn == "builtin.tekst_trim" {
+        returner builtin.trim(args[0])
+    }
+    hvis namn == "builtin.split" eller namn == "builtin.tekst_splitt" {
+        returner builtin.split(args[0], args[1])
+    }
+    hvis namn == "builtin.join" eller namn == "builtin.tekst_join" {
+        returner builtin.join(args[0], args[1])
+    }
+    hvis namn == "builtin.replace" eller namn == "builtin.tekst_erstatt" {
+        returner builtin.replace(args[0], args[1], args[2])
+    }
+    hvis namn == "builtin.upper" eller namn == "builtin.tekst_store" eller namn == "builtin.tekst_til_store" {
+        returner vm_ascii_upper(tekst(args[0]))
+    }
+    hvis namn == "builtin.lower" eller namn == "builtin.tekst_sma" eller namn == "builtin.tekst_til_liten" {
+        returner builtin.lower(args[0])
+    }
+    hvis namn == "builtin.type" eller namn == "builtin.type_av" {
+        returner builtin.type(args[0])
     }
 
     // Fil-eksistens må treffast tidleg for precompiled VM under eldre host-VM.
@@ -3806,24 +3983,6 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         }
         returner treff
     }
-    hvis namn == "builtin.trim" eller namn == "builtin.tekst_trim" {
-        returner builtin.trim(args[0])
-    }
-    hvis namn == "builtin.split" eller namn == "builtin.tekst_splitt" {
-        returner builtin.split(args[0], args[1])
-    }
-    hvis namn == "builtin.join" eller namn == "builtin.tekst_join" {
-        returner builtin.join(args[0], args[1])
-    }
-    hvis namn == "builtin.replace" eller namn == "builtin.tekst_erstatt" {
-        returner builtin.replace(args[0], args[1], args[2])
-    }
-    hvis namn == "builtin.upper" eller namn == "builtin.tekst_store" eller namn == "builtin.tekst_til_store" {
-        returner vm_ascii_upper(tekst(args[0]))
-    }
-    hvis namn == "builtin.lower" eller namn == "builtin.tekst_sma" eller namn == "builtin.tekst_til_liten" {
-        returner builtin.lower(args[0])
-    }
     hvis namn == "builtin.index_of" eller namn == "builtin.tekst_indeks" {
         returner builtin.index_of(args[0], args[1])
     }
@@ -3875,9 +4034,6 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // Type og konvertering
-    hvis namn == "builtin.type" eller namn == "builtin.type_av" {
-        returner builtin.type(args[0])
-    }
     hvis namn == "builtin.desimaltall" {
         returner builtin.desimaltall(args[0])
     }
@@ -4451,6 +4607,59 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
     returner ""
 }
 
+// ─── Spor D: kallmål-cachar for køyr_funksjon ────────────────────────────────
+// Kvar køyr_funksjon-aktivering held små lokale kart: kallnamn → løyst namn
+// (òg negative treff, dvs. builtin-vegen), løyst namn → funksjonsdefinisjon og
+// løyst namn → label-kart. Dei erstattar finn_funksjon + fleire vm_map_get mot
+// det store functions-kartet per CALL (lineært på arm64-seedane), og i
+// standardmodus òg bygg_label_kart + vm_verifiser_kode av heile callee-koden
+// per kall. Resultata er reine funksjonar av functions-kartet sine
+// funksjonsoppføringar, som berre vm_module_load endrar medan VM-en køyrer;
+// han aukar generasjonsboksen, og aktiveringa tømer cachane sine når ho ser
+// ein ny generasjon (vm_def_gen_auk).
+funksjon vm_def_gen_auk(functions) -> heiltall {
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
+    la boks = functions["__vm_def_gen__"]
+    boks["n"] = boks["n"] + 1
+    returner boks["n"]
+}
+
+funksjon vm_def_gen_boks(functions) {
+    hvis ikkje vm_map_har_nokkel(functions, "__vm_def_gen__") {
+        functions["__vm_def_gen__"] = {"n": 0}
+    }
+    returner functions["__vm_def_gen__"]
+}
+
+funksjon vm_løys_kall(cache, functions, mål_namn: tekst) -> tekst {
+    hvis vm_map_har_nokkel(cache, mål_namn) { returner cache[mål_namn] }
+    la løyst = ""
+    hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
+        løyst = finn_funksjon(mål_namn, functions)
+    }
+    cache[mål_namn] = løyst
+    returner løyst
+}
+
+funksjon vm_def_hent(cache, functions, namn: tekst) {
+    hvis vm_map_har_nokkel(cache, namn) { returner cache[namn] }
+    la def = vm_map_get(functions, namn)
+    cache[namn] = def
+    returner def
+}
+
+funksjon vm_label_hent(cache, fn_def, kode, fn_namn: tekst, fast_mode: boolsk, trace_calls: boolsk) {
+    hvis vm_map_har_nokkel(cache, fn_namn) {
+        hvis trace_calls { skriv("VMCALL:" + fn_namn + "\n") }
+        returner cache[fn_namn]
+    }
+    la lk = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+    cache[fn_namn] = lk
+    returner lk
+}
+
 funksjon vm_opcode_fra_instr(instr: liste_tekst) -> tekst {
     la raw = instr[0]
     // C/json_parse_raw kan gi heiltall for enkelte felt. Tekst må ikkje gå
@@ -4845,6 +5054,68 @@ funksjon vm_jit_try(functions, fn_namn: tekst, fn_def, args) -> ordbok_tekst {
     hvis numeric_kind == "invalid" { returner miss }
     la register_key = fn_namn + "|" + numeric_kind
     la register = functions["__vm_jit_register__"]
+    hvis ikkje vm_map_har_nokkel(register, register_key) {
+        la lowered = vm_jit_lower(functions, fn_namn, fn_def, 0, numeric_kind)
+        lowered["calls"] = "0"
+        lowered["handle"] = ""
+        register[register_key] = lowered
+    }
+    la entry = register[register_key]
+    hvis entry["eligible"] != "sann" { returner miss }
+    entry["calls"] = tekst_fra_heltall(heltall_fra_tekst(entry["calls"]) + 1)
+    la threshold: heiltall = 50
+    la raw_threshold = miljo_hent("NORSCODE_VM_JIT_THRESHOLD")
+    hvis raw_threshold != "" og vm_er_heltallstekst(raw_threshold) {
+        la configured = heltall_fra_tekst(raw_threshold)
+        hvis configured >= 2 { threshold = configured }
+    }
+    hvis entry["handle"] == "" og heltall_fra_tekst(entry["calls"]) >= threshold {
+        la compile_request = {"abi": "norscode-jit-v1", "operation": "compile", "operations": entry["operations"], "arity": entry["arity"], "result_kind": entry["result_kind"], "numeric_kind": entry["numeric_kind"]}
+        la compiled = builtin.jit_operation(compile_request)
+        hvis compiled["status"] == "ferdig" {
+            entry["handle"] = compiled["handle"]
+            vm_metric_inc(functions, "jit_compiles")
+            hvis vm_map_har_nokkel(entry, "folded") { vm_metric_add(functions, "jit_folded_ops", heltall_fra_tekst(entry["folded"])) }
+            hvis vm_map_har_nokkel(entry, "inline_count") { vm_metric_add(functions, "jit_inlined_calls", heltall_fra_tekst(entry["inline_count"])) }
+        } ellers {
+            entry["eligible"] = "usann"
+            vm_metric_inc(functions, "jit_compile_failures")
+            returner miss
+        }
+    }
+    hvis entry["handle"] == "" { returner miss }
+    la run_request = {"abi": "norscode-jit-v1", "operation": "run", "handle": entry["handle"], "arguments": args}
+    la result = builtin.jit_operation(run_request)
+    hvis result["status"] != "ferdig" {
+        entry["handle"] = ""
+        vm_metric_inc(functions, "jit_deoptimizations")
+        returner miss
+    }
+    vm_metric_inc(functions, "jit_calls")
+    returner {"used": "sann", "value": result["value"]}
+}
+
+// Spor D: same som vm_jit_try, men med hoista debug-kart, policy-svar, caps-
+// og registerkart frå køyr_funksjon, og med funksjonen sin numeriske kind
+// (vm_jit_function_numeric_kind skannar heile koden) cacha per aktivering.
+funksjon vm_jit_try_i(functions, debug, tillatt: boolsk, caps, register, kind_cache, fn_namn: tekst, fn_def, args) -> ordbok_tekst {
+    la miss = {"used": "usann"}
+    hvis debug["enabled"] == "sann" { returner miss }
+    hvis ikkje tillatt { returner miss }
+    hvis vm_map_har_nokkel(caps, fn_namn) og builtin.index_of(caps[fn_namn], "|jit.execute|") < 0 { returner miss }
+    la numeric_kind = vm_jit_arg_numeric_kind(args)
+    hvis numeric_kind == "invalid" { returner miss }
+    hvis ikkje vm_map_har_nokkel(kind_cache, fn_namn) { kind_cache[fn_namn] = {} }
+    la per_fn = kind_cache[fn_namn]
+    hvis vm_map_har_nokkel(per_fn, numeric_kind) {
+        numeric_kind = per_fn[numeric_kind]
+    } ellers {
+        la fn_kind = vm_jit_function_numeric_kind(fn_def, numeric_kind)
+        per_fn[numeric_kind] = fn_kind
+        numeric_kind = fn_kind
+    }
+    hvis numeric_kind == "invalid" { returner miss }
+    la register_key = fn_namn + "|" + numeric_kind
     hvis ikkje vm_map_har_nokkel(register, register_key) {
         la lowered = vm_jit_lower(functions, fn_namn, fn_def, 0, numeric_kind)
         lowered["calls"] = "0"
@@ -5813,6 +6084,40 @@ funksjon køyr_funksjon(
     la trace_ops = trace_ops_raw != "" og heltall_fra_tekst(trace_ops_raw) == 1
     vm_runtime_init(functions, usann)
     la fast_mode = functions["__vm_fast_mode__"] == "sann"
+    // Hoista VM-tilstand (spor D): les karta éin gong her og etter kvart kall
+    // ut av løkka (builtin, nøsta køyr_funksjon, grøn runde) — aldri per
+    // instruksjon. Sjå vm_metric_add_i for kvifor dette er viktig.
+    la vm_metrics_kart = functions["__vm_metrics__"]
+    la vm_debug_kart = functions["__vm_debug__"]
+    la vm_heap = functions["__vm_runtime_heap__"]
+    la vm_sample_intervall: heiltall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+    la vm_trace_events = functions["__vm_trace_events__"]
+    // JIT-tilstand for standardmodus (vm_jit_try_i): blir henta ved første
+    // brukarkall og på nytt etter kall ut av løkka (vm_jit_ok = usann).
+    la vm_jit_ok: boolsk = usann
+    la vm_jit_tillatt: boolsk = usann
+    la vm_jit_caps = {}
+    la vm_jit_register = {}
+    la vm_jit_kind_cache = {}
+    la aktive_rammer = functions["__vm_active_frames__"]
+    la vm_ramme_pool = functions["__vm_frame_pool__"]
+    la vm_arg_pool = functions["__vm_arg_pool__"]
+    // I fast-modus er skuggeheap-id-lista alltid tom (berre standardmodus
+    // legg til i henne), so ei lokal tom liste gjer same nytta utan oppslag.
+    la vm_tomme_heap_ids: liste_tekst = []
+    la vm_fast_tilstand: heiltall = 0
+    hvis fast_mode { vm_fast_tilstand = 1 }
+    // Modulglobalane blir henta ved første LOAD/STORE_GLOBAL og på nytt etter
+    // kall ut av løkka (vm_globale_ok = usann), ikkje per instruksjon.
+    la vm_globale = {}
+    la vm_globale_ok: boolsk = usann
+    // Kallmål-cachar (sjå vm_løys_kall) og generasjonen dei er gyldige for.
+    la vm_def_gen = vm_def_gen_boks(functions)
+    la vm_def_gen_sett = vm_def_gen["n"]
+    la vm_kall_cache = {}
+    la vm_def_cache = {}
+    la vm_label_cache = {}
+    la trace_calls = miljo_hent("NC_VM_TRACE_CALLS") == "1"
     la resume_state = functions["__vm_debug_resume_state__"]
     la resuming = resume_state["active"] == "sann"
     la function_start_ms = builtin.tid_ms()
@@ -5837,24 +6142,24 @@ funksjon køyr_funksjon(
         tail_chain_count = resume_state["tail_chain_count"]
         resume_state["active"] = "usann"
     } ellers {
-        vm_metric_inc(functions, "function_calls." + fn_namn)
+        hvis ikkje fast_mode { vm_metric_add_i(vm_metrics_kart, "function_calls." + fn_namn, 1) }
     }
     la function_instruction_key = "function_instructions." + fn_namn
-    hvis ikkje vm_map_har_nokkel(functions["__vm_metrics__"], function_instruction_key) {
-        functions["__vm_metrics__"][function_instruction_key] = "0"
+    hvis ikkje vm_map_har_nokkel(vm_metrics_kart, function_instruction_key) {
+        vm_metrics_kart[function_instruction_key] = "0"
     }
     hvis djupn > 500 {
         kast "Sikkerheitsfeil: maks kall-djupn overskreden — mogleg uendeleg rekursjon"
     }
 
-    la fn_def = vm_map_get(functions, fn_namn)
+    la fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
     // usann når ei continuation-ramme er teken attende (RETURN/unwind): då er
     // fn_def framleis callee sin, og LOAD/STORE_GLOBAL hentar kallaren sin
     // definisjon (modulen) frå fn_namn før bruk.
     la fn_def_ok: boolsk = sann
     la kode = fn_def["code"]
     la params = fn_def["params"]
-    la ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
+    la ramme = vm_ramme_hent_p(vm_ramme_pool, fn_namn, 0, fast_mode)
     hvis resuming {
         ramme = resume_state["frame"]
         kode = ramme["code"]
@@ -5863,15 +6168,15 @@ funksjon køyr_funksjon(
     } ellers {
         ramme["code"] = kode
         ramme["params"] = params
-        ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+        ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
         ramme["state"] = "running"
         ramme["started_ms"] = function_start_ms
-        legg_til(functions["__vm_active_frames__"], ramme)
-        vm_metric_inc(functions, "calls")
+        legg_til(aktive_rammer, ramme)
+        vm_metric_inc_f(fast_mode, vm_metrics_kart, "calls")
     }
-    la current_depth = lengde(functions["__vm_active_frames__"])
-    hvis current_depth > heltall_fra_tekst(functions["__vm_metrics__"]["max_depth"]) {
-        functions["__vm_metrics__"]["max_depth"] = tekst_fra_heltall(current_depth)
+    la current_depth = lengde(aktive_rammer)
+    hvis current_depth > heltall_fra_tekst(vm_metrics_kart["max_depth"]) {
+        vm_metrics_kart["max_depth"] = tekst_fra_heltall(current_depth)
     }
     la try_stack = ramme["try_stack"]
 
@@ -5887,16 +6192,19 @@ funksjon køyr_funksjon(
             kast vm_aritet_melding(fn_namn, lengde(params), lengde(arg_verdiar), usann)
         }
         la pi: heltall = 0
+        // Fast-modus: skuggeheap-id-lista er alltid tom (sjå vm_tomme_heap_ids),
+        // so last_heap_id blir "" og oppslaget kan sparast.
+        la pending_ids = vm_tomme_heap_ids
+        hvis ikkje fast_mode { pending_ids = functions["__vm_pending_arg_heap_ids__"] }
         mens (pi < lengde(params)) {
             ramme["last_heap_id"] = ""
-            la pending_ids = functions["__vm_pending_arg_heap_ids__"]
             hvis pi < lengde(pending_ids) {
                 ramme["last_heap_id"] = pending_ids[pi]
             }
             ramme_sett_var(ramme, params[pi], arg_verdiar[pi])
             pi = pi + 1
         }
-        functions["__vm_pending_arg_heap_ids__"] = []
+        hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
     }
 
     // Label-kart og try-stack ligg i ramma slik at ho kan suspenderast.
@@ -5929,6 +6237,18 @@ funksjon køyr_funksjon(
                 hvis vm_green_tikk >= vm_green_kvantum {
                     vm_green_tikk = 0
                     vm_green_runde()
+                    // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
+                    // debug-abort); les dei hoista verdiane på nytt.
+                    aktive_rammer = functions["__vm_active_frames__"]
+                    vm_metrics_kart = functions["__vm_metrics__"]
+                    vm_globale_ok = usann
+                    hvis ikkje fast_mode {
+                        vm_debug_kart = functions["__vm_debug__"]
+                        vm_heap = functions["__vm_runtime_heap__"]
+                        vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
+                    }
                 }
             }
         }
@@ -5943,14 +6263,21 @@ funksjon køyr_funksjon(
                 " ip=" + tekst_fra_heltall(ip) +
                 " opcode=" + op +
                 " operandstack=" + tekst_fra_heltall(lengde(ramme["stack"])) +
-                " framedepth=" + tekst_fra_heltall(lengde(functions["__vm_active_frames__"])) + "\n")
+                " framedepth=" + tekst_fra_heltall(lengde(aktive_rammer)) + "\n")
         }
         la debug_hit = usann
         hvis ikkje fast_mode {
-            functions["__vm_metrics__"]["instructions"] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"]["instructions"]) + 1)
-            functions["__vm_metrics__"][function_instruction_key] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"][function_instruction_key]) + 1)
-            vm_profiler_sample(functions, ramme, fn_namn, ip, op)
-            debug_hit = vm_debug_check(functions, ramme, fn_namn, ip, op)
+            la instr_n: heiltall = heltall_fra_tekst(vm_metrics_kart["instructions"]) + 1
+            vm_metrics_kart["instructions"] = tekst_fra_heltall(instr_n)
+            vm_metrics_kart[function_instruction_key] = tekst_fra_heltall(heltall_fra_tekst(vm_metrics_kart[function_instruction_key]) + 1)
+            // Same føresetnad som i vm_profiler_sample / vm_debug_check, men
+            // med hoista verdiar: funksjonane blir berre kalla når dei gjer noko.
+            hvis vm_sample_intervall >= 1 og instr_n % vm_sample_intervall == 0 {
+                vm_profiler_sample(functions, ramme, fn_namn, ip, op)
+            }
+            hvis vm_debug_kart["enabled"] == "sann" {
+                debug_hit = vm_debug_check(functions, ramme, fn_namn, ip, op)
+            }
         }
         hvis debug_hit og vm_debug_state(functions)["suspend_on_hit"] == "sann" {
             ramme["state"] = "paused"
@@ -5971,20 +6298,32 @@ funksjon køyr_funksjon(
 
         // ── Konstantar og variablar ──────────────────────────────────────
         hvis op == "PUSH_CONST" {
-            la const_heap_id = vm_heap_track(functions, instr[1])
+            la const_heap_id = vm_heap_track_f(fast_mode, vm_heap, instr[1])
             stack_push_heap(ramme, instr[1], const_heap_id)
-            hvis const_heap_id != "" { vm_gc_safe_point(functions, usann) }
+            hvis const_heap_id != "" { vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann) }
             ip = ip + 1
             fortsett
         }
 
         hvis op == "STORE_GLOBAL" {
             hvis ikkje fn_def_ok {
-                fn_def = vm_map_get(functions, fn_namn)
+                hvis vm_def_gen["n"] != vm_def_gen_sett {
+                    // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                    vm_kall_cache = {}
+                    vm_def_cache = {}
+                    vm_label_cache = {}
+                    vm_jit_kind_cache = {}
+                    vm_def_gen_sett = vm_def_gen["n"]
+                }
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
             }
             la modul_namn = tekst(fn_def["module"])
-            la globale = functions["__vm_globals__"]
+            hvis ikkje vm_globale_ok {
+                vm_globale = functions["__vm_globals__"]
+                vm_globale_ok = sann
+            }
+            la globale = vm_globale
             hvis ikkje vm_map_har_nokkel(globale, modul_namn) {
                 globale[modul_namn] = {}
             }
@@ -5996,12 +6335,24 @@ funksjon køyr_funksjon(
 
         hvis op == "LOAD_GLOBAL" {
             hvis ikkje fn_def_ok {
-                fn_def = vm_map_get(functions, fn_namn)
+                hvis vm_def_gen["n"] != vm_def_gen_sett {
+                    // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                    vm_kall_cache = {}
+                    vm_def_cache = {}
+                    vm_label_cache = {}
+                    vm_jit_kind_cache = {}
+                    vm_def_gen_sett = vm_def_gen["n"]
+                }
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
             }
             la modul_namn = tekst(fn_def["module"])
             la global_namn = tekst(instr[1])
-            la globale = functions["__vm_globals__"]
+            hvis ikkje vm_globale_ok {
+                vm_globale = functions["__vm_globals__"]
+                vm_globale_ok = sann
+            }
+            la globale = vm_globale
             hvis ikkje vm_map_har_nokkel(globale, modul_namn) eller ikkje vm_map_har_nokkel(globale[modul_namn], global_namn) {
                 kast "Ukjent global variabel: " + modul_namn + "." + global_namn
             }
@@ -6287,9 +6638,9 @@ funksjon køyr_funksjon(
                 legg_til(ny_liste, tmp[si])
                 si = si - 1
             }
-            la list_heap_id = vm_heap_track(functions, ny_liste)
+            la list_heap_id = vm_heap_track_f(fast_mode, vm_heap, ny_liste)
             stack_push_heap(ramme, ny_liste, list_heap_id)
-            vm_gc_safe_point(functions, usann)
+            vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             ip = ip + 1
             fortsett
         }
@@ -6320,9 +6671,9 @@ funksjon køyr_funksjon(
                 ny_map[nøkkel] = verdi
                 mi = mi - 2
             }
-            la map_heap_id = vm_heap_track(functions, ny_map)
+            la map_heap_id = vm_heap_track_f(fast_mode, vm_heap, ny_map)
             stack_push_heap(ramme, ny_map, map_heap_id)
-            vm_gc_safe_point(functions, usann)
+            vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             ip = ip + 1
             fortsett
         }
@@ -6348,10 +6699,10 @@ funksjon køyr_funksjon(
             la er_ncb_funksjon = builtin.type(obj) == "ordbok" og vm_map_har_nokkel(obj, "code") og vm_map_har_nokkel(obj, "params")
             la er_lita_liste = builtin.type(obj) == "liste" og lengde(obj) <= 4
             hvis ikkje (er_ncb_tabell eller er_ncb_funksjon eller er_lita_liste) {
-                index_heap_id = vm_heap_track(functions, indeks_verdi)
+                index_heap_id = vm_heap_track_f(fast_mode, vm_heap, indeks_verdi)
             }
             stack_push_heap(ramme, indeks_verdi, index_heap_id)
-            hvis index_heap_id != "" { vm_gc_safe_point(functions, usann) }
+            hvis index_heap_id != "" { vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann) }
             ip = ip + 1
             fortsett
         }
@@ -6382,9 +6733,9 @@ funksjon køyr_funksjon(
             la obj = stack_pop(ramme)
             la felt: tekst = instr[1]
             la felt_verdi = vm_sikker_get(obj, felt)
-            la felt_heap_id = vm_heap_track(functions, felt_verdi)
+            la felt_heap_id = vm_heap_track_f(fast_mode, vm_heap, felt_verdi)
             stack_push_heap(ramme, felt_verdi, felt_heap_id)
-            hvis felt_heap_id != "" { vm_gc_safe_point(functions, usann) }
+            hvis felt_heap_id != "" { vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann) }
             ip = ip + 1
             fortsett
         }
@@ -6414,15 +6765,23 @@ funksjon køyr_funksjon(
             la closure = {}
             closure["__lambda__"] = lam_namn
             closure["__capture__"] = capture
-            la closure_heap_id = vm_heap_track(functions, closure)
+            la closure_heap_id = vm_heap_track_f(fast_mode, vm_heap, closure)
             stack_push_heap(ramme, closure, closure_heap_id)
-            hvis closure_heap_id != "" { vm_gc_safe_point(functions, usann) }
+            hvis closure_heap_id != "" { vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann) }
             ip = ip + 1
             fortsett
         }
 
         // ── Funksjonskall ────────────────────────────────────────────────
         hvis op == "CALL" eller op == "CALL_VALUE" {
+            hvis vm_def_gen["n"] != vm_def_gen_sett {
+                // vm_module_load har endra funksjonskartet: tøm kallmål-cachane.
+                vm_kall_cache = {}
+                vm_def_cache = {}
+                vm_label_cache = {}
+                vm_jit_kind_cache = {}
+                vm_def_gen_sett = vm_def_gen["n"]
+            }
             // M3: CALL_VALUE deler heile CALL-maskineriet. Skilnaden er at
             // funksjonsnamnet og fanga variablar kjem frå ein closure-verdi
             // (ordbok med __lambda__/__capture__) øvst på stacken.
@@ -6446,8 +6805,8 @@ funksjon køyr_funksjon(
             // Samle argument frå stack i omvend rekkjefølgje. Reverser dei to
             // listene på plass etterpå; den gamle vegen allokerte fire lister
             // for kvart CALL og tømde AOT-heapen under stor selfhost-codegen.
-            la call_args: liste = vm_arg_liste_hent(functions, fast_mode)
-            la call_heap_ids: liste_tekst = functions["__vm_pending_arg_heap_ids__"]
+            la call_args: liste = vm_arg_liste_hent_p(vm_arg_pool, fast_mode)
+            la call_heap_ids: liste_tekst = vm_tomme_heap_ids
             hvis ikkje fast_mode { call_heap_ids = [] }
             la ai: heltall = 0
             mens (ai < arg_n) {
@@ -6475,14 +6834,14 @@ funksjon køyr_funksjon(
             la retur_verdi = 0
 
             // Brukarfunksjon eller innebygd? (fuzzy lookup)
-            la frames_before: heiltall = lengde(functions["__vm_active_frames__"])
+            la frames_before: heiltall = lengde(aktive_rammer)
             la call_error = 0
             la call_failed = usann
             la løyst_namn = ""
             la intern_feil: tekst = ""
             la dynamisk_kall = usann
             hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
-                løyst_namn = finn_funksjon(mål_namn, functions)
+                løyst_namn = vm_løys_kall(vm_kall_cache, functions, mål_namn)
             }
             hvis trace_ops { skriv("VM-CALL phase=resolved target=" + mål_namn + " resolved=" + løyst_namn + "\n") }
 
@@ -6507,10 +6866,10 @@ funksjon køyr_funksjon(
                     }
                     mål_namn = clo_namn
                     løyst_namn = clo_løyst
-                    vm_arg_liste_frigje(functions, call_args, fast_mode)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                     call_args = clo_args
                     call_heap_ids = clo_heap
-                    vm_metric_inc(functions, "dynamic_calls")
+                    vm_metric_inc_f(fast_mode, vm_metrics_kart, "dynamic_calls")
                 }
             } ellers hvis (mål_namn == "builtin.ncb_call_fn" eller mål_namn == "ncb_call_fn") og lengde(call_args) > 0 {
                 la dynamisk_namn = tekst(call_args[0])
@@ -6526,10 +6885,10 @@ funksjon køyr_funksjon(
                     }
                     mål_namn = dynamisk_namn
                     løyst_namn = dynamisk_løyst
-                    vm_arg_liste_frigje(functions, call_args, fast_mode)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                     call_args = dynamiske_args
                     call_heap_ids = dynamiske_heap
-                    vm_metric_inc(functions, "dynamic_calls")
+                    vm_metric_inc_f(fast_mode, vm_metrics_kart, "dynamic_calls")
                     // 2.1 Aritetskontroll for dynamiske bytekode-kall: eit kompilert
                     // builtin.ncb_call_fn blir dispatcha her, og callee-ramma vert bygd
                     // INLINE i tail-/continuation-greina nedanfor. Den vegen treffer
@@ -6555,11 +6914,11 @@ funksjon køyr_funksjon(
             // at det vert ruta til lokal/forelder try/fang (og `fang (e:
             // ArgumentFeil)` matchar på prefikset, sjå vm_exception_type).
             hvis løyst_namn != "" {
-                la kall_def = vm_map_get(functions, løyst_namn)
+                la kall_def = vm_def_hent(vm_def_cache, functions, løyst_namn)
                 hvis vm_map_har_nokkel(kall_def, "params") og lengde(call_args) != lengde(kall_def["params"]) {
                     la ar_forventa: heiltall = lengde(kall_def["params"])
                     la ar_fekk: heiltall = lengde(call_args)
-                    vm_arg_liste_frigje(functions, call_args, fast_mode)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                     stack_push(ramme, vm_aritet_melding(løyst_namn, ar_forventa, ar_fekk, dynamisk_kall))
                     tvungen_op = "THROW"
                     fortsett
@@ -6570,15 +6929,22 @@ funksjon køyr_funksjon(
                 la jit_used = usann
                 la jit_value = 0
                 hvis ikkje fast_mode {
-                    la jit_result = vm_jit_try(functions, løyst_namn, vm_map_get(functions, løyst_namn), call_args)
+                    hvis ikkje vm_jit_ok {
+                        vm_jit_tillatt = runtime_security.har(functions["__vm_security_policy__"], "jit.execute")
+                        vm_jit_caps = functions["__vm_function_caps__"]
+                        vm_jit_register = functions["__vm_jit_register__"]
+                        vm_jit_ok = sann
+                    }
+                    la jit_result = vm_jit_try_i(functions, vm_debug_kart, vm_jit_tillatt, vm_jit_caps, vm_jit_register,
+                                                 vm_jit_kind_cache, løyst_namn, vm_def_hent(vm_def_cache, functions, løyst_namn), call_args)
                     jit_used = jit_result["used"] == "sann"
                     hvis jit_used { jit_value = jit_result["value"] }
                 }
                 hvis trace_ops { skriv("VM-CALL phase=jit target=" + mål_namn + " used=" + tekst(jit_used) + "\n") }
                 hvis jit_used {
-                    vm_metric_inc(functions, "function_calls." + løyst_namn)
+                    hvis ikkje fast_mode { vm_metric_add_i(vm_metrics_kart, "function_calls." + løyst_namn, 1) }
                     stack_push(ramme, jit_value)
-                    vm_arg_liste_frigje(functions, call_args, fast_mode)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                     ip = ip + 1
                     fortsett
                 }
@@ -6606,39 +6972,39 @@ funksjon køyr_funksjon(
                         function_start_ms = ramme["started_ms"]
                         function_instruction_key = "function_instructions." + fn_namn
                         ip = heltall_fra_tekst(unwind_tail["ip"])
-                        vm_metric_inc(functions, "unwinds")
-                        vm_gc_safe_point(functions, usann)
+                        vm_metric_inc_f(fast_mode, vm_metrics_kart, "unwinds")
+                        vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                         fortsett
                     }
                     kast tail_feil
                 }
                 ramme["state"] = "tail_returned"
-                fjern_siste(functions["__vm_active_frames__"])
-                vm_function_finish(functions, fn_namn, function_start_ms)
-                vm_metric_inc(functions, "tail_calls")
+                fjern_siste(aktive_rammer)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
+                vm_metric_inc_f(fast_mode, vm_metrics_kart, "tail_calls")
 
                 fn_namn = løyst_namn
                 function_start_ms = builtin.tid_ms()
-                vm_metric_inc(functions, "function_calls." + fn_namn)
+                hvis ikkje fast_mode { vm_metric_add_i(vm_metrics_kart, "function_calls." + fn_namn, 1) }
                 function_instruction_key = "function_instructions." + fn_namn
-                hvis ikkje vm_map_har_nokkel(functions["__vm_metrics__"], function_instruction_key) {
-                    functions["__vm_metrics__"][function_instruction_key] = "0"
+                hvis ikkje vm_map_har_nokkel(vm_metrics_kart, function_instruction_key) {
+                    vm_metrics_kart[function_instruction_key] = "0"
                 }
-                fn_def = vm_map_get(functions, fn_namn)
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
                 kode = fn_def["code"]
                 params = fn_def["params"]
                 la ferdig_tail_ramme = ramme
-                ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
-                vm_ramme_frigje(functions, ferdig_tail_ramme)
+                ramme = vm_ramme_hent_p(vm_ramme_pool, fn_namn, 0, fast_mode)
+                vm_ramme_frigje_p(fast_mode, vm_ramme_pool, ferdig_tail_ramme)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+                ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
                 ramme["started_ms"] = function_start_ms
-                legg_til(functions["__vm_active_frames__"], ramme)
-                vm_metric_inc(functions, "calls")
+                legg_til(aktive_rammer, ramme)
+                vm_metric_inc_f(fast_mode, vm_metrics_kart, "calls")
 
                 la tpi: heiltall = 0
                 mens tpi < lengde(params) {
@@ -6654,9 +7020,9 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, cap_keys_t[cki_t], lambda_capture[cap_keys_t[cki_t]])
                     cki_t = cki_t + 1
                 }
-                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
-                functions["__vm_last_return_heap_id__"] = ""
+                vm_siste_retur_sett(fast_mode, functions, "")
                 try_stack = ramme["try_stack"]
                 label_kart = ramme["label_map"]
                 ip = 0
@@ -6670,7 +7036,7 @@ funksjon køyr_funksjon(
                 // alle tail-kall i eit langt VM-køyr. Eit vanleg CALL bryt
                 // derfor kjeda og skal starte teljaren på nytt.
                 tail_chain_count = 0
-                hvis lengde(functions["__vm_active_frames__"]) >= max_vm_frames {
+                hvis lengde(aktive_rammer) >= max_vm_frames {
                     la frame_feil = "Sikkerheitsfeil: maks VM-frame-djupn overskreden"
                     hvis lengde(try_stack) > 0 {
                         ramme["last_exception"] = frame_feil
@@ -6679,7 +7045,7 @@ funksjon køyr_funksjon(
                         la lokal_djupn: heiltall = lokal_handler["stack_djupn"]
                         mens lengde(ramme["stack"]) > lokal_djupn { stack_pop(ramme) }
                         ip = label_kart[lokal_catch]
-                        vm_metric_inc(functions, "unwinds")
+                        vm_metric_inc_f(fast_mode, vm_metrics_kart, "unwinds")
                         fortsett
                     }
                     la unwind_frame = vm_unwind_continuations(functions, continuations, ramme, frame_feil)
@@ -6694,8 +7060,8 @@ funksjon køyr_funksjon(
                         function_start_ms = ramme["started_ms"]
                         function_instruction_key = "function_instructions." + fn_namn
                         ip = heltall_fra_tekst(unwind_frame["ip"])
-                        vm_metric_inc(functions, "unwinds")
-                        vm_gc_safe_point(functions, usann)
+                        vm_metric_inc_f(fast_mode, vm_metrics_kart, "unwinds")
+                        vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                         fortsett
                     }
                     kast frame_feil
@@ -6714,29 +7080,29 @@ funksjon køyr_funksjon(
                 fn_namn = løyst_namn
                 function_start_ms = builtin.tid_ms()
                 hvis trace_ops { skriv("VM-CALL phase=switch target=" + fn_namn + "\n") }
-                vm_metric_inc(functions, "function_calls." + fn_namn)
+                hvis ikkje fast_mode { vm_metric_add_i(vm_metrics_kart, "function_calls." + fn_namn, 1) }
                 function_instruction_key = "function_instructions." + fn_namn
-                hvis ikkje vm_map_har_nokkel(functions["__vm_metrics__"], function_instruction_key) {
-                    functions["__vm_metrics__"][function_instruction_key] = "0"
+                hvis ikkje vm_map_har_nokkel(vm_metrics_kart, function_instruction_key) {
+                    vm_metrics_kart[function_instruction_key] = "0"
                 }
-                fn_def = vm_map_get(functions, fn_namn)
+                fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
                 fn_def_ok = sann
                 hvis trace_ops { skriv("VM-CALL phase=definition target=" + fn_namn + "\n") }
                 kode = fn_def["code"]
                 params = fn_def["params"]
-                ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
+                ramme = vm_ramme_hent_p(vm_ramme_pool, fn_namn, 0, fast_mode)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+                ramme["label_map"] = vm_label_hent(vm_label_cache, fn_def, kode, fn_namn, fast_mode, trace_calls)
                 hvis trace_ops { skriv("VM-CALL phase=labels target=" + fn_namn + "\n") }
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
                 ramme["started_ms"] = function_start_ms
-                legg_til(functions["__vm_active_frames__"], ramme)
-                vm_metric_inc(functions, "calls")
-                la explicit_depth = lengde(functions["__vm_active_frames__"])
-                hvis explicit_depth > heltall_fra_tekst(functions["__vm_metrics__"]["max_depth"]) {
-                    functions["__vm_metrics__"]["max_depth"] = tekst_fra_heltall(explicit_depth)
+                legg_til(aktive_rammer, ramme)
+                vm_metric_inc_f(fast_mode, vm_metrics_kart, "calls")
+                la explicit_depth = lengde(aktive_rammer)
+                hvis explicit_depth > heltall_fra_tekst(vm_metrics_kart["max_depth"]) {
+                    vm_metrics_kart["max_depth"] = tekst_fra_heltall(explicit_depth)
                 }
 
                 la cpi: heiltall = 0
@@ -6754,9 +7120,9 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, cap_keys_c[cki_c], lambda_capture[cap_keys_c[cki_c]])
                     cki_c = cki_c + 1
                 }
-                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
-                functions["__vm_last_return_heap_id__"] = ""
+                vm_siste_retur_sett(fast_mode, functions, "")
                 try_stack = ramme["try_stack"]
                 label_kart = ramme["label_map"]
                 ip = 0
@@ -6767,6 +7133,18 @@ funksjon køyr_funksjon(
                 hvis løyst_namn != "" {
                     functions["__vm_pending_arg_heap_ids__"] = call_heap_ids
                     retur_verdi = køyr_funksjon(løyst_namn, call_args, functions, djupn + 1)
+                    // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
+                    // debug-abort); les dei hoista verdiane på nytt.
+                    aktive_rammer = functions["__vm_active_frames__"]
+                    vm_metrics_kart = functions["__vm_metrics__"]
+                    vm_globale_ok = usann
+                    hvis ikkje fast_mode {
+                        vm_debug_kart = functions["__vm_debug__"]
+                        vm_heap = functions["__vm_runtime_heap__"]
+                        vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
+                    }
                     green_på = vm_green_på_i(functions)
                 } ellers {
                     hvis green_på {
@@ -6776,17 +7154,41 @@ funksjon køyr_funksjon(
                         vm_green_yield_ok = 0
                         hvis er_green_slice og op == "CALL" { vm_green_yield_ok = 1 }
                     }
-                    retur_verdi = kall_innebygd(mål_namn, call_args, functions)
+                    retur_verdi = kall_innebygd_f(mål_namn, call_args, functions, vm_fast_tilstand)
+                    // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
+                    // debug-abort); les dei hoista verdiane på nytt.
+                    aktive_rammer = functions["__vm_active_frames__"]
+                    vm_metrics_kart = functions["__vm_metrics__"]
+                    vm_globale_ok = usann
+                    hvis ikkje fast_mode {
+                        vm_debug_kart = functions["__vm_debug__"]
+                        vm_heap = functions["__vm_runtime_heap__"]
+                        vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                        vm_trace_events = functions["__vm_trace_events__"]
+                        vm_jit_ok = usann
+                    }
                     green_på = vm_green_på_i(functions)
                     // Ventetilstand (vent_frist/vent_data) frå eit tidlegare
                     // GreenVenter-forsøk av same CALL er over når builtinen returnerer
                     // normalt, same kva veg armen gjekk (sjå vm_green_vent_rydd).
                     hvis er_green_slice { vm_green_vent_rydd() }
-                    functions["__vm_last_return_heap_id__"] = vm_heap_track(functions, retur_verdi)
+                    vm_siste_retur_sett(fast_mode, functions, vm_heap_track_f(fast_mode, vm_heap, retur_verdi))
                 }
             } fang (call_exc) {
                 call_error = call_exc
                 call_failed = sann
+                // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
+                // debug-abort); les dei hoista verdiane på nytt.
+                aktive_rammer = functions["__vm_active_frames__"]
+                vm_metrics_kart = functions["__vm_metrics__"]
+                vm_globale_ok = usann
+                hvis ikkje fast_mode {
+                    vm_debug_kart = functions["__vm_debug__"]
+                    vm_heap = functions["__vm_runtime_heap__"]
+                    vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                    vm_trace_events = functions["__vm_trace_events__"]
+                    vm_jit_ok = usann
+                }
             }
 
             // R1/F12: hovudtråden i eit PROGRAM (køyr_ncb) som ventar på ein
@@ -6800,11 +7202,22 @@ funksjon køyr_funksjon(
                   lengde(call_args) > 0 og vm_map_har_nokkel(functions, "__vm_program__") og
                   builtin.index_of(tekst(call_error), "FutureVenter:") >= 0) {
                 la hovud_await = vm_await_hovudtråd(functions, call_args[0])
+                // Spor D: grøne trådar har køyrt; les hoista VM-tilstand på nytt.
+                aktive_rammer = functions["__vm_active_frames__"]
+                vm_metrics_kart = functions["__vm_metrics__"]
+                vm_globale_ok = usann
+                hvis ikkje fast_mode {
+                    vm_debug_kart = functions["__vm_debug__"]
+                    vm_heap = functions["__vm_runtime_heap__"]
+                    vm_sample_intervall = heltall_fra_tekst(functions["__vm_sample_interval__"])
+                    vm_trace_events = functions["__vm_trace_events__"]
+                    vm_jit_ok = usann
+                }
                 hvis hovud_await["ok"] == "sann" {
                     call_failed = usann
                     call_error = 0
                     retur_verdi = hovud_await["verdi"]
-                    functions["__vm_last_return_heap_id__"] = vm_heap_track(functions, retur_verdi)
+                    vm_siste_retur_sett(fast_mode, functions, vm_heap_track_f(fast_mode, vm_heap, retur_verdi))
                 } ellers {
                     call_error = hovud_await["feil"]
                 }
@@ -6833,7 +7246,7 @@ funksjon køyr_funksjon(
                 await_state["function_start_ms"] = function_start_ms
                 functions["__vm_debug_resume_state__"] = await_state
                 la await_verdi = call_args[0]
-                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                 returner await_verdi
             }
 
@@ -6841,8 +7254,8 @@ funksjon køyr_funksjon(
             // attende, lagra tilstanden og gje kontrollen til planleggaren. Same
             // CALL blir køyrd på nytt i neste slice.
             hvis call_failed og er_green_slice og op == "CALL" og builtin.index_of(tekst(call_error), "GreenVenter:") >= 0 {
-                mens lengde(functions["__vm_active_frames__"]) > frames_before {
-                    fjern_siste(functions["__vm_active_frames__"])
+                mens lengde(aktive_rammer) > frames_before {
+                    fjern_siste(aktive_rammer)
                 }
                 la gri: heiltall = 0
                 mens gri < lengde(call_args) {
@@ -6851,7 +7264,7 @@ funksjon køyr_funksjon(
                     stack_push_heap(ramme, call_args[gri], grh)
                     gri = gri + 1
                 }
-                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                 returner vm_green_suspender(functions, ip, ramme, continuations,
                                             tail_chain_count, function_start_ms)
             }
@@ -6860,14 +7273,14 @@ funksjon køyr_funksjon(
                 // Vanleg unnatak (ikkje GreenVenter) frå eit kall i ytste slice:
                 // ei eventuell venting i tråden er over.
                 hvis er_green_slice { vm_green_vent_rydd() }
-                vm_arg_liste_frigje(functions, call_args, fast_mode)
-                vm_metric_inc(functions, "unwinds")
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                vm_metric_inc_f(fast_mode, vm_metrics_kart, "unwinds")
                 functions["__vm_pending_arg_heap_ids__"] = []
-                functions["__vm_last_return_heap_id__"] = ""
-                mens lengde(functions["__vm_active_frames__"]) > frames_before {
-                    fjern_siste(functions["__vm_active_frames__"])
+                vm_siste_retur_sett(fast_mode, functions, "")
+                mens lengde(aktive_rammer) > frames_before {
+                    fjern_siste(aktive_rammer)
                 }
-                vm_gc_safe_point(functions, usann)
+                vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
 
                 la call_handler_index = vm_find_handler(try_stack, call_error)
                 la call_cleanup_stack = ramme["cleanup_stack"]
@@ -6897,7 +7310,7 @@ funksjon køyr_funksjon(
                         function_start_ms = ramme["started_ms"]
                         function_instruction_key = "function_instructions." + fn_namn
                         ip = heltall_fra_tekst(unwind_call["ip"])
-                        vm_gc_safe_point(functions, usann)
+                        vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                         fortsett
                     }
                     kast call_error
@@ -6917,10 +7330,10 @@ funksjon køyr_funksjon(
                 fortsett
             }
 
-            vm_arg_liste_frigje(functions, call_args, fast_mode)
-            stack_push_heap(ramme, retur_verdi, functions["__vm_last_return_heap_id__"])
-            functions["__vm_last_return_heap_id__"] = ""
-            vm_gc_safe_point(functions, usann)
+            vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+            stack_push_heap(ramme, retur_verdi, vm_siste_retur_hent(fast_mode, functions))
+            vm_siste_retur_sett(fast_mode, functions, "")
+            vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             ip = ip + 1
             fortsett
         }
@@ -6940,10 +7353,10 @@ funksjon køyr_funksjon(
                 ip = label_kart[cleanup["label"]]
                 fortsett
             }
-            functions["__vm_last_return_heap_id__"] = ret_heap_id
+            vm_siste_retur_sett(fast_mode, functions, ret_heap_id)
             ramme["state"] = "returned"
-            fjern_siste(functions["__vm_active_frames__"])
-            vm_function_finish(functions, fn_namn, function_start_ms)
+            fjern_siste(aktive_rammer)
+            vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
             la ferdig_ramme = ramme
             hvis trace_frames {
                 skriv("VM-FRAME RETURN " + fn_namn +
@@ -6954,7 +7367,7 @@ funksjon køyr_funksjon(
             hvis lengde(continuations) > 0 {
                 ramme = continuations[lengde(continuations) - 1]
                 fjern_siste(continuations)
-                vm_ramme_frigje(functions, ferdig_ramme)
+                vm_ramme_frigje_p(fast_mode, vm_ramme_pool, ferdig_ramme)
                 ramme["state"] = "running"
                 fn_namn = ramme["namn"]
                 // fn_def er no callee sin definisjon. LOAD/STORE_GLOBAL les
@@ -6975,12 +7388,12 @@ funksjon køyr_funksjon(
                         " continuations=" + tekst_fra_heiltall(lengde(continuations)) + "\n")
                 }
                 stack_push_heap(ramme, ret_v, ret_heap_id)
-                functions["__vm_last_return_heap_id__"] = ""
-                vm_gc_safe_point(functions, usann)
+                vm_siste_retur_sett(fast_mode, functions, "")
+                vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                 fortsett
             }
-            vm_ramme_frigje(functions, ferdig_ramme)
-            vm_gc_safe_point(functions, usann)
+            vm_ramme_frigje_p(fast_mode, vm_ramme_pool, ferdig_ramme)
+            vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             returner ret_v
         }
 
@@ -7044,7 +7457,7 @@ funksjon køyr_funksjon(
         }
 
         hvis op == "THROW" {
-            vm_metric_inc(functions, "throws")
+            vm_metric_inc_f(fast_mode, vm_metrics_kart, "throws")
             la unntak_melding = stack_pop(ramme)
             ramme["last_exception"] = unntak_melding
 
@@ -7067,10 +7480,10 @@ funksjon køyr_funksjon(
 
             // Finn nærmaste try-handler
             hvis lokal_handler_index < 0 {
-                functions["__vm_last_return_heap_id__"] = ""
+                vm_siste_retur_sett(fast_mode, functions, "")
                 ramme["state"] = "thrown"
-                fjern_siste(functions["__vm_active_frames__"])
-                vm_function_finish(functions, fn_namn, function_start_ms)
+                fjern_siste(aktive_rammer)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
                 la handtert = usann
                 mens lengde(continuations) > 0 og ikkje handtert {
                     la forelder = continuations[lengde(continuations) - 1]
@@ -7126,16 +7539,16 @@ funksjon køyr_funksjon(
                     }
                     hvis ikkje handtert {
                         forelder["state"] = "unwound"
-                        fjern_siste(functions["__vm_active_frames__"])
-                        vm_function_finish(functions, forelder["namn"], forelder["started_ms"])
+                        fjern_siste(aktive_rammer)
+                        vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, forelder["namn"], forelder["started_ms"])
                     }
                 }
                 hvis handtert {
-                    vm_metric_inc(functions, "unwinds")
-                    vm_gc_safe_point(functions, usann)
+                    vm_metric_inc_f(fast_mode, vm_metrics_kart, "unwinds")
+                    vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                     fortsett
                 }
-                vm_gc_safe_point(functions, usann)
+                vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
                 kast unntak_melding
             }
 
@@ -7144,10 +7557,10 @@ funksjon køyr_funksjon(
 
             la catch_lbl: tekst = handler["catch_label"]
             hvis ikke vm_map_har_nokkel(label_kart, catch_lbl) {
-                functions["__vm_last_return_heap_id__"] = ""
-                fjern_siste(functions["__vm_active_frames__"])
-                vm_gc_safe_point(functions, usann)
-                vm_function_finish(functions, fn_namn, function_start_ms)
+                vm_siste_retur_sett(fast_mode, functions, "")
+                fjern_siste(aktive_rammer)
+                vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
+                vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
                 kast unntak_melding
             }
 
@@ -7175,11 +7588,11 @@ funksjon køyr_funksjon(
         }
 
         hvis op == "HALT" {
-            functions["__vm_last_return_heap_id__"] = ""
+            vm_siste_retur_sett(fast_mode, functions, "")
             ramme["state"] = "halted"
-            fjern_siste(functions["__vm_active_frames__"])
-            vm_gc_safe_point(functions, usann)
-            vm_function_finish(functions, fn_namn, function_start_ms)
+            fjern_siste(aktive_rammer)
+            vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
+            vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
             returner 0
         }
 
@@ -7188,11 +7601,11 @@ funksjon køyr_funksjon(
     }
 
     // Funksjonen fall gjennom utan RETURN → returner 0
-    functions["__vm_last_return_heap_id__"] = ""
+    vm_siste_retur_sett(fast_mode, functions, "")
     ramme["state"] = "returned"
-    fjern_siste(functions["__vm_active_frames__"])
-    vm_gc_safe_point(functions, usann)
-    vm_function_finish(functions, fn_namn, function_start_ms)
+    fjern_siste(aktive_rammer)
+    vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
+    vm_function_finish_f(fast_mode, vm_trace_events, vm_metrics_kart, fn_namn, function_start_ms)
     returner 0
 }
 
