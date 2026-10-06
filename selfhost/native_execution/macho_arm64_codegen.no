@@ -1707,30 +1707,11 @@ funksjon ncval_gap_rute(namn: tekst) -> tekst {
     returner ""
 }
 
-// M5: kort struktur-typenamn (som tolken sin vm_kort_typenamn): strip "builtin."
-// og ta siste "."-segment. "builtin.Punkt" → "Punkt", "__main__.Punkt" → "Punkt".
-funksjon ncval_struct_kort(namn: tekst) -> tekst {
-    la n = ncval_avkort_builtin(namn)
-    la delar = builtin.split(n, ".")
-    returner delar[lengde(delar) - 1]
-}
-
-// M5: struktur-konstruktor = kall der det korte namnet startar med stor bokstav.
-// Speglar tolken (kall_innebygd, vm.no:3839): stor forbokstav → tagga tomt kart.
-// Reelle brukarfunksjonar/builtins vert sjekka FØR dette (i CALL-dispatchen), så
-// berre syntetiske konstruktørar (ikkje i funksjonar, ikkje builtin) når hit.
-funksjon ncval_er_struct_konstruktor(namn: tekst) -> boolsk {
-    la kort = ncval_struct_kort(namn)
-    hvis lengde(kort) < 1 { returner usann }
-    la c = builtin.slice(kort, 0, 1)
-    returner c >= "A" og c <= "Z"
-}
-
 // M5 oppgåve 2: metode-kandidatar = funksjonar som ser ut som `<Type>.<metode>`
 // (minst 2 "."-segment, nest-siste segment startar med stor bokstav). Returnerer
-// [[kort="Type.metode", full=heile funksjonsnamnet], ...]. kall_metode-dispatchen
-// samanliknar runtime-nøkkelen "<type>.<metode>" mot `kort` (= tolken sin suffiks-
-// match ".Type.metode" sidan full endar på ".kort").
+// [[kort="Type.metode", full=heile funksjonsnamnet], ...]. R2/F20: brukt til å ta alle
+// metodar med i order (verts-funksjonstabellen) når programmet brukar kall_metode;
+// sjølve oppslaget går på det fulle namnet (emit_kall_metode).
 funksjon ncval_metode_kandidatar(funksjonar) -> liste {
     la ut = []
     la keys = builtin.nøkler(funksjonar)
@@ -1753,19 +1734,21 @@ funksjon ncval_metode_kandidatar(funksjonar) -> liste {
     returner ut
 }
 
-// M5 oppgåve 2: emitter for `CALL builtin.kall_metode, N`. Operandar (logisk idx):
-// mottakar=djupn-N, metodenamn=djupn-N+1, realarg j=djupn-N+2+j. Byggjer runtime
-// nøkkelen "<mottakar.__struct_type__>.<metodenamn>", samanliknar mot kvar
-// kandidat, og ved treff: mottakar→x0, realarg j→x(j+1), `bl` kandidatfunksjonen
-// (self-fyrst, som tolken). Returnerer ny djupn. Registerdisiplin: hjelpe-
-// emittarane (map_get/str_concat/str_eq) rører berre x9–x16 → nøkkelen bur trygt
-// i x17, mottakar/metode/args i operand-registra (x19+). str_eq/map_get gjev
-// BOKSA NcVal → les [+8] før forgreining. Ingen-treff = brk (uråkeleg i korrekt
-// kode; compiler emitterer kall_metode berre for reelle metodar).
-funksjon emit_kall_metode(native: liste_heiltall, djupn: heiltall, N: heiltall, memmode: boolsk, home_off: heiltall, kand, bl_patchar) -> heiltall {
+// R2/F20: `CALL builtin.kall_metode, N` med operandane [mottakar, "metode", arg…] (logisk
+// idx djupn-N …). Same oppslag som vm_metode_løys i vm.no:
+//   1. struktur (ordbok med «__struktur__» = "modul.Type"): funksjonen
+//      "<__struktur__>.<metode>" EKSAKT, via verts-funksjonstabellen (__host_finst/
+//      __host_kall, same tabell som builtin.host_kall) med argumenta [mottakar, arg…];
+//   2. ordbok med eit felt <metode> som held ein closure (tagg 6): kall closuren med
+//      argumenta (utan mottakaren), som CALL_VALUE;
+//   3. elles fangbar MetodeFeil (__feil_metode; òg for ingenting-mottakar).
+// Resultatet hamnar i mottakar-sloten. Erstattar M5-dispatchen på __struct_type__ med
+// kort suffiksoppslag. Registerdisiplin: map_get/str_concat rører x0–x6/x9–x17; nøkkelen
+// blir halden på stakken over __host_finst-kallet.
+funksjon emit_kall_metode(native: liste_heiltall, djupn: heiltall, N: heiltall, memmode: boolsk, home_off: heiltall, bl_patchar) -> heiltall {
     la recv_idx = djupn - N
     la meth_idx = djupn - N + 1
-    // Mottakar + metodenamn i overlevande register.
+    la nargs = N - 2
     la RREC = 19 + recv_idx
     hvis memmode {
         legg_u32(native, 0xF9400340 | ((home_off + recv_idx) << 10) | 19)  // ldr x19, [x26, #recv]
@@ -1776,52 +1759,98 @@ funksjon emit_kall_metode(native: liste_heiltall, djupn: heiltall, N: heiltall, 
         legg_u32(native, 0xF9400340 | ((home_off + meth_idx) << 10) | 20)  // ldr x20, [x26, #meth]
         RMET = 20
     }
-    // Nøkkel i x17: type = map_get(mottakar, "__struct_type__"); key = type+"."+metode.
-    emit_ncval_str_const(native, "__struct_type__", 15)     // x15 = nøkkel-streng
-    emit_map_get(native, RREC, 15, 17, usann)               // x17 = type (verdi-peikar, ikkje bool)
-    emit_ncval_str_const(native, ".", 11)                   // x11 = "." (x9 klobbast av str_concat sitt fyrste ldr)
-    emit_str_concat(native, 17, 11, 17)                     // x17 = type + "."
-    emit_str_concat(native, 17, RMET, 17)                   // x17 = key
-    la done_patches = []
-    la ki = 0
-    mens ki < lengde(kand) {
-        la kort = tekst(kand[ki][0])
-        la full = tekst(kand[ki][1])
-        emit_ncval_str_const(native, kort, 11)              // x11 = kandidat-namn (x9 klobbast av str_eq)
-        emit_str_eq(native, 17, 11, 15)                     // x15 = boksa bool (key == kort)
-        legg_u32(native, 0xF94005F0)                        // ldr x16, [x15, #8]  (0/1)
-        la p_skip = lengde(native)
-        legg_u32(native, 0)                                 // cbz x16, skip  (patch)
-        // treff: mottakar→x0, realarg j→x(j+1); bl full.
-        legg_u32(native, 0xAA0003E0 | (RREC << 16))         // mov x0, RREC
-        la j = 0
-        mens j < N - 2 {
-            la aidx = djupn - N + 2 + j
-            hvis memmode {
-                legg_u32(native, 0xF9400340 | ((home_off + aidx) << 10) | (j + 1))  // ldr x(j+1), [x26,#arg]
-            } ellers {
-                legg_u32(native, 0xAA0003E0 | ((19 + aidx) << 16) | (j + 1))         // mov x(j+1), Xarg
-            }
-            j = j + 1
+    la til_feil: liste_heiltall = []
+    la til_closure: liste_heiltall = []
+    la til_ferdig: liste_heiltall = []
+    // ingenting / ikkje-ordbok → MetodeFeil
+    legg_til(til_feil, lengde(native))
+    legg_u32(native, 0xB4000000 | RREC)                 // cbz Xrec, feil
+    legg_u32(native, agc.e_ldr(9, RREC, 0))
+    legg_til(til_feil, lengde(native))
+    legg_u32(native, 0xB4000009)                        // cbz x9, feil (null-objektet)
+    legg_u32(native, agc.e_cmp_i(9, 5))
+    legg_til(til_feil, lengde(native))
+    legg_u32(native, 0x54000001)                        // b.ne feil
+    // 1. struktur: nøkkel = __struktur__ + "." + metode
+    emit_ncval_str_const(native, "__struktur__", 15)
+    emit_map_get(native, RREC, 15, 17, usann)           // x17 = merket / 0
+    legg_til(til_closure, lengde(native))
+    legg_u32(native, 0xB4000011)                        // cbz x17, closure
+    legg_u32(native, agc.e_ldr(9, 17, 0))
+    legg_u32(native, agc.e_cmp_i(9, 3))
+    legg_til(til_closure, lengde(native))
+    legg_u32(native, 0x54000001)                        // b.ne closure
+    emit_ncval_str_const(native, ".", 11)
+    emit_str_concat(native, 17, 11, 17)
+    emit_str_concat(native, 17, RMET, 17)               // x17 = "modul.Type.metode"
+    legg_u32(native, 0xF81F0FF1)                        // str x17, [sp, #-16]!
+    legg_u32(native, agc.e_mov(0, 17))
+    la p_bl_f = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl __host_finst
+    legg_til(bl_patchar, [p_bl_f, "__host_finst"])
+    legg_u32(native, agc.e_ldr(9, 0, 8))                // x9 = finst?
+    legg_u32(native, agc.e_ldr_post(17, 31, 16))        // ldr x17, [sp], #16
+    legg_til(til_closure, lengde(native))
+    legg_u32(native, 0xB4000009)                        // cbz x9, closure
+    // Argumentliste [mottakar, arg…]: mottakaren i metode-sloten, so lista er samanhengande.
+    hvis memmode {
+        legg_u32(native, 0xF9000340 | ((home_off + meth_idx) << 10) | RREC)   // str Xrec, [x26, #home(meth)]
+        emit_build_list_mem(native, N - 1, meth_idx, home_off, 15)
+    } ellers {
+        legg_u32(native, agc.e_mov(RMET, RREC))
+        emit_build_list(native, N - 1, RMET, 15)
+    }
+    legg_u32(native, agc.e_mov(0, 17))
+    legg_u32(native, agc.e_mov(1, 15))
+    la p_bl_k = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl __host_kall
+    legg_til(bl_patchar, [p_bl_k, "__host_kall"])
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0)                                 // b ferdig
+    // 2. closure i feltet <metode>
+    la l_closure = lengde(native)
+    emit_map_get(native, RREC, RMET, 17, usann)         // x17 = feltverdi / 0
+    legg_til(til_feil, lengde(native))
+    legg_u32(native, 0xB4000011)                        // cbz x17, feil
+    legg_u32(native, agc.e_ldr(9, 17, 0))
+    legg_u32(native, agc.e_cmp_i(9, 6))
+    legg_til(til_feil, lengde(native))
+    legg_u32(native, 0x54000001)                        // b.ne feil
+    hvis nargs > 7 { kast "NcVal closure-metodekall støttar høgst 7 argument" }
+    legg_u32(native, agc.e_ldr(12, 17, 8))              // closure_data
+    legg_u32(native, agc.e_ldr(13, 12, 0))              // fn_addr
+    legg_u32(native, agc.e_ldr(14, 12, 8))              // capture
+    la a = 0
+    mens a < nargs {
+        la aidx = djupn - N + 2 + a
+        hvis memmode {
+            legg_u32(native, 0xF9400340 | ((home_off + aidx) << 10) | a)  // ldr x_a, [x26, #home(arg)]
+        } ellers {
+            legg_u32(native, agc.e_mov(a, 19 + aidx))
         }
-        la p_bl = lengde(native)
-        legg_u32(native, 0x94000000)                        // bl full  (patch via bl_patchar)
-        legg_til(bl_patchar, [p_bl, full])
-        la p_done = lengde(native)
-        legg_u32(native, 0)                                 // b done  (patch)
-        legg_til(done_patches, p_done)
-        la skip_pos = lengde(native)
-        skriv_u32(native, p_skip, 0xB4000010 | ((((skip_pos - p_skip) / 4) & 0x7FFFF) << 5))  // cbz x16, skip
-        ki = ki + 1
+        a = a + 1
     }
-    legg_u32(native, 0xD4200000)                            // brk #0  (ingen treff — uråkeleg)
-    la done_pos = lengde(native)
-    la dp = 0
-    mens dp < lengde(done_patches) {
-        la pp = done_patches[dp]
-        skriv_u32(native, pp, 0x14000000 | (((done_pos - pp) / 4) & 0x03FFFFFF))  // b done
-        dp = dp + 1
+    legg_u32(native, agc.e_mov(nargs, 14))              // capture i x[nargs]
+    legg_u32(native, 0xD63F01A0)                        // blr x13
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0)                                 // b ferdig
+    // 3. MetodeFeil
+    la l_feil = lengde(native)
+    legg_u32(native, agc.e_mov(0, RREC))
+    legg_u32(native, agc.e_mov(1, RMET))
+    la p_bl_mf = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl __feil_metode (returnerer aldri)
+    legg_til(bl_patchar, [p_bl_mf, "__feil_metode"])
+    la l_ferdig = lengde(native)
+    for p i til_feil {
+        la ord = native[p] | (native[p + 1] << 8) | (native[p + 2] << 16) | (native[p + 3] << 24)
+        hvis (ord & 0xFF000000) == 0xB4000000 { agc.patch_cbz(native, p, l_feil, ord & 31) } ellers { ncd_bcond(native, p, l_feil, 1) }
     }
+    for p i til_closure {
+        la ord = native[p] | (native[p + 1] << 8) | (native[p + 2] << 16) | (native[p + 3] << 24)
+        hvis (ord & 0xFF000000) == 0xB4000000 { agc.patch_cbz(native, p, l_closure, ord & 31) } ellers { ncd_bcond(native, p, l_closure, 1) }
+    }
+    for p i til_ferdig { ncd_b(native, p, l_ferdig) }
     // resultat x0 → mottakar-slot.
     hvis memmode {
         legg_u32(native, 0xF9000340 | ((home_off + recv_idx) << 10) | 0)   // str x0, [x26, #recv]
@@ -1907,11 +1936,76 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     returner 0
 }
 
+// R2/F20: strukturmerka er usynlege i nøkler/verdier/lengde/json (vm.no vm_struktur_*).
+// Konstruktøren «modul.Namn» byggjer instansen med «__type__» og «__struktur__» som dei to
+// første para (BUILD_MAP-rekkjefølgja), og ingenting flyttar dei seinare (nye felt blir
+// lagde til etter, fjern_nokkel skyv resten ned). Med x9 = &par[0] og x10 = count: er
+// count ≥ 2 og nøklane i par 0/1 tekst lik "__type__"/"__struktur__", blir x9 += 32 og
+// x10 −= 2 (dei to para blir hoppa over). Ei vanleg ordbok med eit eige __type__-felt er
+// ikkje ein struktur. Scratch: x2–x5.
+funksjon ncd_struktur_hopp(native: liste_heiltall) -> heiltall {
+    la til_ferdig: liste_heiltall = []
+    legg_u32(native, agc.e_cmp_i(10, 2))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000003)                                // b.lo ferdig
+    // par 0: "__type__" (8 byte)
+    legg_u32(native, agc.e_ldr(2, 9, 0))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0xB4000002)                                // cbz x2, ferdig
+    legg_u32(native, agc.e_ldr(3, 2, 0))
+    legg_u32(native, agc.e_cmp_i(3, 3))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, agc.e_ldr(3, 2, 8))                        // strdata
+    legg_u32(native, agc.e_ldr(4, 3, 0))
+    legg_u32(native, agc.e_cmp_i(4, 8))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, agc.e_ldr(4, 3, 8))
+    ncd_konst4(native, 5, 0x5F5F, 0x7974, 0x6570, 0x5F5F)      // "__type__"
+    legg_u32(native, agc.e_cmp(4, 5))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    // par 1: "__struktur__" (12 byte)
+    legg_u32(native, agc.e_ldr(2, 9, 16))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0xB4000002)                                // cbz x2, ferdig
+    legg_u32(native, agc.e_ldr(3, 2, 0))
+    legg_u32(native, agc.e_cmp_i(3, 3))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, agc.e_ldr(3, 2, 8))
+    legg_u32(native, agc.e_ldr(4, 3, 0))
+    legg_u32(native, agc.e_cmp_i(4, 12))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, agc.e_ldr(4, 3, 8))
+    ncd_konst4(native, 5, 0x5F5F, 0x7473, 0x7572, 0x746B)      // "__strukt"
+    legg_u32(native, agc.e_cmp(4, 5))
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, 0xB9401064)                                // ldr w4, [x3, #16]
+    legg_u32(native, 0x52800000 | (0x7275 << 5) | 5)            // movz w5, #0x7275
+    legg_u32(native, 0x72A00000 | (0x5F5F << 5) | 5)            // movk w5, #0x5F5F, lsl 16  ("ur__")
+    legg_u32(native, 0x6B05009F)                                // cmp w4, w5
+    legg_til(til_ferdig, lengde(native))
+    legg_u32(native, 0x54000001)                                // b.ne ferdig
+    legg_u32(native, agc.e_add_i(9, 9, 32))
+    legg_u32(native, agc.e_sub_i(10, 10, 2))
+    la l_ferdig = lengde(native)
+    for p i til_ferdig {
+        la ord = native[p] | (native[p + 1] << 8) | (native[p + 2] << 16) | (native[p + 3] << 24)
+        hvis (ord & 0xFF000000) == 0xB4000000 { agc.patch_cbz(native, p, l_ferdig, ord & 31) } ellers { ncd_bcond(native, p, l_ferdig, ord & 15) }
+    }
+    returner 0
+}
+
 // Fase 8: nøkler(kart) → liste av nøklane (kvar andre slot i mapdata).
 funksjon emit_noekler(native: liste_heiltall, map_reg: heiltall, dst_reg: heiltall) -> heiltall {
     legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8] (mapdata)
     legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
     legg_u32(native, 0x91002129)                       // add x9, x9, #8 (&par[0])
+    ncd_struktur_hopp(native)                          // R2/F20: hopp over strukturmerka
     la gcm = ncval_gc_på()
     hvis gcm {
         agc.liste_storleik(native, 10, 14, 11)         // A4: x14 = 8 + next_pow2(count)·8 (x11 scratch, set under)
@@ -1945,7 +2039,9 @@ funksjon emit_noekler(native: liste_heiltall, map_reg: heiltall, dst_reg: heilta
 funksjon emit_verdier(native: liste_heiltall, map_reg: heiltall, dst_reg: heiltall) -> heiltall {
     legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8] (mapdata)
     legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
-    legg_u32(native, 0x91004129)                       // add x9, x9, #16 (&val[0])
+    legg_u32(native, 0x91002129)                       // add x9, x9, #8 (&par[0])
+    ncd_struktur_hopp(native)                          // R2/F20: hopp over strukturmerka
+    legg_u32(native, 0x91002129)                       // add x9, x9, #8 (&val[0])
     la gcm = ncval_gc_på()
     hvis gcm {
         agc.liste_storleik(native, 10, 14, 11)         // A4: x14 = 8 + next_pow2(count)·8 (x11 scratch, set under)
@@ -3002,6 +3098,34 @@ funksjon emit_feil_rutinar(os: tekst, ev: heiltall) -> ordbok {
     emit_str_concat(r, 21, 22, 21)
     legg_u32(r, agc.e_mov(0, 21))
     legg_til(til_kast, agc.plass(r))
+    // R2/F20: __feil_metode (x0 = mottakar, x1 = metodenamn) — vm_metode_løys sine meldingar.
+    inn["__feil_metode"] = lengde(r)
+    legg_u32(r, agc.e_mov(19, 0))
+    legg_u32(r, agc.e_mov(20, 1))
+    la p_mf_null1 = lengde(r)
+    legg_u32(r, 0xB4000013)                                     // cbz x19, ingenting
+    legg_u32(r, agc.e_ldr(9, 19, 0))
+    la p_mf_null2 = lengde(r)
+    legg_u32(r, 0xB4000009)                                     // cbz x9, ingenting
+    emit_ncval_str_const(r, "MetodeFeil: ", 21)
+    ncd_feil_typenamn(r, 19, 22)
+    emit_str_concat(r, 21, 22, 21)
+    emit_ncval_str_const(r, " har ingen metode ", 23)
+    emit_str_concat(r, 21, 23, 21)
+    emit_str_concat(r, 21, 20, 21)
+    emit_ncval_str_const(r, "()", 23)
+    emit_str_concat(r, 21, 23, 21)
+    legg_u32(r, agc.e_mov(0, 21))
+    legg_til(til_kast, agc.plass(r))
+    la l_mf_ingenting = lengde(r)
+    agc.patch_cbz(r, p_mf_null1, l_mf_ingenting, 19)
+    agc.patch_cbz(r, p_mf_null2, l_mf_ingenting, 9)
+    emit_ncval_str_const(r, "MetodeFeil: kan ikkje kalle metoden ", 21)
+    emit_str_concat(r, 21, 20, 21)
+    emit_ncval_str_const(r, "() på ingenting", 23)
+    emit_str_concat(r, 21, 23, 21)
+    legg_u32(r, agc.e_mov(0, 21))
+    legg_til(til_kast, agc.plass(r))
     // __feil_kast (x0 = melding)
     la l_kast = lengde(r)
     inn["__feil_kast"] = l_kast
@@ -3054,7 +3178,7 @@ funksjon ncval_legg_til_feil(all_patchar, image: liste_heiltall, fn_start, os: t
     la treng = usann
     for pt i all_patchar {
         la t = tekst(pt[1])
-        hvis t == "__feil_div" eller t == "__feil_mod" eller t == "__feil_indeks" eller t == "__feil_heiltall" eller t == "__assert" eller t == "__assert_eq" eller t == "__feil_neg" eller builtin.starts_with(t, "__feil_type_") { treng = sann }
+        hvis t == "__feil_div" eller t == "__feil_mod" eller t == "__feil_indeks" eller t == "__feil_heiltall" eller t == "__assert" eller t == "__assert_eq" eller t == "__feil_neg" eller t == "__feil_metode" eller builtin.starts_with(t, "__feil_type_") { treng = sann }
     }
     hvis ikkje treng { returner 0 }
     la ev = 0 - 1
@@ -7052,6 +7176,12 @@ funksjon emit_json_stringify_routine(os: tekst) -> liste_heiltall {
     legg_u32(r, 0xF9400409)                          // ldr x9, [x0, #8]  (mapdata)
     legg_u32(r, 0xF9400135)                          // ldr x21, [x9]     (tal par)
     legg_u32(r, 0x91002134)                          // add x20, x9, #8   (&par[0])
+    // R2/F20: strukturmerka blir ikkje serialiserte (ncd_struktur_hopp på x9/x10).
+    legg_u32(r, agc.e_mov(9, 20))
+    legg_u32(r, agc.e_mov(10, 21))
+    ncd_struktur_hopp(r)
+    legg_u32(r, agc.e_mov(20, 9))
+    legg_u32(r, agc.e_mov(21, 10))
     emit_char_str(r, 123, 19)                        // acc = "{"
     legg_u32(r, 0xD2800016)                          // movz x22, #0
     la lbl_mloop = lengde(r)
@@ -8535,7 +8665,13 @@ funksjon emit_throw_dispatch_routine(os: tekst, et: heiltall, ev: heiltall, eb: 
     legg_u32(r, 0xF100153F)                             // cmp x9, #5  (map?)
     la p_bne_map = lengde(r)
     legg_u32(r, 0)                                      // b.ne chk_str
-    // map: exc_type = map_get(exc, "type")
+    // map: exc_type = exc["__type__"] (R2/F20: struktur-unnatak, som vm_exception_type),
+    // elles exc["type"]
+    emit_ncval_str_const(r, "__type__", 1)              // x1 = "__type__"
+    emit_map_get(r, 0, 1, 20, usann)                    // x20 = verdi-peikar (eller 0)
+    la p_har_t = lengde(r)
+    legg_u32(r, 0)                                      // cbnz x20, have_type
+    legg_u32(r, 0xF9400320 | (ev << 10) | 0)            // ldr x0, [x25, #ev*8]  (reload exc)
     emit_ncval_str_const(r, "type", 1)                  // x1 = "type"
     emit_map_get(r, 0, 1, 20, usann)                    // x20 = verdi-peikar (eller 0)
     la p_b_have1 = lengde(r)
@@ -8638,6 +8774,7 @@ funksjon emit_throw_dispatch_routine(os: tekst, et: heiltall, ev: heiltall, eb: 
     // === patch framover-greiner ===
     skriv_u32(r, p_bne_map,      0x54000001 | ((((lbl_chk_str    - p_bne_map)      / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_b_have1,      0x14000000 |  (((lbl_have_type   - p_b_have1)      / 4) & 0x03FFFFFF))
+    agc.patch_cbnz(r, p_har_t, lbl_have_type, 20)
     skriv_u32(r, p_bne_str,      0x54000001 | ((((lbl_no_type     - p_bne_str)      / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_blt_notype,   0x5400000B | ((((lbl_str_notype  - p_blt_notype)   / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_b_have2,      0x14000000 |  (((lbl_have_type   - p_b_have2)      / 4) & 0x03FFFFFF))
@@ -10150,7 +10287,6 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
     hvis gc_modus og ikkje is_entry { agc.safepoint(native, bl_patchar, os) }
     la djupn = 0
     la etikettar = {}
-    la metode_kand = null   // M5: lat metode-kandidatliste (fyrst når kall_metode nås)
     // Operand-djupn ved kvar grein til ei etikett. Codegen sporar djupn LINEÆRT,
     // men ved kontrollflyt-samanslåing (t.d. kortslutta `og`/`eller`) er den
     // lineære djupna feil på fall-inn til ei etikett som berre nås via hopp.
@@ -11202,16 +11338,29 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal lengde krev éin stakkverdi", "image": []} }
                     // A5: berre tekst/liste/kart (3/4/5) har [count] i data; anna (null-objektet,
                     // heiltal, bool) gjev 0 i staden for å deref-e val (vm.no: lengde(null) → 0).
-                    legg_u32(native, 0xF9400000 | (r1 << 5) | 9)  // ldr x9, [Xtopp]      (type)
-                    legg_u32(native, 0xF1001D3F)                    // cmp x9, #7  (bytes: [tal] som liste)
-                    legg_u32(native, 0x54000080)                    // b.eq les_tal (+4)
-                    legg_u32(native, 0xD1000D2B)                    // sub x11, x9, #3
+                    legg_u32(native, 0xF9400000 | (r1 << 5) | 12) // ldr x12, [Xtopp]     (type)
+                    legg_u32(native, 0xF1001D9F)                    // cmp x12, #7  (bytes: [tal] som liste)
+                    la p_len_les = lengde(native)
+                    legg_u32(native, 0)                             // b.eq les_tal
+                    legg_u32(native, 0xD1000D8B)                    // sub x11, x12, #3
                     legg_u32(native, 0xF100097F)                    // cmp x11, #2
-                    legg_u32(native, 0x54000088)                    // b.hi null_lengd (+4)
+                    la p_len_null = lengde(native)
+                    legg_u32(native, 0)                             // b.hi null_lengd
+                    ncd_bcond(native, p_len_les, lengde(native), 0)
                     legg_u32(native, 0xF9400400 | (r1 << 5) | 9)  // ldr x9, [Xtopp, #8]  (strdata)
                     legg_u32(native, 0xF940012A)                    // ldr x10, [x9]        (lengd)
-                    legg_u32(native, 0x14000002)                    // b boks (+2)
+                    // R2/F20: ein struktur har to skjulte merke-par (ncd_struktur_hopp).
+                    legg_u32(native, agc.e_cmp_i(12, 5))
+                    la p_len_boks1 = lengde(native)
+                    legg_u32(native, 0)                             // b.ne boks
+                    legg_u32(native, 0x91002129)                    // add x9, x9, #8 (&par[0])
+                    ncd_struktur_hopp(native)
+                    la p_len_boks2 = lengde(native)
+                    legg_u32(native, 0)                             // b boks
+                    ncd_bcond(native, p_len_null, lengde(native), 8)
                     legg_u32(native, 0xD280000A)                    // null_lengd: movz x10, #0
+                    ncd_bcond(native, p_len_boks1, lengde(native), 1)
+                    ncd_b(native, p_len_boks2, lengde(native))
                     emit_ncval_alloc(native, 10, r1, 1)             // boks som int → same slot
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis (kallnamn == "char_code" eller kallnamn == "builtin.char_code") og lengde(instr) == 3 og instr[2] == 1 {
@@ -11267,6 +11416,102 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal heltall krev 1 arg", "image": []} }
                     emit_heltall_str(native, r1, r1, bl_patchar)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "typenamn" eller kallnamn == "builtin.typenamn") og lengde(instr) == 3 og instr[2] == 1 {
+                    // R2/F21: typenamn(v) — strukturnamnet («__type__», par 0 i instansen) for
+                    // ein struktur, elles type(v) (vm.no builtin.typenamn).
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal typenamn krev 1 arg", "image": []} }
+                    la tn_vanleg: liste_heiltall = []
+                    legg_til(tn_vanleg, lengde(native))
+                    legg_u32(native, 0xB4000000 | r1)               // cbz Xv, vanleg
+                    legg_u32(native, agc.e_ldr(9, r1, 0))
+                    legg_u32(native, agc.e_cmp_i(9, 5))
+                    legg_til(tn_vanleg, lengde(native))
+                    legg_u32(native, 0x54000001)                    // b.ne vanleg
+                    legg_u32(native, agc.e_ldr(9, r1, 8))
+                    legg_u32(native, agc.e_ldr(10, 9, 0))
+                    legg_u32(native, agc.e_add_i(9, 9, 8))
+                    legg_u32(native, agc.e_mov(6, 9))
+                    ncd_struktur_hopp(native)
+                    legg_u32(native, agc.e_cmp(9, 6))
+                    legg_til(tn_vanleg, lengde(native))
+                    legg_u32(native, 0x54000000)                    // b.eq vanleg (ikkje struktur)
+                    legg_u32(native, agc.e_ldr(r1, 6, 8))           // Xv = __type__-verdien
+                    la p_tn_ferdig = lengde(native)
+                    legg_u32(native, 0)                             // b ferdig
+                    la l_tn_vanleg = lengde(native)
+                    for p i tn_vanleg {
+                        la ord = native[p] | (native[p + 1] << 8) | (native[p + 2] << 16) | (native[p + 3] << 24)
+                        hvis (ord & 0xFF000000) == 0xB4000000 { agc.patch_cbz(native, p, l_tn_vanleg, ord & 31) } ellers { ncd_bcond(native, p, l_tn_vanleg, ord & 15) }
+                    }
+                    emit_type_ncval(native, r1, r1)
+                    ncd_b(native, p_tn_ferdig, lengde(native))
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "er_instans" eller kallnamn == "builtin.er_instans") og lengde(instr) == 3 og instr[2] == 2 {
+                    // R2/F21: er_instans(v, "modul.Type"): v er ein struktur med __struktur__ ==
+                    // målet (eller kort __type__ == målet), eller strukturen sin konstruktør listar
+                    // målet i "interfaces". Kompilatoren pushar målet som konstant rett før kallet,
+                    // so grensesnitt-implementasjonane blir funne ved kompilering (vm_er_instans).
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal er_instans krev 2 arg", "image": []} }
+                    la ei_ekstra: liste_tekst = []
+                    hvis i > 0 og opcode(kode[i - 1]) == "PUSH_CONST" og builtin.type(kode[i - 1][1]) == "tekst" {
+                        la ei_mål = tekst(kode[i - 1][1])
+                        for ei_fn i nøkler(funksjonar) {
+                            la ei_def = funksjonar[ei_fn]
+                            hvis builtin.type(ei_def) == "ordbok" og finnes_nøkkel(ei_def, "interfaces") og builtin.type(ei_def["interfaces"]) == "liste" {
+                                for ei_g i ei_def["interfaces"] {
+                                    hvis tekst(ei_g) == ei_mål { legg_til(ei_ekstra, tekst(ei_fn)) }
+                                }
+                            }
+                        }
+                    }
+                    la ei_usann: liste_heiltall = []
+                    la ei_sann: liste_heiltall = []
+                    legg_til(ei_usann, lengde(native))
+                    legg_u32(native, 0xB4000000 | r2)               // cbz Xv, usann
+                    legg_u32(native, agc.e_ldr(9, r2, 0))
+                    legg_u32(native, agc.e_cmp_i(9, 5))
+                    legg_til(ei_usann, lengde(native))
+                    legg_u32(native, 0x54000001)                    // b.ne usann
+                    legg_u32(native, agc.e_ldr(9, r2, 8))
+                    legg_u32(native, agc.e_ldr(10, 9, 0))
+                    legg_u32(native, agc.e_add_i(9, 9, 8))
+                    legg_u32(native, agc.e_mov(6, 9))
+                    ncd_struktur_hopp(native)
+                    legg_u32(native, agc.e_cmp(9, 6))
+                    legg_til(ei_usann, lengde(native))
+                    legg_u32(native, 0x54000000)                    // b.eq usann (ikkje struktur)
+                    legg_u32(native, agc.e_ldr(17, 6, 24))          // x17 = __struktur__-verdien
+                    legg_u32(native, agc.e_ldr(7, 6, 8))            // x7 = __type__-verdien
+                    emit_str_eq(native, 17, r1, 15)
+                    legg_u32(native, agc.e_ldr(16, 15, 8))
+                    legg_til(ei_sann, lengde(native))
+                    legg_u32(native, 0xB5000010)                    // cbnz x16, sann
+                    emit_str_eq(native, 7, r1, 15)
+                    legg_u32(native, agc.e_ldr(16, 15, 8))
+                    legg_til(ei_sann, lengde(native))
+                    legg_u32(native, 0xB5000010)                    // cbnz x16, sann
+                    for ei_s i ei_ekstra {
+                        emit_ncval_str_const(native, ei_s, 11)
+                        emit_str_eq(native, 17, 11, 15)
+                        legg_u32(native, agc.e_ldr(16, 15, 8))
+                        legg_til(ei_sann, lengde(native))
+                        legg_u32(native, 0xB5000010)                // cbnz x16, sann
+                    }
+                    la l_ei_usann = lengde(native)
+                    legg_u32(native, agc.e_movz(9, 0, 0))
+                    la p_ei_ut = lengde(native)
+                    legg_u32(native, 0)                             // b ut
+                    la l_ei_sann = lengde(native)
+                    legg_u32(native, agc.e_movz(9, 1, 0))
+                    ncd_b(native, p_ei_ut, lengde(native))
+                    for p i ei_usann {
+                        la ord = native[p] | (native[p + 1] << 8) | (native[p + 2] << 16) | (native[p + 3] << 24)
+                        hvis (ord & 0xFF000000) == 0xB4000000 { agc.patch_cbz(native, p, l_ei_usann, ord & 31) } ellers { ncd_bcond(native, p, l_ei_usann, ord & 15) }
+                    }
+                    for p i ei_sann { agc.patch_cbnz(native, p, l_ei_sann, 16) }
+                    emit_ncval_alloc(native, 9, r2, 2)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
                 } ellers hvis (kallnamn == "type" eller kallnamn == "builtin.type") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal type krev 1 arg", "image": []} }
                     emit_type_ncval(native, r1, r1)
@@ -12134,42 +12379,15 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_til(bl_patchar, [p_bl_tf, "__throw_dispatch__"])
                     // djupn-bokføring: konsumerer 1, "produserer" 1 (uråkeleg)
                 } ellers hvis (kallnamn == "kall_metode" eller kallnamn == "builtin.kall_metode") og lengde(instr) == 3 {
-                    // M5 oppgåve 2: metode-dispatch. call_args = [mottakar, metode,
-                    // arg0...]; byggjer "<type>.<metode>" i runtime og kallar den
-                    // rette funksjonen (self-fyrst). Sjå emit_kall_metode.
+                    // R2/F20: eksakt metodeoppslag på __struktur__ (sjå emit_kall_metode).
                     la nm = instr[2]
                     hvis nm < 2 { returner {"ok": "usann", "error": "NcVal kall_metode krev >=2 argument", "image": []} }
                     hvis djupn < nm { returner {"ok": "usann", "error": "NcVal kall_metode arg underflyt", "image": []} }
-                    hvis (nm - 1) > 8 { returner {"ok": "usann", "error": "NcVal metodekall støttar høgst 7 argument", "image": []} }
-                    hvis metode_kand == null { metode_kand = ncval_metode_kandidatar(funksjonar) }
                     prøv {
-                        djupn = emit_kall_metode(native, djupn, nm, memmode, home_off, metode_kand, bl_patchar)
+                        djupn = emit_kall_metode(native, djupn, nm, memmode, home_off, bl_patchar)
                     } fang (mkfeil) {
                         returner {"ok": "usann", "error": tekst(mkfeil), "image": []}
                     }
-                } ellers hvis ncval_er_struct_konstruktor(kallnamn) og lengde(instr) == 3 {
-                    // M5: struktur-konstruktor. Som tolken (vm.no:3839): ignorer
-                    // argumenta, returner eit tomt kart tagga med __struct_type__ =
-                    // kort typenamn. Felt vert sette etterpå via INDEX_SET; metode-
-                    // dispatch (Omgang 4 oppgåve 2) les taggen.
-                    la nargs_k = instr[2]
-                    hvis djupn < nargs_k { returner {"ok": "usann", "error": "NcVal konstruktor-arg underflyt: " + kallnamn, "image": []} }
-                    hvis nargs_k == 0 og ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (konstruktor)", "overflow": "sann", "image": []} }
-                    la typenamn = ncval_struct_kort(kallnamn)
-                    // tagg-5 kart {"__struct_type__": typenamn} via den PROVA
-                    // emit_build_map (byggjer korrekt mapdata-layout INDEX_GET les).
-                    // Nøkkel → x11, verdi → x12 (konsekutivt for emit_build_map);
-                    // str_const klobbar x9/x10/x13, IKKJE x11/x12.
-                    prøv {
-                        emit_ncval_str_const(native, "__struct_type__", 11)  // x11 = nøkkel
-                        emit_ncval_str_const(native, typenamn, 12)           // x12 = verdi
-                    } fang melding {
-                        returner {"ok": "usann", "error": tekst(melding), "image": []}
-                    }
-                    la kdst = opnd_push_reg(djupn - nargs_k, memmode)
-                    emit_build_map(native, 1, 11, kdst)              // 1 par frå x11/x12 → tagg-5
-                    opnd_ut(native, djupn - nargs_k, kdst, memmode, home_off)
-                    djupn = djupn - nargs_k + 1
                 } ellers hvis (kallnamn == "atomic_operation" eller kallnamn == "builtin.atomic_operation") og lengde(instr) == 3 og instr[2] == 1 og ikkje gc_modus og
                               ikkje (ncval_ruting_aktiv(os) og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn))) {
                     // A4: berre utan GC. Inline-emitteren legg atom-cella rått ved fronten og
