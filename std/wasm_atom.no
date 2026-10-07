@@ -10,6 +10,11 @@
 #   k["postkasse"]         byteadressa til postkassa i minnet «m» (tekst over JS-grensa)
 #   k["lit"], k["lit_idx"] det passive datasegmentet 0 med tekstliteralar
 #   k["flyt"], k["testbygg"]
+#   k["struktur"]          (R2) modulen kan ha struktur-instansar: nøkler/lengde gøymer
+#                          merka «__struktur__»/«__type__» på ordbøker med «__struktur__»
+#   k["kast_ok"]           (R2/F08) modulen har unnatak alt: aritmetikk på ikkje-tal kastar
+#                          TypeFeil som VM-en (elles ein rein trap, så ein modul utan unnatak
+#                          ikkje får tag og uhandtert berre for denne feilvegen)
 #
 # Verdimodell (WasmGC, sjå docs/WASM_KLIENT.md). Typeindeksane er faste:
 #   0 $boks   struct {i64}                          heltal utanfor i31
@@ -280,10 +285,39 @@ funksjon atom_rekkje() -> liste {
               "indeks_hent", "indeks_set", "legg_til", "har_nokkel", "nøkler", "for_iterabel",
               "slice", "char_code", "chr", "type_namn", "heltall_av", "desimal_av",
               "uhandtert", "unntak_type", "unntak_passar",
-              "fjern_nokkel", "frå_minne", "til_minne_ved", "tid_ms"]
+              "fjern_nokkel", "frå_minne", "til_minne_ved", "tid_ms",
+              "merke_finn", "er_merke", "verdi_typenamn", "typefeil", "typenamn"]
 }
 
-funksjon atom_avheng(namn: tekst, flyt: bool) -> liste {
+# Avhengnadene til atomet. k: konteksten (flagga flyt, struktur og kast_ok, sjå over).
+funksjon atom_avheng(namn: tekst, k: ordbok) -> liste {
+    la ut = _atom_avheng_grunn(namn, k["flyt"])
+    # R2/F20: nøkler/lengde gøymer strukturmerka når modulen kan ha strukturar
+    hvis k["struktur"] og (namn == "nøkler" eller namn == "lengde") {
+        legg_til(ut, "merke_finn")
+        legg_til(ut, "er_merke")
+        hvis namn == "lengde" { legg_til(ut, "nøkler") }
+    }
+    # R2/F08: TypeFeil for aritmetikk på ikkje-tal når modulen alt kan kaste
+    hvis k["kast_ok"] {
+        hvis namn == "add" eller namn == "sub" eller namn == "mul" eller namn == "div" eller namn == "mod" eller
+             namn == "div_k" eller namn == "mod_k" {
+            legg_til(ut, "typefeil")
+        }
+        hvis namn == "neg" {
+            legg_til(ut, "verdi_typenamn")
+            legg_til(ut, "konkat")
+            legg_til(ut, "kast")
+        }
+    }
+    returner ut
+}
+
+funksjon _atom_avheng_grunn(namn: tekst, flyt: bool) -> liste {
+    hvis namn == "merke_finn" eller namn == "er_merke" { returner ["tekst_lik"] }
+    hvis namn == "verdi_typenamn" { returner ["er_tal", "merke_finn", "tekst_av"] }
+    hvis namn == "typefeil" { returner ["verdi_typenamn", "konkat", "kast"] }
+    hvis namn == "typenamn" { returner ["type_namn", "merke_finn", "tekst_av"] }
     hvis namn == "er_num" { returner ["er_tal"] }
     hvis namn == "til_f64" { returner ["til_i64"] }
     hvis namn == "sannhet" { returner ["er_tal", "til_i64"] }
@@ -295,7 +329,7 @@ funksjon atom_avheng(namn: tekst, flyt: bool) -> liste {
     hvis namn == "logg_tekst" { returner ["til_minne"] }
     hvis namn == "uhandtert" { returner ["tekst_av", "konkat", "logg_tekst"] }
     hvis namn == "unntak_type" { returner ["er_tal", "ordbok_finn", "ordbok_hent", "tekst_av"] }
-    hvis namn == "unntak_passar" { returner ["unntak_type", "tekst_lik"] }
+    hvis namn == "unntak_passar" { returner ["unntak_type", "tekst_lik", "ordbok_finn", "ordbok_hent", "tekst_av"] }
     hvis namn == "skriv" { returner ["tekst_av", "logg_tekst"] }
     hvis namn == "add" { returner ["er_tal", "til_i64", "frå_i64", "er_num", "til_f64", "tekst_av", "konkat"] }
     hvis namn == "sub" eller namn == "mul" eller namn == "div_k" eller namn == "mod_k" {
@@ -375,6 +409,11 @@ funksjon atom_sig(namn: tekst) -> liste {
         returner [[eq], [eq]]
     }
     hvis namn == "slice" { returner [[eq, eq, eq], [eq]] }
+    hvis namn == "merke_finn" { returner [[VT_ORDBOK(), VT_TEKST()], [i32]] }
+    hvis namn == "er_merke" { returner [[eq], [i32]] }
+    hvis namn == "verdi_typenamn" { returner [[eq], [VT_TEKST()]] }
+    hvis namn == "typefeil" { returner [[eq, eq, VT_TEKST()], []] }
+    hvis namn == "typenamn" { returner [[eq], [eq]] }
     returner [[eq, eq], [eq]]
 }
 
@@ -407,6 +446,30 @@ funksjon _aritm(k: ordbok, namn: tekst, anna: liste) -> liste {
               ELS(), anna, END(), END()]
 }
 
+# R2/F08: aritmetikk på ikkje-tal (operandane i lokal 0 og 1). Med kast_ok kastar
+# atomet «typefeil» VM-teksten «TypeFeil: operatoren <op> krev <krav>, fekk <a> og <b>»
+# (fangbar); utan unnatak i modulen er det ein rein trap. Instruksjonane etterlet ein
+# polymorf stakk (unreachable), så dei kan stå i ei grein med resultattype.
+funksjon _typefeil(k: ordbok, op: tekst) -> liste {
+    hvis ikkje k["kast_ok"] { returner [TRAP()] }
+    la krav = "tal"
+    hvis op == "+" { krav = "tal eller tekst" }
+    returner [lg(0), lg(1), LIT(k, "TypeFeil: operatoren " + op + " krev " + krav + ", fekk "), K(k, "typefeil"), TRAP()]
+}
+
+funksjon _neg_feil(k: ordbok) -> liste {
+    hvis ikkje k["kast_ok"] { returner [TRAP()] }
+    returner [LIT(k, "TypeFeil: unær - krev eit tal, fekk "), lg(0), K(k, "verdi_typenamn"), K(k, "konkat"), K(k, "kast"), TRAP()]
+}
+
+funksjon _op_teikn(namn: tekst) -> tekst {
+    hvis namn == "sub" { returner "-" }
+    hvis namn == "mul" { returner "*" }
+    hvis namn == "div" eller namn == "div_k" { returner "/" }
+    hvis namn == "mod" eller namn == "mod_k" { returner "%" }
+    returner "+"
+}
+
 # div/mod: med_sjekk = kast ved deling på null (namnet på funksjonen i lokal 2, 3).
 funksjon _divmod(k: ordbok, er_mod: bool, med_sjekk: bool) -> liste {
     la tf = T_FLYT()
@@ -415,6 +478,13 @@ funksjon _divmod(k: ordbok, er_mod: bool, med_sjekk: bool) -> liste {
     la x = 4
     la y = 5
     la b = []
+    # R2/F08: typesjekken kjem før nullsjekken, som i VM-en («x» / 0 er TypeFeil)
+    la typesjekk = []
+    hvis k["kast_ok"] {
+        la op = "/"
+        hvis er_mod { op = "%" }
+        typesjekk = [lg(0), K(k, "er_num"), lg(1), K(k, "er_num"), 113, 69, iff([]), _typefeil(k, op), END()]
+    }
     hvis med_sjekk {
         fa = 4
         fb = 5
@@ -423,12 +493,14 @@ funksjon _divmod(k: ordbok, er_mod: bool, med_sjekk: bool) -> liste {
         la melding = "DivisjonMedNull: divisjon med null ved "
         hvis er_mod { melding = "ModuloMedNull: modulo med null ved " }
         legg_til(b, lokale([[2, VT_F64()], [2, VT_I64()]]))
+        legg_til(b, typesjekk)
         legg_til(b, [lg(1), K(k, "er_tal"), iff(VT_I32()), lg(1), K(k, "til_i64"), 80,
                      ELS(), lg(1), rtest(tf), iff(VT_I32()), lg(1), rcast(tf), sget(tf, 0), f64c(0), 97,
                      ELS(), i32c(0), END(), END(),
                      iff([]), LIT(k, melding), LIT_LOK(2, 3), K(k, "konkat"), K(k, "kast"), END()])
     } ellers {
         legg_til(b, lokale([[2, VT_F64()], [2, VT_I64()]]))
+        legg_til(b, typesjekk)
     }
     la int_op = []
     hvis er_mod {
@@ -566,6 +638,10 @@ funksjon _unntak_type(k: ordbok) -> liste {
     # lokale: 1 t (tekst); 2 p, 3 n (i32); 4 r (tekst)
     returner [lokale([[1, VT_TEKST()], [2, VT_I32()], [1, VT_TEKST()]]),
               lg(0), rtest(td), iff([]),
+                # R1/F11 + R2: strukturmerket __type__ vinn over eit felt som heiter «type»
+                lg(0), rcast(td), LIT(k, "__type__"), K(k, "ordbok_finn"), i32c(0), 78, iff([]),
+                  lg(0), rcast(td), LIT(k, "__type__"), K(k, "ordbok_hent"), K(k, "tekst_av"), RET(),
+                END(),
                 lg(0), rcast(td), LIT(k, "type"), K(k, "ordbok_finn"), i32c(0), 78, iff([]),
                   lg(0), rcast(td), LIT(k, "type"), K(k, "ordbok_hent"), K(k, "tekst_av"), RET(),
                 END(),
@@ -707,16 +783,26 @@ funksjon atom_kropp(k: ordbok, namn: tekst) -> liste {
     hvis namn == "unntak_passar" {
         # (v, forventa): vm_handler_match for ein konkret type (jokertypane «»/«*»/«alle» blir
         # avgjorde av lowringa). forventa == «tekst» fangar all tekst; elles må typen vere lik.
+        # Ein struktur med eit eige «type»-felt kan fangast på begge namna (vm_handler_match).
+        la td2 = T_ORDBOK()
         returner [ingen, lg(1), LIT(k, "tekst"), K(k, "tekst_lik"), iff(VT_I32()), lg(0), rtest(T_TEKST()), ELS(), i32c(0), END(),
-                  lg(0), K(k, "unntak_type"), lg(1), K(k, "tekst_lik"), 114]
+                  lg(0), K(k, "unntak_type"), lg(1), K(k, "tekst_lik"), 114,
+                  lg(0), rtest(td2), iff(VT_I32()),
+                    lg(0), rcast(td2), LIT(k, "type"), K(k, "ordbok_finn"), i32c(0), 78, iff(VT_I32()),
+                      lg(0), rcast(td2), LIT(k, "type"), K(k, "ordbok_hent"), K(k, "tekst_av"), lg(1), K(k, "tekst_lik"),
+                    ELS(), i32c(0), END(),
+                  ELS(), i32c(0), END(), 114]
     }
     hvis namn == "skriv" {
         returner [ingen, lg(0), K(k, "tekst_av"), K(k, "logg_tekst"), i32c(0), I31NY()]
     }
     hvis namn == "add" {
-        returner [ingen, _aritm(k, "add", [lg(0), K(k, "tekst_av"), lg(1), K(k, "tekst_av"), K(k, "konkat")])]
+        # R2/F08: er éin side tekst, blir den andre tekst(x) (1 + "x" = "1x"); elles TypeFeil
+        returner [ingen, _aritm(k, "add", [lg(0), rtest(tt), lg(1), rtest(tt), 114, iff(VT_EQ()),
+                                             lg(0), K(k, "tekst_av"), lg(1), K(k, "tekst_av"), K(k, "konkat"),
+                                           ELS(), _typefeil(k, "+"), END()])]
     }
-    hvis namn == "sub" eller namn == "mul" { returner [ingen, _aritm(k, namn, [TRAP()])] }
+    hvis namn == "sub" eller namn == "mul" { returner [ingen, _aritm(k, namn, _typefeil(k, _op_teikn(namn)))] }
     hvis namn == "div" { returner _divmod(k, usann, sann) }
     hvis namn == "mod" { returner _divmod(k, sann, sann) }
     hvis namn == "div_k" { returner _divmod(k, usann, usann) }
@@ -737,7 +823,68 @@ funksjon atom_kropp(k: ordbok, namn: tekst) -> liste {
     hvis namn == "neg" {
         returner [ingen, lg(0), K(k, "er_tal"), iff(VT_EQ()), i64c(0), lg(0), K(k, "til_i64"), 125, K(k, "frå_i64"),
                   ELS(), lg(0), rtest(tf), iff(VT_EQ()), lg(0), rcast(tf), sget(tf, 0), 154, sny(tf),
-                  ELS(), TRAP(), END(), END()]
+                  ELS(), _neg_feil(k), END(), END()]
+    }
+    hvis namn == "merke_finn" {
+        # (d, s): indeksen til tekstnøkkelen s i d, eller −1. Berre tekstnøklar blir
+        # samanlikna (tekst_lik), så atomet treng ikkje den polymorfe «lik».
+        # lokale: 2 n, 3 i (i32); 4 nøklar (arr)
+        returner [lokale([[2, VT_I32()], [1, VT_ARR()]]),
+                  lg(0), sget(td, 0), ls(2), lg(0), sget(td, 1), ls(4), i32c(0), ls(3),
+                  blk([]), lp([]),
+                    lg(3), lg(2), 78, brif(1),
+                    lg(4), lg(3), aget(ta), rtest(tt), iff([]),
+                      lg(4), lg(3), aget(ta), rcast(tt), lg(1), K(k, "tekst_lik"), iff([]), lg(3), RET(), END(),
+                    END(),
+                    lg(3), i32c(1), 106, ls(3), br(0),
+                  END(), END(),
+                  i32c(-1)]
+    }
+    hvis namn == "er_merke" {
+        # Er nøkkelen eit av dei skjulte strukturmerka «__struktur__» og «__type__»?
+        returner [ingen, lg(0), rtest(tt), iff(VT_I32()),
+                    lg(0), rcast(tt), LIT(k, "__struktur__"), K(k, "tekst_lik"),
+                    lg(0), rcast(tt), LIT(k, "__type__"), K(k, "tekst_lik"), 114,
+                  ELS(), i32c(0), END()]
+    }
+    hvis namn == "verdi_typenamn" {
+        # vm_verdi_typenamn: kort strukturnamn (__type__) for ein struktur (ordbok med
+        # __struktur__), elles vm_type_name (null, heiltall, bool, desimaltall, tekst, liste,
+        # kart for ordbøker og closures). lokale: 1 d (ordbok); 2 i (i32)
+        returner [lokale([[1, VT_ORDBOK()], [1, VT_I32()]]),
+                  lg(0), 209, iff([]), LIT(k, "null"), RET(), END(),
+                  lg(0), K(k, "er_tal"), iff([]), LIT(k, "heiltall"), RET(), END(),
+                  lg(0), rtest(tbo), iff([]), LIT(k, "bool"), RET(), END(),
+                  lg(0), rtest(tf), iff([]), LIT(k, "desimaltall"), RET(), END(),
+                  lg(0), rtest(tt), iff([]), LIT(k, "tekst"), RET(), END(),
+                  lg(0), rtest(tl), iff([]), LIT(k, "liste"), RET(), END(),
+                  lg(0), rtest(td), iff([]),
+                    lg(0), rcast(td), ls(1),
+                    lg(1), LIT(k, "__struktur__"), K(k, "merke_finn"), i32c(0), 78, iff([]),
+                      lg(1), LIT(k, "__type__"), K(k, "merke_finn"), ls(2),
+                      lg(2), i32c(0), 78, iff([]), lg(1), sget(td, 2), lg(2), aget(ta), K(k, "tekst_av"), RET(), END(),
+                    END(),
+                  END(),
+                  LIT(k, "kart")]
+    }
+    hvis namn == "typefeil" {
+        # (a, b, prefiks): kast «<prefiks><typenamn a> og <typenamn b>» (R2/F08)
+        returner [ingen, lg(2), lg(0), K(k, "verdi_typenamn"), K(k, "konkat"), LIT(k, " og "), K(k, "konkat"),
+                  lg(1), K(k, "verdi_typenamn"), K(k, "konkat"), K(k, "kast")]
+    }
+    hvis namn == "typenamn" {
+        # builtin.typenamn (R2/F21): __type__ for ein struktur, elles type(v).
+        # lokale: 1 d (ordbok); 2 i (i32)
+        returner [lokale([[1, VT_ORDBOK()], [1, VT_I32()]]),
+                  lg(0), rtest(td), iff([]),
+                    lg(0), rcast(td), ls(1),
+                    lg(1), LIT(k, "__struktur__"), K(k, "merke_finn"), i32c(0), 78, iff([]),
+                      lg(1), LIT(k, "__type__"), K(k, "merke_finn"), ls(2),
+                      lg(2), i32c(0), 72, iff([]), LIT(k, ""), RET(), END(),
+                      lg(1), sget(td, 2), lg(2), aget(ta), K(k, "tekst_av"), RET(),
+                    END(),
+                  END(),
+                  lg(0), K(k, "type_namn")]
     }
     hvis namn == "tekst_lik" {
         # lokale: 2 n, 3 i
@@ -811,9 +958,16 @@ funksjon atom_kropp(k: ordbok, namn: tekst) -> liste {
                   ELS(), i32c(2), END(), END(), END()]
     }
     hvis namn == "lengde" {
+        # R2/F20: ein struktur (ordbok med __struktur__) tel ikkje dei to merka
+        la ordbok_n = [lg(0), rcast(td), sget(td, 0)]
+        hvis k["struktur"] {
+            ordbok_n = [lg(0), rcast(td), LIT(k, "__struktur__"), K(k, "merke_finn"), i32c(0), 78, iff(VT_I32()),
+                          lg(0), K(k, "nøkler"), rcast(tl), sget(tl, 0),
+                        ELS(), lg(0), rcast(td), sget(td, 0), END()]
+        }
         returner [ingen, lg(0), rtest(tt), iff(VT_I32()), lg(0), rcast(tt), ALEN(),
                   ELS(), lg(0), rtest(tl), iff(VT_I32()), lg(0), rcast(tl), sget(tl, 0),
-                  ELS(), lg(0), rtest(td), iff(VT_I32()), lg(0), rcast(td), sget(td, 0),
+                  ELS(), lg(0), rtest(td), iff(VT_I32()), ordbok_n,
                   ELS(), TRAP(), END(), END(), END(), I31NY()]
     }
     hvis namn == "ordbok_finn" {
@@ -917,9 +1071,28 @@ funksjon atom_kropp(k: ordbok, namn: tekst) -> liste {
         returner [ingen, lg(0), rcast(td), lg(1), K(k, "ordbok_finn"), i32c(0), 78, K(k, "bool")]
     }
     hvis namn == "nøkler" {
-        # lokale: 1 d (ordbok); 2 n (i32); 3 a (arr)
-        returner [lokale([[1, VT_ORDBOK()], [1, VT_I32()], [1, VT_ARR()]]),
+        # R2/F20: for ein struktur (ordbok med __struktur__) blir merka «__struktur__» og
+        # «__type__» hoppa over (VM-en sin vm_struktur_nøkler).
+        # lokale: 1 d (ordbok); 2 n (i32); 3 a (arr); 4 i, 5 j (i32); 6 ks (arr)
+        la filter = []
+        la lok = lokale([[1, VT_ORDBOK()], [1, VT_I32()], [1, VT_ARR()]])
+        hvis k["struktur"] {
+            lok = lokale([[1, VT_ORDBOK()], [1, VT_I32()], [1, VT_ARR()], [2, VT_I32()], [1, VT_ARR()]])
+            filter = [lg(1), LIT(k, "__struktur__"), K(k, "merke_finn"), i32c(0), 78, iff([]),
+                        lg(2), anew_def(ta), ls(3), lg(1), sget(td, 1), ls(6), i32c(0), ls(4), i32c(0), ls(5),
+                        blk([]), lp([]),
+                          lg(4), lg(2), 78, brif(1),
+                          lg(6), lg(4), aget(ta), K(k, "er_merke"), 69, iff([]),
+                            lg(3), lg(5), lg(6), lg(4), aget(ta), aset(ta), lg(5), i32c(1), 106, ls(5),
+                          END(),
+                          lg(4), i32c(1), 106, ls(4), br(0),
+                        END(), END(),
+                        lg(5), lg(3), sny(tl), RET(),
+                      END()]
+        }
+        returner [lok,
                   lg(0), rcast(td), ls(1), lg(1), sget(td, 0), ls(2),
+                  filter,
                   lg(2), anew_def(ta), ls(3),
                   lg(3), i32c(0), lg(1), sget(td, 1), i32c(0), lg(2), acopy(ta, ta),
                   lg(2), lg(3), sny(tl)]
