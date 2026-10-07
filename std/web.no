@@ -2359,6 +2359,339 @@ funksjon _openapi_resp_json(parsed_verdi, fallback: tekst) -> tekst {
     returner fallback
 }
 
+// ─── R3 trinn 8: handlar-signatur (felles for std.rutebinding og OpenAPI) ─────
+// Kompilatoren lagrar "params" ([{namn, type, har_standard, standard}]) og
+// "modellar" (strukturnamn → {namn, felt}) i rutemetadata. signatur_plan avgjer
+// kvar kvar parameter kjem frå; std.rutebinding bind etter planen og OpenAPI-
+// generatoren under dokumenterer han. Sjå std/rutebinding.no for reglane.
+
+// Delar ei typetekstform (docs/TYPEMETADATA.md): "liste<Person>?" →
+// {"basis": "liste", "args": ["Person"], "valfri": sann}. Ukjende former gjev
+// basis = heile teksten.
+funksjon signatur_type_del(t: tekst) -> ordbok {
+    la s = builtin.trim(t)
+    la valfri = usann
+    hvis tekst_slutter_med(s, "?") {
+        valfri = sann
+        s = builtin.slice(s, 0, lengde(s) - 1)
+    }
+    la args = []
+    la lt = builtin.index_of(s, "<")
+    la basis = s
+    hvis lt > 0 og tekst_slutter_med(s, ">") {
+        basis = builtin.slice(s, 0, lt)
+        la inne = builtin.slice(s, lt + 1, lengde(s) - 1)
+        la djup: heltall = 0
+        la cur = ""
+        la i: heltall = 0
+        mens i < lengde(inne) {
+            la c = builtin.slice(inne, i, i + 1)
+            hvis c == "<" { djup = djup + 1 }
+            hvis c == ">" { djup = djup - 1 }
+            hvis c == "," og djup == 0 {
+                legg_til(args, builtin.trim(cur))
+                cur = ""
+            } ellers {
+                cur = cur + c
+            }
+            i = i + 1
+        }
+        hvis builtin.trim(cur) != "" { legg_til(args, builtin.trim(cur)) }
+    }
+    returner {"basis": basis, "args": args, "valfri": valfri}
+}
+
+// Grunntypen til ei annotasjon ("tekst", "heltall", "desimaltall", "bool", "dato",
+// "liste", "ordbok") eller "" (utypa, strukturnamn eller ukjend). «?» blir sett bort frå.
+funksjon signatur_type_norm(t: tekst) -> tekst {
+    la b = signatur_type_del(t)["basis"]
+    hvis b == "tekst" eller b == "str" eller b == "streng" { returner "tekst" }
+    hvis b == "heltall" eller b == "heiltall" eller b == "int" { returner "heltall" }
+    hvis b == "desimaltall" eller b == "flyttall" eller b == "float" { returner "desimaltall" }
+    hvis b == "boolsk" eller b == "bool" { returner "bool" }
+    hvis b == "dato" { returner "dato" }
+    hvis b == "liste" eller tekst_starter_med(b, "liste_") { returner "liste" }
+    hvis b == "ordbok" eller tekst_starter_med(b, "ordbok_") { returner "ordbok" }
+    returner ""
+}
+
+// Strukturnamnet ein type viser til: "Person", "Person?" → "Person"; elles "".
+funksjon signatur_struktur(t: tekst, katalog) -> tekst {
+    la b = signatur_type_del(t)["basis"]
+    hvis katalog != null og finnes_nøkkel(katalog, b) { returner b }
+    returner ""
+}
+
+// Elementstrukturen i "liste<Person>", elles "".
+funksjon signatur_liste_struktur(t: tekst, katalog) -> tekst {
+    la d = signatur_type_del(t)
+    hvis d["basis"] != "liste" eller lengde(d["args"]) != 1 { returner "" }
+    returner signatur_struktur(d["args"][0], katalog)
+}
+
+funksjon _sig_tekst(d, k: tekst) -> tekst {
+    hvis d == null eller builtin.type(d) != "ordbok" eller ikkje finnes_nøkkel(d, k) { returner "" }
+    la v = d[k]
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+// Stimønsteret til ruta ("path", elles delen etter metoden i "spec").
+funksjon signatur_mønster(rute) -> tekst {
+    la p = _sig_tekst(rute, "path")
+    hvis p != "" { returner p }
+    la spec = _sig_tekst(rute, "spec")
+    la sp = builtin.index_of(spec, " ")
+    hvis sp >= 0 { returner builtin.slice(spec, sp + 1, lengde(spec)) }
+    returner spec
+}
+
+// Stiparametrar i mønsteret: "/a/{id:int}/{s}" → {"id": "int", "s": ""}.
+funksjon signatur_sti_typar(mønster: tekst) -> ordbok {
+    la ut: ordbok = {}
+    la segs = builtin.split(mønster, "/")
+    la i: heltall = 0
+    mens i < lengde(segs) {
+        la s = segs[i]
+        hvis tekst_starter_med(s, "{") og tekst_slutter_med(s, "}") og lengde(s) > 2 {
+            la inne = builtin.slice(s, 1, lengde(s) - 1)
+            la k = builtin.index_of(inne, ":")
+            hvis k < 0 { ut[inne] = "" } ellers { ut[builtin.slice(inne, 0, k)] = builtin.slice(inne, k + 1, lengde(inne)) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// "modellar" frå rutemetadata (tom ordbok når han manglar).
+funksjon signatur_katalog(rute) -> ordbok {
+    hvis rute != null og builtin.type(rute) == "ordbok" og finnes_nøkkel(rute, "modellar") {
+        la m = rute["modellar"]
+        hvis m != null og builtin.type(m) == "ordbok" { returner m }
+    }
+    returner {}
+}
+
+// Signaturen frå metadata, eller namna i param_namn utan typar (eldre NCB).
+funksjon signatur_liste(rute, param_namn) {
+    hvis rute != null og builtin.type(rute) == "ordbok" og finnes_nøkkel(rute, "params") {
+        la ps = rute["params"]
+        hvis ps != null og builtin.type(ps) == "liste" og lengde(ps) > 0 { returner ps }
+    }
+    la ut = []
+    hvis param_namn == null { returner ut }
+    la i: heltall = 0
+    mens i < lengde(param_namn) {
+        legg_til(ut, {"namn": tekst(param_namn[i]), "type": "", "har_standard": usann, "standard": null})
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _sig_er_ctx_namn(n: tekst) -> boolsk {
+    returner n == "ctx" eller n == "req" eller n == "request" eller n == "førespurnad" eller n == "forespurnad"
+}
+
+// Kjelda til kvar parameter: "ctx", "dep", "path", "body", "query" eller
+// "query_liste". Gjev {"modus": "legacy"} når handlaren skal kallast som før
+// (ctx + avhengnader posisjonelt): ingen typar (utover ein ordbok-ctx først),
+// ingen parameter med namnet til ein stiparameter, og ikkje fleire parametrar
+// enn ctx + avhengnader. Elles {"modus": "signatur", "kjelder", "n_body"}.
+funksjon signatur_plan(rute, sig, dep_namn) -> ordbok {
+    la sti = signatur_sti_typar(signatur_mønster(rute))
+    la katalog = signatur_katalog(rute)
+    la deps: ordbok = {}
+    la di: heltall = 0
+    mens di < lengde(dep_namn) {
+        deps[tekst(dep_namn[di])] = di
+        di = di + 1
+    }
+    la typa = usann
+    la sti_namn = usann
+    la i: heltall = 0
+    mens i < lengde(sig) {
+        la t = _sig_tekst(sig[i], "type")
+        la n = _sig_tekst(sig[i], "namn")
+        hvis t != "" og ikkje (i == 0 og signatur_type_norm(t) == "ordbok") { typa = sann }
+        hvis finnes_nøkkel(sti, n) { sti_namn = sann }
+        i = i + 1
+    }
+    hvis ikkje typa og ikkje sti_namn og lengde(sig) - 1 <= lengde(dep_namn) {
+        returner {"modus": "legacy", "kjelder": [], "n_body": 0}
+    }
+    la kjelder = []
+    la brukte: ordbok = {}
+    la n_body: heltall = 0
+    i = 0
+    mens i < lengde(sig) {
+        la n = _sig_tekst(sig[i], "namn")
+        la t = _sig_tekst(sig[i], "type")
+        la nt = signatur_type_norm(t)
+        la k = "query"
+        hvis _sig_er_ctx_namn(n) {
+            k = "ctx"
+        } ellers hvis finnes_nøkkel(sti, n) {
+            k = "path"
+        } ellers hvis finnes_nøkkel(deps, n) {
+            k = "dep"
+            brukte[n] = sann
+        } ellers hvis i == 0 og (t == "" eller nt == "ordbok") {
+            k = "ctx"
+        } ellers hvis signatur_struktur(t, katalog) != "" eller nt == "ordbok" eller signatur_liste_struktur(t, katalog) != "" {
+            k = "body"
+            n_body = n_body + 1
+        } ellers hvis nt == "liste" {
+            k = "query_liste"
+        }
+        legg_til(kjelder, {"namn": n, "type": t, "kjelde": k, "p": sig[i]})
+        i = i + 1
+    }
+    // Utypa parametrar utan treff tek resten av avhengnadene i rekkjefølgje (som før).
+    la rest = []
+    la ri: heltall = 0
+    mens ri < lengde(dep_namn) {
+        la dn = tekst(dep_namn[ri])
+        hvis ikkje finnes_nøkkel(brukte, dn) { legg_til(rest, dn) }
+        ri = ri + 1
+    }
+    la rj: heltall = 0
+    i = 0
+    mens i < lengde(kjelder) og rj < lengde(rest) {
+        la kj = kjelder[i]
+        hvis kj["kjelde"] == "query" og kj["type"] == "" {
+            kj["kjelde"] = "dep"
+            kj["dep"] = rest[rj]
+            rj = rj + 1
+        }
+        i = i + 1
+    }
+    returner {"modus": "signatur", "kjelder": kjelder, "n_body": n_body}
+}
+
+// JSON Schema (tekst) for ein annotasjonstype. Strukturar blir $ref, «T?» blir
+// anyOf [T, null], liste<T> array med items, ordbok<K,V> object med additionalProperties.
+funksjon _openapi_sig_schema(t: tekst, katalog) -> tekst {
+    la d = signatur_type_del(t)
+    la s = _openapi_sig_schema_basis(d, katalog)
+    hvis d["valfri"] { returner "{\"anyOf\":[" + s + ",{\"type\":\"null\"}]}" }
+    returner s
+}
+
+funksjon _openapi_sig_schema_basis(d, katalog) -> tekst {
+    la b = tekst(d["basis"])
+    hvis katalog != null og finnes_nøkkel(katalog, b) {
+        returner "{\"$ref\":\"#/components/schemas/" + _json_escape(b) + "\"}"
+    }
+    la n = signatur_type_norm(b)
+    hvis n == "tekst" { returner "{\"type\":\"string\"}" }
+    hvis n == "heltall" { returner "{\"type\":\"integer\"}" }
+    hvis n == "desimaltall" { returner "{\"type\":\"number\"}" }
+    hvis n == "bool" { returner "{\"type\":\"boolean\"}" }
+    hvis n == "dato" { returner "{\"type\":\"string\",\"format\":\"date\"}" }
+    hvis n == "liste" {
+        la items = "{}"
+        hvis lengde(d["args"]) == 1 { items = _openapi_sig_schema(tekst(d["args"][0]), katalog) }
+        returner "{\"type\":\"array\",\"items\":" + items + "}"
+    }
+    hvis n == "ordbok" {
+        hvis lengde(d["args"]) == 2 { returner "{\"type\":\"object\",\"additionalProperties\":" + _openapi_sig_schema(tekst(d["args"][1]), katalog) + "}" }
+        returner "{\"type\":\"object\"}"
+    }
+    returner "{}"
+}
+
+// Standardverdi som JSON-tekst (for "default" i skjemaet).
+funksjon _openapi_sig_default(p) -> tekst {
+    hvis p == null eller ikkje finnes_nøkkel(p, "standard") { returner "null" }
+    la v = p["standard"]
+    hvis v == null { returner "null" }
+    la vt = builtin.type(v)
+    hvis vt == "boolsk" { hvis v { returner "true" } returner "false" }
+    hvis vt == "heltall" eller vt == "desimaltall" { returner tekst(v) }
+    returner "\"" + _json_escape(tekst(v)) + "\""
+}
+
+funksjon _openapi_sig_har_standard(p) -> boolsk {
+    hvis p == null eller ikkje finnes_nøkkel(p, "har_standard") { returner usann }
+    la v = p["har_standard"]
+    hvis builtin.type(v) == "boolsk" { returner v }
+    la t = tekst(v)
+    returner t == "sann" eller t == "true"
+}
+
+// Skjema med standardverdi lagd inn (når parameteren har ein literal standard).
+funksjon _openapi_sig_med_default(skjema: tekst, p) -> tekst {
+    hvis ikkje _openapi_sig_har_standard(p) { returner skjema }
+    la d = _openapi_sig_default(p)
+    hvis d == "null" { returner skjema }
+    hvis skjema == "{}" { returner "{\"default\":" + d + "}" }
+    returner builtin.slice(skjema, 0, lengde(skjema) - 1) + ",\"default\":" + d + "}"
+}
+
+// components/schemas-innhald for ein struktur frå rutemetadata.
+funksjon openapi_struktur_skjema(meta, katalog) -> tekst {
+    la props: tekst = ""
+    la req: tekst = ""
+    la fl = []
+    hvis meta != null og finnes_nøkkel(meta, "felt") og meta["felt"] != null { fl = meta["felt"] }
+    la i: heltall = 0
+    mens i < lengde(fl) {
+        la f = fl[i]
+        la n = _sig_tekst(f, "namn")
+        la s = _openapi_sig_med_default(_openapi_sig_schema(_sig_tekst(f, "type"), katalog), f)
+        hvis props != "" { props = props + "," }
+        props = props + "\"" + _json_escape(n) + "\":" + s
+        hvis ikkje _openapi_sig_har_standard(f) og ikkje signatur_type_del(_sig_tekst(f, "type"))["valfri"] {
+            hvis req != "" { req = req + "," }
+            req = req + "\"" + _json_escape(n) + "\""
+        }
+        i = i + 1
+    }
+    la ut = "{\"type\":\"object\",\"properties\":{" + props + "}"
+    hvis req != "" { ut = ut + ",\"required\":[" + req + "]" }
+    returner ut + "}"
+}
+
+// Path-parametrar frå mønsteret; ein typa signaturparameter med same namn vinn
+// over {namn:type} i mønsteret (R3/3.4).
+funksjon _openapi_path_params_sig(raw_path: tekst, kjelder) -> tekst {
+    hvis kjelder == null eller lengde(kjelder) == 0 { returner _openapi_path_params(raw_path) }
+    la typar: ordbok = {}
+    la ki: heltall = 0
+    mens ki < lengde(kjelder) {
+        la kj = kjelder[ki]
+        hvis tekst(kj["kjelde"]) == "path" og tekst(kj["type"]) != "" { typar[tekst(kj["namn"])] = tekst(kj["type"]) }
+        ki = ki + 1
+    }
+    la segs = builtin.split(raw_path, "/")
+    la frag: tekst = ""
+    la i: heltall = 0
+    mens i < lengde(segs) {
+        la seg = segs[i]
+        hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+            la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+            la navn = inner
+            la typ = "tekst"
+            la c = builtin.index_of(inner, ":")
+            hvis c > 0 {
+                navn = builtin.slice(inner, 0, c)
+                typ = builtin.slice(inner, c + 1, lengde(inner))
+            }
+            la skjema = _openapi_type_schema(typ)
+            hvis finnes_nøkkel(typar, navn) { skjema = _openapi_sig_schema(typar[navn], {}) }
+            la p = "{\"name\":\"" + _json_escape(navn) + "\",\"in\":\"path\",\"required\":true,\"schema\":" + skjema + "}"
+            hvis frag == "" { frag = p } ellers { frag = frag + "," + p }
+        }
+        i = i + 1
+    }
+    returner frag
+}
+
+// Skjemaet for 422-kroppen {"detail":[{"type","loc","msg","input"}]}.
+funksjon _openapi_valideringsfeil_skjema() -> tekst {
+    returner "{\"type\":\"object\",\"properties\":{\"detail\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\"},\"loc\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"msg\":{\"type\":\"string\"},\"input\":{}},\"required\":[\"type\",\"loc\",\"msg\"]}}}}"
+}
+
 // FA-094/096/098/099/102/103: metadata-drive OpenAPI 3.1-generator.
 // oppsett: ordbok med valfrie nøklar «tittel», «versjon», «beskriving»,
 // «tags» (ordbok tag→beskriving) og «eksempel» (ordbok operationId→rå JSON
@@ -2369,7 +2702,12 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
     la versjon: tekst = "0.1.0"
     hvis finnes_nøkkel(oppsett, "versjon") { versjon = tekst(oppsett["versjon"]) }
 
-    la rh = ncb_route_handlers()
+    // oppsett["ruter"] (liste i same form som ncb_route_handlers()) overstyrer metadataen i VM-en.
+    la rh = []
+    hvis finnes_nøkkel(oppsett, "ruter") og builtin.type(oppsett["ruter"]) == "liste" { rh = oppsett["ruter"] } ellers { rh = ncb_route_handlers() }
+    // R3/3.4: strukturskjema frå "modellar" i rutemetadata (namn → skjema-tekst).
+    la sig_skjema: ordbok = {}
+    la sig_skjema_rekkje: liste<tekst> = []
     // Grupper operasjonar per normalisert sti (GET+POST på same sti i eitt path-item).
     la path_ops: ordbok_tekst = {}
     la path_order: liste<tekst> = []
@@ -2433,11 +2771,71 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 tgi = tgi + 1
             }
 
-            // Parametrar: path (frå mønster) + query (frå metadata).
-            la params_json: tekst = _openapi_path_params(raw_path)
+            // R3/3.4: signaturen til handlaren (typa path/query/body).
+            la sig_katalog = signatur_katalog(handler)
+            la sig_deps = rute_meta_liste(handler, "deps")
+            la sig_plan = signatur_plan(handler, signatur_liste(handler, null), sig_deps)
+            la sig_kj = []
+            hvis sig_plan["modus"] == "signatur" { sig_kj = sig_plan["kjelder"] }
+            la sk_namn = nøkler(sig_katalog)
+            la ski: heltall = 0
+            mens ski < lengde(sk_namn) {
+                la skn = tekst(sk_namn[ski])
+                hvis ikkje finnes_nøkkel(sig_skjema, skn) {
+                    sig_skjema[skn] = openapi_struktur_skjema(sig_katalog[skn], sig_katalog)
+                    legg_til(sig_skjema_rekkje, skn)
+                }
+                ski = ski + 1
+            }
+            la sig_query: ordbok = {}
+            la sig_422 = usann
+            la body_sig: tekst = ""
+            la body_sig_n: heltall = 0
+            la body_sig_req: tekst = ""
+            la body_sig_ein: tekst = ""
+            la body_sig_påkravd = usann
+            la sqi: heltall = 0
+            mens sqi < lengde(sig_kj) {
+                la kj = sig_kj[sqi]
+                la kjk = tekst(kj["kjelde"])
+                la kjn = tekst(kj["namn"])
+                hvis kjk == "query" eller kjk == "query_liste" eller kjk == "path" eller kjk == "body" { sig_422 = sann }
+                hvis kjk == "body" {
+                    la bs = _openapi_sig_schema(tekst(kj["type"]), sig_katalog)
+                    hvis body_sig != "" { body_sig = body_sig + "," }
+                    body_sig = body_sig + "\"" + _json_escape(kjn) + "\":" + bs
+                    body_sig_ein = bs
+                    body_sig_n = body_sig_n + 1
+                    hvis ikkje _openapi_sig_har_standard(kj["p"]) og ikkje signatur_type_del(tekst(kj["type"]))["valfri"] {
+                        body_sig_påkravd = sann
+                        hvis body_sig_req != "" { body_sig_req = body_sig_req + "," }
+                        body_sig_req = body_sig_req + "\"" + _json_escape(kjn) + "\""
+                    }
+                }
+                sqi = sqi + 1
+            }
+
+            // Parametrar: path (frå mønster, typen frå signaturen vinn) + query (signatur, så metadata).
+            la params_json: tekst = _openapi_path_params_sig(raw_path, sig_kj)
+            la spi: heltall = 0
+            mens spi < lengde(sig_kj) {
+                la kj = sig_kj[spi]
+                la kjk = tekst(kj["kjelde"])
+                hvis kjk == "query" eller kjk == "query_liste" {
+                    la kjn = tekst(kj["namn"])
+                    sig_query[kjn] = "1"
+                    la req_q = "true"
+                    hvis _openapi_sig_har_standard(kj["p"]) eller signatur_type_del(tekst(kj["type"]))["valfri"] { req_q = "false" }
+                    la qs = _openapi_sig_med_default(_openapi_sig_schema(tekst(kj["type"]), sig_katalog), kj["p"])
+                    la pq: tekst = "{\"name\":\"" + _json_escape(kjn) + "\",\"in\":\"query\",\"required\":" + req_q + ",\"schema\":" + qs + "}"
+                    hvis params_json == "" { params_json = pq } ellers { params_json = params_json + "," + pq }
+                }
+                spi = spi + 1
+            }
             la qp = handler["query_params"]
             la pi: heltall = 0
             mens pi < lengde(qp) {
+                hvis finnes_nøkkel(sig_query, tekst(qp[pi])) { pi = pi + 1  fortsett }
                 la p: tekst = "{\"name\":\"" + _json_escape(tekst(qp[pi])) + "\",\"in\":\"query\",\"schema\":{\"type\":\"string\"}}"
                 hvis params_json == "" { params_json = p } ellers { params_json = params_json + "," + p }
                 pi = pi + 1
@@ -2469,12 +2867,30 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 // Modell-referert requestBody ($ref til components/schemas).
                 la ref_req = "{\"$ref\":\"#/components/schemas/" + _json_escape(rm_req) + "\"}"
                 op = op + ",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":" + ref_req + body_example + "}}}"
+            } ellers hvis body_sig_n > 0 {
+                // R3/3.4: strukturparameter(ar) frå signaturen. Éin: skjemaet direkte; fleire:
+                // eit objekt med éin eigenskap per parameter (som kroppen blir bunden).
+                la bsj = body_sig_ein
+                hvis body_sig_n > 1 {
+                    bsj = "{\"type\":\"object\",\"properties\":{" + body_sig + "}"
+                    hvis body_sig_req != "" { bsj = bsj + ",\"required\":[" + body_sig_req + "]" }
+                    bsj = bsj + "}"
+                }
+                la breq = ""
+                hvis body_sig_påkravd { breq = "\"required\":true," }
+                op = op + ",\"requestBody\":{" + breq + "\"content\":{\"application/json\":{\"schema\":" + bsj + body_example + "}}}"
             } ellers hvis body_schema != "" {
                 op = op + ",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{" + body_schema + "}}" + body_example + "}}}"
             }
 
             // Respons: bruk response_schema/response_example frå NCB-metadata (FA-050).
             la resp_schema: tekst = _openapi_resp_json(handler["response_schema"], "{\"type\":\"string\"}")
+            // R3/3.3–3.4: returtypen er ein struktur → $ref (òg for metadata frå ein eldre kompilator).
+            la rtype = rute_meta_tekst(handler, "return_type")
+            hvis rtype == "" { rtype = rute_meta_tekst(handler, "response_type") }
+            hvis rtype != "" og (signatur_struktur(rtype, sig_katalog) != "" eller signatur_liste_struktur(rtype, sig_katalog) != "") {
+                resp_schema = _openapi_sig_schema(rtype, sig_katalog)
+            }
             // Modell-referert respons overstyrer skjemaet med $ref (additivt).
             hvis rm_resp != "" { resp_schema = "{\"$ref\":\"#/components/schemas/" + _json_escape(rm_resp) + "\"}" }
             la resp_example: tekst = _openapi_resp_json(handler["response_example"], "\"eksempel\"")
@@ -2511,6 +2927,16 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                     responses_json = responses_json + ",\"" + _json_escape(xs) + "\":{\"description\":\"" + _json_escape(xd) + "\"}"
                 }
                 xri = xri + 1
+            }
+
+            // R3/3.4: typa parametrar kan gje 422 (FastAPI: «Validation Error»).
+            hvis sig_422 og ikkje finnes_nøkkel(status_sett, "422") {
+                status_sett["422"] = "1"
+                responses_json = responses_json + ",\"422\":{\"description\":\"Validation Error\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/HTTPValidationError\"}}}}"
+                hvis ikkje finnes_nøkkel(sig_skjema, "HTTPValidationError") {
+                    sig_skjema["HTTPValidationError"] = _openapi_valideringsfeil_skjema()
+                    legg_til(sig_skjema_rekkje, "HTTPValidationError")
+                }
             }
 
             la guards2 = handler["guards"]
@@ -2584,6 +3010,18 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
             hvis schemas_json == "" { schemas_json = entry } ellers { schemas_json = schemas_json + "," + entry }
             mi = mi + 1
         }
+    }
+
+    // R3/3.4: strukturar frå signaturane (oppsett["modellar"] vinn ved same namn).
+    la ssi: heltall = 0
+    mens ssi < lengde(sig_skjema_rekkje) {
+        la ssn = sig_skjema_rekkje[ssi]
+        la eksplisitt = finnes_nøkkel(oppsett, "modellar") og finnes_nøkkel(oppsett["modellar"], ssn)
+        hvis ikkje eksplisitt {
+            la sentry = "\"" + _json_escape(ssn) + "\":" + sig_skjema[ssn]
+            hvis schemas_json == "" { schemas_json = sentry } ellers { schemas_json = schemas_json + "," + sentry }
+        }
+        ssi = ssi + 1
     }
 
     la components_inner: tekst = ""

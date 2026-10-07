@@ -51,6 +51,7 @@ bruk std.http_cache som _hc
 bruk std.apptenar_ws som _ws
 bruk std.metrikk som _metrikk
 bruk std.mw som _mw
+bruk std.rutebinding som _rb
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
@@ -107,7 +108,8 @@ funksjon konfig_standard() -> ordbok {
         "ws_ping_ms": 30000,
         "ws_lukk_ms": 5000,
         "ws_origins": [],
-        "ws_maks_utbuffer": 4194304
+        "ws_maks_utbuffer": 4194304,
+        "rutemetadata": null
     }
 }
 
@@ -554,6 +556,12 @@ funksjon _segment(sti: tekst) -> liste {
     returner ut
 }
 
+# %-dekoding av eit stisegment (FA-005). «+» er ein vanleg teikn i stien, ikkje mellomrom.
+funksjon _sti_dekod(v: tekst) -> tekst {
+    hvis builtin.index_of(v, "%") < 0 { returner v }
+    returner _web.url_decode(builtin.replace(v, "+", "%2B"))
+}
+
 # Stiparametrar: {namn:int} (heiltal), {namn:type} og {namn} (alt). Gjev null utan treff.
 funksjon sti_match(mønster: tekst, sti: tekst) {
     la m = _segment(mønster)
@@ -568,12 +576,12 @@ funksjon sti_match(mønster: tekst, sti: tekst) {
             la inne = builtin.slice(ms, 1, lengde(ms) - 1)
             la kolon = builtin.index_of(inne, ":")
             hvis kolon < 0 {
-                p[inne] = v
+                p[inne] = _sti_dekod(v)
             } ellers {
                 la namn = builtin.slice(inne, 0, kolon)
                 la typ = builtin.slice(inne, kolon + 1, lengde(inne))
                 hvis typ == "int" og ikkje _er_int_tekst(v) { returner null }
-                p[namn] = v
+                p[namn] = _sti_dekod(v)
             }
         } ellers hvis ms != v {
             returner null
@@ -593,7 +601,14 @@ funksjon _fullt_namn(namn: tekst) -> tekst {
 funksjon _ruter() -> liste {
     hvis ikkje har_nokkel(_t, "ruter") {
         la rh = []
-        prøv { rh = ncb_route_handlers() } fang (e) { rh = [] }
+        # Konfig "rutemetadata" (liste i same form som ncb_route_handlers()) overstyrer
+        # metadataen i VM-en — for testar og for metadata frå ein nyare kompilator.
+        la rm_konf = _k("rutemetadata")
+        hvis rm_konf != null og builtin.type(rm_konf) == "liste" {
+            rh = rm_konf
+        } ellers {
+            prøv { rh = ncb_route_handlers() } fang (e) { rh = [] }
+        }
         hvis rh == null { rh = [] }
         # Dependency-providerar frå kompilator-metadata (namn -> fullt kvalifisert fn).
         prøv { _di.sett_providarar(ncb_metadata("dependency_providers")) } fang (e) { }
@@ -627,7 +642,17 @@ funksjon _ruter() -> liste {
                 legg_til(ut, {"m": _liten(delar[0]), "M": builtin.upper(delar[0]), "mønster": delar[1],
                               "seg": seg, "n": lengde(seg), "param": har_param,
                               "fn": fn, "ar": _di.arity(fn), "vakter": vakter, "deps": rute_deps, "spec": spec,
-                              "har_vakter": lengde(vakter) > 0, "har_deps": lengde(rute_deps) > 0})
+                              "har_vakter": lengde(vakter) > 0, "har_deps": lengde(rute_deps) > 0,
+                              "rute": rh[i], "sig": usann, "plan": null, "rmodell": null})
+                # R3/3.2–3.3: signaturbinding og responsmodell, planlagt éin gong per rute.
+                la r_ny = ut[lengde(ut) - 1]
+                la sig = _rb.signatur(rh[i], _rb.parameternamn(fn))
+                la plan = _rb.planlegg(rh[i], sig, rute_deps)
+                hvis plan["modus"] == "signatur" {
+                    r_ny["sig"] = sann
+                    r_ny["plan"] = plan
+                }
+                r_ny["rmodell"] = _rb.responsmodell(rh[i])
             }
             i = i + 1
         }
@@ -664,6 +689,30 @@ funksjon _ruter() -> liste {
         _t["ruter"] = ut
     }
     returner _t["ruter"]
+}
+
+# Parameterrute der dei faste segmenta passar, men eit {namn:int}-segment ikkje er
+# eit heiltal: {"namn", "input"} (for 422 med loc ["path", namn]), elles null.
+funksjon _typefeil(r: ordbok, seg: liste) {
+    hvis r["n"] != lengde(seg) { returner null }
+    la ms = r["seg"]
+    la fe = null
+    la i = 0
+    mens i < lengde(ms) {
+        la m = ms[i]
+        la v = seg[i]
+        hvis builtin.starts_with(m, "{") og builtin.ends_with(m, "}") og lengde(m) > 2 {
+            la inne = builtin.slice(m, 1, lengde(m) - 1)
+            la k = builtin.index_of(inne, ":")
+            hvis k >= 0 og fe == null og builtin.slice(inne, k + 1, lengde(inne)) == "int" og ikkje _er_int_tekst(v) {
+                fe = {"namn": builtin.slice(inne, 0, k), "input": _sti_dekod(v)}
+            }
+        } ellers hvis m != v {
+            returner null
+        }
+        i = i + 1
+    }
+    returner fe
 }
 
 # Match mot ei kompilert rute. Gjev parametrane eller null.
@@ -1778,6 +1827,8 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         la seg = _segment(sti)
         la fann_sti = usann
         la treff_p = null
+        # {id:int}-segment som ikkje er heiltal (FA-005): 422 når inga anna rute tek stien.
+        la tf = null
         la i = 0
         hvis oppg {
             la wo = _ws_rute(ruter, seg)
@@ -1796,6 +1847,8 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
                     treff = r
                     treff_p = p
                 }
+            } ellers hvis tf == null og r["param"] og r["m"] == metode {
+                tf = _typefeil(r, seg)
             }
             i = i + 1
         }
@@ -1821,6 +1874,10 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
                 treff_p = wt["p"]
                 treff = wt["r"]
             }
+        }
+        hvis treff == null og tf != null {
+            la post = _web.valideringsfeil_post("int_parsing", ["path", tf["namn"]], "Kan ikkje tolke som heiltal", tf["input"])
+            returner _feil_mw({"status": 422, "content_type": "application/json; charset=utf-8", "body": _web.valideringsfeil_json([post])})
         }
         hvis treff == null {
             hvis metode == "options" og fann_sti {
@@ -1911,10 +1968,21 @@ funksjon _rut(ctx0: ordbok, start_ms: heltall) -> ordbok {
         la svar = null
         # Aritet 1 (berre ctx) er det vanlege: kall direkte i staden for via
         # _di.kall_handlar, som ville rekna ut ariteten to gonger per førespurnad.
-        hvis treff["ar"] == 1 {
+        hvis treff["sig"] {
+            # R3/3.2: argument etter signaturen (path/query/body/deps/ctx); feil → 422.
+            la b = _rb.bind_med_plan(treff["rute"], treff["plan"], [], ctx, rute_deps, dep_values)
+            hvis ikkje b["ok"] {
+                returner _feil_mw({"status": 422, "content_type": "application/json; charset=utf-8", "body": b["body"]})
+            }
+            svar = _di.kall(fn, b["args"])
+        } ellers hvis treff["ar"] == 1 {
             svar = builtin.ncb_call_fn(fn, ctx)
         } ellers {
             svar = _di.kall_handlar(fn, ctx, dep_values)
+        }
+        # R3/3.3: returtypen som responsmodell — berre felta i strukturen går ut.
+        hvis treff["rmodell"] != null og svar != null og ((builtin.type(svar) == "ordbok" og ikkje _er_svar(svar)) eller builtin.type(svar) == "liste") {
+            svar = _rb.filtrer_svar(treff["rmodell"], svar)
         }
         # Ein nøsta dispatch i handlaren kan ha sett flagget; nullstill det.
         _t["vanleg"] = usann

@@ -303,6 +303,12 @@ funksjon _konverter(f: ordbok, råverdi, loc: liste, feil: liste) -> ordbok {
         returner {"ok": alt_ok, "verdi": ut}
     }
 
+    hvis type == "ordbok" {
+        hvis rt == "ordbok" { returner {"ok": sann, "verdi": råverdi} }
+        _post(feil, "dict_type", loc, "Forventa objekt", inn)
+        returner {"ok": usann}
+    }
+
     # Ukjend type: ta imot som-er.
     returner {"ok": sann, "verdi": råverdi}
 }
@@ -373,6 +379,7 @@ funksjon _sjekk_avgrensingar(f: ordbok, verdi, loc: liste, feil: liste) -> bool 
 
 # Valider éin feltverdi (konvertering + avgrensingar). loc er full sti til verdien.
 funksjon _valider_felt_verdi(f: ordbok, råverdi, loc: liste, feil: liste) -> ordbok {
+    hvis builtin.type(råverdi) == "ingenting" og har_nokkel(f, "null_ok") og f["null_ok"] { returner {"ok": sann, "verdi": null} }
     la k = _konverter(f, råverdi, loc, feil)
     hvis ikkje k["ok"] { returner {"ok": usann} }
     la avg = _sjekk_avgrensingar(f, k["verdi"], loc, feil)
@@ -442,6 +449,13 @@ funksjon _valider_inn(modell: ordbok, data: ordbok, loc_prefix: liste, feil: lis
 funksjon valider_med_rot(modell: ordbok, data: ordbok, loc_rot: tekst) -> ordbok {
     la feil: liste = []
     la res = _valider_inn(modell, data, [loc_rot], feil)
+    returner {"gyldig": res["ok"], "verdiar": res["verdiar"], "feil": feil}
+}
+
+# Som valider_med_rot, men med full loc-sti (t.d. ["body", "person"]).
+funksjon valider_med_loc(modell: ordbok, data: ordbok, loc: liste) -> ordbok {
+    la feil: liste = []
+    la res = _valider_inn(modell, data, loc, feil)
     returner {"gyldig": res["ok"], "verdiar": res["verdiar"], "feil": feil}
 }
 
@@ -562,6 +576,12 @@ funksjon _type_schema(f: ordbok) -> ordbok {
         s["type"] = "array"
         s["items"] = _type_schema(f["element"])
         returner s
+    } ellers hvis type == "ordbok" {
+        s["type"] = "object"
+    } ellers hvis type == "" {
+        # Utypa felt (R3/3.5): kva verdi som helst.
+        hvis har_nokkel(f, "har_standard") og f["har_standard"] { s["default"] = f["standard"] }
+        returner s
     } ellers {
         s["type"] = "string"
     }
@@ -597,4 +617,160 @@ funksjon json_schema(modell: ordbok) -> ordbok {
     hvis lengde(required) > 0 { s["required"] = required }
     hvis tekst(modell["extra"]) == "forbid" { s["additionalProperties"] = usann }
     returner s
+}
+
+# ─── R3/3.5: strukturtypar som modellar ───────────────────────────────────────
+#
+# Kompilatoren lagrar strukturane ei rute viser til i rutemetadata ("modellar":
+# namn → {"namn", "felt": [{"namn","type","har_standard","standard"}]}). Dei blir
+# omsette til vanlege modellar her, slik at same validator (konvertering,
+# 422-poster, JSON Schema, serialisering) gjeld både for skjema-som-data og for
+# `struktur`. Eit felt utan standardverdi er påkravd. Felttypar som er ukjende
+# eller tomme (utypa felt) blir tekne imot som dei er.
+
+# Annotasjonsnamn → modelltype. Strukturnamn i `katalog` blir "modell".
+funksjon norm_type(t: tekst) -> tekst {
+    returner web.signatur_type_norm(t)
+}
+
+funksjon er_skalar_type(t: tekst) -> bool {
+    la n = norm_type(t)
+    returner n == "tekst" eller n == "heltall" eller n == "desimaltall" eller n == "bool" eller n == "dato"
+}
+
+# Feltdefinisjon for annotasjonstypen `t` (namn `namn`). Strukturar i katalog blir
+# nøsta modellar (djupna er avgrensa, så sjølvrefererande strukturar ikkje går i sløyfe).
+funksjon felt_for_type(namn: tekst, t: tekst, katalog: ordbok, djup: heltall) -> ordbok {
+    la d = web.signatur_type_del(t)
+    la b = tekst(d["basis"])
+    la f = {}
+    hvis katalog != null og har_nokkel(katalog, b) og djup < 16 {
+        f = felt(namn, "modell")
+        f["nøsta"] = _frå_struktur(katalog[b], katalog, djup + 1)
+        f["struktur"] = b
+    } ellers {
+        la nt = norm_type(b)
+        f = felt(namn, nt)
+        hvis nt == "liste" {
+            hvis lengde(d["args"]) == 1 {
+                f["element"] = felt_for_type("", tekst(d["args"][0]), katalog, djup + 1)
+            } ellers {
+                f["element"] = felt("", "")
+            }
+        }
+    }
+    # «T?»: valfri, og null er ein gyldig verdi.
+    hvis d["valfri"] {
+        f["påkravd"] = usann
+        f["null_ok"] = sann
+    }
+    returner f
+}
+
+funksjon _frå_struktur(meta: ordbok, katalog: ordbok, djup: heltall) -> ordbok {
+    la m = ny_modell()
+    hvis har_nokkel(meta, "namn") { m["struktur"] = tekst(meta["namn"]) }
+    la fl = []
+    hvis har_nokkel(meta, "felt") og meta["felt"] != null { fl = meta["felt"] }
+    la i = 0
+    mens i < lengde(fl) {
+        la fd = fl[i]
+        la t = ""
+        hvis har_nokkel(fd, "type") og fd["type"] != null { t = tekst(fd["type"]) }
+        la f = felt_for_type(tekst(fd["namn"]), t, katalog, djup)
+        hvis har_nokkel(fd, "har_standard") og fd["har_standard"] == sann {
+            standard(f, fd["standard"])
+        }
+        legg(m, f)
+        i = i + 1
+    }
+    returner m
+}
+
+# Modell for strukturmetadata frå kompilatoren. katalog = alle "modellar" for ruta.
+funksjon frå_struktur(meta: ordbok, katalog: ordbok) -> ordbok {
+    returner _frå_struktur(meta, katalog, 0)
+}
+
+# Nøsta strukturar og lister av strukturar i ein feltverdi.
+funksjon som_verdi(f: ordbok, v, modul: tekst) {
+    hvis v == null { returner v }
+    la t = tekst(f["type"])
+    hvis t == "modell" og har_nokkel(f, "struktur") { returner som_instans(f["nøsta"], v, modul) }
+    hvis t == "liste" og har_nokkel(f, "element") og builtin.type(v) == "liste" {
+        la ut = []
+        la j = 0
+        mens j < lengde(v) {
+            legg_til(ut, som_verdi(f["element"], v[j], modul))
+            j = j + 1
+        }
+        returner ut
+    }
+    returner v
+}
+
+# Gjer validerte verdiar til ein struktur-instans (dei skjulte merka __type__ og
+# __struktur__, same form som konstruktøren lagar), rekursivt for nøsta strukturar.
+# modul er modulen strukturen er definert i (t.d. "__main__").
+funksjon som_instans(modell: ordbok, verdiar, modul: tekst) {
+    hvis verdiar == null eller builtin.type(verdiar) != "ordbok" { returner verdiar }
+    la er_struktur = har_nokkel(modell, "struktur")
+    la fl = modell["felt"]
+    la i = 0
+    mens i < lengde(fl) {
+        la f = fl[i]
+        la n = tekst(f["namn"])
+        hvis har_nokkel(verdiar, n) {
+            verdiar[n] = som_verdi(f, verdiar[n], modul)
+        } ellers hvis er_struktur {
+            # Som konstruktøren: eit felt utan verdi er ingenting.
+            verdiar[n] = null
+        }
+        i = i + 1
+    }
+    hvis har_nokkel(modell, "struktur") {
+        la sn = tekst(modell["struktur"])
+        verdiar["__type__"] = sn
+        verdiar["__struktur__"] = modul + "." + sn
+    }
+    returner verdiar
+}
+
+# Responsmodell (FastAPI response_model): berre felta i modellen blir med ut,
+# rekursivt for nøsta strukturar og lister av dei. Manglande felt med
+# standardverdi får standardverdien; andre manglande felt blir utelatne.
+funksjon filtrer(modell: ordbok, verdi) {
+    hvis verdi == null { returner verdi }
+    la vt = builtin.type(verdi)
+    hvis vt == "liste" {
+        la ut = []
+        la j = 0
+        mens j < lengde(verdi) {
+            legg_til(ut, filtrer(modell, verdi[j]))
+            j = j + 1
+        }
+        returner ut
+    }
+    hvis vt != "ordbok" { returner verdi }
+    la ut: ordbok = {}
+    la fl = modell["felt"]
+    la i = 0
+    mens i < lengde(fl) {
+        la f = fl[i]
+        la n = tekst(f["namn"])
+        la wire = _wire_namn(f)
+        la ekskl = har_nokkel(f, "exclude") og f["exclude"]
+        hvis ikkje ekskl {
+            hvis har_nokkel(verdi, n) {
+                la v = verdi[n]
+                hvis tekst(f["type"]) == "modell" { v = filtrer(f["nøsta"], v) }
+                ellers hvis tekst(f["type"]) == "liste" og har_nokkel(f, "element") og tekst(f["element"]["type"]) == "modell" { v = filtrer(f["element"]["nøsta"], v) }
+                ut[wire] = v
+            } ellers hvis f["har_standard"] {
+                ut[wire] = f["standard"]
+            }
+        }
+        i = i + 1
+    }
+    returner ut
 }

@@ -993,6 +993,51 @@ funksjon løys_route_deps(ncb: ordbok<tekst, tekst>, item: ordbok<tekst, tekst>,
     returner verdiar
 }
 
+// R3/3.2: binding etter handlar-signatur (FastAPI-stil). Sjølve bindinga er
+// std.rutebinding.bind_serve og køyrer inne i app-VM-en — same kode som apptenar
+// brukar. nc_main kallar ho berre når ruta har signaturmetadata ("params") som
+// kan krevje binding, og modulen er i bunten (nc_serve_implisitte_imports).
+// Gjev null når handlaren skal kallast som før (ctx + avhengnader).
+funksjon nc_serve_bind_signatur(ncb: ordbok<tekst, tekst>, item: ordbok<tekst, tekst>, ctx: ordbok<tekst, tekst>, dep_values: liste) {
+    hvis ikkje har_nokkel(item, "params") { returner null }
+    la ps = item["params"]
+    hvis ps == null eller builtin.type(ps) != "liste" eller lengde(ps) == 0 { returner null }
+    la dep_namn = []
+    hvis har_nokkel(item, "deps") og item["deps"] != null { dep_namn = item["deps"] }
+    // Rask veg: utypa signatur, ingen stiparametrar og ikkje fleire parametrar enn
+    // ctx + avhengnader → kall som før utan å gå via bindaren.
+    la typa = usann
+    la pi = 0
+    mens pi < lengde(ps) {
+        hvis har_nokkel(ps[pi], "type") og tekst(ps[pi]["type"]) != "" { typa = sann }
+        pi = pi + 1
+    }
+    la spec = ""
+    hvis har_nokkel(item, "spec") { spec = tekst(item["spec"]) }
+    hvis ikkje typa og builtin.index_of(spec, "{") < 0 og lengde(ps) - 1 <= lengde(dep_namn) { returner null }
+    la fns = ncb["functions"]
+    la bfn = "std.rutebinding.bind_serve"
+    hvis fns == null eller ikkje har_nokkel(fns, bfn) { returner null }
+    returner køyre_ncb_funksjon(bfn, [item, ctx, dep_namn, dep_values], fns)
+}
+
+// R3/3.3: returtypen som responsmodell. Eit data-svar (ikkje respons-ordbok) frå ein
+// handlar med strukturreturtype blir filtrert til felta i strukturen
+// (std.rutebinding.filtrer_serve → std.modell.filtrer).
+funksjon nc_serve_responsmodell(ncb: ordbok<tekst, tekst>, item: ordbok<tekst, tekst>, svar) {
+    hvis svar == null { returner svar }
+    la st = builtin.type(svar)
+    hvis st != "ordbok" og st != "liste" { returner svar }
+    hvis st == "ordbok" og er_respons_ordbok(svar) { returner svar }
+    hvis ikkje har_nokkel(item, "modellar") { returner svar }
+    la md = item["modellar"]
+    hvis md == null eller builtin.type(md) != "ordbok" eller lengde(nøkler(md)) == 0 { returner svar }
+    la fns = ncb["functions"]
+    la ffn = "std.rutebinding.filtrer_serve"
+    hvis fns == null eller ikkje har_nokkel(fns, ffn) { returner svar }
+    returner køyre_ncb_funksjon(ffn, [item, svar], fns)
+}
+
 // Returnerer no ei respons-ORDBOK. base_ctx er ctx-en etter
 // anvend_request_middlewares (2.4) — request-mw-mutasjonar følgjer med inn i
 // handlar-ctx i staden for å byggjast på nytt frå parsed.
@@ -1093,6 +1138,7 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                         handler = "__main__." + handler
                     }
                     la svar = null
+                    la sig_feil = null
                     prøv {
                         // 2.4: injiser rute-avhengnader som ekstra handlar-argument.
                         la handler_args: liste = [ctx]
@@ -1102,12 +1148,29 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                             legg_til(handler_args, dep_values[dvi])
                             dvi = dvi + 1
                         }
-                        svar = køyre_ncb_funksjon(handler, handler_args, ncb["functions"])
+                        // R3/3.2: typa signatur → argument frå path/query/body (422 ved feil).
+                        la bunde = nc_serve_bind_signatur(ncb, item, ctx, dep_values)
+                        hvis bunde != null {
+                            hvis bunde["ok"] {
+                                handler_args = bunde["args"]
+                            } ellers {
+                                sig_feil = {"status": 422, "body": tekst(bunde["body"]),
+                                            "__headers__": {"Content-Type": "application/json; charset=utf-8"}}
+                            }
+                        }
+                        hvis sig_feil == null {
+                            svar = køyre_ncb_funksjon(handler, handler_args, ncb["functions"])
+                            // R3/3.3: returtypen som responsmodell.
+                            svar = nc_serve_responsmodell(ncb, item, svar)
+                        }
                     } fang (e) {
                         // 2.6: map unntak → 422 (ValideringsFeil) / httpfeil-status /
                         // 500 (utan å lekke unntaksmeldinga med mindre NC_SERVE_DEBUG=1).
                         la feil = feil_frå_unntak(e)
                         returner anvend_error_middlewares(ncb, feil)
+                    }
+                    hvis sig_feil != null {
+                        returner anvend_error_middlewares(ncb, sig_feil)
                     }
                     returner avgjer_standard_handler_respons(ncb, parsed, svar, head_fallback, request_if_modified_since, request_if_match)
                 }
@@ -1910,6 +1973,7 @@ funksjon nc_reload_bundle(src_sti: tekst, modul: tekst) -> ordbok<tekst, tekst> 
     prøv {
         la kjelde = fil_les(src_sti)
         la imports = finn_bruk_imports(kjelde)
+        imports = nc_serve_implisitte_imports(kjelde, imports)
         la ncb_json = ""
         la bundled = usann
         hvis lengde(imports) > 0 {
@@ -3524,6 +3588,14 @@ funksjon nc_aot_flett_implisitt_ncb(input: tekst, target: tekst) -> tekst {
 // Importlista med modulen `namn` lagd til under `alias` (BFS-en i nc_bundle_ncb
 // namngjev modulen etter filstien, ikkje aliaset), eller lista uendra når modulen
 // alt er med.
+// R3/3.2: ein app med ruter får std.rutebinding i bunten (sjølv utan bruk-linje), så
+// serve kan binde handlar-argument etter signaturen inne i app-VM-en (sjå
+// nc_serve_bind_signatur). Utan ruter blir ingenting lagt til.
+funksjon nc_serve_implisitte_imports(kjelde: tekst, imports: liste<tekst>) -> liste<tekst> {
+    hvis builtin.index_of(kjelde, ".route(") < 0 { returner imports }
+    returner nc_aot_legg_til_import(imports, "std.rutebinding", "__rutebinding")
+}
+
 funksjon nc_aot_legg_til_import(imports: liste<tekst>, namn: tekst, alias: tekst) -> liste<tekst> {
     la fil = _modul_filsti_fra_namn(namn)
     la i: heltall = 0

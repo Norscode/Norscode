@@ -1,0 +1,157 @@
+// R3 trinn 8 (3.2): binding etter handlar-signatur i apptenar (FastAPI-stil), in-process
+// via std.apptest. Handlarane ligg i tests/fixtures/r3_signatur_app.no; rutemetadataen
+// (som kompilatoren lagar ho, sjå tests/fixtures/r3_signatur_meta.no) blir gjeven via
+// konfig "rutemetadata". Stiparametrar med type, query med type/standard/valfri/liste,
+// struktur(ar) frå JSON-kroppen, 422 i FastAPI-formatet med rett loc og type, og
+// bakoverkompatibilitet for handlarar som berre tek ctx (+ avhengnader).
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.apptest som t
+bruk std.rutebinding som rb
+bruk tests.fixtures.r3_signatur_app som fx
+bruk tests.fixtures.r3_signatur_meta som m
+
+funksjon _inneheld(s: tekst, nål: tekst) -> boolsk { returner builtin.index_of(s, nål) >= 0 }
+
+// 3.2: stiparameter med type, query med type og standard, returtype som filter (3.3).
+funksjon test_sti_og_query() -> heltall {
+    la kl = m.klient()
+    la r = t.get(kl, "/personar/41", {})
+    assert_eq(t.status(r), 200)
+    // id er heltall (41 + 1); detaljar har standardverdien usann.
+    assert(_inneheld(t.body_tekst(r), "\"id\":42"))
+    assert_eq(t.body_tekst(t.get(kl, "/ekko/41", {})), "{\"id\":42,\"detaljar\":false}")
+    assert_eq(t.body_tekst(t.get(kl, "/ekko/1?detaljar=sann", {})), "{\"id\":2,\"detaljar\":true}")
+    la r2 = t.get(kl, "/personar/abc", {})
+    assert(m.har_post(r2, "int_parsing", ["path", "id"]))
+    la r3 = t.get(kl, "/personar/1?detaljar=kanskje", {})
+    assert(m.har_post(r3, "bool_parsing", ["query", "detaljar"]))
+    // Utan ctx i signaturen; n har standard 10.
+    la s = t.get(kl, "/sok?q=hei", {})
+    assert_eq(t.status(s), 200)
+    assert_eq(t.body_tekst(s), "{\"q\":\"hei\",\"dobbel\":20}")
+    assert_eq(t.body_tekst(t.get(kl, "/sok?q=%C3%A6&n=4", {})), "{\"q\":\"æ\",\"dobbel\":8}")
+    assert(m.har_post(t.get(kl, "/sok", {}), "missing", ["query", "q"]))
+    assert(m.har_post(t.get(kl, "/sok?q=x&n=y", {}), "int_parsing", ["query", "n"]))
+    returner 0
+}
+
+// 3.2/3.5: struktur frå JSON-kroppen, validert med std.modell (nøsta struktur).
+funksjon test_kropp_struktur() -> heltall {
+    la kl = m.klient()
+    la ok = t.post(kl, "/personar", {"json": {"namn": "Ada", "alder": 36, "adresse": {"gate": "Storgata", "nr": 1}}})
+    assert_eq(t.status(ok), 200)
+    la d = t.json(ok)
+    assert_eq(d["namn"], "Ada")
+    assert_eq(tekst(d["alder_neste"]), "37")
+    assert_eq(d["gate"], "Storgata")
+    assert_eq(tekst(d["nr_neste"]), "2")
+    assert_eq(d["type"], "Person")
+    // Standardverdi for alder når feltet manglar.
+    la ok2 = t.post(kl, "/personar", {"json": {"namn": "B", "adresse": {"gate": "G", "nr": 5}}})
+    assert_eq(tekst(t.json(ok2)["alder_neste"]), "1")
+    // Feil typar og manglande felt → 422 med loc i kroppen.
+    la f = t.post(kl, "/personar", {"json": {"alder": "x", "adresse": {"gate": "G", "nr": "y"}}})
+    assert(m.har_post(f, "missing", ["body", "namn"]))
+    assert(m.har_post(f, "int_parsing", ["body", "alder"]))
+    assert(m.har_post(f, "int_parsing", ["body", "adresse", "nr"]))
+    // Tom kropp → missing ["body"]; ugyldig JSON → json_invalid; array → model_attributes_type.
+    assert(m.har_post(t.post(kl, "/personar", {}), "missing", ["body"]))
+    la rj = t.forespurnad(kl, "POST", "/personar", {"headerar": {"Content-Type": "application/json"}})
+    assert(m.har_post(rj, "missing", ["body"]))
+    la rå = app.handsam_rå("POST /personar HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\n{ikkj")
+    assert(builtin.index_of(rå, "json_invalid") >= 0)
+    assert(m.har_post(t.post(kl, "/personar", {"json": [1, 2]}), "model_attributes_type", ["body"]))
+    returner 0
+}
+
+// Fleire strukturparametrar: kroppen er innpakka per parameternamn (Body(embed)).
+funksjon test_fleire_kroppar() -> heltall {
+    la kl = m.klient()
+    la ok = t.post(kl, "/to", {"json": {"a": {"gate": "G", "nr": 1}, "p": {"namn": "N", "adresse": {"gate": "H", "nr": 2}}}})
+    assert_eq(t.status(ok), 200)
+    assert_eq(t.body_tekst(ok), "{\"gate\":\"G\",\"namn\":\"N\"}")
+    la f = t.post(kl, "/to", {"json": {"a": {"gate": "G", "nr": "z"}}})
+    assert(m.har_post(f, "int_parsing", ["body", "a", "nr"]))
+    assert(m.har_post(f, "missing", ["body", "p"]))
+    returner 0
+}
+
+// Utypa stiparametrar: tekst, eller typen frå {n:int} i mønsteret (FA-005: 422, ikkje 404).
+funksjon test_utypa_og_mønstertype() -> heltall {
+    la kl = m.klient()
+    assert_eq(t.body_tekst(t.get(kl, "/utypa/hei%20du", {})), "{\"slug\":\"hei du\"}")
+    assert_eq(t.body_tekst(t.get(kl, "/tal/41", {})), "{\"n_neste\":42}")
+    la f = t.get(kl, "/tal/abc", {})
+    assert(m.har_post(f, "int_parsing", ["path", "n"]))
+    returner 0
+}
+
+// Generiske og valfrie typar (tekstforma frå typesystemet): liste<heltall> frå gjentekne
+// query-nøklar, tekst? som null når han manglar, liste<Struktur> som returtype og i kroppen.
+funksjon test_generiske_typar() -> heltall {
+    la kl = m.klient()
+    la r = t.get(kl, "/personliste?t=1&t=2", {})
+    assert_eq(t.status(r), 200)
+    // t = [1, 2] som heiltal; merke manglar → null.
+    assert(_inneheld(t.body_tekst(r), "\"id\":10"))
+    assert(_inneheld(t.body_tekst(r), "\"id\":20"))
+    assert(_inneheld(t.body_tekst(r), "utan-merke"))
+    la r2 = t.body_tekst(t.get(kl, "/personliste?t=3&merke=x", {}))
+    assert(_inneheld(r2, "\"id\":30"))
+    assert(ikkje _inneheld(r2, "utan-merke"))
+    assert(m.har_post(t.get(kl, "/personliste?t=a", {}), "int_parsing", ["query", "t", "0"]))
+    assert(m.har_post(t.get(kl, "/personliste", {}), "missing", ["query", "t"]))
+    la a = t.post(kl, "/adresser", {"json": [{"gate": "G", "nr": 1}]})
+    assert_eq(t.status(a), 200)
+    assert_eq(t.body_tekst(a), "{\"n\":1,\"nr_neste\":2,\"type\":\"Adresse\"}")
+    assert(m.har_post(t.post(kl, "/adresser", {"json": [{"gate": "G", "nr": "x"}]}), "int_parsing", ["body", "0", "nr"]))
+    assert(m.har_post(t.post(kl, "/adresser", {"json": {"gate": "G"}}), "list_type", ["body"]))
+    returner 0
+}
+
+// Bakoverkompatibilitet: berre ctx, og ctx + avhengnad posisjonelt.
+funksjon test_bakoverkompatibel() -> heltall {
+    la kl = m.klient()
+    assert_eq(t.body_tekst(t.get(kl, "/gamal?q=x", {})), "{\"q\":\"x\"}")
+    assert_eq(t.body_tekst(t.get(kl, "/dep", {})), "{\"db\":\"DB\"}")
+    // Same utan signaturmetadata (eldre NCB): namna frå funksjonen gjeld.
+    la kl2 = t.klient({"logg": "ingen"})
+    assert_eq(t.body_tekst(t.get(kl2, "/gamal?q=y", {})), "{\"q\":\"y\"}")
+    assert_eq(t.body_tekst(t.get(kl2, "/dep", {})), "{\"db\":\"DB\"}")
+    assert_eq(t.body_tekst(t.get(kl2, "/utypa/abc", {})), "{\"slug\":\"abc\"}")
+    app.nullstill({})
+    returner 0
+}
+
+
+// Det nc serve kallar inne i app-VM-en (std.rutebinding.bind_serve), med ctx i
+// nc_main-forma: gjentekne query-nøklar som liste, __path_match__ i params.
+funksjon test_serve_bindar() -> heltall {
+    la hent = m.rute("hent_person")
+    la ctx = {"__method__": "get", "__path__": "/personar/7", "__params__": {"id": "7", "__path_match__": sann},
+               "__query__": {"detaljar": ["usann", "sann"], "__raw__": "detaljar=usann&detaljar=sann"}, "__headers__": {}, "__body__": ""}
+    la b = rb.bind_serve(hent, ctx, [], [])
+    assert(b["ok"])
+    assert_eq(lengde(b["args"]), 3)
+    assert_eq(b["args"][1], 7)
+    assert(b["args"][2] == sann)
+    la ctx2 = {"__params__": {"id": "x", "__path_match__": sann}, "__query__": {}, "__headers__": {}, "__body__": ""}
+    la b2 = rb.bind_serve(hent, ctx2, [], [])
+    assert(ikkje b2["ok"])
+    assert_eq(b2["status"], 422)
+    assert(_inneheld(b2["body"], "\"loc\":[\"path\",\"id\"]"))
+    returner 0
+}
+
+funksjon start() -> heltall {
+    test_serve_bindar()
+    test_sti_og_query()
+    test_kropp_struktur()
+    test_fleire_kroppar()
+    test_utypa_og_mønstertype()
+    test_generiske_typar()
+    test_bakoverkompatibel()
+    skriv("test_r3_signaturbinding OK\n")
+    returner 0
+}
