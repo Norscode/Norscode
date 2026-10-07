@@ -1,0 +1,334 @@
+// FastAPI-hol (matrise 07.10) i apptenar, i same prosess via app.handsam_rå
+// (same dispatch som app.lytt). Spegelen for nc serve er test_fastapi_hol_serve.
+bruk std.web som web
+bruk std.apptenar som app
+bruk std.apptest som t
+bruk std.validering som val
+bruk std.skjema som skjema
+bruk std.asynk som ak
+bruk std.mw som mw
+bruk std.zip som zip
+bruk std.bytes som bytes
+
+funksjon kaker(ctx) {
+    web.route("GET /kaker")
+    la r = web.response_builder(200, {}, "ok")
+    r = web.response_set_cookie(r, web.cookie_header("a", "1"))
+    r = web.response_set_cookie(r, web.cookie_header_med("b", "2", {"max_age": 60, "path": "/app", "samesite": "strict"}))
+    returner r
+}
+
+funksjon kake_liste(ctx) {
+    web.route("GET /kakeliste")
+    returner {"status": 200, "body": "ok", "headers": {"set-cookie": ["c=3; Path=/", "d=4; Path=/"]}}
+}
+
+funksjon kake_slett(ctx) {
+    web.route("GET /kakeslett")
+    returner web.response_delete_cookie(web.response_builder(200, {}, "ok"), "a")
+}
+
+funksjon qliste(ctx) {
+    web.route("GET /qliste")
+    returner {"t": web.request_query_list(ctx, "t"), "s": web.request_query_param(ctx, "s")}
+}
+
+funksjon straum(ctx) {
+    web.route("GET /straum")
+    returner ak.streaming_response({"chunks": ["abc", "de\\fg\n", "h\"i"]})
+}
+
+funksjon straum2(ctx) {
+    web.route("GET /straum2")
+    la s = ak.stream_lag("text/event-stream")
+    ak.stream_skriv(s, "data: ein\n\n")
+    ak.stream_skriv(s, "data: \"to\"\n\n")
+    ak.stream_avslutt(s)
+    returner ak.streaming_response(s)
+}
+
+funksjon jsonl(ctx) {
+    web.route("GET /jsonl")
+    returner ak.jsonl_response([{"a": 1}, {"b": "x"}])
+}
+
+funksjon _stor_tekst() -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < 60 {
+        ut = ut + "Linje " + tekst(i) + ": Norscode komprimerer dette svaret med gzip.\n"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon stor(ctx) {
+    web.route("GET /stor")
+    returner {"status": 200, "content_type": "text/plain; charset=utf-8", "body": _stor_tekst()}
+}
+
+funksjon stor_mw(ctx) {
+    web.route("GET /stormw")
+    returner mw.komprimer_response(web.response_builder(200, {"content-type": "text/plain"}, _stor_tekst()), ctx)
+}
+
+funksjon json_inn(ctx) {
+    web.route("POST /json")
+    returner {"fekk": web.request_json(ctx)}
+}
+
+funksjon qint(ctx) {
+    web.route("GET /qint")
+    returner {"n": web.request_query_int(ctx, "n")}
+}
+
+funksjon _rå(metode: tekst, sti: tekst, headerar: tekst, kropp: tekst) -> tekst {
+    la r = metode + " " + sti + " HTTP/1.1\r\nHost: x\r\n" + headerar
+    hvis kropp != "" { r = r + "Content-Length: " + tekst(lengde(kropp)) + "\r\n" }
+    returner app.handsam_rå(r + "\r\n" + kropp)
+}
+
+funksjon _status(rå: tekst) -> tekst {
+    la linje = builtin.slice(rå, 0, builtin.index_of(rå, "\r\n"))
+    returner builtin.split(linje, " ")[1]
+}
+
+funksjon _body(rå: tekst) -> tekst {
+    la s = builtin.index_of(rå, "\r\n\r\n")
+    returner builtin.slice(rå, s + 4, lengde(rå))
+}
+
+funksjon _inneheld(t: tekst, nål: tekst) -> boolsk {
+    returner builtin.index_of(t, nål) >= 0
+}
+
+// 422 i FastAPI-formatet {"detail":[{"type","loc","msg","input"}]}.
+funksjon _er_422(rå: tekst) -> heltall {
+    assert_eq(_status(rå), "422")
+    la b = _body(rå)
+    assert(web.json_er_gyldig(b))
+    la d = builtin.json_parse_raw(b)
+    assert(finnes_nøkkel(d, "detail"))
+    assert_eq(lengde(d["detail"]), 1)
+    returner 0
+}
+
+// FA-016/029: feil i førespurnaden gjev 422, ikkje 500.
+funksjon test_422_ikkje_500() -> heltall {
+    la ct = "Content-Type: application/json\r\n"
+    // Gyldig JSON → 200.
+    la ok = _rå("POST", "/json", ct, "{\"a\":1}")
+    assert_eq(_status(ok), "200")
+    assert(_inneheld(_body(ok), "\"a\":1"))
+    // Ugyldig JSON og hengande komma → 422 json_invalid.
+    la r1 = _rå("POST", "/json", ct, "{ikkje json")
+    _er_422(r1)
+    assert(_inneheld(_body(r1), "json_invalid"))
+    _er_422(_rå("POST", "/json", ct, "{\"a\":1,}"))
+    // JSON-array når objekt er venta → 422.
+    _er_422(_rå("POST", "/json", ct, "[1,2]"))
+    // text/plain → 422 (FastAPI les ikkje kroppen som JSON då).
+    _er_422(_rå("POST", "/json", "Content-Type: text/plain\r\n", "{\"a\":1}"))
+    // Utan Content-Type → tolka som JSON (som FastAPI).
+    assert_eq(_status(_rå("POST", "/json", "", "{\"a\":1}")), "200")
+    // request_query_int: gyldig, ugyldig, manglande.
+    la q = _rå("GET", "/qint?n=42", "", "")
+    assert_eq(_status(q), "200")
+    assert_eq(_body(q), "{\"n\":42}")
+    assert_eq(_body(_rå("GET", "/qint?n=-7", "", "")), "{\"n\":-7}")
+    _er_422(_rå("GET", "/qint?n=abc", "", ""))
+    _er_422(_rå("GET", "/qint?n=12x", "", ""))
+    _er_422(_rå("GET", "/qint", "", ""))
+    returner 0
+}
+
+// Linjene i svarhovudet som byrjar med «Set-Cookie: » (kasus-uavhengig).
+funksjon _set_cookie_linjer(rå: tekst) -> liste {
+    la hovud = builtin.slice(rå, 0, builtin.index_of(rå, "\r\n\r\n"))
+    la linjer = builtin.split(hovud, "\r\n")
+    la ut = []
+    la i = 1
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(builtin.lower(linjer[i]), "set-cookie: ") {
+            legg_til(ut, builtin.slice(linjer[i], 12, lengde(linjer[i])))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// FA-063: fleire Set-Cookie — éi linje per cookie, ingen «[verdi]».
+funksjon test_fleire_cookies() -> heltall {
+    la r = _rå("GET", "/kaker", "", "")
+    assert_eq(_status(r), "200")
+    assert(ikkje _inneheld(r, "[verdi]"))
+    la sc = _set_cookie_linjer(r)
+    assert_eq(lengde(sc), 2)
+    assert_eq(sc[0], "a=1; HttpOnly; Secure; SameSite=Lax")
+    assert_eq(sc[1], "b=2; Max-Age=60; Path=/app; HttpOnly; Secure; SameSite=Strict")
+
+    // Liste i headers-ordboka → òg éi linje per element.
+    la r2 = _rå("GET", "/kakeliste", "", "")
+    assert(ikkje _inneheld(r2, "[verdi]"))
+    la sc2 = _set_cookie_linjer(r2)
+    assert_eq(lengde(sc2), 2)
+    assert_eq(sc2[0], "c=3; Path=/")
+    assert_eq(sc2[1], "d=4; Path=/")
+
+    // delete_cookie: tom verdi, Max-Age=0, Expires i fortida.
+    la sc3 = _set_cookie_linjer(_rå("GET", "/kakeslett", "", ""))
+    assert_eq(lengde(sc3), 1)
+    assert(builtin.starts_with(sc3[0], "a=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/"))
+
+    // response_header ser cookies i set_cookie-lista (eldre API).
+    la rb = web.response_set_cookie(web.response_builder(200, {"set-cookie": "x=0"}, "ok"), "y=1")
+    assert_eq(web.response_header(rb, "set-cookie"), "x=0, y=1")
+    assert_eq(lengde(web.response_set_cookies(rb)), 2)
+
+    // Header-injeksjon blir avvist.
+    la kasta = usann
+    prøv { web.cookie_header_med("a", "1\r\nX-Evil: 1", {}) } fang (e) { kasta = sann }
+    assert(kasta)
+
+    // apptest-jar: begge cookies blir hugsa, delete fjernar.
+    la kl = t.klient({"logg": "ingen"})
+    la res = t.get(kl, "/kaker", {})
+    assert_eq(lengde(t.set_cookies(res)), 2)
+    assert_eq(tekst(kl["cookies"]["a"]), "1")
+    assert_eq(tekst(kl["cookies"]["b"]), "2")
+    t.get(kl, "/kakeslett", {})
+    assert(ikkje finnes_nøkkel(kl["cookies"], "a"))
+    assert(finnes_nøkkel(kl["cookies"], "b"))
+    returner 0
+}
+
+// FA-018/016: query-lister og %-dekoding i apptenar (som nc serve).
+funksjon test_query_liste_og_dekoding() -> heltall {
+    la r = _rå("GET", "/qliste?t=a&t=b&s=%C3%A6+x", "", "")
+    assert_eq(_status(r), "200")
+    assert_eq(_body(r), "{\"t\":[\"a\",\"b\"],\"s\":\"æ x\"}")
+    // Éin verdi med komma (eldre konvensjon) og ingen verdi.
+    assert_eq(_body(_rå("GET", "/qliste?t=a,b,c", "", "")), "{\"t\":[\"a\",\"b\",\"c\"],\"s\":\"\"}")
+    assert_eq(_body(_rå("GET", "/qliste", "", "")), "{\"t\":[],\"s\":\"\"}")
+    // %-koda verdiar i lista.
+    assert_eq(_body(_rå("GET", "/qliste?t=a%20b&t=%26", "", "")), "{\"t\":[\"a b\",\"&\"],\"s\":\"\"}")
+    // ctx frå nc serve: liste-verdi for gjentekne nøklar → siste for skalar.
+    la ctx = web.request_context("GET", "/", {"t": ["x", "y"], "__raw__": "t=x&t=y"}, {}, "")
+    assert_eq(lengde(web.request_query_list(ctx, "t")), 2)
+    assert_eq(web.request_query_param(ctx, "t"), "y")
+    returner 0
+}
+
+// Tryggleik: docs_html escaper, validatorane avviser mellomrom.
+funksjon test_smaafeil() -> heltall {
+    la d = web.docs_html("<script>alert(1)</script>", "1")
+    assert(ikkje _inneheld(d, "<script>"))
+    assert(ikkje val.er_epost("a b@c.no"))
+    assert(ikkje val.er_epost("ab@c.no "))
+    assert(ikkje val.er_epost("ab@c\t.no"))
+    assert(val.er_epost("ab@c.no"))
+    assert(ikkje val.er_url("http://a b"))
+    assert(ikkje val.er_url("https://a.no/x y"))
+    assert(ikkje val.er_url("http:///sti"))
+    assert(val.er_url("https://a.no/x"))
+    assert(ikkje val.er_https_url("https://a b.no"))
+    assert(val.er_https_url("https://a.no"))
+    // std.skjema har eigne epost-/url-sjekkar: same krav.
+    la ef = [skjema.epost_felt("e", "Epost", sann), skjema.url_felt("u", "Lenkje", usann)]
+    assert_eq(tekst(skjema.valider(ef, {"e": "a b@c.no"})["gyldig"]), "usann")
+    assert_eq(tekst(skjema.valider(ef, {"e": "ab@c.no", "u": "https://a b"})["gyldig"]), "usann")
+    assert_eq(tekst(skjema.valider(ef, {"e": " ab@c.no ", "u": "https://a.no"})["gyldig"]), "sann")
+    returner 0
+}
+
+// FA-066/067: strøyming gav tom kropp (og tom content-type). Bufra no.
+funksjon test_straum() -> heltall {
+    la r = _rå("GET", "/straum", "", "")
+    assert_eq(_status(r), "200")
+    assert_eq(_body(r), "abcde\\fg\nh\"i")
+    assert(ikkje _inneheld(builtin.lower(r), "transfer-encoding"))
+    assert(ikkje _inneheld(r, "content-type: \r\n"))
+    la r2 = _rå("GET", "/straum2", "", "")
+    assert_eq(_body(r2), "data: ein\n\ndata: \"to\"\n\n")
+    assert(_inneheld(builtin.lower(r2), "content-type: text/event-stream"))
+    la r3 = _rå("GET", "/jsonl", "", "")
+    assert_eq(_body(r3), "{\"a\":1}\n{\"b\":\"x\"}\n")
+    assert(_inneheld(builtin.lower(r3), "content-type: application/x-ndjson"))
+    returner 0
+}
+
+// Pakk ut ein gzip-kropp (byte-tekst) med den reine Norscode-INFLATE-en.
+funksjon _gunzip(b: tekst) -> tekst {
+    la l = []
+    la i = 0
+    mens i < lengde(b) {
+        legg_til(l, builtin.char_code(builtin.slice(b, i, i + 1)))
+        i = i + 1
+    }
+    la ut = bytes.til_liste(zip.gzip_dekomprimer_bytes(bytes.fra_liste(l)))
+    la s = ""
+    la j = 0
+    mens j < lengde(ut) {
+        s = s + builtin.chr(ut[j])
+        j = j + 1
+    }
+    returner s
+}
+
+funksjon _hdr(rå: tekst, namn: tekst) -> tekst {
+    la hovud = builtin.slice(rå, 0, builtin.index_of(rå, "\r\n\r\n"))
+    la linjer = builtin.split(hovud, "\r\n")
+    la i = 1
+    mens i < lengde(linjer) {
+        la k = builtin.index_of(linjer[i], ":")
+        hvis k > 0 og builtin.lower(builtin.slice(linjer[i], 0, k)) == namn {
+            returner builtin.trim(builtin.slice(linjer[i], k + 1, lengde(linjer[i])))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+// FA-113: gzip var ikkje kopla inn (builtin.gzip finst ikkje → alltid ukomprimert).
+funksjon test_gzip() -> heltall {
+    la original = _stor_tekst()
+    // Handlar-hjelparen mw.komprimer_response (same i nc serve).
+    la r = _rå("GET", "/stormw", "Accept-Encoding: gzip, deflate\r\n", "")
+    assert_eq(_status(r), "200")
+    assert_eq(_hdr(r, "content-encoding"), "gzip")
+    assert(_inneheld(_hdr(r, "vary"), "Accept-Encoding"))
+    la kropp = _body(r)
+    assert(lengde(kropp) < lengde(original))
+    assert_eq(builtin.char_code(builtin.slice(kropp, 0, 1)), 31)
+    assert_eq(builtin.char_code(builtin.slice(kropp, 1, 2)), 139)
+    assert_eq(heltall_fra_tekst(_hdr(r, "content-length")), lengde(kropp))
+    assert_eq(_gunzip(kropp), original)
+    // Utan Accept-Encoding, eller med gzip;q=0 → ukomprimert.
+    la r0 = _rå("GET", "/stormw", "", "")
+    assert_eq(_hdr(r0, "content-encoding"), "")
+    assert_eq(_body(r0), original)
+    assert_eq(_hdr(_rå("GET", "/stormw", "Accept-Encoding: gzip;q=0\r\n", ""), "content-encoding"), "")
+
+    // apptenar-konfig "gzip": global GZipMiddleware.
+    la r1 = _rå("GET", "/stor", "Accept-Encoding: gzip\r\n", "")
+    assert_eq(_hdr(r1, "content-encoding"), "")
+    app.nullstill({"gzip": {"min": 100}})
+    la r2 = _rå("GET", "/stor", "Accept-Encoding: gzip\r\n", "")
+    assert_eq(_hdr(r2, "content-encoding"), "gzip")
+    assert_eq(_gunzip(_body(r2)), original)
+    // Små svar (< min) blir ikkje komprimerte.
+    assert_eq(_hdr(_rå("GET", "/qint?n=1", "Accept-Encoding: gzip\r\n", ""), "content-encoding"), "")
+    app.nullstill({})
+    returner 0
+}
+
+funksjon start() -> heltall {
+    test_422_ikkje_500()
+    test_fleire_cookies()
+    test_query_liste_og_dekoding()
+    test_smaafeil()
+    test_straum()
+    test_gzip()
+    skriv("test_apptenar_fastapi_hol OK\n")
+    returner 0
+}

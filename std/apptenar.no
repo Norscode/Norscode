@@ -19,6 +19,8 @@
 #   - metrikk og spor: app.slå_på_metrikk() gjev /metrics (Prometheus 0.0.4) med
 #     http_requests_total og http_request_duration_seconds per rutemønster; app.slå_på_spor()
 #     samlar éin OTLP-span per førespurnad (sjå std/metrikk.no og docs/APPTENAR_METRIKK.md).
+#   - gzip: konfig "gzip": {"min": 500, "maks": 65536} komprimerer svar når klienten
+#     sender Accept-Encoding: gzip (rein Norscode-DEFLATE, std.mw.komprimer_svar).
 #
 # Bruk:
 #   bruk std.apptenar som app
@@ -48,6 +50,7 @@ bruk std.apptenar_statisk som _statisk
 bruk std.http_cache som _hc
 bruk std.apptenar_ws som _ws
 bruk std.metrikk som _metrikk
+bruk std.mw som _mw
 
 # ─── Tilstand (modulglobalar) ────────────────────────────────────────────────
 
@@ -84,6 +87,10 @@ funksjon konfig_standard() -> ordbok {
         "prefiks_deps": {},
         "trusted_hosts": [],
         "cors": null,
+        "gzip": null,
+        "oppstart": [],
+        "avslutning": [],
+        "drain_ms": 10000,
         "rate": null,
         "tryggleik_html": usann,
         "request_id": usann,
@@ -153,7 +160,8 @@ funksjon _lag_snap() -> heltall {
     _s["kant"] = har_th eller har_rate eller har_cors
     la rid = _sann(_konf["request_id"])
     _s["request_id"] = rid
-    _s["ferdig"] = har_cors eller _sann(_konf["tryggleik_html"]) eller rid
+    la gz = _konf["gzip"]
+    _s["ferdig"] = har_cors eller _sann(_konf["tryggleik_html"]) eller rid eller (gz != null og builtin.type(gz) == "ordbok")
     _s["tilgangslogg"] = _sann(_konf["tilgangslogg"])
     _s["metrikk"] = (har_nokkel(_t, "metrikk_på") og _t["metrikk_på"] == sann) eller _konf["metrikk"] == sann
     _s["spor"] = (har_nokkel(_t, "spor_på") og _t["spor_på"] == sann) eller _konf["spor"] == sann
@@ -295,6 +303,17 @@ funksjon _dato_no() -> tekst {
 
 # ─── Tolking av førespurnaden ────────────────────────────────────────────────
 
+# %-dekoding (og + → mellomrom) berre når komponenten treng det; dei fleste
+# query-verdiar er reine ASCII-ord, og kvart kall kostar i tolka Norscode.
+funksjon _q_dekod(t: tekst) -> tekst {
+    hvis builtin.index_of(t, "%") < 0 og builtin.index_of(t, "+") < 0 { returner t }
+    returner _web.url_decode(t)
+}
+
+# Query-strengen som ordbok, likt nc serve sin parse_query: nøklar og verdiar
+# blir %-dekoda, og den rå strengen ligg i "__raw__" slik at
+# web.request_query_list kan gje alle verdiane for gjentekne nøklar
+# (?t=a&t=b). For ein skalar nøkkel gjeld siste verdi (som FastAPI).
 funksjon _tolk_query(rå: tekst) -> ordbok {
     la q = {}
     hvis rå == "" { returner q }
@@ -305,13 +324,15 @@ funksjon _tolk_query(rå: tekst) -> ordbok {
         hvis p != "" {
             la eq = builtin.index_of(p, "=")
             hvis eq < 0 {
-                q[p] = ""
+                q[_q_dekod(p)] = ""
             } ellers {
-                q[builtin.trim(builtin.slice(p, 0, eq))] = builtin.trim(builtin.slice(p, eq + 1, lengde(p)))
+                q[_q_dekod(builtin.trim(builtin.slice(p, 0, eq)))] = _q_dekod(builtin.trim(builtin.slice(p, eq + 1, lengde(p))))
             }
         }
         i = i + 1
     }
+    # Sist, so ein klient-nøkkel «__raw__» ikkje kan skugge han.
+    q["__raw__"] = rå
     returner q
 }
 
@@ -940,6 +961,22 @@ funksjon _topp_tabell() -> ordbok {
     returner t
 }
 
+# Éi header-linje per element i ei liste (tomme element blir hoppa over). Kvar
+# verdi blir sjekka for CR/LF/NUL som andre headerverdiar.
+funksjon _header_linjer(namn: tekst, verdiar) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(verdiar) {
+        la vt = tekst(verdiar[i])
+        hvis vt != "" {
+            _sjekk_verdi(namn, vt)
+            ut = ut + namn + ": " + vt + "\r\n"
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
 funksjon _header_linje(namn: tekst, verdi: tekst) -> tekst {
     hvis _utrygg(namn) eller _utrygg(verdi) eller builtin.index_of(namn, ":") >= 0 {
         kast "apptenar: utrygg header " + namn
@@ -1015,7 +1052,11 @@ funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
             hvis k == "content_type" { hn = "Content-Type" } ellers hvis har_nokkel(topp, k) { hn = topp[k] }
             hvis hn != "" {
                 la v = d[k]
-                hvis v != null {
+                hvis hn == "Set-Cookie" og v != null og builtin.type(v) == "liste" {
+                    # set_cookie som liste → éi linje per cookie, som nc serve
+                    # (http_response.legg_header). tekst(liste) gav «[verdi]» (FA-063).
+                    ut = ut + _header_linjer(hn, v)
+                } ellers hvis v != null {
                     la vt = tekst(v)
                     hvis vt != "" {
                         hvis ikkje har_nokkel(tv, vt) { _sjekk_verdi(hn, vt) }
@@ -1037,7 +1078,9 @@ funksjon til_http(d: ordbok, head: bool, keep_alive: bool) -> tekst {
             hvis n != "" {
                 la l = ""
                 hvis har_nokkel(hs, n) { l = hs[n] } ellers { l = _sjekk_namn(n) }
-                hvis ikkje ((l == "content-type" og har_ct) eller l == "content-length" eller l == "connection" eller l == "transfer-encoding" eller l == "keep-alive" eller l == "date") {
+                hvis l == "set-cookie" og builtin.type(h[hk[j]]) == "liste" {
+                    ut = ut + _header_linjer(n, h[hk[j]])
+                } ellers hvis ikkje ((l == "content-type" og har_ct) eller l == "content-length" eller l == "connection" eller l == "transfer-encoding" eller l == "keep-alive" eller l == "date") {
                     la v = tekst(h[hk[j]])
                     hvis ikkje har_nokkel(tv, v) { _sjekk_verdi(n, v) }
                     ut = ut + n + ": " + v + "\r\n"
@@ -1427,6 +1470,16 @@ funksjon _ferdigstill(ctx: ordbok, d: ordbok) -> ordbok {
         la rid = ""
         hvis har_nokkel(ctx, "__request_id__") { rid = tekst(ctx["__request_id__"]) }
         hvis rid != "" og ikkje _utrygg(rid) { _sett_h_mangl(d, "x-request-id", rid) }
+    }
+    # gzip (GZipMiddleware, konfig "gzip": {"min": 500, "maks": 65536}), sist, so
+    # headerane over er med. Rein Norscode-DEFLATE via std.mw/std.zip.
+    la gk = _k("gzip")
+    hvis gk != null og builtin.type(gk) == "ordbok" {
+        la gmin = 500
+        la gmaks = 65536
+        hvis har_nokkel(gk, "min") { gmin = heltall(gk["min"]) }
+        hvis har_nokkel(gk, "maks") { gmaks = heltall(gk["maks"]) }
+        d = _mw.komprimer_svar(d, _h(ctx, "accept-encoding"), gmin, gmaks)
     }
     returner d
 }
@@ -2575,10 +2628,122 @@ funksjon nullstill(konf: ordbok) -> heltall {
     returner 0
 }
 
+# ─── Livsløp: oppstart, avslutning og drenering (FastAPI lifespan) ───────────
+#
+# Oppstart- og avslutningskrokar: web.startup_hook()/web.shutdown_hook() i
+# kompilator-metadataen, eller konfig "oppstart"/"avslutning" (lister med
+# funksjonsnamn). `nc run` kopierer ikkje metadata-listene inn i VM-en (same
+# som for mellomvare, sjå merknaden øvst), so konfig-listene er vegen i dag.
+#
+# Drenering: app.stopp() (t.d. frå ein handlar eller ei periodisk oppgåve)
+# stoppar ikkje lenger brått. Lykkja lukkar lytte-socketen og ledige
+# tilkoplingar, let påbyrja førespurnader bli ferdige (høgst "drain_ms"),
+# lukkar SSE/WebSocket (1001) og køyrer avslutningskrokane — same rekkjefølgje
+# som nc serve ved SIGTERM.
+#
+# SIGTERM/SIGINT: under `nc run` (VM) kan ikkje std sjå ventande signal.
+# native_gap.serve_signal_* brukar builtin.sys6, som berre finst i den native
+# AOT-vegen (nc_main); i VM-en gjev kallet «Ukjent innebygd funksjon». Ein
+# VM-builtin for ventande signal (seed-endring) trengst før SIGTERM kan
+# utløyse dreneringa her; då held det å kalle stopp() når signalet kjem.
+
+# Kall ein krok utan argument når han ikkje tek parametrar, elles med {}.
+funksjon _kall_krok(fn: tekst) {
+    la pc = "-1"
+    prøv {
+        la info = builtin.vm_function_info(fn)
+        hvis tekst(info["finnes"]) == "sann" { pc = tekst(info["param_count"]) }
+    } fang (e) { }
+    hvis pc == "0" { returner builtin.ncb_call_fn(fn) }
+    returner builtin.ncb_call_fn(fn, {})
+}
+
+# Køyr oppstartkrokane. Gjev 0, eller 1 når ein krok kasta (tenaren skal då
+# ikkje starte, som FastAPI ved feil i lifespan-oppstarten).
+funksjon oppstart() -> heltall {
+    hvis ikkje _s["ok"] { _lag_snap() }
+    la l = _mw("startup_hooks", "oppstart")
+    la i = 0
+    mens i < lengde(l) {
+        prøv {
+            _kall_krok(l[i])
+        } fang (e) {
+            skriv("APPTENAR feil: oppstartkrok " + tekst(l[i]) + " kasta: " + tekst(e) + "\n")
+            returner 1
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+# Køyr avslutningskrokane (alle, sjølv om ein kastar). Gjev talet på krokar som kasta.
+funksjon avslutning() -> heltall {
+    hvis ikkje _s["ok"] { _lag_snap() }
+    la l = _mw("shutdown_hooks", "avslutning")
+    la feil = 0
+    la i = 0
+    mens i < lengde(l) {
+        prøv {
+            _kall_krok(l[i])
+        } fang (e) {
+            skriv("APPTENAR feil: avslutningskrok " + tekst(l[i]) + " kasta: " + tekst(e) + "\n")
+            feil = feil + 1
+        }
+        i = i + 1
+    }
+    returner feil
+}
+
+# Start drenering: lukk ledige tilkoplingar, SSE-straumar og WebSocket (1001).
+# Tilkoplingar med ein påbyrja førespurnad eller eit svar som ikkje er skrive
+# ferdig, får halde fram. Gjev talet på tilkoplingar som står att.
+funksjon _drener_start() -> heltall {
+    la ks = nøkler(_tilk)
+    la j = 0
+    mens j < lengde(ks) {
+        hvis har_nokkel(_tilk, ks[j]) {
+            la c = _tilk[ks[j]]
+            la fase = c["fase"]
+            hvis fase == "ws" {
+                prøv {
+                    _ws.lukk(c["ws"], 1001, "tenaren stoppar")
+                    _ws_flytt(c)
+                    _skriv_ut(c)
+                } fang (e) { }
+                _lukk(c)
+            } ellers hvis fase == "sse" eller (fase == "ledig" og c["inn"] == "" og c["ut"] == "") {
+                _lukk(c)
+            } ellers {
+                # Svaret på førespurnaden som er i gang blir det siste.
+                c["lukk_etter"] = sann
+            }
+        }
+        j = j + 1
+    }
+    returner _t["n_tilk"]
+}
+
+# Under drenering: lukk tilkoplingar som er ferdige med svaret sitt.
+funksjon _drener_steg() -> heltall {
+    la ks = nøkler(_tilk)
+    la j = 0
+    mens j < lengde(ks) {
+        hvis har_nokkel(_tilk, ks[j]) {
+            la c = _tilk[ks[j]]
+            hvis c["fase"] == "ledig" og c["ut"] == "" { _lukk(c) }
+        }
+        j = j + 1
+    }
+    returner _t["n_tilk"]
+}
+
 # Start tenaren og køyr lykkja til stopp() blir kalla (eller "maks_ms" er gått).
-# Skriv «APPTENAR klar <vert>:<port>» når socketen lyttar. Gjev 0, eller 1 om lyttinga feila.
+# Oppstartkrokane køyrer før socketen lyttar; stopp() drenerer (sjå Livsløp) og
+# avslutningskrokane køyrer til slutt. Skriv «APPTENAR klar <vert>:<port>» når
+# socketen lyttar. Gjev 0, eller 1 om lyttinga eller ein oppstartkrok feila.
 funksjon lytt(konf: ordbok) -> heltall {
     nullstill(konf)
+    hvis oppstart() != 0 { returner 1 }
     la l = socket.native_lytt(tekst(_konf["vert"]), _konf["port"], 128)
     hvis l["status"] != "listening" {
         skriv("APPTENAR feil: kunne ikkje lytte på " + tekst(_konf["vert"]) + ":" + tekst(_konf["port"]) + ": " + tekst(l["error"]) + "\n")
@@ -2615,12 +2780,31 @@ funksjon lytt(konf: ordbok) -> heltall {
     la maks_tilk = _konf["maks_tilkoplingar"]
     la start_ms = builtin.tid_ms()
     la vent = 1
-    mens ikkje _t["stopp"] {
+    la stoppar = usann
+    la lytt_open = sann
+    la drain_frist = 0
+    mens sann {
         la no = builtin.tid_ms()
         hvis maks_ms > 0 og no - start_ms > maks_ms { bryt }
+        hvis _t["stopp"] og ikkje stoppar {
+            # Drenering: ingen nye tilkoplingar, ledige blir lukka, påbyrja
+            # førespurnader får bli ferdige innan "drain_ms".
+            stoppar = sann
+            drain_frist = no + _konf["drain_ms"]
+            socket.native_lukk(l)
+            lytt_open = usann
+            la att = _drener_start()
+            hvis _konf["klar_melding"] {
+                skriv("APPTENAR stoppar: tek ikkje imot fleire tilkoplingar, drenerer " + tekst(att) + "\n")
+            }
+        }
+        hvis stoppar {
+            hvis _drener_steg() == 0 eller no >= drain_frist { bryt }
+        }
         la fram = 0
         # Ta imot nye tilkoplingar (høgst 32 per runde)
         la ai = 0
+        hvis ikkje lytt_open { ai = 32 }
         mens ai < 32 {
             la a = builtin.network_operation(aq)
             hvis a["status"] != "connected" { bryt }
@@ -2666,7 +2850,8 @@ funksjon lytt(konf: ordbok) -> heltall {
             # Ingenting skjedde: vent på alle socketane samtidig (vaknar straks noko kan
             # lesast). Ventar ei tilkopling på å få skrive, gjeld den korte, aukande
             # fristen som før, sidan poll_mange berre meldar lesbare socketar.
-            la hs = [l["handle"]]
+            la hs = []
+            hvis lytt_open { legg_til(hs, l["handle"]) }
             la skriv_ventar = usann
             la ks3 = nøkler(_tilk)
             la j3 = 0
@@ -2688,10 +2873,15 @@ funksjon lytt(konf: ordbok) -> heltall {
                 la til_slutt = maks_ms - (no - start_ms) + 1
                 hvis v > til_slutt { v = til_slutt }
             }
+            hvis stoppar og v > drain_frist - no { v = drain_frist - no }
             hvis v < 1 { v = 1 }
-            pmq["handles"] = hs
-            pmq["timeout_ms"] = tekst(v)
-            builtin.network_operation(pmq)
+            hvis lengde(hs) == 0 {
+                builtin.sov(v)
+            } ellers {
+                pmq["handles"] = hs
+                pmq["timeout_ms"] = tekst(v)
+                builtin.network_operation(pmq)
+            }
             hvis skriv_ventar {
                 hvis vent < 10 { vent = vent * 2 }
                 hvis vent > 10 { vent = 10 }
@@ -2704,8 +2894,12 @@ funksjon lytt(konf: ordbok) -> heltall {
             la v = vent
             hvis v > til_frist { v = til_frist }
             hvis v < 1 { v = 1 }
-            pq["timeout_ms"] = tekst(v)
-            builtin.network_operation(pq)
+            hvis lytt_open {
+                pq["timeout_ms"] = tekst(v)
+                builtin.network_operation(pq)
+            } ellers {
+                builtin.sov(v)
+            }
             hvis vent < maks { vent = vent * 2 }
             hvis vent > maks { vent = maks }
         }
@@ -2728,7 +2922,9 @@ funksjon lytt(konf: ordbok) -> heltall {
         j = j + 1
     }
     _periodisk(builtin.tid_ms(), sann)
-    socket.native_lukk(l)
+    hvis lytt_open { socket.native_lukk(l) }
     _t["køyrer"] = usann
+    avslutning()
+    hvis stoppar og _konf["klar_melding"] { skriv("APPTENAR stoppa\n") }
     returner 0
 }

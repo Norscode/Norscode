@@ -67,13 +67,57 @@ funksjon request_param(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     returner ""
 }
 
-funksjon request_param_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_param(ctx, nøkkel))
+// Valfritt forteikn + berre siffer (etter trim). heltall_fra_tekst kastar
+// «Ugyldig heiltall» på alt anna, og det rå unntaket vart 500 i både nc serve
+// og apptenar (FA-016). Med denne sjekken kan vi kaste ValideringsFeil i staden.
+funksjon _er_heiltal_tekst(verdi: tekst) -> boolsk {
+    la s = builtin.trim(verdi)
+    la n = lengde(s)
+    hvis n == 0 { returner usann }
+    la i: heiltall = 0
+    la c0 = builtin.slice(s, 0, 1)
+    hvis c0 == "-" eller c0 == "+" { i = 1 }
+    hvis i >= n { returner usann }
+    mens i < n {
+        la code = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis code < 48 eller code > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
 }
 
+// Tolk eit heiltal frå ein førespurnadsverdi, eller kast ValideringsFeil (→ 422
+// i nc serve og apptenar, same format som anna validering). kvar = «query»,
+// «path» eller «body»; brukt berre i meldinga (serve-mappinga set loc = body).
+funksjon _heiltal_eller_422(verdi: tekst, kvar: tekst, nøkkel: tekst) -> heltall {
+    hvis builtin.trim(verdi) == "" {
+        kast "ValideringsFeil: manglande påkravd " + kvar + "-felt '" + nøkkel + "'"
+    }
+    hvis ikkje _er_heiltal_tekst(verdi) {
+        kast "ValideringsFeil: " + kvar + "-felt '" + nøkkel + "' må vere eit heiltal, fekk '" + verdi + "'"
+    }
+    la s = builtin.trim(verdi)
+    hvis builtin.slice(s, 0, 1) == "+" { s = builtin.slice(s, 1, lengde(s)) }
+    returner heltall_fra_tekst(s)
+}
+
+funksjon request_param_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
+    returner _heiltal_eller_422(request_param(ctx, nøkkel), "path", nøkkel)
+}
+
+// Éin query-verdi. Gjentekne nøklar (?t=a&t=b) kjem som liste frå nc serve sin
+// parse_query; då gjeld siste verdi (som FastAPI for ein skalar parameter).
+// request_query_list gjev alle.
 funksjon request_query_param(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     la q = ctx["__query__"]
-    hvis (finnes_nøkkel(q, nøkkel)) { returner tekst(q[nøkkel]) }
+    hvis (finnes_nøkkel(q, nøkkel)) {
+        la v = q[nøkkel]
+        hvis builtin.type(v) == "liste" {
+            hvis lengde(v) == 0 { returner "" }
+            returner tekst(v[lengde(v) - 1])
+        }
+        returner tekst(v)
+    }
     returner ""
 }
 
@@ -83,8 +127,10 @@ funksjon request_query_required(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     returner v
 }
 
+// Påkravd heiltals-query. Manglande eller ugyldig verdi → ValideringsFeil (422),
+// ikkje rått «Ugyldig heiltall» (500). request_query_int_or for valfri.
 funksjon request_query_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_query_param(ctx, nøkkel))
+    returner _heiltal_eller_422(request_query_param(ctx, nøkkel), "query", nøkkel)
 }
 
 // ─── Fase 0.6: tolerant parameter-tolking (utan reseed) ──────────────────────
@@ -164,15 +210,33 @@ funksjon request_query_int_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: helta
     returner fallback
 }
 
-// Rå query-verdi som kommadelt liste (FA-018). Under nc serve kollapsar
-// parse_query gjentekne nøklar til siste verdi, so ekte repeterte nøklar
-// (?x=1&x=2) krev at rå query-streng blir teke vare på i ctx — det er ei
-// reseed-endring i selfhost/nc_main.no. Inntil då støttar denne hjelparen
-// kommalister (?x=1,2,3), som er den vanlege no-reseed-konvensjonen.
+// Alle verdiane til ein query-nøkkel (FA-018), som FastAPI sin
+// `t: list[str] = Query()`: ?t=a&t=b → ["a", "b"]. Kjelder, i rekkjefølgje:
+//   1. liste-verdi i ctx["__query__"] (nc serve sin parse_query lagar det
+//      for gjentekne nøklar),
+//   2. rå query-streng i ctx["__query__"]["__raw__"] (nc serve og apptenar),
+//      %-dekoda,
+//   3. éin verdi.
+// Kjem nøkkelen berre éin gong, blir verdien i tillegg delt på komma
+// (?t=a,b,c), den eldre no-reseed-konvensjonen. Tomme element blir droppa.
 funksjon request_query_list(ctx: ordbok_tekst, nøkkel: tekst) -> liste<tekst> {
-    la v = request_query_param(ctx, nøkkel)
-    hvis v == "" { returner [] }
-    la deler = builtin.split(v, ",")
+    la q = ctx["__query__"]
+    la verdiar: liste<tekst> = []
+    hvis q != null og finnes_nøkkel(q, nøkkel) og builtin.type(q[nøkkel]) == "liste" {
+        la l = q[nøkkel]
+        la li: heiltall = 0
+        mens li < lengde(l) {
+            legg_til(verdiar, tekst(l[li]))
+            li = li + 1
+        }
+    } ellers hvis q != null og finnes_nøkkel(q, "__raw__") {
+        verdiar = _query_rå_verdiar(tekst(q["__raw__"]), nøkkel)
+    } ellers {
+        la v1 = request_query_param(ctx, nøkkel)
+        hvis v1 != "" { legg_til(verdiar, v1) }
+    }
+    la deler = verdiar
+    hvis lengde(verdiar) == 1 { deler = builtin.split(verdiar[0], ",") }
     la ut: liste<tekst> = []
     la i: heiltall = 0
     mens i < lengde(deler) {
@@ -181,6 +245,33 @@ funksjon request_query_list(ctx: ordbok_tekst, nøkkel: tekst) -> liste<tekst> {
         i = i + 1
     }
     returner ut
+}
+
+// Alle %-dekoda verdiar for nøkkel i ein rå query-streng (a=1&b=2&a=3).
+funksjon _query_rå_verdiar(rå: tekst, nøkkel: tekst) -> liste<tekst> {
+    la ut: liste<tekst> = []
+    la delar = builtin.split(rå, "&")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la p = delar[i]
+        hvis p != "" {
+            la eq = builtin.index_of(p, "=")
+            la k = p
+            la v = ""
+            hvis eq >= 0 {
+                k = builtin.slice(p, 0, eq)
+                v = builtin.slice(p, eq + 1, lengde(p))
+            }
+            hvis _url_decode_komponent(k) == nøkkel { legg_til(ut, _url_decode_komponent(v)) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Offentleg %-dekoding av éin URL-/skjemakomponent (+ → mellomrom).
+funksjon url_decode(verdi: tekst) -> tekst {
+    returner _url_decode_komponent(verdi)
 }
 
 // ─── Fase 0.6: application/x-www-form-urlencoded ─────────────────────────────
@@ -673,11 +764,31 @@ funksjon json_er_gyldig(s: tekst) -> boolsk {
     returner usann
 }
 
+// Content-Type-sjekk som FastAPI (routing.py): manglande Content-Type → tolk
+// som JSON; application/json og application/*+json → JSON; alt anna (t.d.
+// text/plain, skjema) → 422. Parameterane etter «;» (charset) blir ignorerte.
+funksjon _content_type_godtek_json(ctx: ordbok_tekst) -> boolsk {
+    la ct = request_header(ctx, "content-type")
+    hvis builtin.trim(ct) == "" { returner sann }
+    la base = ct
+    la semi = builtin.index_of(ct, ";")
+    hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
+    base = _ascii_lower(builtin.trim(base))
+    hvis base == "application/json" { returner sann }
+    returner tekst_starter_med(base, "application/") og tekst_slutter_med(base, "+json")
+}
+
+// JSON-objekt frå kroppen. Alle feil blir kasta som «ValideringsFeil: …», som
+// nc serve og apptenar mappar til 422 i FastAPI-format ({"detail":[…]}).
+// Tidlegare gav ugyldig JSON eit rått «json_invalid: …»-unntak → 500 (FA-016/029).
 funksjon request_json(ctx: ordbok_tekst) -> ordbok_tekst {
     la body = ctx["__body__"]
+    hvis body != "" og ikkje _content_type_godtek_json(ctx) {
+        kast "ValideringsFeil: json_invalid: Content-Type må vere application/json, fekk '" + request_header(ctx, "content-type") + "'"
+    }
     // Fase 0.3: hindre at feilforma JSON når den native parseren (SIGSEGV/DoS).
     hvis body != "" og ikkje json_er_gyldig(body) {
-        kast "json_invalid: ugyldig JSON-kropp"
+        kast "ValideringsFeil: json_invalid: ugyldig JSON-kropp"
     }
     prøv {
         la r = builtin.json_parse_raw(body)
@@ -710,7 +821,7 @@ funksjon _content_type_er_json(ctx: ordbok_tekst) -> boolsk {
     la semi = builtin.index_of(ct, ";")
     hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
     base = _ascii_lower(builtin.trim(base))
-    returner base == "application/json"
+    returner base == "application/json" eller (tekst_starter_med(base, "application/") og tekst_slutter_med(base, "+json"))
 }
 
 // 422-respons for ugyldig JSON, i det samla 0.7-formatet.
@@ -764,7 +875,7 @@ funksjon request_json_field_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: teks
 }
 
 funksjon request_json_field_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_json_field(ctx, nøkkel))
+    returner _heiltal_eller_422(request_json_field(ctx, nøkkel), "body", nøkkel)
 }
 
 funksjon request_json_field_bool(ctx: ordbok_tekst, nøkkel: tekst) -> boolsk {
@@ -1100,6 +1211,11 @@ funksjon response_header(response: ordbok_tekst, nøkkel: tekst) -> tekst {
     la low = tekst_til_liten(nøkkel)
     hvis (finnes_nøkkel(h, low)) { returner h[low] }
     hvis (finnes_nøkkel(h, nøkkel)) { returner h[nøkkel] }
+    // Set-Cookie ligg i toppnøkkelen set_cookie (liste) etter response_set_cookie.
+    hvis low == "set-cookie" {
+        la alle = response_set_cookies(response)
+        hvis lengde(alle) > 0 { returner builtin.join(alle, ", ") }
+    }
     returner ""
 }
 
@@ -1107,11 +1223,158 @@ funksjon cookie_header(nøkkel: tekst, verdi: tekst) -> tekst {
     returner nøkkel + "=" + verdi + "; HttpOnly; Secure; SameSite=Lax"
 }
 
+// ─── Cookies (FA-063) ────────────────────────────────────────────────────────
+// Fleire Set-Cookie: responskontrakten har toppnøkkelen «set_cookie», som kan
+// vere ei liste. nc serve (selfhost/http_response.no legg_header) og apptenar
+// (til_http) sender éi Set-Cookie-linje per element. Ei ordbok kan ikkje ha
+// same header-nøkkel to gonger, so headers["set-cookie"] kan berre bere éin.
+
+funksjon _cookie_del_trygg(t: tekst) -> boolsk {
+    returner builtin.index_of(t, ";") < 0 og builtin.index_of(t, "\r") < 0 og builtin.index_of(t, "\n") < 0 og builtin.index_of(t, builtin.chr(0)) < 0
+}
+
+funksjon _val_tekst(val: ordbok, nøkkel: tekst, standard: tekst) -> tekst {
+    hvis val == null eller ikkje finnes_nøkkel(val, nøkkel) { returner standard }
+    la v = val[nøkkel]
+    hvis v == null { returner standard }
+    returner tekst(v)
+}
+
+funksjon _val_sann(val: ordbok, nøkkel: tekst, standard: boolsk) -> boolsk {
+    hvis val == null eller ikkje finnes_nøkkel(val, nøkkel) { returner standard }
+    la v = tekst(val[nøkkel])
+    returner v == "sann" eller v == "true" eller v == "1"
+}
+
+// Set-Cookie-verdi med val som FastAPI sin response.set_cookie. val (ordbok,
+// alle valfrie): max_age (sekund), expires (HTTP-dato), path (standard «/»),
+// domain, secure (standard sann), httponly (standard sann), samesite
+// (standard «Lax»; «Strict», «Lax», «None» eller «» for å sleppe attributtet).
+// Trygge standardar som cookie_header. Kastar ved ; CR LF NUL i namn/verdi/
+// attributt (header-injeksjon).
+funksjon cookie_header_med(namn: tekst, verdi: tekst, val: ordbok) -> tekst {
+    hvis namn == "" eller ikkje _cookie_del_trygg(namn) eller builtin.index_of(namn, "=") >= 0 eller ikkje _cookie_del_trygg(verdi) {
+        kast "web: ugyldig cookie-namn eller -verdi"
+    }
+    la c = namn + "=" + verdi
+    la max_age = _val_tekst(val, "max_age", "")
+    hvis max_age != "" {
+        hvis ikkje _er_heiltal_tekst(max_age) { kast "web: ugyldig max_age for cookie " + namn }
+        c = c + "; Max-Age=" + builtin.trim(max_age)
+    }
+    la expires = _val_tekst(val, "expires", "")
+    hvis expires != "" {
+        hvis ikkje _cookie_del_trygg(expires) { kast "web: ugyldig expires for cookie " + namn }
+        c = c + "; Expires=" + expires
+    }
+    la path = _val_tekst(val, "path", "/")
+    hvis path != "" {
+        hvis ikkje _cookie_del_trygg(path) { kast "web: ugyldig path for cookie " + namn }
+        c = c + "; Path=" + path
+    }
+    la domain = _val_tekst(val, "domain", "")
+    hvis domain != "" {
+        hvis ikkje _cookie_del_trygg(domain) { kast "web: ugyldig domain for cookie " + namn }
+        c = c + "; Domain=" + domain
+    }
+    la samesite = _val_tekst(val, "samesite", "Lax")
+    la ss = _ascii_lower(samesite)
+    hvis ss == "strict" { samesite = "Strict" }
+    ellers hvis ss == "lax" { samesite = "Lax" }
+    ellers hvis ss == "none" { samesite = "None" }
+    ellers hvis ss != "" { kast "web: ugyldig samesite for cookie " + namn }
+    // SameSite=None krev Secure i nettlesarane.
+    la secure = _val_sann(val, "secure", sann) eller ss == "none"
+    hvis _val_sann(val, "httponly", sann) { c = c + "; HttpOnly" }
+    hvis secure { c = c + "; Secure" }
+    hvis ss != "" { c = c + "; SameSite=" + samesite }
+    returner c
+}
+
+// Alle Set-Cookie-verdiane i eit svar (toppnøkkelen set_cookie og eventuelle
+// eldre headers["set-cookie"]), i rekkjefølgje.
+funksjon response_set_cookies(response: ordbok_tekst) -> liste<tekst> {
+    la ut: liste<tekst> = []
+    la nøklar = ["set_cookie", "__set_cookie__"]
+    la k: heiltall = 0
+    mens k < lengde(nøklar) {
+        hvis finnes_nøkkel(response, nøklar[k]) {
+            la v = response[nøklar[k]]
+            hvis v != null og builtin.type(v) == "liste" {
+                la i: heiltall = 0
+                mens i < lengde(v) {
+                    legg_til(ut, tekst(v[i]))
+                    i = i + 1
+                }
+            } ellers hvis v != null og tekst(v) != "" {
+                legg_til(ut, tekst(v))
+            }
+        }
+        k = k + 1
+    }
+    returner ut
+}
+
+// Legg til ein Set-Cookie (overskriv ikkje tidlegare). Ein eldre
+// headers["set-cookie"] (frå response_builder-headerar) blir flytta inn i lista
+// først, so han verken går tapt eller blir send to gonger.
 funksjon response_set_cookie(response: ordbok_tekst, cookie: tekst) -> ordbok_tekst {
-    la h = response["__headers__"]
-    h["set-cookie"] = cookie
-    response["__headers__"] = h
+    la liste: liste<tekst> = response_set_cookies(response)
+    hvis finnes_nøkkel(response, "__set_cookie__") { fjern_nokkel(response, "__set_cookie__") }
+    la hn = ["__headers__", "headers"]
+    la hi: heiltall = 0
+    mens hi < lengde(hn) {
+        hvis finnes_nøkkel(response, hn[hi]) {
+            la h = response[hn[hi]]
+            hvis h != null og builtin.type(h) == "ordbok" {
+                la ks = nøkler(h)
+                la i: heiltall = 0
+                mens i < lengde(ks) {
+                    la k = tekst(ks[i])
+                    hvis tekst_til_liten(k) == "set-cookie" {
+                        la v = h[k]
+                        hvis builtin.type(v) == "liste" {
+                            la j: heiltall = 0
+                            mens j < lengde(v) {
+                                legg_til(liste, tekst(v[j]))
+                                j = j + 1
+                            }
+                        } ellers hvis tekst(v) != "" {
+                            legg_til(liste, tekst(v))
+                        }
+                        fjern_nokkel(h, k)
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        hi = hi + 1
+    }
+    legg_til(liste, cookie)
+    response["set_cookie"] = liste
     returner response
+}
+
+// Set-Cookie som slettar cookien i nettlesaren (som FastAPI delete_cookie):
+// tom verdi, Max-Age=0 og Expires i fortida. path/domain må vere som då
+// cookien vart sett; standard path er «/».
+funksjon delete_cookie_header(namn: tekst, val: ordbok) -> tekst {
+    la v: ordbok = {}
+    hvis val != null {
+        la ks = nøkler(val)
+        la i: heiltall = 0
+        mens i < lengde(ks) {
+            v[ks[i]] = val[ks[i]]
+            i = i + 1
+        }
+    }
+    v["max_age"] = "0"
+    v["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+    returner cookie_header_med(namn, "", v)
+}
+
+funksjon response_delete_cookie(response: ordbok_tekst, namn: tekst) -> ordbok_tekst {
+    returner response_set_cookie(response, delete_cookie_header(namn, {}))
 }
 
 funksjon validation_error_body(errors: liste<tekst>) -> tekst {
@@ -1455,16 +1718,19 @@ funksjon shutdown_hook() -> tekst  {
     returner ""
 }
 // ─── OpenAPI-markørar (Fase 2 / 2.10) ────────────────────────────────────────
-// Desse er reine kompilerings-tids-markørar: kompilatoren (ir_to_bytecode sin
-// prolog-skann, 2.10) les dei frå dei leiande setningane i ein handlar og
-// skriv metadata inn i route-oppføringa, og sjølve kallet vert IKKJE emittert
-// til bytekode. Dei må likevel finnast som funksjonar slik at handlarkjelda
-// kompilerer (symboloppslag) og — om eit kall skulle hamne utanfor prologen —
-// returnerer trygt i staden for å gje «ukjent kall».
-// web.tags(...) er variadisk i bruk (web.tags("a","b", ...)); markøren er
-// parameterlaus fordi argumenta vert lesne direkte frå AST-en av 2.10.
-funksjon tags() -> tekst  {
-    returner ""
+// Kompilatoren (ir_to_bytecode sin prolog-skann, 2.10) les desse frå dei
+// leiande setningane i ein handlar og skriv metadata inn i route-oppføringa.
+// MERK: sjølve kallet VERT emittert til bytekode og køyrer kvar gong
+// handlaren køyrer, og aritetsvakta i VM-en (R1/F07) krev nøyaktig
+// lengde(params) argument. Kryssmodul-kall får verken standardargument eller
+// vararg-pakking, så signaturen her MÅ samsvare med bruken. Tidlegare var
+// tags() parameterlaus, og web.tags("a") gav 500 ArgumentFeil i handlaren
+// (FA-097). Éin tag per kall: fleire tags skriv ein som fleire linjer,
+// web.tags("a") + web.tags("b") — prolog-skannen samlar dei i éi liste.
+// web.tags("a", "b") i eitt kall krev at kompilatoren slepper markørkallet
+// (eller pakkar varargs på tvers av modular) — det er ei seed-endring.
+funksjon tags(tag: tekst) -> tekst  {
+    returner tag
 }
 funksjon beskriving(tekst_verdi: tekst) -> tekst  {
     returner tekst_verdi
@@ -2046,6 +2312,48 @@ funksjon _openapi_er_docs_rute(norm_path: tekst) -> boolsk {
     returner norm_path == "/openapi.json" eller norm_path == "/docs" eller norm_path == "/redoc"
 }
 
+// Robuste oppslag i rute-metadata (eitt element frå ncb_route_handlers()):
+// eldre NCB-ar (før 2.10) manglar nøklane, og verdiane kan kome som bool/tekst
+// avhengig av JSON-lesaren. Offentlege fordi std.docs_side brukar dei òg.
+funksjon rute_meta_sann(handler, nøkkel: tekst) -> boolsk {
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner usann }
+    la v = tekst(handler[nøkkel])
+    returner v == "sann" eller v == "true" eller v == "1"
+}
+
+funksjon rute_meta_tekst(handler, nøkkel: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner "" }
+    la v = handler[nøkkel]
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+funksjon rute_meta_liste(handler, nøkkel: tekst) {
+    la ut = []
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner ut }
+    la v = handler[nøkkel]
+    hvis builtin.type(v) != "liste" { returner ut }
+    la i: heltall = 0
+    mens i < lengde(v) {
+        legg_til(ut, v[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Standard skildring for ein statuskode når web.respons(...) ikkje gav nokon
+// (OpenAPI krev «description» på kvar respons).
+funksjon _openapi_status_tekst(status: tekst) -> tekst {
+    hvis status == "400" { returner "Bad Request" }
+    hvis status == "401" { returner "Unauthorized" }
+    hvis status == "403" { returner "Forbidden" }
+    hvis status == "404" { returner "Not Found" }
+    hvis status == "409" { returner "Conflict" }
+    hvis status == "422" { returner "Validation Error" }
+    hvis status == "500" { returner "Internal Server Error" }
+    returner "Respons " + status
+}
+
 funksjon _openapi_resp_json(parsed_verdi, fallback: tekst) -> tekst {
     prøv { returner builtin.json_skriv(parsed_verdi) } fang (e) { }
     returner fallback
@@ -2078,7 +2386,8 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
         hvis lengde(deler) >= 2 {
             la raw_path: tekst = deler[1]
             la norm_path: tekst = _openapi_norm_path(raw_path)
-            hvis _openapi_er_docs_rute(norm_path) {
+            hvis _openapi_er_docs_rute(norm_path) eller rute_meta_sann(handler, "hidden") {
+                // web.skjul() → include_in_schema=False (FA-097).
                 i = i + 1
                 fortsett
             }
@@ -2108,11 +2417,20 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 }
             }
 
-            // Tag per modul.
-            la tag = _openapi_tag(funksjonsnamn)
-            hvis ikkje finnes_nøkkel(tag_seen, tag) {
-                tag_seen[tag] = "1"
-                legg_til(tag_order, tag)
+            // Tags: web.tags("x")-markørane i metadata vinn; elles tag per modul.
+            la rute_tags: liste<tekst> = rute_meta_liste(handler, "tags")
+            hvis lengde(rute_tags) == 0 { legg_til(rute_tags, _openapi_tag(funksjonsnamn)) }
+            la tags_op: tekst = ""
+            la tgi: heltall = 0
+            mens tgi < lengde(rute_tags) {
+                la tag = tekst(rute_tags[tgi])
+                hvis ikkje finnes_nøkkel(tag_seen, tag) {
+                    tag_seen[tag] = "1"
+                    legg_til(tag_order, tag)
+                }
+                hvis tags_op != "" { tags_op = tags_op + "," }
+                tags_op = tags_op + "\"" + _json_escape(tag) + "\""
+                tgi = tgi + 1
             }
 
             // Parametrar: path (frå mønster) + query (frå metadata).
@@ -2135,7 +2453,11 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 bi = bi + 1
             }
 
-            la op: tekst = "{\"operationId\":\"" + _json_escape(op_id) + "\",\"tags\":[\"" + _json_escape(tag) + "\"]"
+            la op: tekst = "{\"operationId\":\"" + _json_escape(op_id) + "\",\"tags\":[" + tags_op + "]"
+            // web.beskriving("...") → description; web.forelda() → deprecated (FA-097).
+            la beskr: tekst = rute_meta_tekst(handler, "description")
+            hvis beskr != "" { op = op + ",\"description\":\"" + _json_escape(beskr) + "\"" }
+            hvis rute_meta_sann(handler, "deprecated") { op = op + ",\"deprecated\":true" }
             hvis params_json != "" { op = op + ",\"parameters\":[" + params_json + "]" }
             // Eksempel på requestBody frå oppsett["eksempel"][op_id] dersom gjeve.
             la body_example: tekst = ""
@@ -2157,21 +2479,51 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
             hvis rm_resp != "" { resp_schema = "{\"$ref\":\"#/components/schemas/" + _json_escape(rm_resp) + "\"}" }
             la resp_example: tekst = _openapi_resp_json(handler["response_example"], "\"eksempel\"")
             la responses_json: tekst = "\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\":" + resp_schema + ",\"example\":" + resp_example + "}}}"
+            // Statuskodar som alt er med: ein JSON-nøkkel kan berre finnast éin gong.
+            la status_sett: ordbok_tekst = {}
+            status_sett["200"] = "1"
 
             la errs = handler["error_responses"]
             la eri: heltall = 0
             mens eri < lengde(errs) {
                 la er = errs[eri]
                 la sc: tekst = tekst(er["status"])
-                la sm: tekst = _json_escape(tekst(er["message"]))
-                responses_json = responses_json + ",\"" + sc + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
+                hvis ikkje finnes_nøkkel(status_sett, sc) {
+                    status_sett[sc] = "1"
+                    la sm: tekst = _json_escape(tekst(er["message"]))
+                    responses_json = responses_json + ",\"" + _json_escape(sc) + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
+                }
                 eri = eri + 1
+            }
+
+            // web.respons("404", "Ikkje funne") → extra_responses (FA-059/100).
+            la extras = rute_meta_liste(handler, "extra_responses")
+            la xri: heltall = 0
+            mens xri < lengde(extras) {
+                la xr = extras[xri]
+                la xs: tekst = ""
+                la xd: tekst = ""
+                prøv { xs = tekst(xr["status"]) } fang (e) { xs = "" }
+                prøv { xd = tekst(xr["description"]) } fang (e) { xd = "" }
+                hvis xs != "" og ikkje finnes_nøkkel(status_sett, xs) {
+                    status_sett[xs] = "1"
+                    hvis xd == "" { xd = _openapi_status_tekst(xs) }
+                    responses_json = responses_json + ",\"" + _json_escape(xs) + "\":{\"description\":\"" + _json_escape(xd) + "\"}"
+                }
+                xri = xri + 1
             }
 
             la guards2 = handler["guards"]
             hvis lengde(guards2) > 0 {
                 op = op + ",\"security\":[{\"bearerAuth\":[]}]"
-                responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"},\"403\":{\"description\":\"Forbudt\"}"
+                hvis ikkje finnes_nøkkel(status_sett, "401") {
+                    status_sett["401"] = "1"
+                    responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"}"
+                }
+                hvis ikkje finnes_nøkkel(status_sett, "403") {
+                    status_sett["403"] = "1"
+                    responses_json = responses_json + ",\"403\":{\"description\":\"Forbudt\"}"
+                }
                 har_security = sann
             }
             op = op + ",\"responses\":{" + responses_json + "}}"
@@ -2258,9 +2610,17 @@ funksjon openapi_json(tittel: tekst, versjon: tekst) -> tekst {
 
 // JS-fri dokumentasjonsside: ingen CDN-/ekstern JS (i tråd med sjølvstende).
 // Ei rikare, interaktiv men framleis JS-fri docs-side kjem i Fase 1 (punkt 1.10).
+// Tittelen og skjemaet blir HTML-escapa: før vart tittelen (og beskrivingar/
+// tags inne i skjemaet) lagde rått inn i sida, so «<script>» i tittelen var
+// XSS. I <pre> held det å escape & < > (hermeteikna i JSON-en blir ståande).
+// For ei rikare side, sjå std.docs_side (docs_respons).
 funksjon docs_html(tittel: tekst, versjon: tekst) -> tekst {
     la spec = openapi_json(tittel, versjon)
-    returner "<!doctype html><html><head><title>" + tittel + "</title></head><body><h1>" + tittel + "</h1><pre>" + spec + "</pre></body></html>"
+    la t = escape_html(tittel)
+    la s = tekst_erstatt(spec, "&", "&amp;")
+    s = tekst_erstatt(s, "<", "&lt;")
+    s = tekst_erstatt(s, ">", "&gt;")
+    returner "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + t + "</title></head><body><h1>" + t + "</h1><pre>" + s + "</pre></body></html>"
 }
 
 # ─── Serverstart ───────────────────────────────────────────────────────────────
