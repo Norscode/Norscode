@@ -13249,8 +13249,50 @@ funksjon ncval_tom_liste_med_plass(kapasitet: heiltall) -> liste_heiltall {
 // som kompiler_ncb, men kompilerer over heap-NcVal i staden for rå register.
 // Fase 5: kompiler heile programmet (entry + alle nåbare brukarfunksjonar) til
 // éin kode-image med ekte bl-kall. Ingen inline_kall, ingen fold. Rekursjon
-// fungerer. Deld av macOS- og Linux-driverane. Returnerer rå AArch64-kode.
+// fungerer. Deld av macOS- og Linux-driverane. Returnerer rå AArch64-kode som éi
+// samanhengande liste («image»); ncval_compile_program_delar gjev same bytes som delar.
 funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
+    la res = ncval_compile_program_delar(ncb, os)
+    hvis res["ok"] != "sann" { returner res }
+    la delar = res["delar"]
+    la total: heiltall = res["lengd"]
+    // Store image (nc_main-storleik) blir førehandsdimensjonerte (sjå
+    // ncval_tom_liste_med_plass); små slepp O(kapasitet)-kostnaden i tolka modus.
+    la image: liste_heiltall = []
+    hvis total > 4194304 {
+        image = ncval_tom_liste_med_plass(total + 1048576)
+    }
+    la dk = 0
+    mens dk < lengde(delar) {
+        la del = delar[dk]
+        la j = 0
+        mens j < lengde(del) { legg_til(image, del[j]) j = j + 1 }
+        dk = dk + 1
+    }
+    returner {"ok": "sann", "error": "", "image": image, "fn_start": res["fn_start"]}
+}
+
+// Finn delen som posisjonen `pos` (i heile biletet) ligg i: største k med start[k] <= pos.
+// Tomme delar har same start som neste del og blir dermed hoppa over.
+funksjon ncval_del_for_pos(del_start: liste_heiltall, pos: heiltall) -> heiltall {
+    la lo = 0
+    la hi = lengde(del_start) - 1
+    mens lo < hi {
+        la mid = (lo + hi + 1) / 2
+        hvis del_start[mid] <= pos { lo = mid } ellers { hi = mid - 1 }
+    }
+    returner lo
+}
+
+// Som ncval_compile_program, men biletet kjem som ei liste med delar (eitt fragment per
+// funksjon + ein hale med runtime-rutinane) som skal skrivast etter kvarandre:
+// {"ok", "error", "delar", "lengd", "fn_start"}. bl-/lamaddr-patchane er lagde rett inn i
+// delane, so bytane er dei same som i det samla biletet. Kryss-codegen-en på x86 køyrer med
+// monoton bump-heap (sum allokert tel, ikkje levande sett): å kopiere fragmenta inn i eitt
+// førehandsdimensjonert bilete kosta ~670 MB for R2-nc_main (bytes_to_list veks ved dobling,
+// 8 B per element-peikar), og det var det som sprengde 2 GiB-taket. Driverane
+// (elf/macho/flat) strøymer delane rett til fila.
+funksjon ncval_compile_program_delar(ncb, os) -> ordbok_tekst {
     ncval_gc_oppdater(os)
     la rapport = ncval_rapport_på()
     ncval_rapport_nullstill()
@@ -13378,10 +13420,11 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     gcount = ncd_strk_tildel(funksjonar, order, globals, gcount)
     la fn_start = {}
     la all_patchar = []
-    // Fragmenta blir samla og kopierte inn i eit førehandsdimensjonert image etter løkka
-    // (sjå ncval_tom_liste_med_plass); bild_lengd er lengda imaget vil ha, so basane,
-    // fn_start og bl-patchane er dei same som då fragmenta vart lagde rett inn i imaget.
+    // Fragmenta blir samla som delar av biletet (ingen samla kopi, sjå
+    // ncval_compile_program_delar); bild_lengd er summen av lengdene, so basane, fn_start og
+    // bl-patchane er dei same som i det samla biletet. frag_start[k] = base til frags[k].
     la frags = []
+    la frag_start: liste_heiltall = []
     la bild_lengd = 0
     // lambda_captures alt utrekna før fri-var-skannen (gjenbrukt her).
     la fi = 0
@@ -13415,6 +13458,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
             la base = bild_lengd
             fn_start[fname] = base
             legg_til(frags, frag)
+            legg_til(frag_start, base)
             bild_lengd = bild_lengd + lengde(frag)
             la pj = 0
             mens pj < lengde(bl_patchar) {
@@ -13429,22 +13473,16 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         }
         fi = fi + 1
     }
-    // Plass til runtime-rutinane under (JSON, split, GC, … — nc_main ~30 K byte) utan vekst.
-    // Berre store image (nc_main-storleik) treng førehandsdimensjoneringa: ho kostar
-    // O(kapasitet) i tolka modus (bytes_to_list + fjern_siste), og med +1 MiB margin gjorde
-    // ho kvar vanlege `nc bygg-native` ~10× tregare når codegen-en blir tolka (attestasjonen).
+    // Runtime-rutinane (JSON, split, GC, … — nc_main ~30 K byte) blir lagde i ein eigen hale
+    // («image» under, so hjelparane er uendra). Koordinatane i halen er RELATIVE til starten
+    // på halen (lengde(image)); etter at halen er ferdig, blir fn_start-postane og patchane
+    // som halen la til, forskyvde med bild_lengd (sjå under). Alt i halen er PC-relativt
+    // (berre differansar), unnateke verts-blokka, som les funksjonsstartar og derfor får
+    // absolutt blokkstart.
+    la funk_nøkler = {}
+    for fnk i nøkler(fn_start) { funk_nøkler[fnk] = 1 }
+    la n_patch_funk = lengde(all_patchar)
     la image: liste_heiltall = []
-    hvis bild_lengd > 4194304 {
-        image = ncval_tom_liste_med_plass(bild_lengd + 1048576)
-    }
-    la fk = 0
-    mens fk < lengde(frags) {
-        la frag = frags[fk]
-        la j = 0
-        mens j < lengde(frag) { legg_til(image, frag[j]) j = j + 1 }
-        fk = fk + 1
-    }
-    frags = []
     // Append dei rekursive JSON-rutinane berre om dei vert kalla (bl-mål).
     la treng_str = usann
     la treng_parse = usann
@@ -13485,7 +13523,9 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     }
     hvis treng_host {
         la hb_start = lengde(image)
-        la hb = ncd_host_blokk(order, funksjonar, fn_start, hb_start)
+        // Tabellen held fn_start[funksjon] − blokkstart: funksjonsstartane er absolutte, so
+        // blokkstarten må òg vere det (bild_lengd + relativ hale-posisjon).
+        la hb = ncd_host_blokk(order, funksjonar, fn_start, bild_lengd + hb_start)
         fn_start["__host_finst"] = hb_start + hb["finst"]
         fn_start["__host_kall"] = hb_start + hb["kall"]
         for hbyte i hb["kode"] { legg_til(image, hbyte) }
@@ -13553,6 +13593,21 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     // A4: GC-rutinane (__gc_alloc / __gc_collect) sist, når eit bl-/lamaddr-mål peikar dit.
     agc.legg_til_rutinar(all_patchar, image, fn_start, os)
     akr.legg_til_rutinar(all_patchar, image, fn_start, os, ncval_gc_på())
+    // Halen er ferdig: forskyv det halen la til (fn_start-postar som ikkje er funksjonar,
+    // og patchar etter n_patch_funk) frå hale-koordinatar til koordinatar i heile biletet.
+    la alle_nøkler = nøkler(fn_start)
+    for fnk i alle_nøkler {
+        hvis ikkje finnes_nøkkel(funk_nøkler, fnk) { fn_start[fnk] = fn_start[fnk] + bild_lengd }
+    }
+    la ph = n_patch_funk
+    mens ph < lengde(all_patchar) {
+        la hp = all_patchar[ph]
+        hp[0] = hp[0] + bild_lengd
+        ph = ph + 1
+    }
+    // Delane i biletet: fragmenta, so halen (med start bild_lengd).
+    legg_til(frags, image)
+    legg_til(frag_start, bild_lengd)
     la pk = 0
     mens pk < lengde(all_patchar) {
         la pe = all_patchar[pk]
@@ -13561,6 +13616,11 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         hvis ikkje finnes_nøkkel(fn_start, target) {
             returner {"ok": "usann", "error": ncval_ukjende_kallmål(all_patchar, fn_start), "image": []}
         }
+        // Patchen blir skriven i delen han ligg i (lamaddr-paret movz+movk ligg i same
+        // funksjon og dermed same del).
+        la dk = ncval_del_for_pos(frag_start, pos)
+        la del = frags[dk]
+        la dpos = pos - frag_start[dk]
         hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
             // M3 closure fn-adresse: x9 (=adr-instr på pos-4) + delta = fn-adresse.
             // delta er reint byte-avstand i imaget → vaddr-uavhengig. Alltid positiv
@@ -13569,11 +13629,11 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
             hvis delta < 0 {
                 returner {"ok": "usann", "error": "NcVal lamaddr negativ delta: " + target, "image": []}
             }
-            skriv_u32(image, pos, 0xD2800000 | ((delta & 0xFFFF) << 5) | 10)          // movz x10, #lo16
-            skriv_u32(image, pos + 4, 0xF2A00000 | (((delta >> 16) & 0xFFFF) << 5) | 10) // movk x10, #hi16, lsl16
+            skriv_u32(del, dpos, 0xD2800000 | ((delta & 0xFFFF) << 5) | 10)          // movz x10, #lo16
+            skriv_u32(del, dpos + 4, 0xF2A00000 | (((delta >> 16) & 0xFFFF) << 5) | 10) // movk x10, #hi16, lsl16
         } ellers {
             la delta = (fn_start[target] - pos) / 4
-            skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+            skriv_u32(del, dpos, 0x94000000 | (delta & 0x03FFFFFF))
         }
         pk = pk + 1
     }
@@ -13582,7 +13642,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     hvis rapport og lengde(ncval_rapport_stoppa) > 0 {
         returner {"ok": "usann", "error": "NcVal: kompileringa stoppa i " + tekst(lengde(ncval_rapport_stoppa)) + " funksjon(ar)", "image": []}
     }
-    returner {"ok": "sann", "error": "", "image": image, "fn_start": fn_start}
+    returner {"ok": "sann", "error": "", "delar": frags, "lengd": bild_lengd + lengde(image), "fn_start": fn_start}
 }
 
 // P0.3 (norscodeos-arm64): skriv eit FRITTSTÅANDE arm64-image — berre dei rå
@@ -13594,13 +13654,25 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
 // (NorscodeOS-kjernen implementerer syscalla). Skriv i bitar via macho.append_i_bitar
 // (same 1 MiB-klem-handtering som macho.skriv_program).
 funksjon skriv_flat_image(sti: tekst, kode: liste_heiltall) -> heiltall {
+    returner skriv_flat_image_delar(sti, [kode])
+}
+
+// Som skriv_flat_image, men koden kjem som delar (ncval_compile_program_delar).
+funksjon skriv_flat_image_delar(sti: tekst, delar) -> heiltall {
     builtin.fil_skriv_binær(sti, [])
-    returner macho.append_i_bitar(sti, kode)
+    la n = 0
+    la i = 0
+    mens i < lengde(delar) {
+        la del: liste_heiltall = delar[i]
+        hvis lengde(del) > 0 { n = n + macho.append_i_bitar(sti, del) }
+        i = i + 1
+    }
+    returner n
 }
 
 // Som kompiler_ncb_ncval, men skriv eit frittståande flat image i staden for Mach-O.
 funksjon kompiler_ncb_ncval_flat(ncb, output: tekst, os: tekst) -> ordbok_tekst {
-    la res = ncval_compile_program(ncb, os)
+    la res = ncval_compile_program_delar(ncb, os)
     ncb = null
     hvis res["ok"] != "sann" {
         returner {"ok": "usann", "error": res["error"], "format": "flat arm64", "image": []}
@@ -13608,7 +13680,7 @@ funksjon kompiler_ncb_ncval_flat(ncb, output: tekst, os: tekst) -> ordbok_tekst 
     la emit_ok = sann
     la emitfeil = ""
     la bytes_skrive = 0
-    prøv { bytes_skrive = skriv_flat_image(output, res["image"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
+    prøv { bytes_skrive = skriv_flat_image_delar(output, res["delar"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
     hvis ikkje emit_ok {
         returner {"ok": "usann", "error": "flat-emitter: " + emitfeil, "format": "flat arm64", "image": []}
     }
@@ -13624,7 +13696,8 @@ funksjon kompiler_ncb_ncval_flat(ncb, output: tekst, os: tekst) -> ordbok_tekst 
 }
 
 funksjon kompiler_ncb_ncval(ncb, output: tekst, os: tekst) -> ordbok_tekst {
-    la res = ncval_compile_program(ncb, os)
+    // Biletet kjem som delar (fragment per funksjon + hale), strøyma rett til fila.
+    la res = ncval_compile_program_delar(ncb, os)
     // M1: den parsa NCB-en trengst ikkje lenger; slepp han før Mach-O-emisjonen, so han ikkje
     // er ein del av det levande settet saman med biletet (1 GiB-heapen på x86-verten).
     ncb = null
@@ -13638,7 +13711,7 @@ funksjon kompiler_ncb_ncval(ncb, output: tekst, os: tekst) -> ordbok_tekst {
     la emit_ok = sann
     la emitfeil = ""
     la bytes_skrive = 0
-    prøv { bytes_skrive = macho.skriv_program(output, res["image"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
+    prøv { bytes_skrive = macho.skriv_program_delar(output, res["delar"], res["lengd"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
     hvis ikkje emit_ok {
         returner {"ok": "usann", "error": "Mach-O-emitter: " + emitfeil, "format": "Mach-O arm64", "image": []}
     }
