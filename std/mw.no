@@ -12,6 +12,8 @@
 #   web.response_middleware()
 
 bruk std.web som web
+bruk std.zip som zip
+bruk std.bytes som bytes
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
 
@@ -248,20 +250,136 @@ funksjon logg_response(resp: ordbok_tekst, ctx: ordbok_tekst, cfg: ordbok_tekst)
 
 # ─── Komprimering ─────────────────────────────────────────────────────────────
 
-funksjon komprimer_response(resp: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
-    la accept = web.request_header(ctx, "accept-encoding")
-    hvis ikkje tekst_inneholder(accept, "gzip") { returner resp }
-    la body = tekst(resp["__body__"])
-    hvis lengde(body) < 1024 { returner resp }  // ikkje komprimer små svar
-    prøv {
-        la komprimert = builtin.gzip(body)
-        la h = resp["__headers__"]
-        h["content-encoding"] = "gzip"
-        h["vary"] = "Accept-Encoding"
-        resp["__headers__"] = h
-        resp["__body__"] = komprimert
-    } fang (e) { }
+// GZipMiddleware-ekvivalent (FA-113). Tidlegare kalla denne builtin.gzip, som
+// ikkje finst, og feilen vart svelgd → svaret gjekk alltid ukomprimert ut.
+// No brukar ho den reine Norscode-DEFLATE-en frå Fase 1 (std.zip,
+// gzip_komprimer_bytes, RFC 1951/1952). Kroppen blir ein byte-tekst (kvar
+// byte som eitt teikn), som både nc serve og apptenar sender byte-eksakt.
+//
+// MERK ytelse: DEFLATE køyrer i VM-en (~0,5 s for 9 KB med VM_FAST). Difor
+// er det ei øvre grense (standard 65536 byte); større svar går ukomprimerte.
+
+// Sann når Accept-Encoding godtek gzip (ikkje «gzip;q=0»). «*» tel òg.
+funksjon godtek_gzip(accept: tekst) -> boolsk {
+    la delar = builtin.split(_liten_mw(accept), ",")
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        la namn = d
+        la q = ""
+        la semi = builtin.index_of(d, ";")
+        hvis semi >= 0 {
+            namn = builtin.trim(builtin.slice(d, 0, semi))
+            q = builtin.replace(builtin.trim(builtin.slice(d, semi + 1, lengde(d))), " ", "")
+        }
+        hvis namn == "gzip" eller namn == "*" {
+            hvis q == "q=0" eller q == "q=0.0" eller q == "q=0.00" eller q == "q=0.000" { returner usann }
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _liten_mw(t: tekst) -> tekst {
+    la ut = ""
+    la i: heltall = 0
+    mens i < lengde(t) {
+        la c = builtin.slice(t, i, i + 1)
+        la k = builtin.char_code(c)
+        hvis k >= 65 og k <= 90 { ut = ut + builtin.chr(k + 32) } ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+// gzip av ein tekst (byte for byte) → byte-tekst med gzip-straumen.
+funksjon gzip_tekst(body: tekst) -> tekst {
+    la inn: liste_heltall = []
+    la i: heltall = 0
+    la n = lengde(body)
+    mens i < n {
+        legg_til(inn, builtin.char_code(builtin.slice(body, i, i + 1)))
+        i = i + 1
+    }
+    la ut = bytes.til_liste(zip.gzip_komprimer_bytes(bytes.fra_liste(inn)))
+    la delar: liste<tekst> = []
+    la j: heltall = 0
+    mens j < lengde(ut) {
+        legg_til(delar, builtin.chr(ut[j]))
+        j = j + 1
+    }
+    returner builtin.join(delar, "")
+}
+
+// Content-Type som alt er komprimert (bilete, video, arkiv) → ikkje komprimer.
+funksjon _ct_komprimert(ct: tekst) -> boolsk {
+    la c = _liten_mw(ct)
+    hvis tekst_starter_med(c, "image/") og ikkje tekst_starter_med(c, "image/svg") { returner sann }
+    hvis tekst_starter_med(c, "video/") eller tekst_starter_med(c, "audio/") { returner sann }
+    hvis tekst_inneholder(c, "zip") eller tekst_inneholder(c, "gzip") eller tekst_inneholder(c, "compress") { returner sann }
+    hvis tekst_starter_med(c, "text/event-stream") { returner sann }
+    returner usann
+}
+
+// Header-oppslag (kasus-uavhengig) i ei headers-ordbok; "" om han manglar.
+funksjon _h_mw(h, namn: tekst) -> tekst {
+    hvis h == null eller builtin.type(h) != "ordbok" { returner "" }
+    la ks = nøkler(h)
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        hvis _liten_mw(tekst(ks[i])) == namn { returner tekst(h[ks[i]]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Komprimer eit svar når klienten godtek gzip og kroppen er mellom min og
+// maks byte. Svaret kan ha nøklane body/__body__, headers/__headers__ og
+// content_type (begge responskontraktane). Set Content-Encoding: gzip og
+// Vary: Accept-Encoding. Gjer ingenting for 204/304/206, bytes-kropp, svar som
+// alt har Content-Encoding, delsvar (206/Content-Range) eller allereie komprimerte typar.
+funksjon komprimer_svar(resp, accept_encoding: tekst, min: heltall, maks: heltall) {
+    hvis resp == null eller builtin.type(resp) != "ordbok" { returner resp }
+    hvis ikkje godtek_gzip(accept_encoding) { returner resp }
+    la bk = "body"
+    hvis ikkje finnes_nøkkel(resp, "body") { bk = "__body__" }
+    hvis ikkje finnes_nøkkel(resp, bk) { returner resp }
+    la b = resp[bk]
+    hvis b == null eller builtin.type(b) != "tekst" { returner resp }
+    la n = lengde(b)
+    hvis n < min eller n > maks { returner resp }
+    la st = web.response_status(resp)
+    hvis tekst(st) == "204" eller tekst(st) == "304" eller tekst(st) == "206" { returner resp }
+    la hk = "headers"
+    hvis ikkje finnes_nøkkel(resp, "headers") og finnes_nøkkel(resp, "__headers__") { hk = "__headers__" }
+    la h = null
+    hvis finnes_nøkkel(resp, hk) { h = resp[hk] }
+    hvis h == null eller builtin.type(h) != "ordbok" { h = {} }
+    hvis _h_mw(h, "content-encoding") != "" eller _h_mw(h, "content-range") != "" { returner resp }
+    la ct = _h_mw(h, "content-type")
+    hvis finnes_nøkkel(resp, "content_type") og resp["content_type"] != null { ct = tekst(resp["content_type"]) }
+    hvis _ct_komprimert(ct) { returner resp }
+    la komp = gzip_tekst(b)
+    // Lønner det seg ikkje (allereie komprimert innhald), send originalen.
+    hvis lengde(komp) >= n { returner resp }
+    resp[bk] = komp
+    hvis bk == "body" og finnes_nøkkel(resp, "__body__") { resp["__body__"] = komp }
+    hvis bk == "__body__" og finnes_nøkkel(resp, "body") { resp["body"] = komp }
+    h["content-encoding"] = "gzip"
+    la vary = _h_mw(h, "vary")
+    hvis vary == "" { h["vary"] = "Accept-Encoding" }
+    ellers hvis ikkje tekst_inneholder(_liten_mw(vary), "accept-encoding") { h["vary"] = vary + ", Accept-Encoding" }
+    resp[hk] = h
+    hvis hk == "headers" og finnes_nøkkel(resp, "__headers__") { resp["__headers__"] = h }
+    hvis hk == "__headers__" og finnes_nøkkel(resp, "headers") { resp["headers"] = h }
     returner resp
+}
+
+// Handlar-hjelpar (nc serve og apptenar): returner mw.komprimer_response(svar, ctx).
+// Komprimerer svar på 500–65536 byte når klienten sender Accept-Encoding: gzip.
+funksjon komprimer_response(resp: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner komprimer_svar(resp, web.request_header(ctx, "accept-encoding"), 500, 65536)
 }
 
 # ─── CSRF-vern ────────────────────────────────────────────────────────────────
