@@ -58,7 +58,7 @@ returtype eller typeparametrar:
   (namna er dei same). Utypa parameter: `type`/`type_ast` er `null`.
 - `returns`/`returns_ast` er `null` når returtypen ikkje er skriven.
 - `type_params` er `[]` for ikkje-generiske funksjonar. `bound` er typen i
-  `<T: Samanliknbar>` / `<T utvider Samanliknbar>` (F28 bounded generics).
+  `<T: Samanliknbar>` / `<T implementerer Samanliknbar>` (F28 bounded generics).
 - Vararg (`...rest: tekst`): `vararg: true`, `type` er den skrivne typen.
 
 ## 3. NCB: strukturar
@@ -88,11 +88,12 @@ Parseren (`selfhost/parser.no`) held den gamle forma og legg til nøklar:
   `tom` som parseren set inn når returtypen manglar, har ingen `typeuttrykk`.
 - `Felt` i struktur: `typeuttrykk`/`typetekst` når feltet er typa (barna er
   uendra: einaste barn er framleis standardverdien).
-- `Funksjon`, `Lambda`, `Struktur`, `Grensesnitt`: `typeparametrar` = liste
-  av `{"namn": "T", "grense": <typeuttrykk>|null}` når `<T, …>` er skrive.
+- `Funksjon`, `Struktur`, `Grensesnitt`: `typeparametrar` = liste
+  av `{"namn": "T", "grense": <typeuttrykk>|null, "grense_tekst": <tekst>}`
+  når `<T, …>` er skrive (`grense_tekst` berre når grensa finst).
 - `Grensesnitt`: `Metodekrav`-nodar har barna `Parametere` og `Returtype`
   (same form som `Funksjon`), og eventuelt ein `Blokk` (standardmetode).
-  `utvider` = liste av grensesnittnamn. `Struktur.implementerer` er framleis
+  `utvider` = liste av grensesnittnamn frå `grensesnitt B implementerer A, …`. `Struktur.implementerer` er framleis
   fyrste grensesnitt (tekst); alle står i `implementerer_alle` (liste).
 
 ## 5. Stabilitet
