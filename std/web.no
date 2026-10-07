@@ -67,13 +67,57 @@ funksjon request_param(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     returner ""
 }
 
-funksjon request_param_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_param(ctx, nøkkel))
+// Valfritt forteikn + berre siffer (etter trim). heltall_fra_tekst kastar
+// «Ugyldig heiltall» på alt anna, og det rå unntaket vart 500 i både nc serve
+// og apptenar (FA-016). Med denne sjekken kan vi kaste ValideringsFeil i staden.
+funksjon _er_heiltal_tekst(verdi: tekst) -> boolsk {
+    la s = builtin.trim(verdi)
+    la n = lengde(s)
+    hvis n == 0 { returner usann }
+    la i: heiltall = 0
+    la c0 = builtin.slice(s, 0, 1)
+    hvis c0 == "-" eller c0 == "+" { i = 1 }
+    hvis i >= n { returner usann }
+    mens i < n {
+        la code = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis code < 48 eller code > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
 }
 
+// Tolk eit heiltal frå ein førespurnadsverdi, eller kast ValideringsFeil (→ 422
+// i nc serve og apptenar, same format som anna validering). kvar = «query»,
+// «path» eller «body»; brukt berre i meldinga (serve-mappinga set loc = body).
+funksjon _heiltal_eller_422(verdi: tekst, kvar: tekst, nøkkel: tekst) -> heltall {
+    hvis builtin.trim(verdi) == "" {
+        kast "ValideringsFeil: manglande påkravd " + kvar + "-felt '" + nøkkel + "'"
+    }
+    hvis ikkje _er_heiltal_tekst(verdi) {
+        kast "ValideringsFeil: " + kvar + "-felt '" + nøkkel + "' må vere eit heiltal, fekk '" + verdi + "'"
+    }
+    la s = builtin.trim(verdi)
+    hvis builtin.slice(s, 0, 1) == "+" { s = builtin.slice(s, 1, lengde(s)) }
+    returner heltall_fra_tekst(s)
+}
+
+funksjon request_param_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
+    returner _heiltal_eller_422(request_param(ctx, nøkkel), "path", nøkkel)
+}
+
+// Éin query-verdi. Gjentekne nøklar (?t=a&t=b) kjem som liste frå nc serve sin
+// parse_query; då gjeld siste verdi (som FastAPI for ein skalar parameter).
+// request_query_list gjev alle.
 funksjon request_query_param(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     la q = ctx["__query__"]
-    hvis (finnes_nøkkel(q, nøkkel)) { returner tekst(q[nøkkel]) }
+    hvis (finnes_nøkkel(q, nøkkel)) {
+        la v = q[nøkkel]
+        hvis builtin.type(v) == "liste" {
+            hvis lengde(v) == 0 { returner "" }
+            returner tekst(v[lengde(v) - 1])
+        }
+        returner tekst(v)
+    }
     returner ""
 }
 
@@ -83,8 +127,10 @@ funksjon request_query_required(ctx: ordbok_tekst, nøkkel: tekst) -> tekst {
     returner v
 }
 
+// Påkravd heiltals-query. Manglande eller ugyldig verdi → ValideringsFeil (422),
+// ikkje rått «Ugyldig heiltall» (500). request_query_int_or for valfri.
 funksjon request_query_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_query_param(ctx, nøkkel))
+    returner _heiltal_eller_422(request_query_param(ctx, nøkkel), "query", nøkkel)
 }
 
 // ─── Fase 0.6: tolerant parameter-tolking (utan reseed) ──────────────────────
@@ -673,11 +719,31 @@ funksjon json_er_gyldig(s: tekst) -> boolsk {
     returner usann
 }
 
+// Content-Type-sjekk som FastAPI (routing.py): manglande Content-Type → tolk
+// som JSON; application/json og application/*+json → JSON; alt anna (t.d.
+// text/plain, skjema) → 422. Parameterane etter «;» (charset) blir ignorerte.
+funksjon _content_type_godtek_json(ctx: ordbok_tekst) -> boolsk {
+    la ct = request_header(ctx, "content-type")
+    hvis builtin.trim(ct) == "" { returner sann }
+    la base = ct
+    la semi = builtin.index_of(ct, ";")
+    hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
+    base = _ascii_lower(builtin.trim(base))
+    hvis base == "application/json" { returner sann }
+    returner tekst_starter_med(base, "application/") og tekst_slutter_med(base, "+json")
+}
+
+// JSON-objekt frå kroppen. Alle feil blir kasta som «ValideringsFeil: …», som
+// nc serve og apptenar mappar til 422 i FastAPI-format ({"detail":[…]}).
+// Tidlegare gav ugyldig JSON eit rått «json_invalid: …»-unntak → 500 (FA-016/029).
 funksjon request_json(ctx: ordbok_tekst) -> ordbok_tekst {
     la body = ctx["__body__"]
+    hvis body != "" og ikkje _content_type_godtek_json(ctx) {
+        kast "ValideringsFeil: json_invalid: Content-Type må vere application/json, fekk '" + request_header(ctx, "content-type") + "'"
+    }
     // Fase 0.3: hindre at feilforma JSON når den native parseren (SIGSEGV/DoS).
     hvis body != "" og ikkje json_er_gyldig(body) {
-        kast "json_invalid: ugyldig JSON-kropp"
+        kast "ValideringsFeil: json_invalid: ugyldig JSON-kropp"
     }
     prøv {
         la r = builtin.json_parse_raw(body)
@@ -710,7 +776,7 @@ funksjon _content_type_er_json(ctx: ordbok_tekst) -> boolsk {
     la semi = builtin.index_of(ct, ";")
     hvis semi >= 0 { base = builtin.slice(ct, 0, semi) }
     base = _ascii_lower(builtin.trim(base))
-    returner base == "application/json"
+    returner base == "application/json" eller (tekst_starter_med(base, "application/") og tekst_slutter_med(base, "+json"))
 }
 
 // 422-respons for ugyldig JSON, i det samla 0.7-formatet.
@@ -764,7 +830,7 @@ funksjon request_json_field_or(ctx: ordbok_tekst, nøkkel: tekst, fallback: teks
 }
 
 funksjon request_json_field_int(ctx: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(request_json_field(ctx, nøkkel))
+    returner _heiltal_eller_422(request_json_field(ctx, nøkkel), "body", nøkkel)
 }
 
 funksjon request_json_field_bool(ctx: ordbok_tekst, nøkkel: tekst) -> boolsk {
