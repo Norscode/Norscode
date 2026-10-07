@@ -29,6 +29,8 @@ bruk std.base64 som b64
 
 funksjon nc_kompiler_fil(src_sti: tekst, modul: tekst) -> tekst {
     la kjelde = fil_les(src_sti)
+    // F42: importane til fila blir løyste frå mappa hennar (søsken/prosjektrot).
+    miljo_sett("NORSCODE_KJELDEFIL", src_sti)
     returner komp.kompiler_fil(kjelde, modul)
 }
 
@@ -1970,20 +1972,37 @@ funksjon _bytt_modul_ending(sti: tekst) -> tekst {
     returner ""
 }
 
+// F42: fil_finnes som tolererer stiar utanfor disk-scopet (då finst fila ikkje
+// for moduloppslaget).
+funksjon _fil_finnes_trygt(sti: tekst) -> boolsk {
+    la finst = usann
+    prøv { finst = fil_finnes(sti) } fang (e) { finst = usann }
+    returner finst
+}
+
 funksjon _resolve_import_sti(base_fil: tekst, import_fil: tekst) -> tekst {
     hvis builtin.starts_with(import_fil, "std/") eller
        builtin.starts_with(import_fil, "selfhost/") eller
-       builtin.starts_with(import_fil, "bootstrap/") eller
-       builtin.starts_with(import_fil, "tools/") eller
+       builtin.starts_with(import_fil, "bootstrap/") {
+        la root = miljo_hent("NORSCODE_ROOT")
+        hvis root != "" {
+            returner root + "/" + import_fil
+        }
+    }
+    // Repo-katalogar: NORSCODE_ROOT når modulen finst der. Elles (t.d. tests/
+    // i eit brukarprosjekt) går oppslaget vidare til den felles resolveren.
+    hvis builtin.starts_with(import_fil, "tools/") eller
        builtin.starts_with(import_fil, "tests/") eller
        builtin.starts_with(import_fil, "examples/") eller
        builtin.starts_with(import_fil, "compiler/") eller
        builtin.starts_with(import_fil, "packages/") eller
        builtin.starts_with(import_fil, "toolchain/") eller
        builtin.starts_with(import_fil, "prosjekter/") {
-        la root = miljo_hent("NORSCODE_ROOT")
-        hvis root != "" {
-            returner root + "/" + import_fil
+        la root_r = miljo_hent("NORSCODE_ROOT")
+        hvis root_r != "" {
+            hvis _fil_finnes_trygt(root_r + "/" + import_fil) { returner root_r + "/" + import_fil }
+            la sib_r = _bytt_modul_ending(import_fil)
+            hvis sib_r != "" og _fil_finnes_trygt(root_r + "/" + sib_r) { returner root_r + "/" + sib_r }
         }
     }
     hvis builtin.starts_with(import_fil, "frontend/") {
@@ -1999,34 +2018,24 @@ funksjon _resolve_import_sti(base_fil: tekst, import_fil: tekst) -> tekst {
     la base_dir = _dirname(base_fil)
     la kandidat = import_fil
     hvis base_dir != "." { kandidat = base_dir + "/" + import_fil }
-    hvis fil_finnes(kandidat) { returner kandidat }
+    hvis _fil_finnes_trygt(kandidat) { returner kandidat }
 
     // Prosjekt-lokal import med motsett filending: `bruk mymod` der mymod.no
-    // (eller mymod.nors) ligg ved sida av importøren. _modul_filsti_fra_namn
-    // gjettar .nors når NORSCODE_ROOT ikkje har modulen, men brukarprosjekt
-    // (t.d. NorscodeOS) har ofte .no. Prøv syskenendinga i same katalog FØR
-    // repo-rot-fallbacken, så stock Norscode byggjer slike tre utan patching.
-    // .nors har framleis prioritet: dette slår berre inn når den gjetta
-    // endinga ikkje finst, så eksisterande (grøne) byggjer er byte-uendra.
+    // (eller mymod.nors) ligg ved sida av importøren. .nors har prioritet.
     la sibling = _bytt_modul_ending(import_fil)
     hvis sibling != "" {
         la kandidat_sib = sibling
         hvis base_dir != "." { kandidat_sib = base_dir + "/" + sibling }
-        hvis fil_finnes(kandidat_sib) { returner kandidat_sib }
+        hvis _fil_finnes_trygt(kandidat_sib) { returner kandidat_sib }
     }
 
-    // Repo-modular utanfor prefikslista (t.d. ein testfil i tests/ eller ei
-    // mellombels hybrid-kjelde i build/ som brukar `bruk toolchain.x`) skal
-    // falle tilbake til repo-rota når fila ikkje finst ved sida av importøren.
-    la rot_fb = miljo_hent("NORSCODE_ROOT")
-    hvis rot_fb != "" {
-        hvis fil_finnes(rot_fb + "/" + import_fil) {
-            returner rot_fb + "/" + import_fil
-        }
-        hvis sibling != "" og fil_finnes(rot_fb + "/" + sibling) {
-            returner rot_fb + "/" + sibling
-        }
-    }
+    // F42: same resolver som kompilatoren — prosjektrot (norcode.toml /
+    // innstillingar.toml over importøren), NORSCODE_IMPORT_BASE, PWD,
+    // NORSCODE_PATH og NORSCODE_ROOT. `bruk src.template` frå src/views.no
+    // finn då <prosjekt>/src/template.no i staden for src/src/template.nors,
+    // og tests/ i eit prosjekt finn src.* frå prosjektrota.
+    la løyst = komp.finn_modulfil(modulnamn_fra_importfil(import_fil), base_fil)
+    hvis løyst != "" { returner løyst }
     returner kandidat
 }
 
@@ -2062,6 +2071,14 @@ funksjon finn_bruk_imports(kjelde: tekst) -> liste<tekst> {
     la i: heltall = 0
     mens i < lengde(linjer) {
         la linje = builtin.trim(linjer[i])
+        // F42: selektiv import `fra a.b bruk x, y` hentar heile modulen a.b
+        // (alias = siste segment); kompilatoren bind x og y ukvalifisert.
+        hvis builtin.starts_with(linje, "fra ") og builtin.contains(linje, " bruk ") {
+            la fra_modul = builtin.trim(builtin.slice(linje, 4, builtin.index_of(linje, " bruk ")))
+            la fra_segs = builtin.split(fra_modul, ".")
+            hvis lengde(imports_str) > 0 { imports_str = imports_str + "\n" }
+            imports_str = imports_str + fra_segs[lengde(fra_segs) - 1] + "=" + _modul_filsti_fra_namn(fra_modul)
+        }
         la har_bruk = builtin.starts_with(linje, "bruk ") eller builtin.starts_with(linje, "importer ")
         hvis har_bruk {
             la rest = builtin.trim(builtin.slice(linje, 5, lengde(linje)))
@@ -2840,6 +2857,8 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                 la compile_kjelde = ""
                 hvis vm_vertsstyrt { compile_kjelde = nc_vm_modulglobal_kjelde(kjelde) }
                 ellers { compile_kjelde = fil_les(fil) }
+                // F42: kompilatoren løyser søskenmodular frå denne fila.
+                miljo_sett("NORSCODE_KJELDEFIL", fil)
                 nc_materialiser_import_ncb(parsed_mod_ncb, compile_kjelde, alias, "")
             } ellers {
                 hvis ikkje brukte_selfhost_fragment {
@@ -2980,6 +2999,7 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     // Behald bruk-linjene slik at IR-kompilatoren registrerer importalias og
     // skriv kanoniske CALL-mål direkte. Då treng ikkje heile NCB-teksten ein
     // ustabil alias-replace etter kompilering.
+    miljo_sett("NORSCODE_KJELDEFIL", src_sti)
     la hoved_ncb_json = komp.kompiler_fil(hoved_kjelde, modul)
     // Hovudfila sine importalias MÅ normaliserast òg — den einaste andre
     // kallstaden er cache-kompatibilitetsbana for IMPORTERTE modular. Utan
@@ -3739,10 +3759,51 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
     returner 0
 }
 
+// F42: `nc check` løyser importane med same resolver som run/test/serve
+// (_resolve_import_sti → komp.finn_modulfil) og går transitivt gjennom
+// prosjektmodulane (ikkje std./selfhost./bootstrap.). Ein manglande modul er
+// ein feil med modulnamn og importør; kvar prosjektmodul blir kompilert.
+funksjon nc_check_importar(src_sti: tekst) -> tekst {
+    la kø = [src_sti]
+    la besøkt: ordbok<tekst, boolsk> = {}
+    besøkt[src_sti] = sann
+    la ki: heiltall = 0
+    mens ki < lengde(kø) {
+        la fil = tekst(kø[ki])
+        ki = ki + 1
+        la imports = finn_bruk_imports(fil_les(fil))
+        la i: heiltall = 0
+        mens i < lengde(imports) {
+            la arg = tekst(imports[i])
+            i = i + 1
+            la eq = builtin.index_of(arg, "=")
+            hvis eq <= 0 { fortsett }
+            la import_fil = builtin.slice(arg, eq + 1, lengde(arg))
+            la modulnamn = modulnamn_fra_importfil(import_fil)
+            la løyst = _resolve_import_sti(fil, import_fil)
+            hvis ikkje _fil_finnes_trygt(løyst) {
+                returner "modul ikkje funnen: " + modulnamn + " (importert frå " + fil + ")"
+            }
+            hvis builtin.starts_with(modulnamn, "std.") eller builtin.starts_with(modulnamn, "selfhost.") eller builtin.starts_with(modulnamn, "bootstrap.") { fortsett }
+            hvis finnes_nøkkel(besøkt, løyst) { fortsett }
+            besøkt[løyst] = sann
+            legg_til(kø, løyst)
+            prøv {
+                nc_kompiler_fil(løyst, modulnamn)
+            } fang (e) {
+                returner løyst + ": " + tekst(e)
+            }
+        }
+    }
+    returner ""
+}
+
 funksjon nc_check(src_sti: tekst) -> heiltall {
     la modul = miljo_hent("NORSCODE_MODULE")
     hvis modul == "" { modul = "__main__" }
     prøv {
+        la importfeil = nc_check_importar(src_sti)
+        hvis importfeil != "" { kast importfeil }
         nc_kompiler_fil(src_sti, modul)
         skriv(src_sti + ": OK\n")
         returner 0
