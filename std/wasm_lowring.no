@@ -16,14 +16,37 @@
 # atoma i std/wasm_atom.no, som berre blir tekne med når modulen brukar dei.
 #
 # Subset: PUSH_CONST (heltall, desimaltall, tekst, bool, null), LOAD/STORE_NAME,
-# LOAD/STORE_GLOBAL, POP, DUP, BINARY_{ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,LSHIFT,RSHIFT},
-# COMPARE_{EQ,NE,LT,LE,GT,GE}, UNARY_{NEG,NOT}, JUMP, JUMP_IF_FALSE, LABEL, BUILD_LIST,
-# BUILD_MAP, INDEX_GET, INDEX_SET, CALL (brukarfunksjonar, vertsfunksjonar i std.wasm_vert,
-# builtins i `builtin_tabell`, struktur-konstruktørar og builtin.ncb_call_fn), RETURN, og i
-# W2: TRY_BEGIN, TRY_END, THROW, LOAD_EXCEPTION, FINALLY_PUSH, FINALLY_RUN, FINALLY_END,
-# LOAD_PENDING, CLEAR_PENDING (prøv/fang/endeleg og utsett), BUILD_LAMBDA og CALL_VALUE.
+# LOAD/STORE_GLOBAL (R2/F14: med valfri tredje operand = modulen), POP, DUP,
+# BINARY_{ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,LSHIFT,RSHIFT}, COMPARE_{EQ,NE,LT,LE,GT,GE},
+# UNARY_{NEG,NOT}, JUMP, JUMP_IF_FALSE, LABEL, BUILD_LIST, BUILD_MAP, INDEX_GET, INDEX_SET,
+# CALL (brukarfunksjonar inkl. dei kompilerte struktur-konstruktørane «modul.Namn»,
+# vertsfunksjonar i std.wasm_vert, builtins i `builtin_tabell`, builtin.kall_metode,
+# builtin.er_instans og builtin.ncb_call_fn), RETURN, og i W2: TRY_BEGIN, TRY_END, THROW,
+# LOAD_EXCEPTION, FINALLY_PUSH, FINALLY_RUN, FINALLY_END, LOAD_PENDING, CLEAR_PENDING
+# (prøv/fang/endeleg og utsett), BUILD_LAMBDA og CALL_VALUE.
 # Alt anna — ukjende opkodar og builtins — gjev KOMPILERINGSFEIL med ei liste over alle
 # funna. Det finst ingen stille fallback.
+#
+# R2-objektmodellen (selfhost/vm.no, vm_metode_løys/vm_er_instans/vm_struktur_nøkler):
+#   - Ein struktur-instans er ei ordbok frå konstruktøren «modul.Namn» (ein vanleg funksjon i
+#     NCB-en, "struct": true) med dei skjulte merka «__struktur__» (modulkvalifisert) og
+#     «__type__». nøkler/lengde (og dermed verdier, for og json_stringify i std.wasm_rt)
+#     gøymer merka på ordbøker med «__struktur__»; indeksering (p["__type__"]) og har_nokkel
+#     ser dei, som i VM-en. Atoma får gøymeløypa berre når modulen kan ha strukturar (flagget
+#     «struktur»: ein «__struktur__»-konstant i koden, eller json_parse_raw).
+#   - mott.m(args) = CALL builtin.kall_metode [mott, "m", args…]. Metodenamnet er ein
+#     tekstkonstant (sporet over blokkgrenser av analysen); kallet går til ein generert
+#     dispatcher per (m, aritet) som samanliknar __struktur__ med konstruktørane S som har ein
+#     funksjon «S.m» (eksakt oppslag), så closure-felt (berre når modulen har closures), så
+#     fangbar MetodeFeil (òg for ingenting) og ArgumentFeil ved feil aritet med VM-tekstane.
+#   - builtin.typenamn er eit atom; builtin.er_instans(v, "modul.T") ein generert test mot T
+#     og strukturane som implementerer T ("interfaces"), og __type__ for eit ukvalifisert namn.
+#   - Eit metode-/typenamn som ikkje er ein konstant, gjev kompileringsfeil.
+#   - R2/F08: + med tekst på éi side gjev tekst(a) + tekst(b); andre ikkje-tal til + - * / %
+#     og unær minus kastar TypeFeil med VM-teksten når modulen har unnatak (elles trap).
+#   - R2/F14: globalar i andre modular (alias.NAMN) og modulinitialiseringa deira kjem med;
+#     ei initialisering med kall eller kast (toppnivå-setningar) køyrer sjølv om modulen
+#     elles ikkje er nådd, som i VM-en.
 #
 # Kontrollflyt: basisblokker med stakkslot-lokale og ei dispatch-lykkje
 # (loop + br_table). Verdiar som flyt over etikettar (`og`/`eller`) blir lagra i slotane.
@@ -47,10 +70,10 @@
 # referanse og fangar-array; lambda-hjelpefunksjonen får fangarane som ekstra parameter og
 # kopierer dei til lokale. CALL_VALUE kastar funksjonsreferansen til $fnN (éin type per
 # aritet) og brukar call_ref. builtin.ncb_call_fn(x, args…) blir ein generert dispatcher per
-# aritet: closure → call_ref; tekst → samanlikning mot metodenamna i NCB-en (funksjonar
-# `modul.Type.metode`, slik kompilatoren lowrar p.metode(args)); ukjent → unnatak
-# «Ukjent selfhost-funksjon: <namn>» som i VM-en. builtin.<Stor forbokstav>() (struktur-
-# konstruktør) gjev ei ordbok med «__type__» som VM-en.
+# aritet: closure → call_ref; tekst → samanlikning mot funksjonsnamna `modul.Type.metode` i
+# NCB-en (før R2 lowra kompilatoren p.metode(args) slik); ukjent → unnatak
+# «Ukjent selfhost-funksjon: <namn>» som i VM-en. R2: builtin.<Stor forbokstav>() er ikkje
+# lenger ein konstruktør (VM-en har fjerna heuristikken) og gjev «ustøtta builtin».
 #
 # Modulen: typar (dei sju GC-typane, [$lambda], så funksjonstypar), importar «nc».<vertsfunksjon>,
 # funksjonar (atom, innpakkarar, brukarfunksjonar, dispatcharar, innpakka tilbakekall, init),
@@ -99,7 +122,7 @@ funksjon builtin_tabell() -> ordbok {
               "heltall_fra_tekst": [1, "heltall_av"], "legg_til": [2, "legg_til"],
               "har_nokkel": [2, "har_nokkel"], "nøkler": [1, "nøkler"], "slice": [3, "slice"],
               "char_code": [1, "char_code"], "chr": [1, "chr"], "type": [1, "type_namn"],
-              "for_iterabel": [1, "for_iterabel"], "desimaltall": [1, "desimal_av"],
+              "for_iterabel": [1, "for_iterabel"], "desimaltall": [1, "desimal_av"], "typenamn": [1, "typenamn"],
               "fjern_nokkel": [2, "fjern_nokkel"], "fjern_nøkkel": [2, "fjern_nokkel"], "tid_ms": [0, "tid_ms"]}
 }
 
@@ -216,11 +239,32 @@ funksjon _jokertype(t: tekst) -> bool {
     returner t == "" eller t == "*" eller t == "alle"
 }
 
-# builtin.<Namn> med stor forbokstav er ein struktur-konstruktør (VM-en: ordbok med __type__).
-funksjon _er_konstruktør(namn: tekst) -> bool {
-    hvis lengde(namn) == 0 { returner usann }
-    la c = builtin.char_code(builtin.slice(namn, 0, 1))
-    returner c >= 65 og c <= 90
+# R2/F14: modulen til LOAD_GLOBAL/STORE_GLOBAL — den valfrie tredje operanden, elles
+# modulen til funksjonen.
+funksjon _global_modul(ins: liste, modul: tekst) -> tekst {
+    hvis lengde(ins) > 2 og ins[2] != null og builtin.type(ins[2]) == "tekst" og tekst(ins[2]) != "" { returner tekst(ins[2]) }
+    returner modul
+}
+
+# R2/F20: er q ein kompilert struktur-konstruktør («modul.Namn» med "struct": true)?
+funksjon _er_struktur_fn(k: ordbok, q: tekst) -> bool {
+    hvis ikkje finnes_nøkkel(k["fns"], q) { returner usann }
+    la fd = k["fns"][q]
+    returner finnes_nøkkel(fd, "struct") og fd["struct"] == sann
+}
+
+# Konstruktørane i NCB-en (kvalifiserte namn), i NCB-rekkjefølgje.
+funksjon _strukturar(k: ordbok) -> liste {
+    hvis finnes_nøkkel(k, "strukturar_c") { returner k["strukturar_c"] }
+    la ut = []
+    la namn = nøkler(k["fns"])
+    la i = 0
+    mens i < lengde(namn) {
+        hvis _er_struktur_fn(k, tekst(namn[i])) { legg_til(ut, tekst(namn[i])) }
+        i = i + 1
+    }
+    k["strukturar_c"] = ut
+    returner ut
 }
 
 # ─── Kontekst ────────────────────────────────────────────────────────────────
@@ -243,7 +287,8 @@ funksjon _ny_kontekst(ncb: ordbok, testbygg: bool) -> ordbok {
         "vert_brukt": {}, "atom_direkte": {}, "tilbakekall": {}, "tilbakekall_liste": [], "tilbakekall_namn": {},
         "lit": [], "lit_idx": {}, "data": [], "strengar": {},
         "lambda": {}, "bruker_lambda": usann, "dyn": {}, "dyn_liste": [], "dyn_kand": {},
-        "har_throw": usann, "har_eh": usann,
+        "har_throw": usann, "har_eh": usann, "struktur": usann, "kast_ok": usann,
+        "gen": {}, "gen_liste": [], "glob_mod": {}, "glob_mod_liste": [],
         "reloc": usann, "reloc_ok": sann, "rt_cache": {}, "rt_cache_på": usann, "rt_cache_fil": "", "rt_cache_mappe": "", "rt_cache_rot": "", "rt_ny": {}, "rt_treff": 0, "rt_bomm": 0,
         "rt_analyse_treff": 0, "rt_effekt": {}, "opptak": null, "kode_s": {}
     }
@@ -298,7 +343,7 @@ funksjon _atom_lukking(k: ordbok) -> ordbok {
         la n = tekst(arbeid[j])
         hvis ikkje finnes_nøkkel(sett, n) {
             sett[n] = sann
-            la dep = a.atom_avheng(n, k["flyt"])
+            la dep = a.atom_avheng(n, k)
             la d = 0
             mens d < lengde(dep) {
                 legg_til(arbeid, dep[d])
@@ -403,25 +448,54 @@ funksjon _er_terminator(op: tekst) -> bool {
              op == "FINALLY_PUSH"
 }
 
-# Ny inngang til blokka b2 med stakkhøgd h og unnatakstilstand (T, C, P).
+# Ny inngang til blokka b2 med stakkhøgd h og unnatakstilstand (T, C, P). Unnataks- og
+# endeleg-kantar: alle stakkverdiane er «v» (ukjende).
 funksjon _flett(k: ordbok, q: tekst, an: ordbok, b2: heltall, h: heltall, T: liste, C: liste, P: heltall, arbeid: liste) -> heltall {
+    returner _flett_st(k, q, an, b2, h, T, C, P, arbeid, null)
+}
+
+# Som _flett, men med kindane på stakken frå st (vanlege kantar: hopp og gjennomfall). R2:
+# ein tekstkonstant («t:<i>») held seg over blokkgrenser når alle vegar inn har same
+# konstant, så metodenamnet i `p.m(a og b)` (der argumentet lagar blokker) er kjent.
+funksjon _flett_st(k: ordbok, q: tekst, an: ordbok, b2: heltall, h: heltall, T: liste, C: liste, P: heltall, arbeid: liste, st) -> heltall {
     la hoyde = an["hoyde"]
     la nk = _tc_nøkkel(T, C)
+    la kinds = []
+    la ki = 0
+    mens ki < h {
+        hvis st != null og ki < st["h"] { legg_til(kinds, tekst(st["k"][ki])) } ellers { legg_til(kinds, "v") }
+        ki = ki + 1
+    }
     hvis hoyde[b2] < 0 {
         hoyde[b2] = h
         an["tT"][b2] = T
         an["tC"][b2] = C
         an["tP"][b2] = P
         an["tkey"][b2] = nk
+        an["tK"][b2] = kinds
         legg_til(arbeid, b2)
     } ellers hvis hoyde[b2] != h {
         _feil(k, q, "ulik stakkhøgd ved blokk " + tekst(b2) + " (" + tekst(hoyde[b2]) + " mot " + tekst(h) + ")")
     } ellers hvis an["tkey"][b2] != nk {
         _feil(k, q, "ulik unntakstilstand ved blokk " + tekst(b2) + " (" + an["tkey"][b2] + " mot " + nk +
               "): hopp ut av ei prøv-blokk (bryt/fortsett) og utsett i ei lykkje er ikkje støtta")
-    } ellers hvis (an["tP"][b2] | P) != an["tP"][b2] {
-        an["tP"][b2] = an["tP"][b2] | P
-        legg_til(arbeid, b2)
+    } ellers {
+        la igjen = usann
+        hvis (an["tP"][b2] | P) != an["tP"][b2] {
+            an["tP"][b2] = an["tP"][b2] | P
+            igjen = sann
+        }
+        # Ulike kindar på same plass blir «v» (monotont, så arbeidslista endar)
+        la gk = an["tK"][b2]
+        ki = 0
+        mens ki < h {
+            hvis gk[ki] != "v" og gk[ki] != kinds[ki] {
+                gk[ki] = "v"
+                igjen = sann
+            }
+            ki = ki + 1
+        }
+        hvis igjen { legg_til(arbeid, b2) }
     }
     returner 0
 }
@@ -467,7 +541,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
     la np_w = lengde(params)
     hvis er_lambda { np_w = np_w + 1 }
     la an = {"q": q, "modul": modul, "np": lengde(params), "np_w": np_w, "lambda": er_lambda, "lok": {}, "n_lok": 0,
-             "fangar": [], "blokker": [], "labels": {}, "hoyde": [], "tT": [], "tC": [], "tP": [], "tkey": [],
+             "fangar": [], "blokker": [], "labels": {}, "hoyde": [], "tT": [], "tC": [], "tP": [], "tkey": [], "tK": [], "gen_kall": {},
              "rolle": {}, "maks_slot": 0, "dup": usann, "konst_div": {}, "eh": usann,
              "try": {}, "cln": {}, "fr_mål": {}, "ret_mål": {}, "ret_drop": {}, "fe_p": {}}
     k["analyse"][q] = an
@@ -531,6 +605,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
             legg_til(an["tC"], [])
             legg_til(an["tP"], 0)
             legg_til(an["tkey"], "")
+            legg_til(an["tK"], [])
             hvis tekst(kode[i][0]) == "LABEL" { an["labels"][tekst(kode[i][1])] = lengde(an["blokker"]) - 1 }
         }
         i = i + 1
@@ -546,6 +621,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
     an["tC"][0] = []
     an["tP"][0] = 1
     an["tkey"][0] = "|"
+    an["tK"][0] = []
     la arbeid = [0]
     la ai = 0
     mens ai < lengde(arbeid) {
@@ -554,7 +630,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
         la blk = an["blokker"][bi]
         la st = {"k": [], "h": 0, "maks": 0}
         la hi = 0
-        mens hi < an["hoyde"][bi] { _push(st, "v")  hi = hi + 1 }
+        mens hi < an["hoyde"][bi] { _push(st, tekst(an["tK"][bi][hi]))  hi = hi + 1 }
         la T0 = an["tT"][bi]
         la C0 = an["tC"][bi]
         la T = T0
@@ -570,7 +646,12 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
             } ellers hvis op == "PUSH_CONST" {
                 la tn = _type_namn(ins[1])
                 hvis tn == "heltall" eller tn == "bool" eller tn == "null" { _push(st, "v") }
-                ellers hvis tn == "tekst" { _push(st, "t:" + tekst(ii)) }
+                ellers hvis tn == "tekst" {
+                    # R2: «__struktur__» i koden (konstruktørane) → modulen kan ha strukturar,
+                    # så nøkler/lengde må gøyme merka
+                    hvis ins[1] == "__struktur__" { _flagg(k, "struktur") }
+                    _push(st, "t:" + tekst(ii))
+                }
                 ellers hvis tn == "desimaltall" {
                     _flagg(k, "flyt")
                     _push(st, "v")
@@ -585,16 +666,27 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 _pop_verdi(k, q, st, "STORE_NAME " + tekst(ins[1]))
             } ellers hvis op == "LOAD_GLOBAL" eller op == "STORE_GLOBAL" {
                 la gn = tekst(ins[1])
+                # R2/F14: valfri tredje operand = modulen globalen ligg i (alias.NAMN)
+                la gmod = _global_modul(ins, modul)
                 la finst = usann
-                hvis finnes_nøkkel(k["globale"], modul) {
-                    la gl = k["globale"][modul]
+                hvis finnes_nøkkel(k["globale"], gmod) {
+                    la gl = k["globale"][gmod]
                     la gi = 0
                     mens gi < lengde(gl) {
                         hvis tekst(gl[gi]) == gn { finst = sann }
                         gi = gi + 1
                     }
                 }
-                hvis ikkje finst { _feil(k, q, "ukjend global " + modul + "." + gn) }
+                hvis ikkje finst { _feil(k, q, "ukjend global " + gmod + "." + gn) }
+                hvis gmod != modul {
+                    # Globalen og modulinitialiseringa til den andre modulen må med, sjølv om
+                    # ingen funksjon i han er nåbar
+                    _opptak_urein(k)
+                    hvis ikkje finnes_nøkkel(k["glob_mod"], gmod) {
+                        k["glob_mod"][gmod] = sann
+                        legg_til(k["glob_mod_liste"], gmod)
+                    }
+                }
                 hvis op == "LOAD_GLOBAL" { _push(st, "v") } ellers { _pop_verdi(k, q, st, "STORE_GLOBAL " + gn) }
             } ellers hvis finnes_nøkkel(k["binop"], op) {
                 _pop_n(k, q, st, 2, op)
@@ -658,7 +750,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 _push(st, "v")
                 _push(st, "v")
             } ellers hvis op == "CALL" {
-                _analyser_kall(k, an, q, modul, ins, st)
+                _analyser_kall(k, an, q, modul, ins, st, ii)
             } ellers hvis op == "BUILD_LAMBDA" {
                 _analyser_lambda(k, an, q, ins)
                 _push(st, "v")
@@ -731,14 +823,14 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
                 P = 1
             } ellers hvis op == "JUMP" {
                 la mj = _etikett(k, q, an, tekst(ins[1]))
-                hvis mj >= 0 { _flett(k, q, an, mj, st["h"], T, C, P, arbeid) }
+                hvis mj >= 0 { _flett_st(k, q, an, mj, st["h"], T, C, P, arbeid, st) }
                 avslutta = sann
             } ellers hvis op == "JUMP_IF_FALSE" {
                 _pop_verdi(k, q, st, op)
                 _bruk_atom(k, "sannhet")
                 la mf = _etikett(k, q, an, tekst(ins[1]))
-                hvis mf >= 0 { _flett(k, q, an, mf, st["h"], T, C, P, arbeid) }
-                hvis bi + 1 < lengde(an["blokker"]) { _flett(k, q, an, bi + 1, st["h"], T, C, P, arbeid) }
+                hvis mf >= 0 { _flett_st(k, q, an, mf, st["h"], T, C, P, arbeid, st) }
+                hvis bi + 1 < lengde(an["blokker"]) { _flett_st(k, q, an, bi + 1, st["h"], T, C, P, arbeid, st) }
                 avslutta = sann
             } ellers {
                 _feil(k, q, "ustøtta opcode " + op)
@@ -752,7 +844,7 @@ funksjon _analyser(k: ordbok, q: tekst) -> heltall {
         }
         hvis ikkje avslutta {
             hvis bi + 1 < lengde(an["blokker"]) {
-                _flett(k, q, an, bi + 1, st["h"], T, C, P, arbeid)
+                _flett_st(k, q, an, bi + 1, st["h"], T, C, P, arbeid, st)
             } ellers {
                 _feil(k, q, "funksjonen endar utan RETURN")
             }
@@ -791,12 +883,115 @@ funksjon _analyser_lambda(k: ordbok, an: ordbok, q: tekst, ins: liste) -> heltal
     returner 0
 }
 
-funksjon _analyser_kall(k: ordbok, an: ordbok, q: tekst, modul: tekst, ins: liste, st: ordbok) -> heltall {
+# R2/F20 + F21: builtin.kall_metode(mott, "metode", args…) og builtin.er_instans(v, "modul.Type").
+# Kompilatoren pushar metode-/typenamnet som ein tekstkonstant (PUSH_CONST) rett før dei andre
+# argumenta; han blir løyst her (òg over blokkgrenser, sjå _flett_st) og kallet går til ein
+# generert funksjon per (metode, aritet) eller per type (_gen_kropp). Konstanten blir ikkje
+# laga i modulen (rolla «null»: ref.null i staden for ein $tekst). Eit namn som ikkje er ein
+# konstant, er ein kompileringsfeil.
+funksjon _analyser_r2_kall(k: ordbok, an: ordbok, q: tekst, kort: tekst, n: heltall, st: ordbok, ii: heltall) -> heltall {
+    _opptak_urein(k)
+    hvis (kort == "kall_metode" og n < 2) eller (kort == "er_instans" og n != 2) {
+        _feil(k, q, "builtin." + kort + " med " + tekst(n) + " argument er ikkje støtta")
+        returner 0
+    }
+    la base = st["h"] - n
+    hvis base < 0 {
+        _feil(k, q, "stakkunderflyt ved builtin." + kort)
+        returner 0
+    }
+    la kind = tekst(st["k"][base + 1])
+    hvis ikkje builtin.starts_with(kind, "t:") {
+        _feil(k, q, "builtin." + kort + ": metode- eller typenamnet må vere ein tekstkonstant (dynamisk namn er ikkje støtta)")
+        returner 0
+    }
+    la ci = builtin.heltall_fra_tekst(builtin.slice(kind, 2, lengde(kind)))
+    la namn = tekst(k["fns"][q]["code"][ci][1])
+    an["rolle"][tekst(ci)] = {"art": "null"}
+    la nøkkel = ""
+    hvis kort == "kall_metode" { nøkkel = _gen_metode(k, q, namn, n - 2) } ellers { nøkkel = _gen_instans(k, namn) }
+    an["gen_kall"][tekst(ii)] = nøkkel
+    returner 0
+}
+
+# Dispatcher for mott.m(a1..an): kandidatane er konstruktørane S med ein funksjon «S.m»
+# (eksakt oppslag på __struktur__, som vm_metode_løys). Metodar med rett aritet blir nåbare;
+# feil aritet gjev ArgumentFeil ved køyring, som VM-en.
+funksjon _gen_metode(k: ordbok, q: tekst, m: tekst, na: heltall) -> tekst {
+    la nøkkel = "m:" + m + "/" + tekst(na)
+    hvis ikkje finnes_nøkkel(k["gen"], nøkkel) {
+        la kand = []
+        la ss = _strukturar(k)
+        la i = 0
+        mens i < lengde(ss) {
+            la mq = ss[i] + "." + m
+            hvis finnes_nøkkel(k["fns"], mq) {
+                la np = lengde(k["fns"][mq]["params"])
+                legg_til(kand, [ss[i], mq, np])
+                hvis np == na + 1 {
+                    hvis finnes_nøkkel(k["lambda"], mq) { _feil(k, q, mq + " er ein closure-hjelpar og kan ikkje vere ein metode") }
+                    _legg_nåbar(k, mq)
+                }
+            }
+            i = i + 1
+        }
+        k["gen"][nøkkel] = {"art": "metode", "m": m, "n": na, "kand": kand}
+        legg_til(k["gen_liste"], nøkkel)
+    }
+    la at = ["tekst_av", "tekst_lik", "merke_finn", "konkat", "kast", "verdi_typenamn", "ordbok_hent"]
+    la ai = 0
+    mens ai < lengde(at) {
+        _bruk_atom(k, at[ai])
+        ai = ai + 1
+    }
+    returner nøkkel
+}
+
+# er_instans(v, mål): sann når v er ein struktur og __struktur__ er mål eller ein struktur som
+# implementerer mål ("interfaces" i konstruktør-defen), eller (mål utan punktum) __type__ er
+# mål — vm_er_instans.
+funksjon _gen_instans(k: ordbok, mål: tekst) -> tekst {
+    la nøkkel = "i:" + mål
+    hvis ikkje finnes_nøkkel(k["gen"], nøkkel) {
+        la tagg = [mål]
+        la ss = _strukturar(k)
+        la i = 0
+        mens i < lengde(ss) {
+            la fd = k["fns"][ss[i]]
+            hvis ss[i] != mål og finnes_nøkkel(fd, "interfaces") {
+                la gl = fd["interfaces"]
+                la j = 0
+                mens j < lengde(gl) {
+                    hvis tekst(gl[j]) == mål {
+                        legg_til(tagg, ss[i])
+                        j = lengde(gl)
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        k["gen"][nøkkel] = {"art": "instans", "mål": mål, "tagg": tagg, "kort": builtin.index_of(mål, ".") < 0}
+        legg_til(k["gen_liste"], nøkkel)
+    }
+    _bruk_atom(k, "merke_finn")
+    _bruk_atom(k, "tekst_av")
+    _bruk_atom(k, "tekst_lik")
+    returner nøkkel
+}
+
+funksjon _analyser_kall(k: ordbok, an: ordbok, q: tekst, modul: tekst, ins: liste, st: ordbok, ii: heltall) -> heltall {
     la namn = tekst(ins[1])
     la n = ins[2]
     la vm = k["vert_modul"] + "."
     hvis builtin.starts_with(namn, "builtin.") {
         la kort_b = builtin.slice(namn, 8, lengde(namn))
+        hvis kort_b == "kall_metode" eller kort_b == "er_instans" {
+            _analyser_r2_kall(k, an, q, kort_b, n, st, ii)
+            _pop_n(k, q, st, n, namn)
+            _push(st, "v")
+            returner 0
+        }
         hvis kort_b == "ncb_call_fn" {
             _opptak_urein(k)
             hvis n < 1 {
@@ -825,14 +1020,9 @@ funksjon _analyser_kall(k: ordbok, an: ordbok, q: tekst, modul: tekst, ins: list
             _push(st, "v")
             returner 0
         }
-        hvis _er_konstruktør(kort_b) {
-            # VM-en: ordbok {"__type__": namn}; eventuelle argument blir ignorerte
-            _bruk_atom(k, "ordbok_frå_par")
-            _pop_n(k, q, st, n, namn)
-            _push(st, "v")
-            returner 0
-        }
         hvis finnes_nøkkel(k["rt"], kort_b) {
+            # R2: json_parse kan lage ordbøker med «__struktur__» (VM-en gøymer merka då òg)
+            hvis kort_b == "json_parse_raw" { _flagg(k, "struktur") }
             la mål_rt = rt_modul() + "." + tekst(k["rt"][kort_b])
             hvis ikkje finnes_nøkkel(k["fns"], mål_rt) {
                 _feil(k, q, "builtin." + kort_b + " krev runtime-biblioteket " + rt_modul() +
@@ -1097,6 +1287,7 @@ funksjon _lenk_merke(k: ordbok, m: ordbok) -> liste {
     hvis r == "F" { returner _leb(k["funk_idx"][tekst(m["n"])]) }
     hvis r == "G" { returner _leb(k["glob_idx"][tekst(m["n"])]) }
     hvis r == "D" { returner _leb(k["dyn_idx"][tekst(m["n"])]) }
+    hvis r == "M" { returner _leb(k["gen_idx"][tekst(m["n"])]) }
     hvis r == "L" { returner a.flat(a.LIT(k, tekst(m["n"]))) }
     hvis r == "N" { returner _fnamn_bytar(k, tekst(m["n"])) }
     hvis r == "TL" { returner _leb(k["t_lambda"]) }
@@ -1271,8 +1462,10 @@ funksjon _instruksjon(k: ordbok, an: ordbok, ii: heltall, ins: liste, lok_tmp: h
             la nøkkel = tekst(ii)
             hvis finnes_nøkkel(an["rolle"], nøkkel) {
                 la r = an["rolle"][nøkkel]
-                k["reloc_ok"] = usann
-                hvis r["art"] == "funksjon" { _la_til(b, _streng_ref(k, k["tilbakekall"][r["mål"]])) }
+                hvis r["art"] != "null" { k["reloc_ok"] = usann }
+                # R2: metode-/typenamnet til kall_metode/er_instans er løyst i analysen
+                hvis r["art"] == "null" { _la_til(b, [208, EQREF()]) }
+                ellers hvis r["art"] == "funksjon" { _la_til(b, _streng_ref(k, k["tilbakekall"][r["mål"]])) }
                 ellers { _la_til(b, _streng_ref(k, tekst(v))) }
             } ellers {
                 _la_til(b, _LIT(k, tekst(v)))
@@ -1284,7 +1477,7 @@ funksjon _instruksjon(k: ordbok, an: ordbok, ii: heltall, ins: liste, lok_tmp: h
         _la_til(b, _ls(an["lok"][tekst(ins[1])]))
     } ellers hvis op == "LOAD_GLOBAL" eller op == "STORE_GLOBAL" {
         hvis op == "LOAD_GLOBAL" { legg_til(b, 35) } ellers { legg_til(b, 36) }
-        la gn = an["modul"] + "." + tekst(ins[1])
+        la gn = _global_modul(ins, an["modul"]) + "." + tekst(ins[1])
         hvis k["reloc"] { legg_til(b, {"r": "G", "n": gn}) } ellers { _la_til(b, _leb(k["glob_idx"][gn])) }
     } ellers hvis finnes_nøkkel(k["binop"], op) {
         _la_til(b, _kall(k, k["binop"][op]))
@@ -1369,20 +1562,17 @@ funksjon _instruksjon(k: ordbok, an: ordbok, ii: heltall, ins: liste, lok_tmp: h
         la namn = tekst(ins[1])
         hvis builtin.starts_with(namn, "builtin.") {
             la kort = builtin.slice(namn, 8, lengde(namn))
-            hvis kort == "ncb_call_fn" {
+            hvis kort == "kall_metode" eller kort == "er_instans" {
+                la gk = an["gen_kall"][tekst(ii)]
+                legg_til(b, 16)
+                hvis k["reloc"] { legg_til(b, {"r": "M", "n": gk}) } ellers { _la_til(b, _leb(k["gen_idx"][gk])) }
+            } ellers hvis kort == "ncb_call_fn" {
                 legg_til(b, 16)
                 hvis k["reloc"] { legg_til(b, {"r": "D", "n": tekst(ins[2] - 1)}) }
                 ellers { _la_til(b, _leb(k["dyn_idx"][tekst(ins[2] - 1)])) }
             } ellers hvis finnes_nøkkel(k["rt"], kort) {
                 legg_til(b, 16)
                 _la_til(b, _fidx(k, rt_modul() + "." + tekst(k["rt"][kort])))
-            } ellers hvis _er_konstruktør(kort) {
-                la di = 0
-                mens di < ins[2] { legg_til(b, 26)  di = di + 1 }
-                _la_til(b, _LIT(k, "__type__"))
-                _la_til(b, _LIT(k, kort))
-                _la_til(b, [251, 8, a.T_ARR(), 2])
-                _la_til(b, _kall(k, "ordbok_frå_par"))
             } ellers {
                 _la_til(b, _kall(k, k["builtins"][kort][1]))
             }
@@ -1951,6 +2141,109 @@ funksjon _hending_namn() -> tekst {
     returner builtin.join(ut, ", ")
 }
 
+# R2: kroppen til ein generert funksjon (kall_metode-dispatcher eller er_instans-test).
+funksjon _gen_kropp(k: ordbok, nøkkel: tekst) -> liste {
+    la g = k["gen"][nøkkel]
+    hvis g["art"] == "instans" { returner _instans_kropp(k, g) }
+    returner _metode_kropp(k, g)
+}
+
+# (v, _) → bool: vm_er_instans for mål (sjå _gen_instans). Parameter 1 er plassen til
+# typenamnet (ref.null; namnet er løyst i analysen). lokale: 2 d (ordbok), 3 i (i32), 4 t (tekst).
+funksjon _instans_kropp(k: ordbok, g: ordbok) -> liste {
+    la td = a.T_ORDBOK()
+    la tt = a.T_TEKST()
+    la ta = a.T_ARR()
+    la b = [3, 1, 99, td, 1, I32(), 1, 99, tt]
+    _la_til(b, a.flat([a.lg(0), a.rtest(td), 69, a.iff([]), 35, 0, 15, a.END(),
+                       a.lg(0), a.rcast(td), a.ls(2),
+                       a.lg(2), a.LIT(k, "__struktur__"), a.K(k, "merke_finn"), 34, 3, a.i32c(0), 72, a.iff([]), 35, 0, 15, a.END(),
+                       a.lg(2), a.sget(td, 2), a.lg(3), a.aget(ta), a.K(k, "tekst_av"), a.ls(4)]))
+    la tagg = g["tagg"]
+    la i = 0
+    mens i < lengde(tagg) {
+        _la_til(b, a.flat([a.lg(4), a.LIT(k, tekst(tagg[i])), a.K(k, "tekst_lik"), a.iff([]), 35, 1, 15, a.END()]))
+        i = i + 1
+    }
+    hvis g["kort"] {
+        # Ukvalifisert namn: samanlikna med det korte typenamnet (__type__)
+        _la_til(b, a.flat([a.lg(2), a.LIT(k, "__type__"), a.K(k, "merke_finn"), 34, 3, a.i32c(0), 78, a.iff([]),
+                             a.lg(2), a.sget(td, 2), a.lg(3), a.aget(ta), a.K(k, "tekst_av"), a.LIT(k, tekst(g["mål"])),
+                             a.K(k, "tekst_lik"), a.iff([]), 35, 1, 15, a.END(),
+                           a.END()]))
+    }
+    _la_til(b, [35, 0, 11])
+    returner b
+}
+
+# (mott, _, a1..an) → eqref: mott.m(a1..an) som vm_metode_løys + CALL-armen i VM-en:
+#   1. struktur: tekst(mott.__struktur__) samanlikna med kvar kandidat S → S.m(mott, a1..an)
+#      (feil aritet → ArgumentFeil som VM-en);
+#   2. ordbok med feltet m som held ein closure → closuren(a1..an) (berre når modulen har
+#      closures; utan $lambda kan ingen verdi vere ein closure);
+#   3. elles MetodeFeil (òg for ingenting).
+# lokale: n+2 d (ordbok), n+3 t (tekst), n+4 v (eqref), n+5 i (i32).
+funksjon _metode_kropp(k: ordbok, g: ordbok) -> liste {
+    la td = a.T_ORDBOK()
+    la tt = a.T_TEKST()
+    la ta = a.T_ARR()
+    la na = g["n"]
+    la m = tekst(g["m"])
+    la ld = na + 2
+    la lt = na + 3
+    la lv = na + 4
+    la li = na + 5
+    la b = [4, 1, 99, td, 1, 99, tt, 1, EQREF(), 1, I32()]
+    _la_til(b, a.flat([a.lg(0), a.rtest(td), a.iff([]), a.lg(0), a.rcast(td), a.ls(ld)]))
+    la kand = g["kand"]
+    hvis lengde(kand) > 0 {
+        _la_til(b, a.flat([a.lg(ld), a.LIT(k, "__struktur__"), a.K(k, "merke_finn"), 34, li, a.i32c(0), 78, a.iff([]),
+                           a.lg(ld), a.sget(td, 2), a.lg(li), a.aget(ta), a.K(k, "tekst_av"), a.ls(lt)]))
+        la ci = 0
+        mens ci < lengde(kand) {
+            la c = kand[ci]
+            _la_til(b, a.flat([a.lg(lt), a.LIT(k, tekst(c[0])), a.K(k, "tekst_lik"), a.iff([])]))
+            hvis c[2] == na + 1 {
+                _la_til(b, _lg(0))
+                la ai = 0
+                mens ai < na {
+                    _la_til(b, _lg(ai + 2))
+                    ai = ai + 1
+                }
+                legg_til(b, 16)
+                _la_til(b, _leb(k["funk_idx"][tekst(c[1])]))
+                legg_til(b, 15)
+            } ellers {
+                la meld = "ArgumentFeil: Aritetsfeil ved dynamisk kall til " + tekst(c[1]) + ": forventa " + tekst(c[2]) +
+                          " argument, fekk " + tekst(na + 1)
+                _la_til(b, a.flat([a.LIT(k, meld), a.K(k, "kast")]))
+            }
+            legg_til(b, 11)
+            ci = ci + 1
+        }
+        legg_til(b, 11)
+    }
+    hvis k["bruker_lambda"] {
+        _la_til(b, a.flat([a.lg(ld), a.LIT(k, m), a.K(k, "ordbok_hent"), a.ls(lv)]))
+        _la_til(b, _lg(lv))
+        _la_til(b, [251, 20])
+        _la_til(b, w.leb_s(k["t_lambda"]))
+        _la_til(b, [4, 64])
+        la ai2 = 0
+        mens ai2 < na {
+            _la_til(b, _lg(ai2 + 2))
+            ai2 = ai2 + 1
+        }
+        _la_til(b, _kall_closure(k, lv, na))
+        _la_til(b, [15, 11])
+    }
+    legg_til(b, 11)
+    _la_til(b, a.flat([a.lg(0), 209, a.iff([]), a.LIT(k, "MetodeFeil: kan ikkje kalle metoden " + m + "() på ingenting"), a.K(k, "kast"), a.END(),
+                       a.LIT(k, "MetodeFeil: "), a.lg(0), a.K(k, "verdi_typenamn"), a.K(k, "konkat"),
+                       a.LIT(k, " har ingen metode " + m + "()"), a.K(k, "konkat"), a.K(k, "kast"), 0, 11]))
+    returner b
+}
+
 # Dispatcher for builtin.ncb_call_fn med n argument: (x, a1..an) → eqref.
 funksjon _dyn_kropp(k: ordbok, n: heltall) -> liste {
     la tl = k["t_lambda"]
@@ -1999,6 +2292,21 @@ funksjon _verna_kall(k: ordbok, mål: liste) -> liste {
     _la_til(b, _kall(k, "uhandtert"))
     legg_til(b, 11)
     returner b
+}
+
+# R2/F14: har modulinitialiseringa ein verknad utover å setje globalane (kall eller kast, t.d.
+# ei toppnivå-setning som skriv)? VM-en køyrer alle initialiseringane; ei init med verknad
+# kjem difor med sjølv når ingenting i modulen elles er nådd. Ei rein init (konstantar og
+# literalar inn i globalar) kan ingen sjå når globalane ikkje blir brukte.
+funksjon _init_har_verknad(fd: ordbok) -> bool {
+    la kode = fd["code"]
+    la i = 0
+    mens i < lengde(kode) {
+        la op = tekst(kode[i][0])
+        hvis op == "CALL" eller op == "CALL_VALUE" eller op == "THROW" { returner sann }
+        i = i + 1
+    }
+    returner usann
 }
 
 # ─── Hovudinngang ────────────────────────────────────────────────────────────
@@ -2050,11 +2358,18 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
             modular[tekst(fns[k["nåbare"][mi]]["module"])] = sann
             mi = mi + 1
         }
+        # R2/F14: modular med globalar som andre modular les eller skriv (alias.NAMN)
+        la gmi0 = 0
+        mens gmi0 < lengde(k["glob_mod_liste"]) {
+            modular[tekst(k["glob_mod_liste"][gmi0])] = sann
+            gmi0 = gmi0 + 1
+        }
         la endra = usann
         la ii = 0
         mens ii < lengde(inits) {
             la iq = tekst(inits[ii])
-            hvis finnes_nøkkel(fns, iq) og ikkje finnes_nøkkel(inits_med, iq) og finnes_nøkkel(modular, tekst(fns[iq]["module"])) {
+            hvis finnes_nøkkel(fns, iq) og ikkje finnes_nøkkel(inits_med, iq) og
+                 (finnes_nøkkel(modular, tekst(fns[iq]["module"])) eller _init_har_verknad(fns[iq])) {
                 inits_med[iq] = sann
                 _legg_nåbar(k, iq)
                 endra = sann
@@ -2077,6 +2392,9 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     la atom_sett = _atom_lukking(k)
     la kan_kaste = k["har_throw"] eller k["har_eh"] eller lengde(k["dyn_liste"]) > 0 eller finnes_nøkkel(atom_sett, "kast")
     hvis kan_kaste {
+        # R2/F08: modulen har unnatak (tag og uhandtert) alt, så aritmetikk på ikkje-tal
+        # kastar ein fangbar TypeFeil som i VM-en (atom_avheng tek med «typefeil»)
+        k["kast_ok"] = sann
         _bruk_atom(k, "uhandtert")
         atom_sett = _atom_lukking(k)
     }
@@ -2162,6 +2480,14 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         neste = neste + 1
         dli = dli + 1
     }
+    # R2: genererte funksjonar (kall_metode-dispatcharar og er_instans-testar)
+    k["gen_idx"] = {}
+    la gli = 0
+    mens gli < lengde(k["gen_liste"]) {
+        k["gen_idx"][tekst(k["gen_liste"][gli])] = neste
+        neste = neste + 1
+        gli = gli + 1
+    }
     # Tilbakekall blir pakka inn (uhandterte unnatak → ERROR) når modulen kan kaste
     la tk_idx = {}
     hvis kan_kaste {
@@ -2183,6 +2509,16 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         hvis ikkje finnes_nøkkel(gm_sett, mm) {
             gm_sett[mm] = sann
             legg_til(glob_modular, mm)
+        }
+        fi = fi + 1
+    }
+    # R2/F14: modular som berre blir nådde gjennom globalane sine (alias.NAMN)
+    fi = 0
+    mens fi < lengde(k["glob_mod_liste"]) {
+        la mm3 = tekst(k["glob_mod_liste"][fi])
+        hvis ikkje finnes_nøkkel(gm_sett, mm3) {
+            gm_sett[mm3] = sann
+            legg_til(glob_modular, mm3)
         }
         fi = fi + 1
     }
@@ -2214,6 +2550,12 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
     mens dli < lengde(k["dyn_liste"]) {
         legg_til(dyn_kroppar, _dyn_kropp(k, k["dyn_liste"][dli]))
         dli = dli + 1
+    }
+    la gen_kroppar = []
+    la gli2 = 0
+    mens gli2 < lengde(k["gen_liste"]) {
+        legg_til(gen_kroppar, _gen_kropp(k, tekst(k["gen_liste"][gli2])))
+        gli2 = gli2 + 1
     }
     # Postkassa ligg etter vertskonstantane (8-justert)
     k["postkasse"] = ((lengde(k["data"]) + 7) / 8) * 8
@@ -2265,6 +2607,15 @@ funksjon kompiler(ncb: ordbok, opsjonar: ordbok) -> ordbok {
         legg_til(funk_typar, _type_idx(k, _eqref_liste(k["dyn_liste"][dli] + 1), [EQREF()]))
         legg_til(kroppar, dyn_kroppar[dli])
         dli = dli + 1
+    }
+    gli = 0
+    mens gli < lengde(k["gen_liste"]) {
+        la gs = k["gen"][tekst(k["gen_liste"][gli])]
+        la gn_p = 2
+        hvis gs["art"] == "metode" { gn_p = gs["n"] + 2 }
+        legg_til(funk_typar, _type_idx(k, _eqref_liste(gn_p), [EQREF()]))
+        legg_til(kroppar, gen_kroppar[gli])
+        gli = gli + 1
     }
     hvis kan_kaste {
         la tki1 = 0
