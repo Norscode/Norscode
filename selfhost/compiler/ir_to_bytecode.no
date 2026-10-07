@@ -938,10 +938,12 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
     // medan hjelpekoden blir generert, elles kan eit parameternamn som òg er
     // modulglobalt feilaktig bli skrive med STORE_GLOBAL.
     la førre_lokale = komp["current_locals"]
+    la førre_strukturtype = komp["lokal_strukturtype"]
     la førre_init = komp["in_module_init"]
     la førre_source_lines = komp["current_source_lines"]
     la førre_source_columns = komp["current_source_columns"]
     komp["current_locals"] = {}
+    komp["lokal_strukturtype"] = {}
     komp["current_function"] = "__module_init__"
     komp["in_module_init"] = usann
     komp["source_map_active"] = sann
@@ -1022,6 +1024,7 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
 
     legg_til(komp["lambda_funk_par"], fullt_namn + "|SEP|" + fn_json)
     komp["current_locals"] = førre_lokale
+    komp["lokal_strukturtype"] = førre_strukturtype
     komp["in_module_init"] = førre_init
     komp["current_source_lines"] = førre_source_lines
     komp["current_source_columns"] = førre_source_columns
@@ -1043,6 +1046,11 @@ funksjon ny_komp()
     // tal faste parametrar før vararg, så kryssmodul-kall får same kallform.
     komp["imp_defaults"] = {}
     komp["imp_vararg"] = {}
+    // R3/F31: privat i importerte modular: fullt namn → sann, ukvalifisert
+    // funksjonsnamn → modul, og returtypen til importerte funksjonar.
+    komp["imp_privat"] = {}
+    komp["imp_privat_namn"] = {}
+    komp["imp_returtype"] = {}
     komp["grensesnitt_kart"] = {} // grensesnitt-namn → liste med påkravde metodenamn
     komp["struktur_impl"] = []    // liste med [struktur-namn, grensesnitt-namn] for validering
     // R2/F20: strukturar i denne modulen (namn → Struktur-node) og i importerte
@@ -1072,6 +1080,7 @@ funksjon ny_komp()
     komp["global_kart"] = {}
     komp["global_namn"] = []
     komp["current_locals"] = {}
+    komp["lokal_strukturtype"] = {}
     komp["in_module_init"] = usann
     komp["source_map_active"] = sann
     hvis miljo_hent("NORSCODE_COMPILE_SOURCE_MAP") == "0"
@@ -1300,6 +1309,8 @@ funksjon emit_felt(komp, node, kode) -> boolsk {
         legg_til(kode, "[\"LOAD_GLOBAL\"," + json_escape_tekst(node["verdi"]) + "," + json_escape_tekst(mg) + "]")
         returner sann
     }
+    // R3/F31: privat felt på ein verdi med kjend strukturtype frå ein annan modul.
+    sjekk_privat_felt(komp, node)
     emit_uttrykk(komp, obj, kode)
     legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
     legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
@@ -1317,6 +1328,8 @@ funksjon modulglobal_mål(komp, node) -> tekst {
     la m = komp["import_alias"][alias]
     hvis ikkje har_nokkel(komp["modul_global_kart"], m) { returner "" }
     hvis ikkje har_nokkel(komp["modul_global_kart"][m], node["verdi"]) { returner "" }
+    // R3/F31: privat global i den andre modulen (les og skriv).
+    hvis er_importert_privat(komp, m + "." + tekst(node["verdi"])) { tilgangsfeil(node, "globalen " + m + "." + tekst(node["verdi"])) }
     returner m
 }
 
@@ -2031,6 +2044,10 @@ funksjon emit_uttrykk(komp, node, kode)
         hvis vararg_faste < 0 og imp_mål != "" og har_nokkel(komp["imp_vararg"], imp_mål)
             vararg_faste = komp["imp_vararg"][imp_mål]
         slutt
+        // R3/F31: privat funksjon i ein annan modul.
+        hvis imp_mål != "" og er_importert_privat(komp, imp_mål)
+            tilgangsfeil(node, "funksjonen " + imp_mål)
+        slutt
 
         hvis vararg_faste >= 0 og arg_antal >= vararg_faste
             la vfi = 0
@@ -2173,6 +2190,9 @@ funksjon emit_uttrykk(komp, node, kode)
                 // berre vere ein struktur — ingen innebygd funksjon har stor
                 // forbokstav. Pnukt() er difor ein kompileringsfeil, ikkje ei
                 // tom ordbok frå ein runtime-heuristikk.
+                hvis har_nokkel(komp["imp_privat_namn"], fn_navn)
+                    tilgangsfeil(node, "funksjonen " + komp["imp_privat_namn"][fn_navn] + "." + fn_navn)
+                slutt
                 hvis er_typenamn_form(fn_navn)
                     kast "Typefeil linje " + tekst(node["linje"]) + ": ukjend type eller funksjon " + fn_navn + " (ingen struktur eller funksjon med det namnet i " + modul + " eller importerte modular)"
                 slutt
@@ -2210,6 +2230,7 @@ funksjon emit_sett_verdi(komp, mål, verdi_node, kode)
     hvis mål["type"] == "Ident"
         emit_uttrykk(komp, verdi_node, kode)
         emit_store_namn(komp, kode, mål["verdi"], usann)
+        sett_lokal_strukturtype(komp, mål["verdi"], null, verdi_node)
     slutt
     hvis mål["type"] == "Indeks"
         // liste[i] = verdi → LOAD liste, eval i, eval verdi, INDEX_SET, POP
@@ -2229,6 +2250,7 @@ funksjon emit_sett_verdi(komp, mål, verdi_node, kode)
     slutt
     hvis mål["type"] == "Felt"
         // obj.felt = verdi → LOAD obj, PUSH felt, eval verdi, INDEX_SET, POP
+        sjekk_privat_felt(komp, mål)
         emit_uttrykk(komp, mål["barn"][0], kode)
         legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", mål["verdi"]))
         emit_uttrykk(komp, verdi_node, kode)
@@ -2340,6 +2362,7 @@ funksjon kompiler_konstruktør(komp, s_node) -> tekst {
     la felt = struktur_felt(s_node)
     komp["current_function"] = namn
     komp["current_locals"] = {}
+    komp["lokal_strukturtype"] = {}
     komp["in_module_init"] = usann
     komp["current_source_lines"] = []
     komp["current_source_columns"] = []
@@ -2753,6 +2776,16 @@ funksjon emit_setning(komp, node, kode)
             legg_til(kode, "[" + json_escape_tekst("PUSH_CONST") + ",null]")
         slutt
         emit_store_namn(komp, kode, namn, sann)
+        // R3/F31: statisk strukturtype (la v: T = … / la v = T(…) / la v = m.f()).
+        la_type_node = null
+        hvis lengde(node["barn"]) > 0 og node["barn"][0]["type"] == "Type"
+            la_type_node = node["barn"][0]
+        slutt
+        la_verdi_node = null
+        hvis lengde(node["barn"]) > 0
+            la_verdi_node = node["barn"][lengde(node["barn"]) - 1]
+        slutt
+        sett_lokal_strukturtype(komp, namn, la_type_node, la_verdi_node)
         returner sann
     slutt
 
@@ -2831,6 +2864,7 @@ funksjon emit_setning(komp, node, kode)
         // vart ein Felt-mål stilt hoppa over (ingen kode i det heile).
         hvis mål["type"] == "Felt"
             la aug_mg = modulglobal_mål(komp, mål)
+            sjekk_privat_felt(komp, mål)
             hvis aug_mg != ""
                 emit_uttrykk(komp, mål, kode)
                 emit_uttrykk(komp, verdi_node, kode)
@@ -3157,6 +3191,10 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
                 mgl[modul_namn] = {}
             slutt
             la modul_globalar = mgl[modul_namn]
+            hvis node["type"] == "La" og har_nokkel(node, "privat") og node["privat"] == sann
+                la gpr = komp["imp_privat"]
+                gpr[modul_namn + "." + node["verdi"]] = sann
+            slutt
             hvis node["type"] == "La"
                 hvis har_nokkel(node, "konst") og node["konst"] == sann
                     modul_globalar[node["verdi"]] = "konst"
@@ -3200,6 +3238,18 @@ funksjon registrer_importerte_funksjonar(komp, alias, modul_namn)
             la modul_funksjonar = mfk[modul_namn]
             modul_funksjonar[fn_namn] = sann
             registrer_importert_kallform(komp, fullt_namn, node)
+            // R3/F31: privat funksjon — ikkje ukvalifisert synleg utanfrå;
+            // alias.f og f(...) blir kompileringsfeil (sjå tilgangsfeil).
+            hvis har_nokkel(node, "privat") og node["privat"] == sann
+                la ipr = komp["imp_privat"]
+                ipr[fullt_namn] = sann
+                la ipn = komp["imp_privat_namn"]
+                hvis ikkje har_nokkel(komp["imported_funk_kart"], fn_namn)
+                    ipn[fn_namn] = modul_namn
+                slutt
+                i = i + 1
+                fortsett
+            slutt
 
             // Innebygde namn må ALDRI skuggast av ukvalifiserte importar.
             // std.dns definerer t.d. `legg_til(sone, r)`; utan denne sperra
@@ -3248,6 +3298,9 @@ funksjon registrer_importutval(komp, bruk_node)
         la namn = u["verdi"]
         la mfk = komp["modul_funk_kart"]
         la msk = komp["modul_struktur_kart"]
+        hvis er_importert_privat(komp, modul_namn + "." + namn)
+            tilgangsfeil(u, "funksjonen " + modul_namn + "." + namn)
+        slutt
         hvis har_nokkel(mfk, modul_namn) og har_nokkel(mfk[modul_namn], namn)
             la ifk = komp["imported_funk_kart"]
             ifk[namn] = modul_namn + "." + namn
@@ -3271,6 +3324,11 @@ funksjon registrer_importert_kallform(komp, fullt_namn, fn_node) {
     la pnode = fn_node["barn"][0]
     la idf = komp["imp_defaults"]
     idf[fullt_namn] = _samle_standardar(pnode)
+    // R3/F31: returtypen (for statisk strukturtype på kallstaden).
+    hvis lengde(fn_node["barn"]) > 1 og fn_node["barn"][1]["type"] == "Returtype" {
+        la irt = komp["imp_returtype"]
+        irt[fullt_namn] = tekst(fn_node["barn"][1]["verdi"])
+    }
     hvis lengde(pnode["barn"]) > 0 {
         la siste_p = pnode["barn"][lengde(pnode["barn"]) - 1]
         hvis har_nokkel(siste_p, "vararg") og siste_p["vararg"] == sann {
@@ -3333,6 +3391,100 @@ funksjon fyll_importerte_standardar(komp, mål: tekst, arg_antal: heiltall, kode
     returner n_pushed
 }
 
+// ─── R3/F31: privat ─────────────────────────────────────────────────────────
+// `privat funksjon`, `privat la/konst` og `privat felt` i struktur er berre
+// synlege i modulen sin. Bruk frå ein annan modul er ein kompileringsfeil:
+//   - alias.f(...), ukvalifisert f(...), `fra M bruk f` og alias.f som verdi;
+//   - alias.NAMN (les og skriv);
+//   - v.felt når den statiske strukturtypen til v er kjend og høyrer til ein
+//     annan modul (la v: T / la v = T(...) / alias.T(...) / v = f() der den
+//     importerte f har returtypen T). Utan kjend type blir felt ikkje sjekka.
+
+funksjon tilgangsfeil(node, kva: tekst) {
+    la linje = 0
+    hvis node != null og node["linje"] != null { linje = node["linje"] }
+    kast "Tilgangsfeil linje " + tekst(linje) + ": " + kva + " er privat og kan ikkje brukast utanfor modulen sin"
+}
+
+funksjon er_importert_privat(komp, fullt_namn: tekst) -> boolsk {
+    returner har_nokkel(komp["imp_privat"], fullt_namn)
+}
+
+// Strukturtypen [modul, Type] som uttrykket `uttrykk` (ev. med Type-noden
+// `type_node`) gjev, når typen er ein struktur i ein ANNAN modul; elles null.
+funksjon importert_strukturtype(komp, type_node, uttrykk) {
+    hvis type_node != null {
+        la tn = tekst(type_node["verdi"])
+        hvis builtin.contains(tn, ".") {
+            la d = builtin.split(tn, ".")
+            hvis lengde(d) == 2 og har_nokkel(komp["import_alias"], d[0]) {
+                la m = komp["import_alias"][d[0]]
+                hvis importert_struktur(komp, m, d[1]) != null { returner [m, d[1]] }
+            }
+        } ellers hvis har_nokkel(komp["importert_struktur_kart"], tn) og ikkje har_nokkel(komp["struktur_kart"], tn) {
+            la im = komp["importert_struktur_kart"][tn]
+            hvis im != "__AMBIGUOUS__" { returner [im, tn] }
+        }
+    }
+    hvis uttrykk == null eller builtin.type(uttrykk) != "ordbok" eller uttrykk["type"] != "Kall" { returner null }
+    la fi = uttrykk["barn"][0]
+    // Konstruktør: Type(...) (importert) eller alias.Type(...).
+    hvis fi["type"] == "Ident" og har_nokkel(komp["importert_struktur_kart"], fi["verdi"]) og ikkje har_nokkel(komp["struktur_kart"], fi["verdi"]) og ikkje har_nokkel(komp["funk_kart"], fi["verdi"]) {
+        la km = komp["importert_struktur_kart"][fi["verdi"]]
+        hvis km != "__AMBIGUOUS__" { returner [km, tekst(fi["verdi"])] }
+    }
+    hvis fi["type"] == "Felt" og fi["barn"][0]["type"] == "Ident" og har_nokkel(komp["import_alias"], fi["barn"][0]["verdi"]) {
+        la am = komp["import_alias"][fi["barn"][0]["verdi"]]
+        hvis importert_struktur(komp, am, fi["verdi"]) != null { returner [am, tekst(fi["verdi"])] }
+    }
+    // Kall til importert funksjon med strukturreturtype i sin modul.
+    la mål = importert_kallmål(komp, fi)
+    hvis mål != "" og har_nokkel(komp["imp_returtype"], mål) {
+        la rt = komp["imp_returtype"][mål]
+        la mm = builtin.slice(mål, 0, lengde(mål) - lengde(tekst(fi["verdi"])) - 1)
+        hvis importert_struktur(komp, mm, rt) != null { returner [mm, rt] }
+    }
+    returner null
+}
+
+// Oppdater den statiske strukturtypen til lokalvariabelen `namn`.
+funksjon sett_lokal_strukturtype(komp, namn, type_node, uttrykk) -> heiltall {
+    la lst = komp["lokal_strukturtype"]
+    la t = importert_strukturtype(komp, type_node, uttrykk)
+    hvis t != null {
+        lst[namn] = t
+    } ellers hvis har_nokkel(lst, namn) {
+        lst[namn] = null
+    }
+    returner 0
+}
+
+// v.felt der v har ein kjend strukturtype frå ein annan modul og feltet er privat.
+funksjon sjekk_privat_felt(komp, felt_node) -> heiltall {
+    la obj = felt_node["barn"][0]
+    hvis obj["type"] != "Ident" { returner 0 }
+    // alias.f / alias.T som verdi der f er privat i modulen.
+    hvis har_nokkel(komp["import_alias"], obj["verdi"]) og ikkje har_nokkel(komp["current_locals"], obj["verdi"]) {
+        la pf = komp["import_alias"][obj["verdi"]] + "." + tekst(felt_node["verdi"])
+        hvis er_importert_privat(komp, pf) { tilgangsfeil(felt_node, "funksjonen " + pf) }
+    }
+    la lst = komp["lokal_strukturtype"]
+    hvis ikkje har_nokkel(lst, obj["verdi"]) { returner 0 }
+    la t = lst[obj["verdi"]]
+    hvis t == null { returner 0 }
+    la s = importert_struktur(komp, t[0], t[1])
+    hvis s == null { returner 0 }
+    la felt = struktur_felt(s)
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        hvis felt[i]["verdi"] == felt_node["verdi"] og har_nokkel(felt[i], "privat") og felt[i]["privat"] == sann {
+            tilgangsfeil(felt_node, "feltet " + t[0] + "." + t[1] + "." + tekst(felt_node["verdi"]))
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
 // ─── Kompiler funksjonar ─────────────────────────────────────────────────────
 
 funksjon kompiler_funksjon(komp, fn_node)
@@ -3346,6 +3498,7 @@ funksjon kompiler_funksjon(komp, fn_node)
     // Samle parameter-namn
     params = []
     komp["current_locals"] = {}
+    komp["lokal_strukturtype"] = {}
     komp["in_module_init"] = usann
     i = 0
     param_barn = param_node["barn"]
@@ -3476,6 +3629,7 @@ funksjon har_toppnivå_setning(komp, ast_program) -> boolsk {
 funksjon kompiler_modul_init(komp, ast_program) -> tekst {
     la kode = []
     komp["current_locals"] = {}
+    komp["lokal_strukturtype"] = {}
     komp["in_module_init"] = sann
     la i: heiltall = 0
     mens i < lengde(ast_program["barn"]) {
