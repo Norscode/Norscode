@@ -1455,16 +1455,19 @@ funksjon shutdown_hook() -> tekst  {
     returner ""
 }
 // ─── OpenAPI-markørar (Fase 2 / 2.10) ────────────────────────────────────────
-// Desse er reine kompilerings-tids-markørar: kompilatoren (ir_to_bytecode sin
-// prolog-skann, 2.10) les dei frå dei leiande setningane i ein handlar og
-// skriv metadata inn i route-oppføringa, og sjølve kallet vert IKKJE emittert
-// til bytekode. Dei må likevel finnast som funksjonar slik at handlarkjelda
-// kompilerer (symboloppslag) og — om eit kall skulle hamne utanfor prologen —
-// returnerer trygt i staden for å gje «ukjent kall».
-// web.tags(...) er variadisk i bruk (web.tags("a","b", ...)); markøren er
-// parameterlaus fordi argumenta vert lesne direkte frå AST-en av 2.10.
-funksjon tags() -> tekst  {
-    returner ""
+// Kompilatoren (ir_to_bytecode sin prolog-skann, 2.10) les desse frå dei
+// leiande setningane i ein handlar og skriv metadata inn i route-oppføringa.
+// MERK: sjølve kallet VERT emittert til bytekode og køyrer kvar gong
+// handlaren køyrer, og aritetsvakta i VM-en (R1/F07) krev nøyaktig
+// lengde(params) argument. Kryssmodul-kall får verken standardargument eller
+// vararg-pakking, så signaturen her MÅ samsvare med bruken. Tidlegare var
+// tags() parameterlaus, og web.tags("a") gav 500 ArgumentFeil i handlaren
+// (FA-097). Éin tag per kall: fleire tags skriv ein som fleire linjer,
+// web.tags("a") + web.tags("b") — prolog-skannen samlar dei i éi liste.
+// web.tags("a", "b") i eitt kall krev at kompilatoren slepper markørkallet
+// (eller pakkar varargs på tvers av modular) — det er ei seed-endring.
+funksjon tags(tag: tekst) -> tekst  {
+    returner tag
 }
 funksjon beskriving(tekst_verdi: tekst) -> tekst  {
     returner tekst_verdi
@@ -2046,6 +2049,48 @@ funksjon _openapi_er_docs_rute(norm_path: tekst) -> boolsk {
     returner norm_path == "/openapi.json" eller norm_path == "/docs" eller norm_path == "/redoc"
 }
 
+// Robuste oppslag i rute-metadata (eitt element frå ncb_route_handlers()):
+// eldre NCB-ar (før 2.10) manglar nøklane, og verdiane kan kome som bool/tekst
+// avhengig av JSON-lesaren. Offentlege fordi std.docs_side brukar dei òg.
+funksjon rute_meta_sann(handler, nøkkel: tekst) -> boolsk {
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner usann }
+    la v = tekst(handler[nøkkel])
+    returner v == "sann" eller v == "true" eller v == "1"
+}
+
+funksjon rute_meta_tekst(handler, nøkkel: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner "" }
+    la v = handler[nøkkel]
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+funksjon rute_meta_liste(handler, nøkkel: tekst) {
+    la ut = []
+    hvis ikkje finnes_nøkkel(handler, nøkkel) { returner ut }
+    la v = handler[nøkkel]
+    hvis builtin.type(v) != "liste" { returner ut }
+    la i: heltall = 0
+    mens i < lengde(v) {
+        legg_til(ut, v[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Standard skildring for ein statuskode når web.respons(...) ikkje gav nokon
+// (OpenAPI krev «description» på kvar respons).
+funksjon _openapi_status_tekst(status: tekst) -> tekst {
+    hvis status == "400" { returner "Bad Request" }
+    hvis status == "401" { returner "Unauthorized" }
+    hvis status == "403" { returner "Forbidden" }
+    hvis status == "404" { returner "Not Found" }
+    hvis status == "409" { returner "Conflict" }
+    hvis status == "422" { returner "Validation Error" }
+    hvis status == "500" { returner "Internal Server Error" }
+    returner "Respons " + status
+}
+
 funksjon _openapi_resp_json(parsed_verdi, fallback: tekst) -> tekst {
     prøv { returner builtin.json_skriv(parsed_verdi) } fang (e) { }
     returner fallback
@@ -2078,7 +2123,8 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
         hvis lengde(deler) >= 2 {
             la raw_path: tekst = deler[1]
             la norm_path: tekst = _openapi_norm_path(raw_path)
-            hvis _openapi_er_docs_rute(norm_path) {
+            hvis _openapi_er_docs_rute(norm_path) eller rute_meta_sann(handler, "hidden") {
+                // web.skjul() → include_in_schema=False (FA-097).
                 i = i + 1
                 fortsett
             }
@@ -2108,11 +2154,20 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 }
             }
 
-            // Tag per modul.
-            la tag = _openapi_tag(funksjonsnamn)
-            hvis ikkje finnes_nøkkel(tag_seen, tag) {
-                tag_seen[tag] = "1"
-                legg_til(tag_order, tag)
+            // Tags: web.tags("x")-markørane i metadata vinn; elles tag per modul.
+            la rute_tags: liste<tekst> = rute_meta_liste(handler, "tags")
+            hvis lengde(rute_tags) == 0 { legg_til(rute_tags, _openapi_tag(funksjonsnamn)) }
+            la tags_op: tekst = ""
+            la tgi: heltall = 0
+            mens tgi < lengde(rute_tags) {
+                la tag = tekst(rute_tags[tgi])
+                hvis ikkje finnes_nøkkel(tag_seen, tag) {
+                    tag_seen[tag] = "1"
+                    legg_til(tag_order, tag)
+                }
+                hvis tags_op != "" { tags_op = tags_op + "," }
+                tags_op = tags_op + "\"" + _json_escape(tag) + "\""
+                tgi = tgi + 1
             }
 
             // Parametrar: path (frå mønster) + query (frå metadata).
@@ -2135,7 +2190,11 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
                 bi = bi + 1
             }
 
-            la op: tekst = "{\"operationId\":\"" + _json_escape(op_id) + "\",\"tags\":[\"" + _json_escape(tag) + "\"]"
+            la op: tekst = "{\"operationId\":\"" + _json_escape(op_id) + "\",\"tags\":[" + tags_op + "]"
+            // web.beskriving("...") → description; web.forelda() → deprecated (FA-097).
+            la beskr: tekst = rute_meta_tekst(handler, "description")
+            hvis beskr != "" { op = op + ",\"description\":\"" + _json_escape(beskr) + "\"" }
+            hvis rute_meta_sann(handler, "deprecated") { op = op + ",\"deprecated\":true" }
             hvis params_json != "" { op = op + ",\"parameters\":[" + params_json + "]" }
             // Eksempel på requestBody frå oppsett["eksempel"][op_id] dersom gjeve.
             la body_example: tekst = ""
@@ -2157,21 +2216,51 @@ funksjon openapi_json_med(oppsett: ordbok) -> tekst {
             hvis rm_resp != "" { resp_schema = "{\"$ref\":\"#/components/schemas/" + _json_escape(rm_resp) + "\"}" }
             la resp_example: tekst = _openapi_resp_json(handler["response_example"], "\"eksempel\"")
             la responses_json: tekst = "\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\":" + resp_schema + ",\"example\":" + resp_example + "}}}"
+            // Statuskodar som alt er med: ein JSON-nøkkel kan berre finnast éin gong.
+            la status_sett: ordbok_tekst = {}
+            status_sett["200"] = "1"
 
             la errs = handler["error_responses"]
             la eri: heltall = 0
             mens eri < lengde(errs) {
                 la er = errs[eri]
                 la sc: tekst = tekst(er["status"])
-                la sm: tekst = _json_escape(tekst(er["message"]))
-                responses_json = responses_json + ",\"" + sc + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
+                hvis ikkje finnes_nøkkel(status_sett, sc) {
+                    status_sett[sc] = "1"
+                    la sm: tekst = _json_escape(tekst(er["message"]))
+                    responses_json = responses_json + ",\"" + _json_escape(sc) + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
+                }
                 eri = eri + 1
+            }
+
+            // web.respons("404", "Ikkje funne") → extra_responses (FA-059/100).
+            la extras = rute_meta_liste(handler, "extra_responses")
+            la xri: heltall = 0
+            mens xri < lengde(extras) {
+                la xr = extras[xri]
+                la xs: tekst = ""
+                la xd: tekst = ""
+                prøv { xs = tekst(xr["status"]) } fang (e) { xs = "" }
+                prøv { xd = tekst(xr["description"]) } fang (e) { xd = "" }
+                hvis xs != "" og ikkje finnes_nøkkel(status_sett, xs) {
+                    status_sett[xs] = "1"
+                    hvis xd == "" { xd = _openapi_status_tekst(xs) }
+                    responses_json = responses_json + ",\"" + _json_escape(xs) + "\":{\"description\":\"" + _json_escape(xd) + "\"}"
+                }
+                xri = xri + 1
             }
 
             la guards2 = handler["guards"]
             hvis lengde(guards2) > 0 {
                 op = op + ",\"security\":[{\"bearerAuth\":[]}]"
-                responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"},\"403\":{\"description\":\"Forbudt\"}"
+                hvis ikkje finnes_nøkkel(status_sett, "401") {
+                    status_sett["401"] = "1"
+                    responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"}"
+                }
+                hvis ikkje finnes_nøkkel(status_sett, "403") {
+                    status_sett["403"] = "1"
+                    responses_json = responses_json + ",\"403\":{\"description\":\"Forbudt\"}"
+                }
                 har_security = sann
             }
             op = op + ",\"responses\":{" + responses_json + "}}"
