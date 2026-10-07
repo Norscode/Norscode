@@ -255,11 +255,17 @@ funksjon json_fra_map_parliste(par_liste)
 slutt
 
 funksjon web_type_til_schema(type_namn)
-    hvis type_namn == "heltall" eller type_namn == "int"
+    hvis type_namn == "heltall" eller type_namn == "heiltall" eller type_namn == "int"
         returner "{\"type\":\"integer\"}"
     slutt
     hvis type_namn == "bool" eller type_namn == "boolsk"
         returner "{\"type\":\"boolean\"}"
+    slutt
+    hvis type_namn == "desimaltall" eller type_namn == "flyttall" eller type_namn == "float"
+        returner "{\"type\":\"number\"}"
+    slutt
+    hvis type_namn == "liste"
+        returner "{\"type\":\"array\"}"
     slutt
     hvis type_namn == "liste_heltall"
         returner "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
@@ -426,6 +432,20 @@ funksjon route_felt_liste(route, nøkkel)
     returner []
 slutt
 
+// R3/3.4: ein returtype som er ein struktur i modulen (eller liste av han) blir
+// $ref til components/schemas (skjemaet sjølv kjem frå "modellar" i OpenAPI-generatoren).
+funksjon web_rute_respons_schema(route, response_type)
+    la rs = route_felt_tekst(route, "respons_struktur")
+    hvis rs != ""
+        la ref = "{\"$ref\":" + json_escape_tekst("#/components/schemas/" + rs) + "}"
+        hvis tekst_starter_med(route_felt_tekst(route, "return_type"), "liste<")
+            returner "{\"type\":\"array\",\"items\":" + ref + "}"
+        slutt
+        returner ref
+    slutt
+    returner web_type_til_schema(response_type)
+slutt
+
 funksjon web_rute_til_json(route)
     response_type = route_felt_tekst(route, "response_type")
     hvis response_type == ""
@@ -461,7 +481,7 @@ funksjon web_rute_til_json(route)
     route_json = route_json + "\"path\":" + json_escape_tekst(request_path)
     route_json = route_json + "},"
     route_json = route_json + "\"response_example\":" + web_type_til_eksempel(response_type) + ","
-    route_json = route_json + "\"response_schema\":" + web_type_til_schema(response_type) + ","
+    route_json = route_json + "\"response_schema\":" + web_rute_respons_schema(route, response_type) + ","
     // Serialiser error_responses som liste av {status, message}-objekt
     la errs_json: tekst = "["
     la errs_list = route_felt_liste(route, "error_responses")
@@ -490,7 +510,7 @@ funksjon web_rute_til_json(route)
     route_json = route_json + "\"description\":\"OK\","
     route_json = route_json + "\"content\":{"
     route_json = route_json + "\"application/json\":{"
-    route_json = route_json + "\"schema\":" + web_type_til_schema(response_type) + ","
+    route_json = route_json + "\"schema\":" + web_rute_respons_schema(route, response_type) + ","
     route_json = route_json + "\"example\":" + web_type_til_eksempel(response_type)
     route_json = route_json + "}}}"
     route_json = route_json + "}"
@@ -528,6 +548,17 @@ funksjon web_rute_til_json(route)
     slutt
     extra_json = extra_json + "]"
     route_json = route_json + ",\"extra_responses\":" + extra_json
+    // R3/3.1: signaturmetadata (ferdig JSON frå samla_web_annotasjonar).
+    la p_json = route_felt_tekst(route, "params_json")
+    hvis p_json == ""
+        p_json = "[]"
+    slutt
+    la m_json = route_felt_tekst(route, "modellar_json")
+    hvis m_json == ""
+        m_json = "{}"
+    slutt
+    route_json = route_json + ",\"params\":" + p_json + ",\"modellar\":" + m_json
+    route_json = route_json + ",\"return_type\":" + json_escape_tekst(route_felt_tekst(route, "return_type"))
     route_json = route_json + "}"
     returner route_json
 slutt
@@ -648,8 +679,240 @@ funksjon skann_rute_metadata(stmts, qp, bf, er)
     slutt
 slutt
 
+// ─── R3/3.1: signaturmetadata for rutehandlarar ──────────────────────────────
+// Kvar rute får "params" (namn, type, standardverdi) frå signaturen til
+// handlaren og "modellar" (strukturane som parametrar og returtype viser til,
+// transitivt gjennom felttypane). Kjøretida (std.rutebinding, apptenar og
+// nc serve) bind path/query/body etter dette i FastAPI-stil. Typen er
+// annotasjonsnamnet slik parseren gjev det (generiske argument og «?» er
+// forkasta der i dag); tom tekst = utypa. Felttypane i struktur er tomme til
+// typesystemet (R3 spor A) lagrar dei på Felt-noden.
+
+// Standardverdi som JSON når uttrykket er ein literal; elles "" (ikkje literal).
+funksjon web_literal_json(node)
+    hvis node == null
+        returner ""
+    slutt
+    la t = node["type"]
+    hvis t == "Tekst"
+        returner json_escape_tekst(node["verdi"])
+    slutt
+    hvis t == "Heltall" eller t == "Desimal"
+        returner tekst(node["verdi"])
+    slutt
+    hvis t == "Bool"
+        hvis node["verdi"] == "sann"
+            returner "true"
+        slutt
+        returner "false"
+    slutt
+    hvis t == "Null"
+        returner "null"
+    slutt
+    returner ""
+slutt
+
+// Typen til ein Parameter- eller Felt-node som tekstform ("" når utypa).
+// Tekstforma (docs/TYPEMETADATA.md, R3 spor A) er t.d. "heltall", "liste<Person>",
+// "heltall?" og "ordbok<tekst,heltall>"; utan typeuttrykk frå parseren (eldre
+// parser) blir grunnamnet i Type-noden brukt.
+funksjon web_node_type(node)
+    hvis node == null
+        returner ""
+    slutt
+    hvis har_nokkel(node, "typetekst")
+        returner tekst(node["typetekst"])
+    slutt
+    hvis har_nokkel(node, "barn")
+        la bi = 0
+        mens bi < lengde(node["barn"])
+            la b = node["barn"][bi]
+            hvis har_nokkel(b, "type") og b["type"] == "Type"
+                hvis har_nokkel(b, "typetekst")
+                    returner tekst(b["typetekst"])
+                slutt
+                returner tekst(b["verdi"])
+            slutt
+            bi = bi + 1
+        slutt
+    slutt
+    returner ""
+slutt
+
+// Standarduttrykket til ein Parameter (Standard-barn) eller Felt (første
+// barn som ikkje er ein Type-node), eller null.
+funksjon web_node_standard(node)
+    hvis node == null eller ikkje har_nokkel(node, "barn")
+        returner null
+    slutt
+    la bi = 0
+    mens bi < lengde(node["barn"])
+        la b = node["barn"][bi]
+        hvis b["type"] == "Standard"
+            hvis lengde(b["barn"]) > 0
+                returner b["barn"][0]
+            slutt
+            returner null
+        slutt
+        hvis node["type"] == "Felt" og b["type"] != "Type"
+            returner b
+        slutt
+        bi = bi + 1
+    slutt
+    returner null
+slutt
+
+// Ein parameter/felt som JSON: {"namn","type","har_standard","standard"}.
+// Ein standardverdi som ikkje er ein literal blir "standard": null med
+// "standard_uttrykk": true (kjøretida kan ikkje evaluere han).
+funksjon web_signatur_ledd_json(node)
+    la ut = "{\"namn\":" + json_escape_tekst(tekst(node["verdi"]))
+    ut = ut + ",\"type\":" + json_escape_tekst(web_node_type(node))
+    la st = web_node_standard(node)
+    hvis st == null
+        ut = ut + ",\"har_standard\":false,\"standard\":null"
+    ellers
+        la lj = web_literal_json(st)
+        hvis lj == ""
+            ut = ut + ",\"har_standard\":true,\"standard\":null,\"standard_uttrykk\":true"
+        ellers
+            ut = ut + ",\"har_standard\":true,\"standard\":" + lj
+        slutt
+    slutt
+    hvis node["type"] == "Parameter" og har_nokkel(node, "vararg") og node["vararg"] == sann
+        ut = ut + ",\"vararg\":true"
+    slutt
+    returner ut + "}"
+slutt
+
+funksjon web_params_json(fn)
+    hvis lengde(fn["barn"]) == 0 eller fn["barn"][0]["type"] != "Parametere"
+        returner "[]"
+    slutt
+    la ps = fn["barn"][0]["barn"]
+    la delar = []
+    la pi = 0
+    mens pi < lengde(ps)
+        legg_til(delar, web_signatur_ledd_json(ps[pi]))
+        pi = pi + 1
+    slutt
+    returner "[" + builtin.join(delar, ",") + "]"
+slutt
+
+// Identifikatorane i ei typetekstform: "ordbok<tekst,liste<Person>>?" →
+// ["ordbok", "tekst", "liste", "Person"].
+funksjon web_typenamn_i(t)
+    la ut = []
+    la cur = ""
+    la i = 0
+    mens i < lengde(t)
+        la c = builtin.slice(t, i, i + 1)
+        hvis c == "<" eller c == ">" eller c == "," eller c == "?" eller c == "(" eller c == ")" eller c == " " eller c == "-"
+            hvis cur != ""
+                legg_til(ut, cur)
+            slutt
+            cur = ""
+        ellers
+            cur = cur + c
+        slutt
+        i = i + 1
+    slutt
+    hvis cur != ""
+        legg_til(ut, cur)
+    slutt
+    returner ut
+slutt
+
+// Strukturen som ein returtype filtrerer etter: "Person", "Person?" eller
+// "liste<Person>" → "Person"; elles "".
+funksjon web_respons_struktur(t, strukturar)
+    la ns = web_typenamn_i(t)
+    hvis lengde(ns) == 1 og har_nokkel(strukturar, ns[0])
+        returner ns[0]
+    slutt
+    hvis lengde(ns) == 2 og ns[0] == "liste" og har_nokkel(strukturar, ns[1])
+        returner ns[1]
+    slutt
+    returner ""
+slutt
+
+// Legg alle strukturar som typeteksten viser til, i `ut`.
+funksjon web_samla_typar(t, strukturar, ut)
+    la ns = web_typenamn_i(t)
+    la i = 0
+    mens i < lengde(ns)
+        web_samla_modell(ns[i], strukturar, ut)
+        i = i + 1
+    slutt
+    returner 0
+slutt
+
+// Strukturane i modulen: namn → Struktur-node.
+funksjon web_strukturkart(ast_program)
+    la kart = {}
+    la i = 0
+    mens i < lengde(ast_program["barn"])
+        la n = ast_program["barn"][i]
+        hvis n["type"] == "Struktur"
+            kart[tekst(n["verdi"])] = n
+        slutt
+        i = i + 1
+    slutt
+    returner kart
+slutt
+
+// Legg strukturen `typenamn` (og strukturane felta viser til) i `ut`
+// (namn → JSON-tekst). Ukjende typenamn blir hoppa over.
+funksjon web_samla_modell(typenamn, strukturar, ut)
+    hvis typenamn == "" eller har_nokkel(ut, typenamn) eller ikkje har_nokkel(strukturar, typenamn)
+        returner 0
+    slutt
+    la s = strukturar[typenamn]
+    ut[typenamn] = ""
+    la felt = []
+    la fi = 0
+    mens fi < lengde(s["barn"])
+        hvis s["barn"][fi]["type"] == "Felt"
+            legg_til(felt, s["barn"][fi])
+        slutt
+        fi = fi + 1
+    slutt
+    la delar = []
+    la i = 0
+    mens i < lengde(felt)
+        legg_til(delar, web_signatur_ledd_json(felt[i]))
+        web_samla_typar(web_node_type(felt[i]), strukturar, ut)
+        i = i + 1
+    slutt
+    ut[typenamn] = "{\"namn\":" + json_escape_tekst(typenamn) + ",\"felt\":[" + builtin.join(delar, ",") + "]}"
+    returner 0
+slutt
+
+// "modellar"-objektet for ei rute: strukturane parametrane og returtypen viser til.
+funksjon web_modellar_json(fn, returtype, strukturar)
+    la ut = {}
+    hvis lengde(fn["barn"]) > 0 og fn["barn"][0]["type"] == "Parametere"
+        la ps = fn["barn"][0]["barn"]
+        la pi = 0
+        mens pi < lengde(ps)
+            web_samla_typar(web_node_type(ps[pi]), strukturar, ut)
+            pi = pi + 1
+        slutt
+    slutt
+    web_samla_typar(returtype, strukturar, ut)
+    la ks = nøkler(ut)
+    la delar = []
+    la ki = 0
+    mens ki < lengde(ks)
+        legg_til(delar, json_escape_tekst(ks[ki]) + ":" + ut[ks[ki]])
+        ki = ki + 1
+    slutt
+    returner "{" + builtin.join(delar, ",") + "}"
+slutt
+
 funksjon samla_web_annotasjonar(ast_program, modul_namn)
     handlers = []
+    la web_strukturar = web_strukturkart(ast_program)
     providers = []
     guard_providers = []
     request_middlewares = []
@@ -830,6 +1093,19 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
         hvis lengde(fn["barn"]) > 1 og fn["barn"][1]["type"] == "Returtype" og fn["barn"][1]["verdi"] != "tom"
             route_response_type = fn["barn"][1]["verdi"]
         slutt
+        // Returtypen som tekstform ("liste<Person>", "Person?"); grunnamnet når
+        // parseren ikkje gjev typeuttrykk.
+        la route_return_type = ""
+        hvis lengde(fn["barn"]) > 1 og fn["barn"][1]["type"] == "Returtype" og fn["barn"][1]["verdi"] != "tom"
+            route_return_type = fn["barn"][1]["verdi"]
+            hvis har_nokkel(fn["barn"][1], "typetekst")
+                route_return_type = tekst(fn["barn"][1]["typetekst"])
+            slutt
+        slutt
+        // R3/3.1: signatur og strukturane han viser til (ferdig JSON).
+        la route_params_json = web_params_json(fn)
+        la route_modellar_json = web_modellar_json(fn, route_return_type, web_strukturar)
+        la route_respons_struktur = web_respons_struktur(route_return_type, web_strukturar)
 
         // 2.10(a): fleire web.route()-kall per handler → éi route-oppføring kvar.
         si = 0
@@ -860,6 +1136,10 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             route["request_example"]["method"] = "get"
             route["request_example"]["path"] = combined_spec
             route["response_type"] = route_response_type
+            route["params_json"] = route_params_json
+            route["modellar_json"] = route_modellar_json
+            route["return_type"] = route_return_type
+            route["respons_struktur"] = route_respons_struktur
             route["response_example"] = web_type_til_eksempel(route["response_type"])
             route["response_schema"] = web_type_til_schema(route["response_type"])
             route["responses"] = {}
