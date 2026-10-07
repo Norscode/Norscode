@@ -1,0 +1,356 @@
+# rutebinding.no — FastAPI-liknande binding frå handlar-signatur (R3 trinn 8, 3.2/3.3)
+#
+# Kompilatoren lagrar signaturen til kvar rutehandlar i rutemetadata:
+#   "params":   [{"namn", "type", "har_standard", "standard"}, ...]
+#   "modellar": strukturnamn → {"namn", "felt": [...]}   (sjå std.modell.frå_struktur)
+#   "response_type": returtypen
+# Denne modulen bind argumenta etter signaturen og er felles for apptenar og nc serve
+# (nc serve kallar bind_serve inne i app-VM-en, sjå selfhost/nc_main.no):
+#
+#   funksjon hent(ctx, id: heltall, q: tekst = "", n: heltall = 10) -> Person
+#       web.route("GET /personar/{id}")
+#
+#   - ein parameter med same namn som eit {stiparameter} blir henta frå stien og
+#     konvertert til typen (annotasjonen vinn over {id:int} i mønsteret);
+#   - ein parameter med same namn som ein avhengnad (web.use_dependency) får verdien;
+#   - ein parameter med strukturtype blir bunden frå JSON-kroppen og validert med
+#     std.modell (fleire strukturparametrar: kroppen er {namn: objekt, ...});
+#   - ein `liste`-parameter blir henta som gjentekne query-nøklar (?t=a&t=b);
+#   - andre parametrar (enkle typar eller utypa) blir henta frå query-strengen;
+#   - den første parameteren er ctx når han er utypa (eller `ordbok`) og ikkje er
+#     ein sti-/avhengnadsparameter, og namna ctx/req/request/førespurnad er alltid ctx.
+# Feil type eller manglande påkravd verdi gjev 422 i Fase 0-formatet
+# {"detail":[{"type","loc","msg","input"}]} med loc ["path","id"], ["query","n"] og
+# ["body","felt"].
+#
+# Bakoverkompatibilitet: ein handlar utan typeannotasjonar som ikkje har fleire
+# parametrar enn ctx + avhengnader, og ingen parameter med namnet til ein
+# stiparameter, blir kalla som før (ctx, dep1, dep2, ...). Rutemetadata utan "params"
+# (NCB frå ein eldre kompilator) blir bunde etter parameternamna til funksjonen,
+# utan typar.
+
+bruk std.web som _web
+bruk std.modell som _m
+
+# ─── Hjelparar ────────────────────────────────────────────────────────────────
+
+funksjon _har(d, k: tekst) -> bool {
+    returner d != null og builtin.type(d) == "ordbok" og har_nokkel(d, k)
+}
+
+funksjon _tekst_felt(d, k: tekst) -> tekst {
+    hvis ikkje _har(d, k) { returner "" }
+    la v = d[k]
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+funksjon _er_sann(v) -> bool {
+    hvis v == null { returner usann }
+    hvis builtin.type(v) == "boolsk" { returner v }
+    la t = tekst(v)
+    returner t == "sann" eller t == "true" eller t == "1"
+}
+
+# Modulen til ein fullt kvalifisert funksjon ("app.api.hent" → "app.api").
+funksjon modul_av(fn: tekst) -> tekst {
+    la delar = builtin.split(fn, ".")
+    hvis lengde(delar) < 2 { returner "__main__" }
+    fjern(delar, lengde(delar) - 1)
+    returner builtin.join(delar, ".")
+}
+
+# Planlegginga (kvar kvar parameter kjem frå) ligg i std.web, slik at OpenAPI-
+# generatoren der dokumenterer nøyaktig det same som blir bunde her.
+
+# Stiparameternamn og -typar frå mønsteret: "/a/{id:int}/{s}" → {"id": "int", "s": ""}.
+funksjon sti_typar(mønster: tekst) -> ordbok { returner _web.signatur_sti_typar(mønster) }
+
+funksjon _mønster(rute: ordbok) -> tekst { returner _web.signatur_mønster(rute) }
+
+# Mønstertypen {id:int} som annotasjonsnamn.
+funksjon _frå_mønstertype(t: tekst) -> tekst {
+    la l = builtin.lower(t)
+    hvis l == "int" { returner "heltall" }
+    hvis l == "float" { returner "desimaltall" }
+    hvis l == "bool" { returner "boolsk" }
+    returner ""
+}
+
+# Signaturen til ruta: lista frå metadata, eller namna frå funksjonen (utan typar).
+funksjon signatur(rute: ordbok, param_namn) -> liste { returner _web.signatur_liste(rute, param_namn) }
+
+funksjon _katalog(rute: ordbok) -> ordbok { returner _web.signatur_katalog(rute) }
+
+# ─── Planlegging ──────────────────────────────────────────────────────────────
+
+# Kjelda til kvar parameter: "ctx", "dep", "path", "body", "query", "query_liste".
+# Gjev {"modus": "legacy" | "signatur", "kjelder": liste<ordbok>, "n_body"}.
+funksjon planlegg(rute: ordbok, sig: liste, dep_namn: liste) -> ordbok { returner _web.signatur_plan(rute, sig, dep_namn) }
+
+# ─── Verdiar ──────────────────────────────────────────────────────────────────
+
+# Validerer éin verdi mot typen t med loc [rot, namn]. Gjev {"ok", "verdi"}; feil i `feil`.
+funksjon _ein(namn: tekst, t: tekst, rå, rot: tekst, feil: liste, katalog: ordbok) -> ordbok {
+    la f = _m.felt_for_type(namn, t, katalog, 0)
+    la md = _m.ny_modell()
+    _m.legg(md, f)
+    la data: ordbok = {}
+    data[namn] = rå
+    la res = _m.valider_med_rot(md, data, rot)
+    hvis res["gyldig"] { returner {"ok": sann, "verdi": res["verdiar"][namn]} }
+    la j = 0
+    mens j < lengde(res["feil"]) {
+        legg_til(feil, res["feil"][j])
+        j = j + 1
+    }
+    returner {"ok": usann}
+}
+
+funksjon _manglar(feil: liste, loc: liste) -> heltall {
+    legg_til(feil, _web.valideringsfeil_post("missing", loc, "Påkravd felt manglar", ""))
+    returner 0
+}
+
+funksjon _standard_eller_manglar(p: ordbok, loc: liste, feil: liste) -> ordbok {
+    hvis _web.signatur_type_del(_tekst_felt(p, "type"))["valfri"] og ikkje _er_sann(p["har_standard"]) {
+        returner {"ok": sann, "verdi": null}
+    }
+    hvis _er_sann(p["har_standard"]) {
+        la sv = null
+        hvis _har(p, "standard") { sv = p["standard"] }
+        returner {"ok": sann, "verdi": sv}
+    }
+    _manglar(feil, loc)
+    returner {"ok": usann}
+}
+
+funksjon _query_verdi(ctx: ordbok, namn: tekst) {
+    la q = null
+    hvis _har(ctx, "__query__") { q = ctx["__query__"] }
+    hvis q == null eller builtin.type(q) != "ordbok" eller ikkje har_nokkel(q, namn) { returner null }
+    la v = q[namn]
+    # nc serve held gjentekne nøklar som liste; ein skalar tek den siste (som FastAPI).
+    hvis v != null og builtin.type(v) == "liste" {
+        hvis lengde(v) == 0 { returner null }
+        returner v[lengde(v) - 1]
+    }
+    returner v
+}
+
+funksjon _har_query(ctx: ordbok, namn: tekst) -> bool {
+    hvis ikkje _har(ctx, "__query__") { returner usann }
+    la q = ctx["__query__"]
+    hvis q == null eller builtin.type(q) != "ordbok" { returner usann }
+    hvis har_nokkel(q, namn) { returner sann }
+    hvis har_nokkel(q, "__raw__") { returner lengde(_web.request_query_list(ctx, namn)) > 0 }
+    returner usann
+}
+
+# JSON-kroppen éin gong per binding: {"ok", "data"} eller {"ok": usann, "post"}.
+funksjon _kropp(ctx: ordbok, cache: ordbok) -> ordbok {
+    hvis har_nokkel(cache, "kropp") { returner cache["kropp"] }
+    la body = ""
+    hvis _har(ctx, "__body__") og ctx["__body__"] != null { body = tekst(ctx["__body__"]) }
+    la r = {}
+    hvis builtin.trim(body) == "" {
+        r = {"ok": usann, "tom": sann}
+    } ellers hvis ikkje _web.json_er_gyldig(body) {
+        r = {"ok": usann, "post": _web.valideringsfeil_post("json_invalid", ["body"], "ugyldig JSON-kropp", "")}
+    } ellers {
+        r = {"ok": sann, "data": builtin.json_parse_raw(body)}
+    }
+    cache["kropp"] = r
+    returner r
+}
+
+funksjon _bind_body(kj: ordbok, ctx: ordbok, cache: ordbok, n_body: heltall, feil: liste, katalog: ordbok, modul: tekst) -> ordbok {
+    la n = kj["namn"]
+    la t = kj["type"]
+    la p = kj["p"]
+    la k = _kropp(ctx, cache)
+    hvis ikkje k["ok"] {
+        hvis har_nokkel(k, "post") {
+            hvis ikkje har_nokkel(cache, "json_feil") {
+                cache["json_feil"] = sann
+                legg_til(feil, k["post"])
+            }
+            returner {"ok": usann}
+        }
+        la loc = ["body"]
+        hvis n_body > 1 { loc = ["body", n] }
+        returner _standard_eller_manglar(p, loc, feil)
+    }
+    la data = k["data"]
+    la rot_loc = ["body"]
+    hvis n_body > 1 {
+        # Fleire kroppsparametrar: {"namn": {...}, ...} (FastAPI Body(embed)).
+        hvis builtin.type(data) != "ordbok" {
+            legg_til(feil, _web.valideringsfeil_post("model_attributes_type", ["body"], "Forventa objekt", ""))
+            returner {"ok": usann}
+        }
+        hvis ikkje har_nokkel(data, n) { returner _standard_eller_manglar(p, ["body", n], feil) }
+        data = data[n]
+        rot_loc = ["body", n]
+    }
+    la s = _web.signatur_struktur(t, katalog)
+    hvis builtin.type(data) == "ingenting" og _web.signatur_type_del(t)["valfri"] { returner {"ok": sann, "verdi": null} }
+    hvis s == "" {
+        # Annan kroppstype (ordbok, liste<Person>, ...): validert som eitt felt med
+        # loc-en til kroppen (t.d. ["body", "0", "namn"] for eit listeelement).
+        hvis _web.signatur_type_norm(t) == "ordbok" eller t == "" {
+            hvis builtin.type(data) != "ordbok" {
+                legg_til(feil, _web.valideringsfeil_post("dict_type", rot_loc, "Forventa objekt", ""))
+                returner {"ok": usann}
+            }
+        }
+        la siste = rot_loc[lengde(rot_loc) - 1]
+        la prefiks = []
+        la pi = 0
+        mens pi < lengde(rot_loc) - 1 {
+            legg_til(prefiks, rot_loc[pi])
+            pi = pi + 1
+        }
+        la ef = _m.felt_for_type(siste, t, katalog, 0)
+        la emd = _m.ny_modell()
+        _m.legg(emd, ef)
+        la ed: ordbok = {}
+        ed[siste] = data
+        la eres = _m.valider_med_loc(emd, ed, prefiks)
+        hvis ikkje eres["gyldig"] {
+            la ej = 0
+            mens ej < lengde(eres["feil"]) {
+                legg_til(feil, eres["feil"][ej])
+                ej = ej + 1
+            }
+            returner {"ok": usann}
+        }
+        returner {"ok": sann, "verdi": _m.som_verdi(ef, eres["verdiar"][siste], modul)}
+    }
+    hvis builtin.type(data) != "ordbok" {
+        legg_til(feil, _web.valideringsfeil_post("model_attributes_type", rot_loc, "Forventa objekt", ""))
+        returner {"ok": usann}
+    }
+    la md = _m.frå_struktur(katalog[s], katalog)
+    la vres = _m.valider_med_loc(md, data, rot_loc)
+    la fl = vres["feil"]
+    hvis ikkje vres["gyldig"] {
+        la j = 0
+        mens j < lengde(fl) {
+            legg_til(feil, fl[j])
+            j = j + 1
+        }
+        returner {"ok": usann}
+    }
+    returner {"ok": sann, "verdi": _m.som_instans(md, vres["verdiar"], modul)}
+}
+
+# ─── Offentleg API ────────────────────────────────────────────────────────────
+
+# Bind argumenta til handlaren. dep_namn/dep_verdiar er rute-avhengnadene (namn og
+# løyste verdiar i same rekkjefølgje). param_namn er parameternamna til funksjonen
+# (brukt når metadata manglar "params"; kan vere null).
+# Gjev {"ok": sann, "args": liste} eller {"ok": usann, "status": 422, "body": tekst}.
+funksjon bind(rute: ordbok, ctx: ordbok, dep_namn: liste, dep_verdiar: liste, param_namn) -> ordbok {
+    la sig = signatur(rute, param_namn)
+    la plan = planlegg(rute, sig, dep_namn)
+    returner bind_med_plan(rute, plan, sig, ctx, dep_namn, dep_verdiar)
+}
+
+# Som bind, med plan og signatur rekna ut på førehand (apptenar gjer det éin gong per rute).
+funksjon bind_med_plan(rute: ordbok, plan: ordbok, sig: liste, ctx: ordbok, dep_namn: liste, dep_verdiar: liste) -> ordbok {
+    hvis plan["modus"] == "legacy" {
+        la args = [ctx]
+        la n_dep = lengde(sig) - 1
+        la i = 0
+        mens i < n_dep og i < lengde(dep_verdiar) {
+            legg_til(args, dep_verdiar[i])
+            i = i + 1
+        }
+        hvis lengde(sig) == 0 { args = [] }
+        returner {"ok": sann, "args": args, "modus": "legacy"}
+    }
+    la katalog = _katalog(rute)
+    la sti_t = sti_typar(_mønster(rute))
+    la params = {}
+    hvis _har(ctx, "__params__") og ctx["__params__"] != null { params = ctx["__params__"] }
+    la deps: ordbok = {}
+    la di = 0
+    mens di < lengde(dep_namn) og di < lengde(dep_verdiar) {
+        deps[tekst(dep_namn[di])] = dep_verdiar[di]
+        di = di + 1
+    }
+    la modul = modul_av(_tekst_felt(rute, "function"))
+    la cache: ordbok = {}
+    la feil: liste = []
+    la args = []
+    la kjelder = plan["kjelder"]
+    la i = 0
+    mens i < lengde(kjelder) {
+        la kj = kjelder[i]
+        la k = kj["kjelde"]
+        la n = kj["namn"]
+        la t = kj["type"]
+        la r = {"ok": sann, "verdi": null}
+        hvis k == "ctx" {
+            r = {"ok": sann, "verdi": ctx}
+        } ellers hvis k == "dep" {
+            la dn = n
+            hvis har_nokkel(kj, "dep") { dn = kj["dep"] }
+            hvis har_nokkel(deps, dn) { r = {"ok": sann, "verdi": deps[dn]} }
+        } ellers hvis k == "path" {
+            la pt = t
+            hvis pt == "" { pt = _frå_mønstertype(sti_t[n]) }
+            hvis params != null og builtin.type(params) == "ordbok" og har_nokkel(params, n) {
+                r = _ein(n, pt, params[n], "path", feil, katalog)
+            } ellers {
+                _manglar(feil, ["path", n])
+                r = {"ok": usann}
+            }
+        } ellers hvis k == "body" {
+            r = _bind_body(kj, ctx, cache, plan["n_body"], feil, katalog, modul)
+        } ellers hvis k == "query_liste" {
+            hvis _har_query(ctx, n) {
+                r = _ein(n, t, _web.request_query_list(ctx, n), "query", feil, katalog)
+            } ellers {
+                r = _standard_eller_manglar(kj["p"], ["query", n], feil)
+            }
+        } ellers {
+            la qv = _query_verdi(ctx, n)
+            hvis qv == null {
+                r = _standard_eller_manglar(kj["p"], ["query", n], feil)
+            } ellers {
+                r = _ein(n, t, qv, "query", feil, katalog)
+            }
+        }
+        legg_til(args, r["verdi"])
+        i = i + 1
+    }
+    hvis lengde(feil) > 0 {
+        returner {"ok": usann, "status": 422, "body": _web.valideringsfeil_json(feil), "feil": feil}
+    }
+    returner {"ok": sann, "args": args, "modus": "signatur"}
+}
+
+# Same som bind, men for nc serve (kalla frå nc_main inne i app-VM-en): parameternamna
+# blir henta med vm_function_info når metadata manglar "params".
+funksjon bind_serve(rute: ordbok, ctx: ordbok, dep_namn: liste, dep_verdiar: liste) -> ordbok {
+    returner bind(rute, ctx, dep_namn, dep_verdiar, parameternamn(_tekst_felt(rute, "function")))
+}
+
+# Parameternamna til ein funksjon i den køyrande VM-en (tom liste om ukjend).
+funksjon parameternamn(fn: tekst) -> liste {
+    la info = builtin.vm_function_info(fn)
+    hvis tekst(info["finnes"]) != "sann" { returner [] }
+    la ps = info["params"]
+    hvis ps == null { returner [] }
+    hvis builtin.type(ps) == "liste" { returner ps }
+    la rå = tekst(ps)
+    hvis rå == "" { returner [] }
+    prøv {
+        la l = builtin.json_parse_raw(rå)
+        hvis builtin.type(l) == "liste" { returner l }
+    } fang (e) { }
+    returner []
+}
+
