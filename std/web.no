@@ -1166,6 +1166,11 @@ funksjon response_header(response: ordbok_tekst, nøkkel: tekst) -> tekst {
     la low = tekst_til_liten(nøkkel)
     hvis (finnes_nøkkel(h, low)) { returner h[low] }
     hvis (finnes_nøkkel(h, nøkkel)) { returner h[nøkkel] }
+    // Set-Cookie ligg i toppnøkkelen set_cookie (liste) etter response_set_cookie.
+    hvis low == "set-cookie" {
+        la alle = response_set_cookies(response)
+        hvis lengde(alle) > 0 { returner builtin.join(alle, ", ") }
+    }
     returner ""
 }
 
@@ -1173,11 +1178,158 @@ funksjon cookie_header(nøkkel: tekst, verdi: tekst) -> tekst {
     returner nøkkel + "=" + verdi + "; HttpOnly; Secure; SameSite=Lax"
 }
 
+// ─── Cookies (FA-063) ────────────────────────────────────────────────────────
+// Fleire Set-Cookie: responskontrakten har toppnøkkelen «set_cookie», som kan
+// vere ei liste. nc serve (selfhost/http_response.no legg_header) og apptenar
+// (til_http) sender éi Set-Cookie-linje per element. Ei ordbok kan ikkje ha
+// same header-nøkkel to gonger, so headers["set-cookie"] kan berre bere éin.
+
+funksjon _cookie_del_trygg(t: tekst) -> boolsk {
+    returner builtin.index_of(t, ";") < 0 og builtin.index_of(t, "\r") < 0 og builtin.index_of(t, "\n") < 0 og builtin.index_of(t, builtin.chr(0)) < 0
+}
+
+funksjon _val_tekst(val: ordbok, nøkkel: tekst, standard: tekst) -> tekst {
+    hvis val == null eller ikkje finnes_nøkkel(val, nøkkel) { returner standard }
+    la v = val[nøkkel]
+    hvis v == null { returner standard }
+    returner tekst(v)
+}
+
+funksjon _val_sann(val: ordbok, nøkkel: tekst, standard: boolsk) -> boolsk {
+    hvis val == null eller ikkje finnes_nøkkel(val, nøkkel) { returner standard }
+    la v = tekst(val[nøkkel])
+    returner v == "sann" eller v == "true" eller v == "1"
+}
+
+// Set-Cookie-verdi med val som FastAPI sin response.set_cookie. val (ordbok,
+// alle valfrie): max_age (sekund), expires (HTTP-dato), path (standard «/»),
+// domain, secure (standard sann), httponly (standard sann), samesite
+// (standard «Lax»; «Strict», «Lax», «None» eller «» for å sleppe attributtet).
+// Trygge standardar som cookie_header. Kastar ved ; CR LF NUL i namn/verdi/
+// attributt (header-injeksjon).
+funksjon cookie_header_med(namn: tekst, verdi: tekst, val: ordbok) -> tekst {
+    hvis namn == "" eller ikkje _cookie_del_trygg(namn) eller builtin.index_of(namn, "=") >= 0 eller ikkje _cookie_del_trygg(verdi) {
+        kast "web: ugyldig cookie-namn eller -verdi"
+    }
+    la c = namn + "=" + verdi
+    la max_age = _val_tekst(val, "max_age", "")
+    hvis max_age != "" {
+        hvis ikkje _er_heiltal_tekst(max_age) { kast "web: ugyldig max_age for cookie " + namn }
+        c = c + "; Max-Age=" + builtin.trim(max_age)
+    }
+    la expires = _val_tekst(val, "expires", "")
+    hvis expires != "" {
+        hvis ikkje _cookie_del_trygg(expires) { kast "web: ugyldig expires for cookie " + namn }
+        c = c + "; Expires=" + expires
+    }
+    la path = _val_tekst(val, "path", "/")
+    hvis path != "" {
+        hvis ikkje _cookie_del_trygg(path) { kast "web: ugyldig path for cookie " + namn }
+        c = c + "; Path=" + path
+    }
+    la domain = _val_tekst(val, "domain", "")
+    hvis domain != "" {
+        hvis ikkje _cookie_del_trygg(domain) { kast "web: ugyldig domain for cookie " + namn }
+        c = c + "; Domain=" + domain
+    }
+    la samesite = _val_tekst(val, "samesite", "Lax")
+    la ss = _ascii_lower(samesite)
+    hvis ss == "strict" { samesite = "Strict" }
+    ellers hvis ss == "lax" { samesite = "Lax" }
+    ellers hvis ss == "none" { samesite = "None" }
+    ellers hvis ss != "" { kast "web: ugyldig samesite for cookie " + namn }
+    // SameSite=None krev Secure i nettlesarane.
+    la secure = _val_sann(val, "secure", sann) eller ss == "none"
+    hvis _val_sann(val, "httponly", sann) { c = c + "; HttpOnly" }
+    hvis secure { c = c + "; Secure" }
+    hvis ss != "" { c = c + "; SameSite=" + samesite }
+    returner c
+}
+
+// Alle Set-Cookie-verdiane i eit svar (toppnøkkelen set_cookie og eventuelle
+// eldre headers["set-cookie"]), i rekkjefølgje.
+funksjon response_set_cookies(response: ordbok_tekst) -> liste<tekst> {
+    la ut: liste<tekst> = []
+    la nøklar = ["set_cookie", "__set_cookie__"]
+    la k: heiltall = 0
+    mens k < lengde(nøklar) {
+        hvis finnes_nøkkel(response, nøklar[k]) {
+            la v = response[nøklar[k]]
+            hvis v != null og builtin.type(v) == "liste" {
+                la i: heiltall = 0
+                mens i < lengde(v) {
+                    legg_til(ut, tekst(v[i]))
+                    i = i + 1
+                }
+            } ellers hvis v != null og tekst(v) != "" {
+                legg_til(ut, tekst(v))
+            }
+        }
+        k = k + 1
+    }
+    returner ut
+}
+
+// Legg til ein Set-Cookie (overskriv ikkje tidlegare). Ein eldre
+// headers["set-cookie"] (frå response_builder-headerar) blir flytta inn i lista
+// først, so han verken går tapt eller blir send to gonger.
 funksjon response_set_cookie(response: ordbok_tekst, cookie: tekst) -> ordbok_tekst {
-    la h = response["__headers__"]
-    h["set-cookie"] = cookie
-    response["__headers__"] = h
+    la liste: liste<tekst> = response_set_cookies(response)
+    hvis finnes_nøkkel(response, "__set_cookie__") { fjern_nokkel(response, "__set_cookie__") }
+    la hn = ["__headers__", "headers"]
+    la hi: heiltall = 0
+    mens hi < lengde(hn) {
+        hvis finnes_nøkkel(response, hn[hi]) {
+            la h = response[hn[hi]]
+            hvis h != null og builtin.type(h) == "ordbok" {
+                la ks = nøkler(h)
+                la i: heiltall = 0
+                mens i < lengde(ks) {
+                    la k = tekst(ks[i])
+                    hvis tekst_til_liten(k) == "set-cookie" {
+                        la v = h[k]
+                        hvis builtin.type(v) == "liste" {
+                            la j: heiltall = 0
+                            mens j < lengde(v) {
+                                legg_til(liste, tekst(v[j]))
+                                j = j + 1
+                            }
+                        } ellers hvis tekst(v) != "" {
+                            legg_til(liste, tekst(v))
+                        }
+                        fjern_nokkel(h, k)
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        hi = hi + 1
+    }
+    legg_til(liste, cookie)
+    response["set_cookie"] = liste
     returner response
+}
+
+// Set-Cookie som slettar cookien i nettlesaren (som FastAPI delete_cookie):
+// tom verdi, Max-Age=0 og Expires i fortida. path/domain må vere som då
+// cookien vart sett; standard path er «/».
+funksjon delete_cookie_header(namn: tekst, val: ordbok) -> tekst {
+    la v: ordbok = {}
+    hvis val != null {
+        la ks = nøkler(val)
+        la i: heiltall = 0
+        mens i < lengde(ks) {
+            v[ks[i]] = val[ks[i]]
+            i = i + 1
+        }
+    }
+    v["max_age"] = "0"
+    v["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+    returner cookie_header_med(namn, "", v)
+}
+
+funksjon response_delete_cookie(response: ordbok_tekst, namn: tekst) -> ordbok_tekst {
+    returner response_set_cookie(response, delete_cookie_header(namn, {}))
 }
 
 funksjon validation_error_body(errors: liste<tekst>) -> tekst {
