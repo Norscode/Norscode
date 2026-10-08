@@ -180,6 +180,42 @@ funksjon parse_program(tokens)
             fortsett
         slutt
 
+        // R3/F29: `abstrakt struktur`/`abstrakt funksjon` finst ikkje (A4: grensesnitt +
+        // komposisjon). Gje ein klar feil i staden for at ein kroppslaus funksjon
+        // slukar neste deklarasjon.
+        hvis type == "IDENT" og token_verdi(gjeldende(state)) == "abstrakt"
+            la etter_abstrakt = se_frem(state, 1)["type"]
+            hvis etter_abstrakt == "STRUKTUR" eller etter_abstrakt == "FUNKSJON"
+                parserfeil(state, "abstrakt er ikkje støtta: bruk grensesnitt (med standardmetodar) og komposisjon")
+            slutt
+        slutt
+
+        // R3/F31: `privat` framfor funksjon / la / konst på toppnivå. `privat`
+        // er kontekstuelt (std brukar det som parameternamn).
+        hvis type == "IDENT" og er_privat_modifikator(state)
+            neste(state)
+            privat_node = null
+            hvis gjeldende(state)["type"] == "ASYNC" eller gjeldende(state)["type"] == "FUNKSJON"
+                privat_node = parse_funksjon(state)
+            ellers
+                hvis gjeldende(state)["type"] == "IDENT"
+                    // `privat konst X = …`: lexeren gjer berre `konst` ved
+                    // setningsstart til LA; her står han etter `privat`.
+                    konst_tok = gjeldende(state)
+                    konst_tok["type"] = "LA"
+                slutt
+                privat_node = parse_setning(state)
+            slutt
+            privat_node["privat"] = sann
+            legg_barn(rot, privat_node)
+            fortsett
+        slutt
+
+        hvis type == "IDENT" og er_fra_bruk(state)
+            legg_barn(rot, parse_fra_bruk(state))
+            fortsett
+        slutt
+
         hvis type == "IDENT"
             kort_funksjon = usann
             hvis se_frem(state, 1)["type"] == "LPAREN"
@@ -380,12 +416,18 @@ funksjon parse_struktur(state)
     start = forvent(state, "STRUKTUR", "forventet struktur")
     namn_tok = forvent(state, "IDENT", "forventet strukturnamn")
     node = ny_node("Struktur", token_verdi(namn_tok), token_linje(start), token_kolonne(start))
-    // Valfri grensesnitt-klausul: struktur X implementerer Form { … }.
-    // ir_to_bytecode sjekkar at X har alle metodane til Form.
+    // R3/F28: generiske typeparametrar struktur Boks<T> { verdi: T } (erased).
+    hvis gjeldende(state)["type"] == "LT"
+        node["typeparametrar"] = les_typeparametrar(state)
+    slutt
+    // Valfri grensesnitt-klausul: struktur X implementerer Form, Namngjeven { … }.
+    // ir_to_bytecode sjekkar at X har alle metodane til kvart grensesnitt.
+    // R3/F29: node["implementerer"] er det fyrste (som før), alle i implementerer_alle.
     hvis gjeldende(state)["type"] == "IMPLEMENTERER"
         neste(state)
-        iface_tok = forvent(state, "IDENT", "forventet grensesnitt-namn etter implementerer")
-        node["implementerer"] = token_verdi(iface_tok)
+        alle_iface = les_grensesnitt_liste(state)
+        node["implementerer"] = alle_iface[0]
+        node["implementerer_alle"] = alle_iface
     slutt
     matcher(state, "LBRACE")   // valfri { — støtt begge stilar
 
@@ -395,14 +437,25 @@ funksjon parse_struktur(state)
             bryt
         slutt
         // Selfhost-strukturkontrakt: felt er reine identifikatornamn i denne parservegen.
-        // Ein valfri type-annotasjon (`x: heltall`) blir parsa og FORKASTA — Felt-noden
-        // ber berre namnet, og runtime lagrar strukturen som ordbok som før.
+        // R3/F28: ein valfri type-annotasjon (`x: heltall`) blir lagra som nøklane
+        // typeuttrykk/typetekst på Felt-noden (barna er uendra; runtime er erased).
+        // R3/F31: `privat felt: type` — feltet er berre synleg i modulen.
+        felt_privat = usann
+        hvis gjeldende(state)["type"] == "IDENT" og token_verdi(gjeldende(state)) == "privat" og se_frem(state, 1)["type"] == "IDENT"
+            neste(state)
+            felt_privat = sann
+        slutt
         felt_tok = forvent(state, "IDENT", "forventet feltnavn i struktur")
         felt_node = ny_node("Felt", token_verdi(felt_tok), token_linje(felt_tok), token_kolonne(felt_tok))
+        hvis felt_privat
+            felt_node["privat"] = sann
+        slutt
         legg_barn(node, felt_node)
         hvis gjeldende(state)["type"] == "COLON"
             neste(state)
             les_type_token(state)
+            felt_node["typeuttrykk"] = state["siste_type"]
+            felt_node["typetekst"] = type_tekst(state["siste_type"])
         slutt
         // R2/F05: standardverdi `x: heltall = 5`. Uttrykket blir einaste barn
         // av Felt-noden; konstruktøren evaluerer det når argumentet manglar.
@@ -450,15 +503,23 @@ slutt
 
 // ─── grensesnitt-deklarasjon ──────────────────────────────────────────────────
 // grensesnitt Form { funksjon areal(self) -> heltall  … }  — listar påkravde
-// metode-signaturar. ir_to_bytecode sjekkar at struktur X implementerer Form har
-// alle metodane (funksjon X.metode), elles kompileringsfeil.
+// metode-signaturar. R3/F29: kvar Metodekrav har barna Parametere og Returtype
+// (som Funksjon) og ein valfri Blokk = standardmetode (`funksjon f(self) { … }`).
+// `grensesnitt B implementerer A, C` arvar krava til A og C (node["utvider"]).
+// ir_to_bytecode sjekkar at struktur X implementerer Form har alle metodane
+// (funksjon X.metode) med rett aritet og returtype, og syntetiserer standardmetodar.
 funksjon parse_grensesnitt(state)
     start = forvent(state, "GRENSESNITT", "forventet grensesnitt")
     namn_tok = forvent(state, "IDENT", "forventet grensesnitt-namn")
     node = ny_node("Grensesnitt", token_verdi(namn_tok), token_linje(start), token_kolonne(start))
+    hvis gjeldende(state)["type"] == "LT"
+        node["typeparametrar"] = les_typeparametrar(state)
+    slutt
+    hvis gjeldende(state)["type"] == "IMPLEMENTERER"
+        neste(state)
+        node["utvider"] = les_grensesnitt_liste(state)
+    slutt
     matcher(state, "LBRACE")
-    // Flat skanning: samle metodenamn (etter kvar `funksjon`), hopp over resten
-    // av signaturen token for token til neste funksjon eller blokkslutt.
     mens ikkje er_slutt(state)
         t = gjeldende(state)["type"]
         hvis t == "SLUTT" eller t == "RBRACE"
@@ -467,7 +528,30 @@ funksjon parse_grensesnitt(state)
         hvis t == "FUNKSJON"
             neste(state)
             m_tok = les_namn_token(state)
-            legg_barn(node, ny_node("Metodekrav", token_verdi(m_tok), token_linje(m_tok), token_kolonne(m_tok)))
+            krav = ny_node("Metodekrav", token_verdi(m_tok), token_linje(m_tok), token_kolonne(m_tok))
+            hvis gjeldende(state)["type"] == "LT"
+                krav["typeparametrar"] = les_typeparametrar(state)
+            slutt
+            hvis gjeldende(state)["type"] == "LPAREN"
+                neste(state)
+                legg_barn(krav, parse_parameterliste(state))
+                forvent(state, "RPAREN", "forventet ) etter parameterliste i grensesnitt")
+            ellers
+                legg_barn(krav, ny_node("Parametere", "", token_linje(m_tok), token_kolonne(m_tok)))
+            slutt
+            la k_retur = gjeldende(state)["type"]
+            hvis k_retur == "ARROW" eller k_retur == "COLON"
+                neste(state)
+                k_rt = les_type_token(state)
+                legg_barn(krav, type_node(state, "Returtype", k_rt))
+            ellers
+                legg_barn(krav, ny_node("Returtype", "tom", token_linje(m_tok), token_kolonne(m_tok)))
+            slutt
+            // Standardmetode: berre klammeform, så `slutt` framleis avsluttar grensesnittet.
+            hvis gjeldende(state)["type"] == "LBRACE"
+                legg_barn(krav, parse_blokk(state))
+            slutt
+            legg_barn(node, krav)
         ellers
             neste(state)
         slutt
@@ -475,6 +559,20 @@ funksjon parse_grensesnitt(state)
     matcher(state, "RBRACE")
     matcher(state, "SLUTT")
     returner node
+slutt
+
+// Namneliste etter implementerer: A, B, C (R3/F29).
+funksjon les_grensesnitt_liste(state)
+    ut = []
+    mens sann
+        g_tok = forvent(state, "IDENT", "forventet grensesnitt-namn etter implementerer")
+        legg_til(ut, token_verdi(g_tok))
+        hvis gjeldende(state)["type"] != "COMMA"
+            bryt
+        slutt
+        neste(state)
+    slutt
+    returner ut
 slutt
 
 // ─── bruk-import ──────────────────────────────────────────────────────────────
@@ -513,6 +611,75 @@ funksjon parse_bruk(state)
     returner node
 slutt
 
+// F42: selektiv import `fra a.b bruk x, y` (eller `fra a.b bruk *`). Gjev ein
+// vanleg Bruk-node for a.b (alias = siste segment) med Utval-born for namna;
+// kompilatoren bind dei ukvalifisert til a.b.<namn>. `fra` er kontekstuelt:
+// berre på toppnivå når ein modulsti og `bruk` følgjer.
+funksjon er_fra_bruk(state)
+    tok = gjeldende(state)
+    hvis tok["type"] != "IDENT" eller token_verdi(tok) != "fra"
+        returner usann
+    slutt
+    j = 1
+    mens j < 64
+        t = se_frem(state, j)["type"]
+        hvis t == "BRUK"
+            returner j > 1
+        slutt
+        hvis t != "IDENT" og t != "DOT" og t != "TYPE_TEXT" og t != "TYPE_INT" og t != "TYPE_BOOL"
+            returner usann
+        slutt
+        j = j + 1
+    slutt
+    returner usann
+slutt
+
+
+// R3/F31: er gjeldande token modifikatoren `privat` (framfor funksjon, la,
+// konst eller asynk funksjon)?
+funksjon er_privat_modifikator(state)
+    tok = gjeldende(state)
+    hvis tok["type"] != "IDENT" eller token_verdi(tok) != "privat"
+        returner usann
+    slutt
+    nt = se_frem(state, 1)
+    hvis nt["type"] == "FUNKSJON" eller nt["type"] == "ASYNC" eller nt["type"] == "LA"
+        returner sann
+    slutt
+    hvis nt["type"] == "IDENT" og token_verdi(nt) == "konst" og se_frem(state, 2)["type"] == "IDENT"
+        returner sann
+    slutt
+    returner usann
+slutt
+
+funksjon parse_fra_bruk(state)
+    start = neste(state)  // fra
+    sti = token_verdi(les_modul_del(state, "forventet modulnamn etter fra"))
+    mens gjeldende(state)["type"] == "DOT"
+        neste(state)
+        del = les_modul_del(state, "forventet modulnamn etter .")
+        sti = sti + "." + token_verdi(del)
+    slutt
+    forvent(state, "BRUK", "forventet bruk etter fra <modul>")
+    node = ny_node("Bruk", sti, token_linje(start), token_kolonne(start))
+    delar = builtin.split(sti, ".")
+    legg_barn(node, ny_node("Alias", delar[lengde(delar) - 1], token_linje(start), token_kolonne(start)))
+    hvis gjeldende(state)["type"] == "MUL"
+        stjerne = neste(state)
+        legg_barn(node, ny_node("Utval", "*", token_linje(stjerne), token_kolonne(stjerne)))
+    ellers
+        namn_tok = les_namn_token(state)
+        legg_barn(node, ny_node("Utval", token_verdi(namn_tok), token_linje(namn_tok), token_kolonne(namn_tok)))
+        mens gjeldende(state)["type"] == "COMMA"
+            neste(state)
+            namn_tok = les_namn_token(state)
+            legg_barn(node, ny_node("Utval", token_verdi(namn_tok), token_linje(namn_tok), token_kolonne(namn_tok)))
+        slutt
+    slutt
+    matcher(state, "SEMICOLON")
+    returner node
+slutt
+
 funksjon parse_funksjon(state)
     er_async = usann
     hvis gjeldende(state)["type"] == "ASYNC"
@@ -533,8 +700,16 @@ funksjon parse_funksjon(state)
         del = les_namn_token(state)
         fullt_fn_namn = fullt_fn_namn + "." + token_verdi(del)
     slutt
+    // R3/F28: generiske typeparametrar funksjon namn<T, U: Grense>(…) (erased).
+    typeparametrar = null
+    hvis gjeldende(state)["type"] == "LT"
+        typeparametrar = les_typeparametrar(state)
+    slutt
 
     node = ny_node("Funksjon", fullt_fn_namn, token_linje(start), token_kolonne(start))
+    hvis typeparametrar != null
+        node["typeparametrar"] = typeparametrar
+    slutt
     hvis er_async
         node["is_async"] = sann
     slutt
@@ -546,11 +721,11 @@ funksjon parse_funksjon(state)
     hvis returmarkor == "ARROW"
         neste(state)
         retur = les_type_token(state)
-        legg_barn(node, ny_node("Returtype", token_verdi(retur), token_linje(retur), token_kolonne(retur)))
+        legg_barn(node, type_node(state, "Returtype", retur))
     ellers hvis returmarkor == "COLON"
         neste(state)
         retur = les_type_token(state)
-        legg_barn(node, ny_node("Returtype", token_verdi(retur), token_linje(retur), token_kolonne(retur)))
+        legg_barn(node, type_node(state, "Returtype", retur))
     ellers
         legg_barn(node, ny_node("Returtype", "tom", token_linje(start), token_kolonne(start)))
     slutt
@@ -591,11 +766,11 @@ funksjon parse_kort_funksjon(state)
     hvis gjeldende(state)["type"] == "ARROW"
         neste(state)
         retur = les_type_token(state)
-        node["barn"][0] = ny_node("Returtype", token_verdi(retur), token_linje(retur), token_kolonne(retur))
+        node["barn"][0] = type_node(state, "Returtype", retur)
     ellers hvis gjeldende(state)["type"] == "COLON"
         neste(state)
         retur = les_type_token(state)
-        node["barn"][0] = ny_node("Returtype", token_verdi(retur), token_linje(retur), token_kolonne(retur))
+        node["barn"][0] = type_node(state, "Returtype", retur)
     slutt
 
     hvis gjeldende(state)["type"] == "LBRACE"
@@ -641,43 +816,197 @@ funksjon er_type_token_type(type)
     returner usann
 slutt
 
-funksjon les_type_token(state)
-    // Konsumer eit type-token (IDENT eller TYPE_*)
-    // Handterer nøsta generiske typar: liste<ordbok<tekst,tekst>> via djupne-telling
-    // NB: '>>' vert tokenisert som RSHIFT, ikkje to separate GT
-    tok = gjeldende(state)
-    hvis ikkje er_type_token_type(tok["type"])
-        returner neste(state)  // fallback: konsumer uansett
+// ─── R3/F28: strukturert typeuttrykk ──────────────────────────────────────────
+// les_type_token konsumerer eit typeuttrykk og returnerer FYRSTE token (som før:
+// Type-/Returtype-noden ber grunnamnet som verdi). Det strukturerte uttrykket
+// (docs/TYPEMETADATA.md) ligg etterpå i state["siste_type"]; type_node hentar det.
+//   type := grunn ['<' type {',' type} '>'] ['?']
+//   grunn := namn | 'funksjon' ['(' [type {',' type}] ')' ['->' type]]
+// '>>' er eitt RSHIFT-token: det lukkar to nivå (state["type_gt_rest"] = 1).
+
+funksjon type_namn_uttrykk(namn)
+    t = {}
+    t["kind"] = "name"
+    t["name"] = namn
+    returner t
+slutt
+
+funksjon type_er_lukk(state)
+    hvis har_nokkel(state, "type_gt_rest") og state["type_gt_rest"] > 0
+        returner sann
     slutt
-    neste(state)
-    // Hopp over generisk-parameter med djupne-telling
-    hvis gjeldende(state)["type"] == "LT"
+    la lt = gjeldende(state)["type"]
+    returner lt == "GT" eller lt == "RSHIFT"
+slutt
+
+funksjon type_lukk(state)
+    hvis har_nokkel(state, "type_gt_rest") og state["type_gt_rest"] > 0
+        state["type_gt_rest"] = state["type_gt_rest"] - 1
+        returner 0
+    slutt
+    hvis gjeldende(state)["type"] == "RSHIFT"
         neste(state)
-        djupn = 1
-        mens djupn > 0 og gjeldende(state)["type"] != "EOF"
-            ct = gjeldende(state)["type"]
-            hvis ct == "LT"
-                djupn = djupn + 1
+        state["type_gt_rest"] = 1
+        returner 0
+    slutt
+    hvis gjeldende(state)["type"] == "GT"
+        neste(state)
+        returner 0
+    slutt
+    parserfeil(state, "forventet > etter typeargument")
+slutt
+
+// Typeargument fram til lukkande '>'. Uventa token blir hoppa over (som den
+// gamle djupneteljinga gjorde), så eldre annotasjonar parsar framleis.
+funksjon les_typeargument(state)
+    args = []
+    mens ikkje type_er_lukk(state) og ikkje er_slutt(state)
+        legg_til(args, les_typeuttrykk(state))
+        // Sjekk lukking fyrst: eit indre «>>» har alt lukka dette nivået òg.
+        hvis ikkje type_er_lukk(state)
+            hvis gjeldende(state)["type"] == "COMMA"
                 neste(state)
-            slutt
-            hvis ct == "GT"
-                djupn = djupn - 1
-                neste(state)
-            slutt
-            hvis ct == "RSHIFT"
-                djupn = djupn - 2
-                neste(state)
-            slutt
-            hvis ct != "LT" og ct != "GT" og ct != "RSHIFT"
+            ellers hvis ikkje er_slutt(state)
                 neste(state)
             slutt
         slutt
     slutt
-    // Valfri-markør `T?`: annotasjonen blir berre forkasta (ingen typeinformasjon).
-    hvis gjeldende(state)["type"] == "QUESTION"
+    type_lukk(state)
+    returner args
+slutt
+
+funksjon les_funksjonstype(state)
+    neste(state)
+    hvis gjeldende(state)["type"] != "LPAREN"
+        returner type_namn_uttrykk("funksjon")
+    slutt
+    neste(state)
+    t = {}
+    t["kind"] = "function"
+    t["params"] = []
+    mens gjeldende(state)["type"] != "RPAREN" og ikkje er_slutt(state)
+        // Valfritt parameternamn: funksjon(x: heltall) -> heltall
+        hvis gjeldende(state)["type"] == "IDENT" og se_frem(state, 1)["type"] == "COLON"
+            neste(state)
+            neste(state)
+        slutt
+        legg_til(t["params"], les_typeuttrykk(state))
+        hvis gjeldende(state)["type"] != "COMMA"
+            bryt
+        slutt
         neste(state)
     slutt
+    forvent(state, "RPAREN", "forventet ) i funksjonstype")
+    t["returns"] = null
+    hvis gjeldende(state)["type"] == "ARROW"
+        neste(state)
+        t["returns"] = les_typeuttrykk(state)
+    slutt
+    returner t
+slutt
+
+funksjon les_typeuttrykk(state)
+    tok = gjeldende(state)
+    t = null
+    hvis tok["type"] == "FUNKSJON"
+        t = les_funksjonstype(state)
+    ellers
+        neste(state)
+        t = type_namn_uttrykk(token_verdi(tok))
+        hvis er_type_token_type(tok["type"]) og gjeldende(state)["type"] == "LT"
+            neste(state)
+            g = {}
+            g["kind"] = "apply"
+            g["name"] = token_verdi(tok)
+            g["args"] = les_typeargument(state)
+            t = g
+        slutt
+    slutt
+    hvis gjeldende(state)["type"] == "QUESTION"
+        neste(state)
+        o = {}
+        o["kind"] = "optional"
+        o["inner"] = t
+        t = o
+    slutt
+    returner t
+slutt
+
+// Tekstforma til eit typeuttrykk (deterministisk, utan mellomrom).
+funksjon type_tekst(t)
+    hvis t == null
+        returner ""
+    slutt
+    k = t["kind"]
+    hvis k == "optional"
+        returner type_tekst(t["inner"]) + "?"
+    slutt
+    hvis k == "apply"
+        delar = []
+        i = 0
+        mens i < lengde(t["args"])
+            legg_til(delar, type_tekst(t["args"][i]))
+            i = i + 1
+        slutt
+        returner t["name"] + "<" + builtin.join(delar, ",") + ">"
+    slutt
+    hvis k == "function"
+        pdelar = []
+        j = 0
+        mens j < lengde(t["params"])
+            legg_til(pdelar, type_tekst(t["params"][j]))
+            j = j + 1
+        slutt
+        ft = "funksjon(" + builtin.join(pdelar, ",") + ")"
+        hvis t["returns"] != null
+            ft = ft + "->" + type_tekst(t["returns"])
+        slutt
+        returner ft
+    slutt
+    returner tekst(t["name"])
+slutt
+
+funksjon les_type_token(state)
+    tok = gjeldende(state)
+    state["type_gt_rest"] = 0
+    state["siste_type"] = les_typeuttrykk(state)
     returner tok
+slutt
+
+// Type-/Returtype-node for typen som les_type_token nett las.
+funksjon type_node(state, nodetype, tok)
+    n = ny_node(nodetype, token_verdi(tok), token_linje(tok), token_kolonne(tok))
+    hvis har_nokkel(state, "siste_type") og state["siste_type"] != null
+        n["typeuttrykk"] = state["siste_type"]
+        n["typetekst"] = type_tekst(state["siste_type"])
+    slutt
+    returner n
+slutt
+
+// Typeparametrar etter eit deklarasjonsnamn: <T, U: Grense, V implementerer G>.
+funksjon les_typeparametrar(state)
+    state["type_gt_rest"] = 0
+    neste(state)
+    ut = []
+    mens ikkje type_er_lukk(state) og ikkje er_slutt(state)
+        p_tok = forvent(state, "IDENT", "forventet typeparameter")
+        p = {}
+        p["namn"] = token_verdi(p_tok)
+        p["grense"] = null
+        la gt = gjeldende(state)["type"]
+        hvis gt == "COLON" eller gt == "IMPLEMENTERER"
+            neste(state)
+            p["grense"] = les_typeuttrykk(state)
+            p["grense_tekst"] = type_tekst(p["grense"])
+        slutt
+        legg_til(ut, p)
+        hvis type_er_lukk(state) eller gjeldende(state)["type"] != "COMMA"
+            bryt
+        slutt
+        neste(state)
+    slutt
+    type_lukk(state)
+    returner ut
 slutt
 
 funksjon les_namn_token(state)
@@ -710,7 +1039,7 @@ funksjon parse_parameterliste(state)
         hvis gjeldende(state)["type"] == "COLON"
             neste(state)
             type_token = les_type_token(state)
-            legg_barn(param, ny_node("Type", token_verdi(type_token), token_linje(type_token), token_kolonne(type_token)))
+            legg_barn(param, type_node(state, "Type", type_token))
         slutt
 
         // Standardargument: param = uttrykk. Standard-noden ber default-uttrykket;
@@ -956,7 +1285,7 @@ funksjon parse_la(state)
     hvis gjeldende(state)["type"] == "COLON"
         neste(state)
         type_token = les_type_token(state)
-        legg_barn(node, ny_node("Type", token_verdi(type_token), token_linje(type_token), token_kolonne(type_token)))
+        legg_barn(node, type_node(state, "Type", type_token))
     slutt
 
     hvis gjeldende(state)["type"] == "ASSIGN"
@@ -1607,7 +1936,7 @@ funksjon parse_lambda(state)
     hvis gjeldende(state)["type"] == "ARROW"
         neste(state)
         retur_tok = les_type_token(state)
-        legg_barn(node, ny_node("Returtype", token_verdi(retur_tok), token_linje(retur_tok), token_kolonne(retur_tok)))
+        legg_barn(node, type_node(state, "Returtype", retur_tok))
     slutt
     legg_barn(node, parse_blokk(state))
     returner node
@@ -1620,8 +1949,21 @@ funksjon parse_fun_lambda(state)
     forvent(state, "LPAREN", "forventet ( i fun-lambda")
     legg_barn(node, parse_parameterliste(state))
     forvent(state, "RPAREN", "forventet ) i fun-lambda")
+    // R3/F17: blokkropp `fun(x) { …; returner y }` eller med returtype
+    // `fun(x) -> T { … }`. Same Lambda-form som `funksjon(x) { … }`.
+    hvis gjeldende(state)["type"] == "LBRACE"
+        legg_barn(node, parse_blokk(state))
+        returner node
+    slutt
+    hvis gjeldende(state)["type"] == "ARROW" og fun_lambda_har_typa_blokk(state)
+        neste(state)
+        retur_tok = les_type_token(state)
+        legg_barn(node, ny_node("Returtype", token_verdi(retur_tok), token_linje(retur_tok), token_kolonne(retur_tok)))
+        legg_barn(node, parse_blokk(state))
+        returner node
+    slutt
     // -> uttrykk  (kortform: ingen returtype-annotasjon, body er uttrykk)
-    forvent(state, "ARROW", "forventet -> i fun-lambda")
+    forvent(state, "ARROW", "forventet -> eller { i fun-lambda")
     kropp_uttrykk = parse_uttrykk(state)
     // Pakk uttrykkget inn i ein Blokk med Returner
     blokk = ny_node("Blokk", "", token_linje(start), token_kolonne(start))
@@ -1630,6 +1972,36 @@ funksjon parse_fun_lambda(state)
     legg_barn(blokk, returner_node)
     legg_barn(node, blokk)
     returner node
+slutt
+
+// R3/F17: står vi på `-> Type {` (ev. `-> liste<T> {`)? Då er det ein
+// blokk-lambda med returtype, ikkje kortforma `-> uttrykk`.
+funksjon fun_lambda_har_typa_blokk(state)
+    hvis ikkje er_type_token_type(se_frem(state, 1)["type"])
+        returner usann
+    slutt
+    j = 2
+    hvis se_frem(state, j)["type"] == "LT"
+        djupn = 1
+        j = j + 1
+        mens djupn > 0 og j < 256
+            ct = se_frem(state, j)["type"]
+            hvis ct == "EOF"
+                returner usann
+            slutt
+            hvis ct == "LT"
+                djupn = djupn + 1
+            slutt
+            hvis ct == "GT"
+                djupn = djupn - 1
+            slutt
+            hvis ct == "RSHIFT"
+                djupn = djupn - 2
+            slutt
+            j = j + 1
+        slutt
+    slutt
+    returner se_frem(state, j)["type"] == "LBRACE"
 slutt
 
 // Eit liste-element: valfri spread (...uttrykk) eller vanleg uttrykk.
