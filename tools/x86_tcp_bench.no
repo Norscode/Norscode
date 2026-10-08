@@ -1,0 +1,126 @@
+// tools/x86_tcp_bench.no — NcVal-ytelsesmikrorigg for TCP-stien (relay X5 punkt 10).
+// Måler loopback-TCP i ÉIN linux-x86_64-ELF (tenar og klient i same prosess, ingen
+// trådar): ekko-rundturar (send → recv → send → recv) for nokre meldingsstorleikar og
+// gjennomstrøyming i 32 KiB-bitar. Kvar byte går gjennom socket_send/socket_recv i
+// std.native_gap (NcVal-tekst ↔ rå buffer byte for byte), so tala viser kva det kostar
+// i Norscode-laget over sys6, ikkje kjerna.
+//
+//   ./bin/nc bygg-native --target linux-x86_64 tools/x86_tcp_bench.no build/x86_tcp_bench
+//   docker run --rm --platform linux/amd64 -v $PWD:/w nc-x86tools /w/build/x86_tcp_bench
+//
+// Miljø: X86_BENCH_SKALA (heiltal, standard 1) gongar talet på rundar.
+// Utskrift: éi linje per måling, «namn rundar=… ms=… us_per_rundtur=… MB_s=…».
+bruk std.native_gap
+
+funksjon tal_fra_miljo(namn: tekst, standard: heiltall) -> heiltall {
+    la v = miljo_hent(namn)
+    hvis v == "" { returner standard }
+    returner heltall_fra_tekst(v)
+}
+
+funksjon lag_melding(n: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n { legg_til(delar, builtin.chr(97 + (i % 26))) i = i + 1 }
+    returner builtin.join(delar, "")
+}
+
+// Les nøyaktig n byte (TCP kan dele opp).
+funksjon les_alt(fd: heiltall, n: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la fått: heiltall = 0
+    mens fått < n {
+        la d = socket_recv(fd, n - fått)
+        hvis d == "" { kast "bench: uventa EOF" }
+        legg_til(delar, d)
+        fått = fått + lengde(d)
+    }
+    returner builtin.join(delar, "")
+}
+
+funksjon desimal3(teljar: heiltall, nemnar: heiltall) -> tekst {
+    // teljar/nemnar med tre desimalar utan flyttal
+    hvis nemnar <= 0 { returner "inf" }
+    la heil = teljar / nemnar
+    la rest = ((teljar % nemnar) * 1000) / nemnar
+    la r = tekst_fra_heltall(rest)
+    mens lengde(r) < 3 { r = "0" + r }
+    returner tekst_fra_heltall(heil) + "." + r
+}
+
+funksjon rundtur(namn: tekst, kli: heiltall, tenar: heiltall, storleik: heiltall, rundar: heiltall) -> heiltall {
+    la m = lag_melding(storleik)
+    // oppvarming
+    socket_send(kli, m) socket_send(tenar, les_alt(tenar, storleik)) les_alt(kli, storleik)
+    la t0 = tid_ms()
+    la i: heiltall = 0
+    mens i < rundar {
+        socket_send(kli, m)
+        la d = les_alt(tenar, storleik)
+        socket_send(tenar, d)
+        la svar = les_alt(kli, storleik)
+        hvis lengde(svar) != storleik { kast "bench: feil lengd" }
+        i = i + 1
+    }
+    la ms = tid_ms() - t0
+    hvis ms <= 0 { ms = 1 }
+    // byte flytta = 2 × storleik per rundtur (fram og attende)
+    la byte_tot = 2 * storleik * rundar
+    skriv(namn + " storleik=" + tekst_fra_heltall(storleik) + " rundar=" + tekst_fra_heltall(rundar) +
+          " ms=" + tekst_fra_heltall(ms) + " us_per_rundtur=" + desimal3(ms * 1000, rundar) +
+          " MB_s=" + desimal3(byte_tot, ms * 1000) + "\n")
+    returner ms
+}
+
+funksjon straum(kli: heiltall, tenar: heiltall, totalt: heiltall) -> heiltall {
+    la bit: heiltall = 32768
+    la m = lag_melding(bit)
+    la t0 = tid_ms()
+    la sendt: heiltall = 0
+    mens sendt < totalt {
+        socket_send(kli, m)
+        les_alt(tenar, bit)
+        sendt = sendt + bit
+    }
+    la ms = tid_ms() - t0
+    hvis ms <= 0 { ms = 1 }
+    skriv("straum_32k totalt=" + tekst_fra_heltall(totalt) + " ms=" + tekst_fra_heltall(ms) +
+          " MB_s=" + desimal3(totalt, ms * 1000) + "\n")
+    returner ms
+}
+
+// Referanse utan sokkel: same NcVal-arbeid (tekst → rå byte → tekst) som éin send+recv
+// gjer, via fd_skriv/fd_les på eit lokalt røyr er ikkje tilgjengeleg utan pipe2, so vi
+// måler berre byggjesteinen lag_melding (byte-for-byte NcVal) som golv.
+funksjon golv(storleik: heiltall, rundar: heiltall) -> heiltall {
+    la t0 = tid_ms()
+    la i: heiltall = 0
+    mens i < rundar { lag_melding(storleik) i = i + 1 }
+    la ms = tid_ms() - t0
+    skriv("golv_lag_melding storleik=" + tekst_fra_heltall(storleik) + " rundar=" + tekst_fra_heltall(rundar) +
+          " ms=" + tekst_fra_heltall(ms) + "\n")
+    returner ms
+}
+
+funksjon start() -> heiltall {
+    la skala = tal_fra_miljo("X86_BENCH_SKALA", 1)
+    la srv = socket_new(2, 1)
+    socket_setsockopt(srv, 1, 2, 1)
+    hvis socket_bind(srv, "127.0.0.1", 0) != 0 { kast "bench: bind" }
+    socket_listen(srv, 4)
+    la port = socket_getsockname(srv)
+    la kli = socket_new(2, 1)
+    hvis socket_connect(kli, "127.0.0.1", port) != 0 { kast "bench: connect" }
+    la tenar = socket_accept(srv)
+    skriv("x86_tcp_bench port=" + tekst_fra_heltall(port) + " skala=" + tekst_fra_heltall(skala) + "\n")
+    rundtur("rundtur", kli, tenar, 1, 2000 * skala)
+    rundtur("rundtur", kli, tenar, 64, 2000 * skala)
+    rundtur("rundtur", kli, tenar, 1024, 500 * skala)
+    rundtur("rundtur", kli, tenar, 16384, 50 * skala)
+    straum(kli, tenar, 4 * 1024 * 1024 * skala)
+    golv(1024, 500 * skala)
+    socket_close(kli)
+    socket_close(tenar)
+    socket_close(srv)
+    returner 0
+}
