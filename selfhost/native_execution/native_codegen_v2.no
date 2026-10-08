@@ -58,10 +58,52 @@ funksjon X86_MAL() -> tekst {
     la t = miljo_hent("NC_TARGET")
     hvis t == "" eller t == "linux-x86_64" { returner "linux-x86_64" }
     hvis t == "windows-x86_64" { returner "windows-x86_64" }
-    kast "native_codegen_v2: ukjent NC_TARGET " + t + " (venta linux-x86_64 eller windows-x86_64)"
+    hvis t == "norscodeos-x86_64" { returner "norscodeos-x86_64" }
+    kast "native_codegen_v2: ukjent NC_TARGET " + t + " (venta linux-x86_64, windows-x86_64 eller norscodeos-x86_64)"
 }
 // Er dette Windows-målet? Gate for PE-container, _start og syscall-ruting (W1+).
 funksjon ER_WINDOWS() -> boolsk { returner X86_MAL() == "windows-x86_64" }
+// norscodeos-x86_64 (docs/NORSCODEOS_X86_64.md): same statiske ELF og Linux-ABI som
+// linux-x86_64, men berre NorscodeOS-delmengda av systemkall. Gate for: heap-storleik
+// (HEAP_SZ_MÅL), stakkvakt, krypto_op (privat syscall 4098), sys6-porten (berre std, filtrert
+// nummer), og -ENOSYS i staden for clone/futex/lstat/getdents64/rename/symlink/uname/getcwd/
+// readlink. Linux-vegen er byte-identisk (kvar gate er `hvis ER_NOS()`).
+funksjon ER_NOS() -> boolsk { returner X86_MAL() == "norscodeos-x86_64" }
+// Rekursjonsvakta: stakk-grensa ([STACK_LIMIT_VA]) = initiell rsp − STAKK_GRENSE_BYTE.
+// linux-x86_64/windows-x86_64: 7 MiB (hovudtråden har 8 MiB). norscodeos-x86_64: 960 KiB som
+// standard — NorscodeOS-kjernen gjev ring-3-prosessen ei lat stakkregion med sidekvote, og
+// vakta må slå til (fangbart «For djup rekursjon») før kvoten/regionen tek prosessen; 64 KiB
+// under grensa er att til kast-vegen. Overstyrbar ved bygging: NC_STAKK_KIB=<64..7168>.
+funksjon STAKK_GRENSE_BYTE() -> heiltall {
+    hvis ikkje ER_NOS() { returner 7340032 }
+    la raa = miljo_hent("NC_STAKK_KIB")
+    hvis raa == "" { returner 983040 }
+    la n: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(raa) {
+        la c = builtin.char_code(builtin.slice(raa, i, i + 1))
+        hvis c < 48 eller c > 57 { kast "native_codegen_v2: NC_STAKK_KIB må vere eit heiltal (KiB), fekk «" + raa + "»" }
+        n = n * 10 + (c - 48)
+        hvis n > 100000 { kast "native_codegen_v2: NC_STAKK_KIB er for stor: " + raa }
+        i = i + 1
+    }
+    hvis n < 64 eller n > 7168 { kast "native_codegen_v2: NC_STAKK_KIB må vere 64..7168 (fekk " + raa + ")" }
+    returner n * 1024
+}
+// norscodeos-x86_64 har berre bump-heapen (64 MiB, arena-reset via heap_sett); GC-layouten
+// ligg på faste VA-ar opp til 0x6B000000 og passar ikkje i segmentet.
+funksjon nos_krev_utan_gc() -> heiltall {
+    hvis ER_NOS() og miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        kast "native_codegen_v2: norscodeos-x86_64 har ingen GC-modus (NORSCODE_GC_ALLOC=1 er ikkje støtta; bump-heap + heap_merke/heap_sett)"
+    }
+    returner 0
+}
+// -ENOSYS (−38) i rax: 48 C7 C0 DA FF FF FF (7 B, same lengd som «mov eax,nr; syscall»).
+// norscodeos-x86_64 sin erstatning for systemkall utanfor delmengda (os_enosys-mønsteret).
+funksjon emit_nos_enosys(buf) -> heiltall {
+    copy(buf, [0x48, 0xC7, 0xC0, 0xDA, 0xFF, 0xFF, 0xFF])
+    returner 0
+}
 // Rå 4 LE-byte av HEAP_VA()+off — for hand-assemblerte instruksjonar som
 // før hardkoda 0x600000-familien; no følgjer dei HEAP_VA (relayout-trygt).
 funksjon _heap_abs4(off: heltall) -> liste { la v = hl.HEAP_VA(X86_MAL()) + off returner [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255] }
@@ -5748,21 +5790,21 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])           // add rsp,16
     copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (cond-addr)
     copy(bytes, [0xF0, 0x49, 0xFF, 0x04, 0x24])     // lock inc qword [r12] (auk sekvens)
-    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202
+    hvis ikkje ER_WINDOWS() og ikkje ER_NOS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202 (norscodeos: −ENOSYS under)
     copy(bytes, [0x4C, 0x89, 0xE7])                 // mov rdi,r12
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1 (FUTEX_WAKE)
     copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
-    hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
+    hvis ER_NOS() { emit_nos_enosys(bytes) } ellers hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
     la td_done = lengde(bytes)
     patch_jump(bytes, td_cancel_done, td_done)
     patch_jump(bytes, td_zero_done, td_done)
     patch_jump(bytes, td_jne_done2, td_done)
     copy(bytes, [0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00]) // mov qword [rbx+8],1 (done)
-    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202
+    hvis ikkje ER_WINDOWS() og ikkje ER_NOS() { copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00]) }  // mov eax,202 (norscodeos: −ENOSYS under)
     copy(bytes, [0x48, 0x8D, 0x7B, 0x08])           // lea rdi,[rbx+8]
     copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1
     copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
-    hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
+    hvis ER_NOS() { emit_nos_enosys(bytes) } ellers hvis ER_WINDOWS() { emit_syscall_site(bytes, 202) } ellers { copy(bytes, [0x0F, 0x05]) }
     hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00]) }  // mov eax,60
     copy(bytes, [0x31, 0xFF])                       // xor edi,edi
     hvis ER_WINDOWS() { emit_syscall_site(bytes, 60) } ellers { copy(bytes, [0x0F, 0x05]) }
@@ -5775,13 +5817,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (stack_top)
     copy(bytes, [0x48, 0x8B, 0x52, 0x08])           // mov rdx,[rdx+8] (deskriptor)
     copy(bytes, [0x48, 0x89, 0x56, 0xF0])           // mov [rsi-16],rdx
-    hvis ikkje ER_WINDOWS() { copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00]) }  // mov eax,56 (clone)
+    hvis ikkje ER_WINDOWS() og ikkje ER_NOS() { copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00]) }  // mov eax,56 (clone; norscodeos: −ENOSYS)
     copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx (ptid)
     copy(bytes, [0x4D, 0x31, 0xD2])                 // xor r10,r10 (ctid)
     copy(bytes, [0x4D, 0x31, 0xC0])                 // xor r8,r8 (tls)
     // clone → OSTAB[56] = os_enosys (grøne trådar = W4; CreateThread ≠ clone-modell). Rutar
     // so ingen rå syscall står att; thread_spawn feilar reint (rax=-38) på Windows.
-    hvis ER_WINDOWS() { emit_syscall_site(bytes, 56) } ellers { copy(bytes, [0x0F, 0x05]) }
+    hvis ER_NOS() { emit_nos_enosys(bytes) } ellers hvis ER_WINDOWS() { emit_syscall_site(bytes, 56) } ellers { copy(bytes, [0x0F, 0x05]) }
     copy(bytes, [0x48, 0x85, 0xC0])                 // test rax,rax
     la ts_parent = emit_jcc_placeholder(bytes, 0x85) // jnz .parent
     copy(bytes, [0x48, 0x8B, 0x7C, 0x24, 0xF0])     // mov rdi,[rsp-16] (deskriptor)
@@ -10566,6 +10608,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
 
+    // norscodeos-x86_64: sys6-porten (sist i runtimen, so linux-x86_64 er byte-identisk).
+    hvis ER_NOS() { emit_nos_sys6_port(bytes, atomics) }
+
     // F3.8: skriv inn GC-atom-adressene i dei direkte emitterte kalla (fail-closed).
     gc_fix_løys(bytes, gc_fix, atomics)
     // Fail-closed: kvar RT_*-slot i entry-tabellen MÅ vere patcha (movabs rax = 48 B8).
@@ -10590,6 +10635,53 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         sha_ki = sha_ki + 1
     }
     returner [bytes, atomics]
+}
+
+// ─── norscodeos-x86_64: sys6-port ────────────────────────────────────────────
+// Systemkall-nummera std (gap-rutene i std/native_gap.no) får nå gjennom sys6 på
+// norscodeos-x86_64: Linux-x86_64-nummer i NorscodeOS-delmengda (fil-, røyr-, prosess-,
+// klokke-, entropi- og sokkel-kalla som kjerna implementerer) + spawn (4097). krypto 4098 er
+// IKKJE med: krypto_op er einaste vegen dit. mmap 9 er med for socket-/argon2-skratsjen i std
+// (kjerna gjev anonym mmap med MINNE-kapabilitet) og munmap 11 for fil_les-straumbufferen
+// (64 KiB … 64 MiB, std.native_gap); mprotect/brk/clone/futex/fork/execve
+// er ikkje med. Sjå docs/NORSCODEOS_X86_64.md.
+funksjon nos_sys6_tillatne() -> liste_heiltall {
+    returner [0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 21, 22, 24, 35, 39,
+              41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+              60, 61, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
+}
+
+funksjon nos_nr_tillate(nr: heiltall) -> boolsk {
+    la t = nos_sys6_tillatne()
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        hvis t[i] == nr { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// nos_sys6_port: rax = nummer, rdi/rsi/rdx/r10/r8/r9 = argument (urørte). For kvart tillate
+// nummer: `cmp rax,imm32; je .gjer` (48 3D imm32 / 0F 84 rel32); ingen treff →
+// `mov rax,-38; ret` (−ENOSYS); .gjer: `syscall; ret`. Dette er den einaste
+// syscall-instruksjonen i ein norscodeos-x86_64-binær med køyretids-nummer.
+funksjon emit_nos_sys6_port(bytes, atomics) -> heiltall {
+    atomics["nos_sys6_port"] = TEXT_VA() + lengde(bytes)
+    la tillatne = nos_sys6_tillatne()
+    la hopp: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(tillatne) {
+        copy(bytes, [0x48, 0x3D]) u32(bytes, tillatne[i])          // cmp rax,imm32
+        legg_til(hopp, emit_jcc_placeholder(bytes, 0x84))          // je .gjer
+        i = i + 1
+    }
+    emit_nos_enosys(bytes)                                          // mov rax,-38
+    copy(bytes, [0xC3])                                             // ret
+    la gjer = lengde(bytes)
+    copy(bytes, [0x0F, 0x05, 0xC3])                                 // syscall; ret
+    la j: heiltall = 0
+    mens j < lengde(hopp) { patch_jump(bytes, hopp[j], gjer)  j = j + 1 }
+    returner 0
 }
 
 // ─── Hovud kodegenererator ────────────────────────────────────────────────────
@@ -10648,6 +10740,8 @@ funksjon desimal_ieee_bits_algoritme(v) -> heiltall {
 funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
                         gc_safepoint_va, atomic_vas, global_vas) {
     la detaljsporing = miljo_hent("NC_NATIVE_CODEGEN_TRACE_INSTR") == "1"
+    nos_gjeldande_modul = ""
+    hvis builtin.type(fn_def) == "ordbok" og finnes_nøkkel(fn_def, "module") { nos_gjeldande_modul = tekst(fn_def["module"]) }
     hvis detaljsporing { native_codegen_trace("kompiler_fn enter") }
     la kode = fn_def["code"]
     hvis detaljsporing { native_codegen_trace("kompiler_fn code") }
@@ -11479,6 +11573,8 @@ funksjon er_tryggleiks_builtin(fn_nm: tekst) -> boolsk {
 // «namn/nargs») gjev exit 3. Null-fallback er ein ekte feilkjelde (minne: fersk-seed-
 // null-fallback-hol); for nc_main er kvitlista i dag tom. Utan flagget: inga endring.
 la builtin_rapport_uloyste: liste_tekst = []
+// Modulen til funksjonen kompiler_fn_v2 held på med (sys6-porten for norscodeos-x86_64).
+la nos_gjeldande_modul: tekst = ""
 
 funksjon builtin_rapport_noter(fn_nm: tekst, nargs: heiltall) -> heiltall {
     hvis miljo_hent("NC_BUILTIN_REPORT") != "1" { returner 0 }
@@ -11772,7 +11868,8 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         call_rel32(buf, atomic_vas["cstr_to"], code_va)
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la st_bad1 = emit_je_placeholder(buf)
-        copy(buf, [0xB8, 0x06, 0x00, 0x00, 0x00])                    // mov eax,6 (lstat)
+        // norscodeos-x86_64: lstat (6) finst ikkje i delmengda (NorsFS har ingen symlenker) → stat (4).
+        hvis ER_NOS() { copy(buf, [0xB8, 0x04, 0x00, 0x00, 0x00]) } ellers { copy(buf, [0xB8, 0x06, 0x00, 0x00, 0x00]) }  // mov eax,6 (lstat)
         copy(buf, [0x4D, 0x85, 0xE4])                                // test r12,r12
         // W2: dei to je-a hoppar over mov eax,4-override til mov rdi,rsp. På Windows blir
         // mov eax,4 droppa (−5 B), so offsettane må ned 5 (0x0D→0x08, 0x05→0x00) for å lande
@@ -11889,10 +11986,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         call_rel32(buf, atomic_vas["cstr_to"], code_va)
         copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
         la r_bad2 = emit_je_placeholder(buf)
-        hvis ikkje ER_WINDOWS() { copy(buf, [0xB8]) u32(buf, r_nr) }  // mov eax,nr (rename 82 / symlink 88)
+        hvis ikkje ER_WINDOWS() og ikkje ER_NOS() { copy(buf, [0xB8]) u32(buf, r_nr) }  // mov eax,nr (rename 82 / symlink 88; norscodeos: −ENOSYS)
         copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (a)
         copy(buf, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x10, 0x00, 0x00])  // lea rsi,[rsp+4096] (b)
-        hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0x25]) u32(buf, OSTAB_VA() + r_nr * 8) } ellers { copy(buf, [0x0F, 0x05]) }  // → OSTAB[r_nr] (82=os_rename, 88=enosys)
+        hvis ER_NOS() { emit_nos_enosys(buf) } ellers hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0x25]) u32(buf, OSTAB_VA() + r_nr * 8) } ellers { copy(buf, [0x0F, 0x05]) }  // → OSTAB[r_nr] (82=os_rename, 88=enosys)
         la r_ok = emit_jmp_placeholder(buf)
         la r_badl = lengde(buf)
         patch_jump(buf, r_bad1, r_badl) patch_jump(buf, r_bad2, r_badl)
@@ -11951,6 +12048,21 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 260) legg_til(buf, 0x00)      // mov byte[r12+260],0
         copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 512) legg_til(buf, 0x00)      // mov byte[r12+512],0
         copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 1536) legg_til(buf, 0x00)     // mov byte[r12+1536],0
+        hvis ER_NOS() {
+            // norscodeos-x86_64: uname/getcwd/readlink finst ikkje i delmengda. Faste svar:
+            // system «NorscodeOS», machine «x86_64», cwd «/», executable «» (rax = −ENOSYS →
+            // js under hoppar over NUL-skrivinga).
+            copy(buf, [0x48, 0xB8, 0x4E, 0x6F, 0x72, 0x73, 0x63, 0x6F, 0x64, 0x65])  // mov rax,"Norscode"
+            copy(buf, [0x49, 0x89, 0x04, 0x24])                                       // mov [r12],rax
+            copy(buf, [0x48, 0xC7, 0xC0, 0x4F, 0x53, 0x00, 0x00])                    // mov rax,"OS\0"
+            copy(buf, [0x49, 0x89, 0x44, 0x24, 0x08])                                 // mov [r12+8],rax
+            copy(buf, [0x48, 0xB8, 0x78, 0x38, 0x36, 0x5F, 0x36, 0x34, 0x00, 0x00])  // mov rax,"x86_64\0\0"
+            copy(buf, [0x49, 0x89, 0x84, 0x24]) u32(buf, 260)                         // mov [r12+260],rax
+            copy(buf, [0x48, 0xC7, 0xC0, 0x2F, 0x00, 0x00, 0x00])                    // mov rax,"/\0"
+            copy(buf, [0x49, 0x89, 0x84, 0x24]) u32(buf, 512)                         // mov [r12+512],rax
+            copy(buf, [0x49, 0x8D, 0xB4, 0x24]) u32(buf, 1536)                        // lea rsi,[r12+1536]
+            emit_nos_enosys(buf)                                                      // rax = −ENOSYS
+        } ellers {
         // uname(r12)
         hvis ER_WINDOWS() {
             copy(buf, [0x4C, 0x89, 0xE7]) emit_syscall_site(buf, 63)                // mov rdi,r12; → os_uname
@@ -11973,6 +12085,7 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00]) emit_syscall_site(buf, 89)    // mov edx,1023; → os_readlink
         } ellers {
             copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00, 0x0F, 0x05])                  // mov edx,1023; syscall
+        }
         }
         copy(buf, [0x48, 0x85, 0xC0, 0x78, 0x04])                                  // test rax,rax; js +4
         copy(buf, [0xC6, 0x04, 0x06, 0x00])                                        // mov byte[rsi+rax],0
@@ -12153,6 +12266,63 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // for rein-Norscode-implementasjonar av prosess-/sokkel-ABI (std/native_gap.no):
     // ingen frosen C-rutine, berre syscall. Argument er int-NcVal (payload +8); null → 0.
     // Stakken har a6 øvst; syscall klobrar rcx/r11 (r11 er scratch her). (2026-09-06)
+    // heap_merke() / heap_sett(v) — arena-merke og -reset (same kontrakt som arm64,
+    // macho_arm64_codegen P0.2): heap_merke() gjev bump-toppen ([HEAP_VA]) slik han var ved
+    // kallet (lesen FØR resultatboksen blir allokert, via heap_bump-atomet); heap_sett(v) set
+    // bump-toppen til v og gjev v attende utan allokering. Alle verdiar allokerte etter merket
+    // er frigjorde etter heap_sett(merke) — kallaren må ikkje halde på dei. Begge x86-mål.
+    // I GC-modus kjenner ikkje fri-lista/live-mappa ein bump-reset → heap_sett kastar
+    // «NATIV-GAP» ved køyring (fangbart); heap_merke er ufarleg.
+    hvis (fn_nm == "heap_merke" eller fn_nm == "builtin.heap_merke") og nargs == 0 {
+        call_rel32(buf, atomic_vas["heap_bump"], code_va)
+        legg_til(buf, 0x50)                                                       // push rax
+        returner
+    }
+    hvis (fn_nm == "heap_sett" eller fn_nm == "builtin.heap_sett") og nargs == 1 {
+        hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+            legg_til(buf, 0x58)                                                   // pop (v)
+            emit_push_const(buf, "NATIV-GAP", rd_offs, code_va)
+            emit_rt_call_1(buf, atomic_vas["feil"], code_va)                      // kastar
+            returner
+        }
+        emit_rt_call_1(buf, atomic_vas["heap_set_bump"], code_va)                 // pop rdi; call; push rax
+        returner
+    }
+    // krypto_op(op, argp, iters) → NorscodeOS krypto-leaf (og klokketenestene, opcode 64–79)
+    // via privat syscall 4098: rdi = op, rsi = argp (flat-buffer-adresse, validert i kjerna),
+    // rdx = iters; svaret er rax som heiltal (negativ = −errno). Same argument og retur som
+    // arm64 (svc 402). Einaste vegen til krypto-leafen (nøkkelisolasjon; sys6-porten slepper
+    // ikkje 4098 gjennom). Andre x86-mål har ingen krypto-leaf → «NATIV-GAP» ved køyring.
+    // Argumenta er int-NcVal (payload +8, null → 0), poppa som i sys6:
+    //   31 D2 41 5B 4D 85 DB 74 04 49 8B 53 08   rdx = iters
+    //   31 F6 41 5B 4D 85 DB 74 04 49 8B 73 08   rsi = argp
+    //   31 FF 41 5B 4D 85 DB 74 04 49 8B 7B 08   rdi = op
+    //   48 C7 C0 02 10 00 00                     mov rax,4098
+    //   0F 05                                    syscall
+    hvis (fn_nm == "krypto_op" eller fn_nm == "builtin.krypto_op") og nargs == 3 {
+        hvis ikkje ER_NOS() {
+            legg_til(buf, 0x58) legg_til(buf, 0x58) legg_til(buf, 0x58)          // pop ×3
+            emit_push_const(buf, "NATIV-GAP", rd_offs, code_va)
+            emit_rt_call_1(buf, atomic_vas["feil"], code_va)                      // kastar
+            returner
+        }
+        copy(buf, [0x31, 0xD2, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x53, 0x08])   // rdx = iters
+        copy(buf, [0x31, 0xF6, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x73, 0x08])   // rsi = argp
+        copy(buf, [0x31, 0xFF, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x7B, 0x08])   // rdi = op
+        copy(buf, [0x48, 0xC7, 0xC0, 0x02, 0x10, 0x00, 0x00])                                       // mov rax,4098
+        copy(buf, [0x0F, 0x05])                                                                     // syscall
+        copy(buf, [0x48, 0x89, 0xC7])                                                               // mov rdi,rax
+        call_rel32(buf, RT_INT(), code_va)
+        legg_til(buf, 0x50)                                                                         // push rax
+        returner
+    }
+    // norscodeos-x86_64: sys6 (rå systemkall) er intern for standardbiblioteket — std-modular
+    // (std.native_gap sine prosess-/sokkel-/fil-ruter) får kalle han, brukarkode får ein
+    // kompileringsfeil. Køyretidsporten nos_sys6_port avgrensar i tillegg nummera.
+    hvis (fn_nm == "builtin.sys6" eller fn_nm == "sys6") og ER_NOS() og ikkje builtin.starts_with(nos_gjeldande_modul, "std.") {
+        kast "native_codegen_v2: builtin.sys6 er ikkje tilgjengeleg for brukarkode på norscodeos-x86_64 (modul «" +
+             nos_gjeldande_modul + "»; rå systemkall er intern for std — bruk std-API-et, t.d. std.socket eller krypto_op)"
+    }
     hvis (fn_nm == "builtin.sys6" eller fn_nm == "sys6") og nargs == 7 {
         copy(buf, [0x4D, 0x31, 0xC9, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x4D, 0x8B, 0x4B, 0x08]) // r9 = a6
         copy(buf, [0x4D, 0x31, 0xC0, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x4D, 0x8B, 0x43, 0x08]) // r8 = a5
@@ -12163,7 +12333,12 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x31, 0xC0, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x43, 0x08])       // rax = nr
         // generisk sys6: nr i rax (runtime) → register-indeksert OSTAB-kall [OSTAB + rax*8]
         // (FF 14 C5 disp32). Straight-line-atom (dei inline je +4 er innanfor kvar arg-load).
-        hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0xC5]) u32(buf, OSTAB_VA()) } ellers { copy(buf, [0x0F, 0x05]) }  // syscall
+        // norscodeos-x86_64: `call nos_sys6_port` — porten slepper berre gjennom nummer i
+        // NorscodeOS-delmengda (sjå nos_sys6_tillatne) og gjev −ENOSYS for resten. Ingen rå
+        // syscall med køyretids-nummer står att i binæren utanom porten.
+        hvis ER_NOS() {
+            call_rel32(buf, atomic_vas["nos_sys6_port"], code_va)                                       // call nos_sys6_port
+        } ellers hvis ER_WINDOWS() { copy(buf, [0xFF, 0x14, 0xC5]) u32(buf, OSTAB_VA()) } ellers { copy(buf, [0x0F, 0x05]) }  // syscall
         copy(buf, [0x48, 0x89, 0xC7])                                                                   // mov rdi, rax
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)                                                                             // push rax
@@ -12430,7 +12605,10 @@ funksjon emit_syscall_site(text, nr: heltall) -> heiltall {
 // stader uansett spennande hopp (7 ↔ 7). Berre den samanhengande 7 B-forma finst på urura
 // stader (mine ruter brukar splitta form), so replace_all mot forma treffer ikkje ruta kode.
 funksjon emit_sys_clean7(buf, nr: heltall) -> heiltall {
-    hvis ER_WINDOWS() {
+    // norscodeos-x86_64: nummer utanfor delmengda (t.d. getdents64 217) → −ENOSYS (7 ↔ 7 B).
+    hvis ER_NOS() og ikkje nos_nr_tillate(nr) {
+        emit_nos_enosys(buf)
+    } ellers hvis ER_WINDOWS() {
         emit_syscall_site(buf, nr)
     } ellers {
         copy(buf, [0xB8, nr & 255, (nr >> 8) & 255, (nr >> 16) & 255, (nr >> 24) & 255, 0x0F, 0x05])
@@ -12524,6 +12702,7 @@ funksjon bygg_pe_bilete(entry_va: heltall, text, data_bytes, ncb_json) -> liste 
 
 funksjon kompiler_v2(ncb_json) {
     native_codegen_trace("parse start")
+    nos_krev_utan_gc()
     // F3.6: ncb_json kan vere JSON-tekst eller binær NCB-tekst (magic 0x93). Binær går
     // tekstvegen utan JSON-rundtur — AOT-json_skriv skriv desimaltall som null, so ein
     // rundtur via json_skriv øydela flyttalskonstantar (3.5 > 3 vart usann).
@@ -12791,7 +12970,7 @@ funksjon kompiler_v2(ncb_json) {
     // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
     // FANGBART «For djup rekursjon» (AOT-VM-en hadde inga vakt → SIGSEGV; C-seeden
     // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
-    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF)  // lea rax,[r12-7MiB]
+    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - STAKK_GRENSE_BYTE()) & 0xFFFFFFFF)  // lea rax,[r12-7MiB] (norscodeos: NC_STAKK_KIB)
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())             // mov [limit],rax
     hvis ER_WINDOWS() {
         // W1: Windows-entry har inga startstakk. os_setup_argv (OSTAB[NR_SETUP_ARGV]=500)
@@ -13027,7 +13206,7 @@ funksjon kompiler_v2(ncb_json) {
     u64(elf, hl.HEAP_VA(X86_MAL()))
     u64(elf, hl.HEAP_VA(X86_MAL()))
     u64(elf, heap_filesz)
-    u64(elf, hl.HEAP_SZ())
+    u64(elf, hl.HEAP_SZ_MÅL(X86_MAL()))   // norscodeos-x86_64: 64 MiB / NC_HEAP_MIB
     u64(elf, 4096)
     native_codegen_trace("post-emit elf-hovud ferdig")
 
@@ -13264,6 +13443,7 @@ funksjon ncval_x86_link(ncb_json, ncb, sizes, frag_byte_lists) -> ordbok_tekst {
     returner ncval_x86_link_with(ncb_json, ncval_x86_setup(ncb), sizes, frag_byte_lists)
 }
 funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbok_tekst {
+    nos_krev_utan_gc()
     la data_bytes = oppsett["data_bytes"]
     la rt = oppsett["rt"]
     la module_initializers = oppsett["module_initializers"]
@@ -13296,7 +13476,7 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
         hvis ikkje ER_WINDOWS() { copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00]) }  // mov eax,10
         hvis ER_WINDOWS() { emit_syscall_site(text, 10) } ellers { copy(text, [0x0F, 0x05]) }
     }
-    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF) // lea rax,[r12-7MiB]
+    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - STAKK_GRENSE_BYTE()) & 0xFFFFFFFF) // lea rax,[r12-7MiB] (norscodeos: NC_STAKK_KIB)
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())           // mov [stakk-grense],rax
     legg_til(text, 0x49) legg_til(text, 0x8B) legg_til(text, 0x3C) legg_til(text, 0x24) // mov rdi,[r12]=argc
     legg_til(text, 0x49) legg_til(text, 0x8D) legg_til(text, 0x74) legg_til(text, 0x24) legg_til(text, 0x08) // lea rsi,[r12+8]
@@ -13382,7 +13562,7 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
 
     u32(elf, 1) u32(elf, 6) u64(elf, heap_file_off)
     u64(elf, hl.HEAP_VA(X86_MAL())) u64(elf, hl.HEAP_VA(X86_MAL()))
-    u64(elf, heap_filesz) u64(elf, hl.HEAP_SZ()) u64(elf, 4096)
+    u64(elf, heap_filesz) u64(elf, hl.HEAP_SZ_MÅL(X86_MAL())) u64(elf, 4096)
 
     pad(elf, text_file_off)
     copy(elf, text)

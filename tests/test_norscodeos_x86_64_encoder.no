@@ -1,0 +1,170 @@
+// norscodeos-x86_64: byte-eksakt encoder-test (rein; ingen codegen-ELF, ingen Docker).
+//
+// Køyrer native_codegen_v2 sin runtime-byggjar og kallstad-emitter i prosess med
+// NC_TARGET=norscodeos-x86_64 og samanliknar med HANDSKRIVNE forventa byte:
+//   * emit_nos_enosys:       48 C7 C0 DA FF FF FF           (mov rax,-38)
+//   * sys6-porten:           (cmp rax,imm32; je .gjer)×N, mov rax,-38; ret, .gjer: syscall; ret
+//                            — 4097 (spawn) med, 4098 (krypto), 56 (clone), 202 (futex), 12 (brk),
+//                            59 (execve), 57 (fork) UTE
+//   * heap_bump / heap_set_bump-atoma (bump-slot = HEAP_VA 0x780000)
+//   * krypto_op-kallstaden:  rdx/rsi/rdi-lasting, mov rax,4098, syscall, mov rdi,rax, call RT_INT, push rax
+//   * heap_merke-kallstaden: call heap_bump; push rax
+//   * heap_sett-kallstaden:  pop rdi; call heap_set_bump; push rax
+// Det same på linux-x86_64: porten finst ikkje, og krypto_op gjev «NATIV-GAP» (ingen 4098).
+
+bruk selfhost.native_execution.native_codegen_v2 som codegen
+
+funksjon sjekk_liste(namn: tekst, faktisk, venta: liste_heiltall) -> heiltall {
+    hvis lengde(faktisk) != lengde(venta) {
+        skriv(namn + ": lengd " + tekst(lengde(faktisk)) + " != " + tekst(lengde(venta)) + "\n")
+        assert_eq(lengde(faktisk), lengde(venta))
+    }
+    la i: heiltall = 0
+    mens i < lengde(venta) {
+        hvis faktisk[i] != venta[i] {
+            skriv(namn + ": byte " + tekst(i) + " er " + tekst(faktisk[i]) + ", venta " + tekst(venta[i]) + "\n")
+            assert_eq(faktisk[i], venta[i])
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon del(b, a0: heiltall, a1: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = a0
+    mens i < a1 { legg_til(ut, b[i])  i = i + 1 }
+    returner ut
+}
+
+funksjon le32(v: heiltall) -> liste_heiltall {
+    returner [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255]
+}
+
+funksjon sett(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(a) { legg_til(ut, a[i])  i = i + 1 }
+    i = 0
+    mens i < lengde(b) { legg_til(ut, b[i])  i = i + 1 }
+    returner ut
+}
+
+funksjon inneheld(xs, x: heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(xs) {
+        hvis xs[i] == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    miljo_sett("NC_TARGET", "norscodeos-x86_64")
+    miljo_sett("NORSCODE_GC_ALLOC", "")
+    assert_eq(codegen.X86_MAL(), "norscodeos-x86_64")
+    assert(codegen.ER_NOS())
+
+    // ── 1. −ENOSYS ──
+    la buf: liste = []
+    codegen.emit_nos_enosys(buf)
+    sjekk_liste("enosys", buf, [0x48, 0xC7, 0xC0, 0xDA, 0xFF, 0xFF, 0xFF])
+
+    // ── 2. runtime: sys6-port + heap-atom ──
+    la rt = codegen.bygg_runtime_v2(codegen.HOST_ABI_VA())
+    la bytes = rt[0]
+    la vas = rt[1]
+    la base = codegen.TEXT_VA()
+    la port = vas["nos_sys6_port"] - base
+    la tillatne = codegen.nos_sys6_tillatne()
+    // Uavhengig handskriven liste (spegler docs/NORSCODEOS_X86_64.md §3): ingen 56/202/12/57/59/4098.
+    la venta_nr: liste_heiltall = [0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 21, 22, 24, 35, 39,
+                                   41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+                                   60, 61, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
+    sjekk_liste("tillatne", tillatne, venta_nr)
+    assert(inneheld(tillatne, 4097))
+    assert(inneheld(tillatne, 9))
+    assert(inneheld(tillatne, 11))
+    assert(ikkje inneheld(tillatne, 4098))
+    assert(ikkje inneheld(tillatne, 56))
+    assert(ikkje inneheld(tillatne, 202))
+    assert(ikkje inneheld(tillatne, 12))
+    assert(ikkje inneheld(tillatne, 57))
+    assert(ikkje inneheld(tillatne, 59))
+    la n = lengde(venta_nr)
+    la slutt_cmp = port + 12 * n                 // 12 B per oppføring: 48 3D imm32 + 0F 84 rel32
+    la gjer = slutt_cmp + 8                      // mov rax,-38 (7 B) + ret (1 B)
+    la venta_port: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < n {
+        la etter_je = port + 12 * (i + 1)         // adressa rett bak je-instruksjonen
+        venta_port = sett(venta_port, sett(sett([0x48, 0x3D], le32(venta_nr[i])),
+                                           sett([0x0F, 0x84], le32(gjer - etter_je))))
+        i = i + 1
+    }
+    venta_port = sett(venta_port, [0x48, 0xC7, 0xC0, 0xDA, 0xFF, 0xFF, 0xFF, 0xC3, 0x0F, 0x05, 0xC3])
+    sjekk_liste("sys6-port", del(bytes, port, port + lengde(venta_port)), venta_port)
+    // Porten er sist i runtimen, og er den einaste `0F 05` med nummer frå register.
+    assert_eq(lengde(bytes), port + lengde(venta_port))
+
+    // heap_bump: sub rsp,8; mov rdi,[0x780000]; call RT_INT; add rsp,8; ret
+    la hb = vas["heap_bump"] - base
+    la hb_call_etter = base + hb + 4 + 8 + 5
+    sjekk_liste("heap_bump", del(bytes, hb, hb + 4 + 8 + 5 + 5),
+        sett(sett([0x48, 0x83, 0xEC, 0x08, 0x48, 0x8B, 0x3C, 0x25], le32(0x780000)),
+             sett([0xE8], sett(le32(codegen.RT_INT() - hb_call_etter), [0x48, 0x83, 0xC4, 0x08, 0xC3]))))
+    // heap_set_bump: mov rax,[rdi+8]; mov [0x780000],rax; mov rax,rdi; ret
+    la hs = vas["heap_set_bump"] - base
+    sjekk_liste("heap_set_bump", del(bytes, hs, hs + 16),
+        sett(sett([0x48, 0x8B, 0x47, 0x08, 0x48, 0x89, 0x04, 0x25], le32(0x780000)),
+             [0x48, 0x89, 0xF8, 0xC3]))
+
+    // ── 3. kallstader ──
+    la rd: ordbok = {}
+    la cva = base + 0x20000
+    // krypto_op(op, argp, iters)
+    la k: liste = []
+    codegen.emit_builtin_or_user_call(k, "krypto_op", 3, {}, rd, cva, vas)
+    la k_pre = [0x31, 0xD2, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x53, 0x08,
+                0x31, 0xF6, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x73, 0x08,
+                0x31, 0xFF, 0x41, 0x5B, 0x4D, 0x85, 0xDB, 0x74, 0x04, 0x49, 0x8B, 0x7B, 0x08,
+                0x48, 0xC7, 0xC0, 0x02, 0x10, 0x00, 0x00, 0x0F, 0x05, 0x48, 0x89, 0xC7]
+    la k_etter = cva + lengde(k_pre) + 5
+    sjekk_liste("krypto_op", k,
+        sett(k_pre, sett([0xE8], sett(le32(codegen.RT_INT() - k_etter), [0x50]))))
+    // heap_merke()
+    la hm: liste = []
+    codegen.emit_builtin_or_user_call(hm, "builtin.heap_merke", 0, {}, rd, cva, vas)
+    sjekk_liste("heap_merke", hm, sett([0xE8], sett(le32(vas["heap_bump"] - (cva + 5)), [0x50])))
+    // heap_sett(v)
+    la hsett: liste = []
+    codegen.emit_builtin_or_user_call(hsett, "builtin.heap_sett", 1, {}, rd, cva, vas)
+    sjekk_liste("heap_sett", hsett,
+        sett([0x5F, 0xE8], sett(le32(vas["heap_set_bump"] - (cva + 6)), [0x50])))
+
+    // ── 4. spawn (4097) er berre i porten; krypto (4098) berre i kallstaden ──
+    la finst_4098_i_port = usann
+    i = 0
+    mens i < n { hvis tillatne[i] == 4098 { finst_4098_i_port = sann }  i = i + 1 }
+    assert_eq(finst_4098_i_port, usann)
+
+    // ── 5. linux-x86_64: ingen port, ingen 4098 ──
+    miljo_sett("NC_TARGET", "linux-x86_64")
+    assert_eq(codegen.ER_NOS(), usann)
+    la rt2 = codegen.bygg_runtime_v2(codegen.HOST_ABI_VA())
+    assert_eq(finnes_nøkkel(rt2[1], "nos_sys6_port"), usann)
+    la lk: liste = []
+    prøv {
+        codegen.emit_builtin_or_user_call(lk, "krypto_op", 3, {}, rd, cva, rt2[1])
+    } fang (e) {}
+    // Linux-vegen emitterer ikkje mov rax,4098 (48 C7 C0 02 10 00 00).
+    i = 0
+    la fann = usann
+    mens i + 6 < lengde(lk) {
+        hvis lk[i] == 0x48 og lk[i + 1] == 0xC7 og lk[i + 2] == 0xC0 og lk[i + 3] == 0x02 og lk[i + 4] == 0x10 { fann = sann }
+        i = i + 1
+    }
+    assert_eq(fann, usann)
+    skriv("test_norscodeos_x86_64_encoder OK\n")
+    returner 0
+}
