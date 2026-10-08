@@ -4937,6 +4937,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x25, 0x00, 0xF0, 0x00, 0x00])           // and eax,0xF000
     copy(bytes, [0x3D, 0x00, 0x40, 0x00, 0x00])           // cmp eax,0x4000 (S_IFDIR)
     la fls_dir = emit_je_placeholder(bytes)               // katalog → tom streng (sjå under)
+    // Relay X5 (os-x86-io): ikkje-søkbare filer (røyr/FIFO, sokkel, teiknfil som
+    // /dev/stdin på ein tty) og vanlege filer med st_size 0 (/proc/*) gav "" fordi
+    // RT_FIL_LES les lseek(SEEK_END)-storleiken. Dei går no til straum-lesaren under
+    // (read til EOF i ein veksande mmap-buffer, tak 64 MiB). Ikkje Windows (os_stat).
+    la fls_straum1 = 0
+    la fls_straum2 = 0
+    hvis ikkje ER_WINDOWS() {
+        copy(bytes, [0x3D, 0x00, 0x80, 0x00, 0x00])       // cmp eax,0x8000 (S_IFREG)
+        fls_straum1 = emit_jcc_placeholder(bytes, 0x85)   // jne straum
+        copy(bytes, [0x48, 0x83, 0xBC, 0x24, 0x30, 0x0F, 0x00, 0x00, 0x00]) // cmp qword [rsp+0xF30],0 (st_size)
+        fls_straum2 = emit_je_placeholder(bytes)          // je straum
+    }
     copy(bytes, [0x48, 0x89, 0xDF])                       // mov rdi,rbx
     copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00]) // add rsp,0x1008
     copy(bytes, [0x5B, 0x5D])                             // pop rbx; pop rbp
@@ -4951,7 +4963,94 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = ""
     copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00]) // add rsp,0x1008
     copy(bytes, [0x5B, 0x5D, 0xC3])                       // pop rbx; pop rbp; ret
+    // Straum-lesar: r12 = fd, r13 = buffer (mmap), r14 = kapasitet, r15 = lese byte.
+    // Stien ligg NUL-terminert på [rsp] (etter dei fire push-ane: [rsp+32]).
+    la fls_straum_feil: liste_heiltall = []
+    hvis ikkje ER_WINDOWS() {
+        la fsl = lengde(bytes)
+        patch_jump(bytes, fls_straum1, fsl)
+        patch_jump(bytes, fls_straum2, fsl)
+        copy(bytes, [0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push r12..r15
+        copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])       // mov eax,2 (open)
+        copy(bytes, [0x48, 0x8D, 0x7C, 0x24, 0x20])       // lea rdi,[rsp+32] (sti)
+        copy(bytes, [0x31, 0xF6, 0x31, 0xD2])             // xor esi,esi (O_RDONLY); xor edx,edx
+        copy(bytes, [0x0F, 0x05])                         // syscall
+        copy(bytes, [0x48, 0x85, 0xC0])                   // test rax,rax
+        la fsl_open_feil = emit_jcc_placeholder(bytes, 0x88) // js open_feil
+        copy(bytes, [0x49, 0x89, 0xC4])                   // mov r12,rax (fd)
+        copy(bytes, [0x41, 0xBE, 0x00, 0x00, 0x10, 0x00]) // mov r14d,0x100000 (1 MiB)
+        copy(bytes, [0x4C, 0x89, 0xF6])                   // mov rsi,r14
+        copy(bytes, [0xB8, 0x09, 0x00, 0x00, 0x00, 0x31, 0xFF]) // mov eax,9 (mmap); xor edi,edi
+        copy(bytes, [0xBA, 0x03, 0x00, 0x00, 0x00])       // mov edx,3 (PROT_READ|PROT_WRITE)
+        copy(bytes, [0x41, 0xBA, 0x22, 0x00, 0x00, 0x00]) // mov r10d,0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+        copy(bytes, [0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0x45, 0x31, 0xC9]) // mov r8,-1; xor r9d,r9d
+        copy(bytes, [0x0F, 0x05])                         // syscall
+        copy(bytes, [0x49, 0x89, 0xC5])                   // mov r13,rax
+        copy(bytes, [0x48, 0x85, 0xC0])                   // test rax,rax
+        la fsl_mmap_feil = emit_jcc_placeholder(bytes, 0x88) // js feil (munmap(−errno) er ufarleg)
+        copy(bytes, [0x45, 0x31, 0xFF])                   // xor r15d,r15d
+        // .lykkje
+        la fsl_lykkje = lengde(bytes)
+        copy(bytes, [0x4D, 0x39, 0xF7])                   // cmp r15,r14
+        la fsl_har_plass = emit_jcc_placeholder(bytes, 0x82) // jb les
+        copy(bytes, [0x49, 0x81, 0xFE, 0x00, 0x00, 0x00, 0x04]) // cmp r14,0x4000000 (64 MiB tak)
+        la fsl_tak = emit_jcc_placeholder(bytes, 0x83)    // jae ferdig
+        copy(bytes, [0x4C, 0x89, 0xF6, 0x48, 0x01, 0xF6]) // mov rsi,r14; add rsi,rsi (ny kapasitet)
+        copy(bytes, [0xB8, 0x09, 0x00, 0x00, 0x00, 0x31, 0xFF]) // mov eax,9; xor edi,edi
+        copy(bytes, [0xBA, 0x03, 0x00, 0x00, 0x00])       // mov edx,3
+        copy(bytes, [0x41, 0xBA, 0x22, 0x00, 0x00, 0x00]) // mov r10d,0x22
+        copy(bytes, [0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0x45, 0x31, 0xC9]) // mov r8,-1; xor r9d,r9d
+        copy(bytes, [0x0F, 0x05])                         // syscall
+        copy(bytes, [0x48, 0x85, 0xC0])                   // test rax,rax
+        la fsl_vekst_feil = emit_jcc_placeholder(bytes, 0x88) // js feil
+        copy(bytes, [0x48, 0x89, 0xC7, 0x4C, 0x89, 0xEE, 0x4C, 0x89, 0xF9]) // mov rdi,rax; mov rsi,r13; mov rcx,r15
+        copy(bytes, [0xF3, 0xA4])                         // rep movsb
+        copy(bytes, [0x50])                               // push rax (ny buffer)
+        copy(bytes, [0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xF6]) // mov rdi,r13; mov rsi,r14
+        copy(bytes, [0xB8, 0x0B, 0x00, 0x00, 0x00, 0x0F, 0x05]) // munmap(gamal)
+        copy(bytes, [0x41, 0x5D])                         // pop r13
+        copy(bytes, [0x4D, 0x01, 0xF6])                   // add r14,r14
+        // .les
+        patch_jump(bytes, fsl_har_plass, lengde(bytes))
+        copy(bytes, [0x4C, 0x89, 0xE7])                   // mov rdi,r12 (fd)
+        copy(bytes, [0x4B, 0x8D, 0x74, 0x3D, 0x00])       // lea rsi,[r13+r15]
+        copy(bytes, [0x4C, 0x89, 0xF2, 0x4C, 0x29, 0xFA]) // mov rdx,r14; sub rdx,r15
+        copy(bytes, [0x31, 0xC0, 0x0F, 0x05])             // xor eax,eax (read); syscall
+        copy(bytes, [0x48, 0x85, 0xC0])                   // test rax,rax
+        la fsl_ikkje_pos = emit_jcc_placeholder(bytes, 0x8E) // jle ikkje_pos
+        copy(bytes, [0x49, 0x01, 0xC7])                   // add r15,rax
+        la fsl_att = emit_jmp_placeholder(bytes)
+        patch_jump(bytes, fsl_att, fsl_lykkje)
+        patch_jump(bytes, fsl_ikkje_pos, lengde(bytes))
+        copy(bytes, [0x48, 0x83, 0xF8, 0xFC])             // cmp rax,-4 (EINTR)
+        la fsl_eintr = emit_je_placeholder(bytes)
+        patch_jump(bytes, fsl_eintr, fsl_lykkje)
+        // .ferdig: close(fd); rax = RT_STR_RAW(buffer, n); munmap(buffer)
+        patch_jump(bytes, fsl_tak, lengde(bytes))
+        copy(bytes, [0x4C, 0x89, 0xE7, 0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05]) // close(r12)
+        copy(bytes, [0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xFE]) // mov rdi,r13; mov rsi,r15
+        call_rel32(bytes, RT_STR_RAW(), TEXT_VA())        // rax = tekst
+        copy(bytes, [0x50, 0x48, 0x83, 0xEC, 0x08])       // push rax; sub rsp,8
+        copy(bytes, [0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xF6]) // mov rdi,r13; mov rsi,r14
+        copy(bytes, [0xB8, 0x0B, 0x00, 0x00, 0x00, 0x0F, 0x05]) // munmap
+        copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0x58])       // add rsp,8; pop rax
+        copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C]) // pop r15..r12
+        copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00]) // add rsp,0x1008
+        copy(bytes, [0x5B, 0x5D, 0xC3])                   // pop rbx; pop rbp; ret
+        // .feil (mmap): munmap(r13, r14) + close(fd) → open_feil
+        la fsl_feil = lengde(bytes)
+        patch_jump(bytes, fsl_mmap_feil, fsl_feil)
+        patch_jump(bytes, fsl_vekst_feil, fsl_feil)
+        copy(bytes, [0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xF6]) // mov rdi,r13; mov rsi,r14
+        copy(bytes, [0xB8, 0x0B, 0x00, 0x00, 0x00, 0x0F, 0x05]) // munmap
+        copy(bytes, [0x4C, 0x89, 0xE7, 0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05]) // close(r12)
+        // .open_feil: stakken attende til ramma, kast «Kan ikkje opne fil: <sti>»
+        patch_jump(bytes, fsl_open_feil, lengde(bytes))
+        copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C]) // pop r15..r12
+        legg_til(fls_straum_feil, emit_jmp_placeholder(bytes))
+    }
     la fls_bad = lengde(bytes)
+    hvis lengde(fls_straum_feil) > 0 { patch_jump(bytes, fls_straum_feil[0], fls_bad) }
     patch_jump(bytes, fls_bad1, fls_bad) patch_jump(bytes, fls_bad2, fls_bad) patch_jump(bytes, fls_bad3, fls_bad)
     patch_jump(bytes, fls_bad4, fls_bad)
     copy(bytes, [0x48, 0xB8, 0x4B, 0x61, 0x6E, 0x20, 0x69, 0x6B, 0x6B, 0x6A]) // "Kan ikkj"
