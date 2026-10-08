@@ -1636,9 +1636,187 @@ funksjon _pg_windows_spawn_synkron(req) {
     returner r
 }
 
+// ── norscodeos-x86_64: synkron spawn utan fork ──────────────────────────────────
+// NorscodeOS har ingen fork/execve. Vegen er pipe2 ×3 + spawn (privat syscall 4097) +
+// read (poll over stdout/stderr) + wait4:
+//   spawn(rdi = NUL-terminert namn på ei initrd-/manifestoppføring, rsi = fd-kart = tre
+//         qword {fd0, fd1, fd2} i forelderen) → pid eller −errno; barnet får fd 0/1/2 frå
+//         kartet (forelderen lukkar barne-endane etterpå).
+//   wait4(pid, &status, 0, 0) → berre eigne born; status er Linux-kodinga (exit(k) → k<<8,
+//         drepen → signalnummer).
+// Avgrensingar: args/cwd/environment blir ikkje sende (spawn-ABI-en har dei ikkje), timeout_ms
+// blir ikkje handheva (ingen kill i delmengda), max_output_bytes kuttar berre utdata.
+// Skratsj: éin mmap på 16 KiB (gjenbrukt; kjerna har ingen munmap), elles bump-heap via
+// heap_merke/heap_sett når mmap ikkje er tillate (manglande MINNE-kapabilitet).
+la _nos_skratsj_adr = 0
+
+funksjon _nos_er_mål() -> boolsk {
+    prøv { returner tekst(builtin.native_target()) == "norscodeos-x86_64" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon _NOS_SKRATSJ() -> heiltall { returner 16384 }
+funksjon _NOS_LESBUF() -> heiltall { returner 4096 }      // [4096, 12288) lesebuffer
+funksjon _NOS_LESBUF_N() -> heiltall { returner 8192 }
+
+funksjon _nos_skratsj() -> heiltall {
+    hvis _nos_skratsj_adr > 0 { returner _nos_skratsj_adr }
+    la a = _sys_mmap_rw(_NOS_SKRATSJ())
+    hvis a > 0 {
+        _nos_skratsj_adr = a
+        returner a
+    }
+    // Rå bytar frå bump-heapen. Boksane som blir allokerte medan grensene blir rekna ut,
+    // ligg rett over merket — skratsjen startar 4 KiB lenger oppe.
+    la m = builtin.heap_merke()
+    la start = m + 4096
+    builtin.heap_sett(start + _NOS_SKRATSJ())
+    returner start
+}
+
+funksjon _nos_les_fd(fd: heiltall, buf: heiltall) -> tekst {
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, _NOS_LESBUF_N(), 0, 0, 0)
+    hvis n <= 0 { returner "" }
+    la teikn: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n {
+        legg_til(teikn, builtin.chr(builtin.raw_load8(buf + i)))
+        i = i + 1
+    }
+    returner builtin.join(teikn, "")
+}
+
+funksjon _nos_lukk(fd: heiltall) -> heiltall {
+    hvis fd >= 0 { builtin.sys6(nsys._nr("close"), fd, 0, 0, 0, 0, 0) }
+    returner 0
+}
+
+funksjon _nos_spawn_synkron(req) {
+    la exe = ""
+    hvis finnes_nøkkel(req, "executable") { exe = tekst(req["executable"]) }
+    la namn = exe
+    hvis builtin.starts_with(namn, "/initrd/") { namn = builtin.slice(namn, 8, lengde(namn)) }
+    hvis namn == "" { returner _pg_synkron_feil("tom executable") }
+    hvis lengde(namn) > 63 { returner _pg_synkron_feil("namnet er for langt for spawn (maks 63)") }
+    la maks: heiltall = 8388608
+    hvis finnes_nøkkel(req, "max_output_bytes") {
+        la mb = heltall_fra_tekst(tekst(req["max_output_bytes"]))
+        hvis mb > 0 { maks = mb }
+    }
+    la sk = _nos_skratsj()
+    // [0,64) namn · [64,88) fd-kart · [96,120) 3 × int[2] røyr · [128,136) wait-status ·
+    // [136,152) 2 × pollfd · [4096,12288) lesebuffer
+    la fds: liste_heiltall = []
+    la k: heiltall = 0
+    mens k < 3 {
+        builtin.raw_store64(sk + 96 + 8 * k, 0)
+        la r = builtin.sys6(nsys._nr("pipe2"), sk + 96 + 8 * k, 0, 0, 0, 0, 0)
+        hvis r < 0 {
+            la j: heiltall = 0
+            mens j < lengde(fds) { _nos_lukk(fds[j])  j = j + 1 }
+            returner _pg_synkron_feil("pipe2 feila (" + tekst(r) + ")")
+        }
+        la par = builtin.raw_load64(sk + 96 + 8 * k)
+        legg_til(fds, par & 4294967295)
+        legg_til(fds, (par >> 32) & 4294967295)
+        k = k + 1
+    }
+    // fds: [inn_les, inn_skriv, ut_les, ut_skriv, feil_les, feil_skriv]
+    _pg_cstr(sk, namn)
+    builtin.raw_store64(sk + 64, fds[0])
+    builtin.raw_store64(sk + 72, fds[3])
+    builtin.raw_store64(sk + 80, fds[5])
+    la pid = builtin.sys6(nsys._nr("spawn"), sk, sk + 64, 0, 0, 0, 0)
+    _nos_lukk(fds[0])
+    _nos_lukk(fds[3])
+    _nos_lukk(fds[5])
+    hvis pid < 0 {
+        _nos_lukk(fds[1])
+        _nos_lukk(fds[2])
+        _nos_lukk(fds[4])
+        returner _pg_synkron_feil("spawn(" + namn + ") feila (" + tekst(pid) + ")")
+    }
+    // stdin: skriv alt (i bitar via lesebufferen), så EOF.
+    la inn = ""
+    hvis finnes_nøkkel(req, "stdin") og req["stdin"] != null { inn = tekst(req["stdin"]) }
+    la buf = sk + _NOS_LESBUF()
+    la pos: heiltall = 0
+    mens pos < lengde(inn) {
+        la n: heiltall = lengde(inn) - pos
+        hvis n > _NOS_LESBUF_N() { n = _NOS_LESBUF_N() }
+        la i: heiltall = 0
+        mens i < n {
+            builtin.raw_store8(buf + i, builtin.char_code(builtin.slice(inn, pos + i, pos + i + 1)))
+            i = i + 1
+        }
+        la w = builtin.sys6(nsys._nr("write"), fds[1], buf, n, 0, 0, 0)
+        hvis w <= 0 { pos = lengde(inn) } ellers { pos = pos + w }
+    }
+    _nos_lukk(fds[1])
+    // stdout/stderr: poll over begge, so eit barn som fyller stderr-røyret ikkje heng.
+    la ut: liste_tekst = []
+    la feil: liste_tekst = []
+    la ut_n: heiltall = 0
+    la feil_n: heiltall = 0
+    la ut_fd: heiltall = fds[2]
+    la feil_fd: heiltall = fds[4]
+    la pollin = nsys._flagg("POLLIN")
+    la eintr = 0 - nsys._errno("EINTR")
+    la sekvensiell = usann
+    mens ut_fd >= 0 eller feil_fd >= 0 {
+        la les_ut = usann
+        la les_feil = usann
+        hvis sekvensiell {
+            hvis ut_fd >= 0 { les_ut = sann } ellers { les_feil = sann }
+        } ellers {
+            // pollfd = {int fd; short events; short revents}; fd −1 blir hoppa over.
+            builtin.raw_store64(sk + 136, (ut_fd & 4294967295) | (pollin << 32))
+            builtin.raw_store64(sk + 144, (feil_fd & 4294967295) | (pollin << 32))
+            la r = builtin.sys6(nsys._nr("poll"), sk + 136, 2, -1, 0, 0, 0)
+            hvis r < 0 og r != eintr {
+                sekvensiell = sann       // poll manglar (t.d. −ENOSYS): eitt røyr om gongen
+            } ellers hvis r > 0 {
+                les_ut = ut_fd >= 0 og ((builtin.raw_load64(sk + 136) >> 48) & 65535) != 0
+                les_feil = feil_fd >= 0 og ((builtin.raw_load64(sk + 144) >> 48) & 65535) != 0
+            }
+        }
+        hvis les_ut {
+            la del = _nos_les_fd(ut_fd, buf)
+            hvis del == "" {
+                _nos_lukk(ut_fd)
+                ut_fd = -1
+            } ellers hvis ut_n < maks { legg_til(ut, del)  ut_n = ut_n + lengde(del) }
+        }
+        hvis les_feil {
+            la del = _nos_les_fd(feil_fd, buf)
+            hvis del == "" {
+                _nos_lukk(feil_fd)
+                feil_fd = -1
+            } ellers hvis feil_n < maks { legg_til(feil, del)  feil_n = feil_n + lengde(del) }
+        }
+    }
+    builtin.raw_store64(sk + 128, 0)
+    la w4 = builtin.sys6(nsys._nr("wait4"), pid, sk + 128, 0, 0, 0, 0)
+    la status = builtin.raw_load64(sk + 128) & 4294967295
+    la kode: heiltall = 127
+    hvis w4 == pid {
+        hvis (status & 127) == 0 { kode = (status >> 8) & 255 } ellers { kode = 128 + (status & 127) }
+    }
+    la ut_t = builtin.join(ut, "")
+    la feil_t = builtin.join(feil, "")
+    hvis lengde(ut_t) > maks { ut_t = builtin.slice(ut_t, 0, maks) }
+    hvis lengde(feil_t) > maks { feil_t = builtin.slice(feil_t, 0, maks) }
+    la svar = _pg_res("ferdig", pid, "", kode, ut_t, feil_t, "", 0, 0)
+    hvis w4 != pid { svar["error"] = "wait4 feila (" + tekst(w4) + ")" }
+    svar["abi"] = "norscode-process-spawn-v1"
+    fjern_nokkel(svar, "handle")
+    returner svar
+}
+
 funksjon process_spawn_argv_gap(req) {
     hvis builtin.type(req) != "ordbok" { returner _pg_synkron_feil("ugyldig request") }
     hvis _pg_er_windows() { returner _pg_windows_spawn_synkron(req) }
+    hvis _nos_er_mål() { returner _nos_spawn_synkron(req) }
     la r = _pg_spawn(req, sann)
     hvis r["status"] == "feil" { returner _pg_synkron_feil(tekst(r["error"])) }
     la handle = tekst(r["handle"])
