@@ -1,0 +1,475 @@
+// tools/x86_64_syscall_skann.no — instruksjonslengd-dekodar for x86-64 og skann etter
+// syscall-stader i .text til ein ELF frå native_codegen_v2 (norscodeos-x86_64-revisjonen).
+//
+// Kvifor: norscodeos-x86_64-binærar skal berre kunne ta systemkalla i NorscodeOS-delmengda
+// (docs/NORSCODEOS_X86_64.md). Ein rå byte-skann etter 0F 05 er upåliteleg (bytane kan stå
+// inne i ein immediat eller ein forskyving), so .text blir dekoda lineært instruksjon for
+// instruksjon frå TEXT_VA. For kvar `syscall` (0F 05) går skannen bakover i den dekoda
+// straumen til næraste instruksjon som skriv eax/rax:
+//   * `mov eax,imm32` (B8+imm), `mov rax,simm32` (48 C7 C0+imm) eller `xor eax,eax`
+//     → statisk nummer;
+//   * alt anna som kan skrive rax (mov/lea/pop/call/aritmetikk med rax som mål), eller
+//     ingen kandidat innanfor vindauget → «dynamisk» (nr = −1).
+// Dekodaren dekkjer det native_codegen_v2 emitterer: eitt-byte-tabellen i 64-bit-modus,
+// 0F-tabellen, 0F38/0F3A, VEX (C4/C5), legacy-prefiks og REX. Ukjende/ugyldige opkodar
+// kastar (ein desynkronisert sveip skal ikkje gje ein stille «ok»).
+//
+// Bruk som modul (tests/test_norscodeos_x86_64_syscall_skann.no) eller frå kommandolinja:
+//   NC_ELF=ut.elf ./bin/nc run tools/x86_64_syscall_skann.no
+// skriv «nr antal» per systemkallnummer (−1 = dynamisk) og talet på dekoda instruksjonar.
+
+funksjon _b(b: liste, p: heiltall) -> heiltall {
+    hvis p < 0 eller p >= lengde(b) { kast "x86_64_skann: les utanfor bufferen (pos " + tekst(p) + ")" }
+    returner b[p]
+}
+
+funksjon _u32(b: liste, p: heiltall) -> heiltall {
+    returner _b(b, p) | (_b(b, p + 1) << 8) | (_b(b, p + 2) << 16) | (_b(b, p + 3) << 24)
+}
+
+funksjon _u64(b: liste, p: heiltall) -> heiltall {
+    returner _u32(b, p) | (_u32(b, p + 4) << 32)
+}
+
+// Lengda til ModRM (+SIB +forskyving) som byrjar i p (p peikar på ModRM-byten).
+funksjon _modrm_lengd(b: liste, p: heiltall) -> heiltall {
+    la m = _b(b, p)
+    la mod = (m >> 6) & 3
+    la rm = m & 7
+    la n: heiltall = 1
+    hvis mod == 3 { returner 1 }
+    hvis rm == 4 {
+        la sib = _b(b, p + 1)
+        n = n + 1
+        hvis mod == 0 og (sib & 7) == 5 { returner n + 4 }
+    }
+    hvis mod == 0 og rm == 5 { returner n + 4 }      // RIP-relativ disp32
+    hvis mod == 1 { returner n + 1 }
+    hvis mod == 2 { returner n + 4 }
+    returner n
+}
+
+funksjon _i(xs: liste_heiltall, x: heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(xs) {
+        hvis xs[i] == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Lengda (byte) til instruksjonen som byrjar i p.
+funksjon instr_lengd(b: liste, p0: heiltall) -> heiltall {
+    la p: heiltall = p0
+    la op16 = usann
+    la adr32 = usann
+    la vidare = sann
+    mens vidare {
+        la c = _b(b, p)
+        hvis c == 0x66 { op16 = sann  p = p + 1 }
+        ellers hvis c == 0x67 { adr32 = sann  p = p + 1 }
+        ellers hvis c == 0xF0 eller c == 0xF2 eller c == 0xF3 eller c == 0x2E eller c == 0x36 eller
+                    c == 0x3E eller c == 0x26 eller c == 0x64 eller c == 0x65 { p = p + 1 }
+        ellers { vidare = usann }
+        hvis p - p0 > 14 { kast "x86_64_skann: for mange prefiks ved " + tekst(p0) }
+    }
+    la rex_w = usann
+    la c = _b(b, p)
+    hvis c >= 0x40 og c <= 0x4F {
+        rex_w = (c & 8) != 0
+        p = p + 1
+        c = _b(b, p)
+    }
+    // VEX
+    hvis c == 0xC5 {
+        la op = _b(b, p + 2)
+        p = p + 3
+        p = p + _modrm_lengd(b, p)
+        hvis _i([0x70, 0x71, 0x72, 0x73, 0xC2, 0xC4, 0xC5, 0xC6], op) { p = p + 1 }
+        returner p - p0
+    }
+    hvis c == 0xC4 {
+        la kart = _b(b, p + 1) & 31
+        la op = _b(b, p + 3)
+        p = p + 4
+        p = p + _modrm_lengd(b, p)
+        hvis kart == 3 { p = p + 1 }
+        ellers hvis kart == 1 og _i([0x70, 0x71, 0x72, 0x73, 0xC2, 0xC4, 0xC5, 0xC6], op) { p = p + 1 }
+        returner p - p0
+    }
+    la imm_z: heiltall = 4
+    hvis op16 { imm_z = 2 }
+    hvis c == 0x0F {
+        la c2 = _b(b, p + 1)
+        hvis c2 == 0x38 {
+            p = p + 3
+            returner p + _modrm_lengd(b, p) - p0
+        }
+        hvis c2 == 0x3A {
+            p = p + 3
+            returner p + _modrm_lengd(b, p) + 1 - p0
+        }
+        p = p + 2
+        // utan ModRM
+        hvis _i([0x05, 0x06, 0x07, 0x08, 0x09, 0x0B, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x77, 0xA0, 0xA1, 0xA2, 0xA8, 0xA9], c2) {
+            returner p - p0
+        }
+        hvis c2 >= 0x80 og c2 <= 0x8F { returner p + 4 - p0 }          // jcc rel32
+        hvis c2 >= 0xC8 og c2 <= 0xCF { returner p - p0 }              // bswap
+        la ml = _modrm_lengd(b, p)
+        hvis _i([0x70, 0x71, 0x72, 0x73, 0xA4, 0xAC, 0xBA, 0xC2, 0xC4, 0xC5, 0xC6], c2) { returner p + ml + 1 - p0 }
+        returner p + ml - p0
+    }
+    p = p + 1
+    // eitt-byte-tabellen (64-bit-modus)
+    hvis c <= 0x3F og (c & 7) <= 3 og c != 0x0F {
+        returner p + _modrm_lengd(b, p) - p0                           // ALU r/m, reg
+    }
+    hvis c <= 0x3F og (c & 7) == 4 { returner p + 1 - p0 }             // ALU al, imm8
+    hvis c <= 0x3F og (c & 7) == 5 { returner p + imm_z - p0 }         // ALU eax, imm32
+    hvis c >= 0x50 og c <= 0x5F { returner p - p0 }                    // push/pop
+    hvis c == 0x63 { returner p + _modrm_lengd(b, p) - p0 }            // movsxd
+    hvis c == 0x68 { returner p + imm_z - p0 }
+    hvis c == 0x69 { returner p + _modrm_lengd(b, p) + imm_z - p0 }
+    hvis c == 0x6A { returner p + 1 - p0 }
+    hvis c == 0x6B { returner p + _modrm_lengd(b, p) + 1 - p0 }
+    hvis c >= 0x6C og c <= 0x6F { returner p - p0 }
+    hvis c >= 0x70 og c <= 0x7F { returner p + 1 - p0 }                // jcc rel8
+    hvis c == 0x80 eller c == 0x83 { returner p + _modrm_lengd(b, p) + 1 - p0 }
+    hvis c == 0x81 { returner p + _modrm_lengd(b, p) + imm_z - p0 }
+    hvis c >= 0x84 og c <= 0x8F { returner p + _modrm_lengd(b, p) - p0 }
+    hvis c >= 0x90 og c <= 0x99 { returner p - p0 }
+    hvis c >= 0x9B og c <= 0x9F { returner p - p0 }
+    hvis c >= 0xA0 og c <= 0xA3 {
+        hvis adr32 { returner p + 4 - p0 }
+        returner p + 8 - p0                                              // moffs64
+    }
+    hvis c >= 0xA4 og c <= 0xA7 { returner p - p0 }
+    hvis c == 0xA8 { returner p + 1 - p0 }
+    hvis c == 0xA9 { returner p + imm_z - p0 }
+    hvis c >= 0xAA og c <= 0xAF { returner p - p0 }
+    hvis c >= 0xB0 og c <= 0xB7 { returner p + 1 - p0 }
+    hvis c >= 0xB8 og c <= 0xBF {
+        hvis rex_w { returner p + 8 - p0 }                               // movabs
+        returner p + imm_z - p0
+    }
+    hvis c == 0xC0 eller c == 0xC1 { returner p + _modrm_lengd(b, p) + 1 - p0 }
+    hvis c == 0xC2 eller c == 0xCA { returner p + 2 - p0 }
+    hvis c == 0xC3 eller c == 0xCB eller c == 0xC9 eller c == 0xCC eller c == 0xCF { returner p - p0 }
+    hvis c == 0xC6 { returner p + _modrm_lengd(b, p) + 1 - p0 }
+    hvis c == 0xC7 { returner p + _modrm_lengd(b, p) + imm_z - p0 }
+    hvis c == 0xC8 { returner p + 3 - p0 }
+    hvis c == 0xCD { returner p + 1 - p0 }
+    hvis c >= 0xD0 og c <= 0xD3 { returner p + _modrm_lengd(b, p) - p0 }
+    hvis c >= 0xD8 og c <= 0xDF { returner p + _modrm_lengd(b, p) - p0 }   // x87
+    hvis c >= 0xE0 og c <= 0xE7 { returner p + 1 - p0 }
+    hvis c == 0xE8 eller c == 0xE9 { returner p + 4 - p0 }
+    hvis c == 0xEB { returner p + 1 - p0 }
+    hvis c >= 0xEC og c <= 0xEF { returner p - p0 }
+    hvis c == 0xF1 eller c == 0xF4 eller c == 0xF5 { returner p - p0 }
+    hvis c == 0xF6 eller c == 0xF7 {
+        la reg = (_b(b, p) >> 3) & 7
+        la ml = _modrm_lengd(b, p)
+        hvis reg <= 1 {
+            hvis c == 0xF6 { returner p + ml + 1 - p0 }
+            returner p + ml + imm_z - p0
+        }
+        returner p + ml - p0
+    }
+    hvis c >= 0xF8 og c <= 0xFD { returner p - p0 }
+    hvis c == 0xFE eller c == 0xFF { returner p + _modrm_lengd(b, p) - p0 }
+    kast "x86_64_skann: ukjend/ugyldig opkode 0x" + _hex2(c) + " ved fil-offset " + tekst(p0)
+}
+
+funksjon _hex2(v: heiltall) -> tekst {
+    la s = "0123456789abcdef"
+    returner builtin.slice(s, (v >> 4) & 15, ((v >> 4) & 15) + 1) + builtin.slice(s, v & 15, (v & 15) + 1)
+}
+
+// [fil-offset for .text-start, fil-offset for .text-slutt] i ein ELF frå native_codegen_v2:
+// .text startar på offset 0x1000 (TEXT_VA 0x401000) og første PT_LOAD dekkjer [0, slutt).
+funksjon elf_text(b: liste) -> liste_heiltall {
+    hvis lengde(b) < 128 eller _b(b, 0) != 0x7F eller _b(b, 1) != 0x45 eller _b(b, 2) != 0x4C eller _b(b, 3) != 0x46 {
+        kast "x86_64_skann: ikkje ein ELF"
+    }
+    la phoff = _u64(b, 32)
+    la slutt = _u64(b, phoff + 32)          // p_filesz til første PT_LOAD (RX)
+    returner [4096, slutt]
+}
+
+// Skriv instruksjonen i p rax/eax (eller kan han gjere det)? 0 = nei, 1 = ja (ukjend
+// verdi). Statiske lastingar blir handsama av kallaren først.
+funksjon _skriv_rax(b: liste, p: heiltall, lengd: heiltall) -> boolsk {
+    la q: heiltall = p
+    mens _i([0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65], _b(b, q)) { q = q + 1 }
+    la rex: heiltall = 0
+    hvis _b(b, q) >= 0x40 og _b(b, q) <= 0x4F { rex = _b(b, q)  q = q + 1 }
+    la c = _b(b, q)
+    hvis c == 0xE8 { returner sann }                                    // call → rax er klobra
+    hvis c == 0x58 og (rex & 1) == 0 { returner sann }                  // pop rax
+    hvis c >= 0x91 og c <= 0x97 og (rex & 1) == 0 { returner sann }     // xchg rax,r
+    hvis (c >= 0xB8 og c <= 0xBF) og (c - 0xB8) == 0 og (rex & 1) == 0 { returner sann }
+    hvis c == 0x0F {
+        // 0F-ar med reg-mål (movzx/movsx/cmov/imul/bsf/…): rax når reg-feltet er 0
+        la c2 = _b(b, q + 1)
+        hvis c2 == 0x05 { returner sann }                               // syscall: rax = retur
+        hvis _i([0xB6, 0xB7, 0xBE, 0xBF, 0xAF, 0xBC, 0xBD, 0xB8], c2) eller (c2 >= 0x40 og c2 <= 0x4F) {
+            la reg = (_b(b, q + 2) >> 3) & 7
+            returner reg == 0 og (rex & 4) == 0
+        }
+        hvis c2 == 0xC7 { returner sann }                               // rdrand/rdseed
+        returner usann
+    }
+    hvis c >= 0xD8 {
+        hvis c == 0xFF {
+            la reg = (_b(b, q + 1) >> 3) & 7
+            hvis reg == 2 eller reg == 3 { returner sann }              // call r/m
+            la mod = (_b(b, q + 1) >> 6) & 3
+            la rm = _b(b, q + 1) & 7
+            returner (reg == 0 eller reg == 1) og mod == 3 og rm == 0 og (rex & 1) == 0
+        }
+        hvis c == 0xF7 {
+            la reg = (_b(b, q + 1) >> 3) & 7
+            hvis reg >= 4 { returner sann }                             // mul/imul/div/idiv: rax
+            la mod = (_b(b, q + 1) >> 6) & 3
+            la rm = _b(b, q + 1) & 7
+            returner (reg == 2 eller reg == 3) og mod == 3 og rm == 0 og (rex & 1) == 0
+        }
+        returner usann
+    }
+    // reg-mål (reg-feltet i ModRM): 03 0B 13 1B 23 2B 33 8A 8B 8D 63 69 6B
+    hvis _i([0x02, 0x03, 0x0A, 0x0B, 0x12, 0x13, 0x1A, 0x1B, 0x22, 0x23, 0x2A, 0x2B, 0x32, 0x33, 0x8A, 0x8B, 0x8D, 0x63, 0x69, 0x6B], c) {
+        la reg = (_b(b, q + 1) >> 3) & 7
+        returner reg == 0 og (rex & 4) == 0
+    }
+    // r/m-mål med mod == 3 og rm == 0 (rax): 01 09 11 19 21 29 31 89 C7 81 83 C1 D1 D3 C0 D0 87
+    hvis _i([0x00, 0x01, 0x08, 0x09, 0x10, 0x11, 0x18, 0x19, 0x20, 0x21, 0x28, 0x29, 0x30, 0x31, 0x88, 0x89, 0xC6, 0xC7, 0x80, 0x81, 0x83, 0xC0, 0xC1, 0xD0, 0xD1, 0xD3, 0x86, 0x87], c) {
+        la m = _b(b, q + 1)
+        la mod = (m >> 6) & 3
+        la rm = m & 7
+        hvis c == 0x86 eller c == 0x87 {
+            la reg = (m >> 3) & 7
+            hvis reg == 0 og (rex & 4) == 0 { returner sann }
+        }
+        hvis (c == 0x80 eller c == 0x81 eller c == 0x83) og ((m >> 3) & 7) == 7 { returner usann }   // cmp
+        returner mod == 3 og rm == 0 og (rex & 1) == 0
+    }
+    // ALU eax,imm (05 0D 25 2D 35 …) og cdqe/cqo (98/99 skriv rax/rdx)
+    hvis c <= 0x3F og (c & 7) == 5 og c != 0x3D { returner sann }
+    hvis c == 0x98 { returner sann }
+    hvis c == 0xA1 { returner sann }
+    returner usann
+}
+
+// Er instruksjonen i p ei statisk lasting av eax/rax? Svar: nummeret, eller −1.
+funksjon _rax_imm(b: liste, p: heiltall, lengd: heiltall) -> heiltall {
+    la c = _b(b, p)
+    hvis c == 0xB8 og lengd == 5 { returner _u32(b, p + 1) }
+    hvis c == 0x48 og lengd == 7 og _b(b, p + 1) == 0xC7 og _b(b, p + 2) == 0xC0 {
+        la v = _u32(b, p + 3)
+        hvis v >= 2147483648 { returner 0 - (4294967296 - v) - 1000000 }   // negativ: ikkje eit syscall-nr
+        returner v
+    }
+    hvis c == 0xC7 og lengd == 6 og _b(b, p + 1) == 0xC0 { returner _u32(b, p + 2) }
+    hvis (c == 0x31 eller c == 0x33) og lengd == 2 og _b(b, p + 1) == 0xC0 { returner 0 }
+    hvis c == 0x48 og lengd == 3 og (_b(b, p + 1) == 0x31 eller _b(b, p + 1) == 0x33) og _b(b, p + 2) == 0xC0 { returner 0 }
+    returner -1
+}
+
+// ret / jmp rel / jmp r/m / ud2: neste byte er ikkje nådd ved gjennomfall.
+funksjon _er_avslutting(b: liste, p: heiltall, n: heiltall) -> boolsk {
+    la c = _b(b, p)
+    hvis n == 1 og c == 0xC3 { returner sann }
+    hvis (n == 5 og c == 0xE9) eller (n == 2 og c == 0xEB) { returner sann }
+    hvis n == 2 og c == 0x0F og _b(b, p + 1) == 0x0B { returner sann }
+    la q: heiltall = p
+    hvis c >= 0x40 og c <= 0x4F { q = q + 1 }
+    hvis _b(b, q) == 0xFF og ((_b(b, q + 1) >> 3) & 7) == 4 { returner sann }
+    returner usann
+}
+
+// Lengda til ein innebygd tekst i p (feilmeldingar som atomet skriv ut med movabs rsi +
+// mov edx,len): minst 8 byte utskrivbar tekst (gyldig UTF-8, minst 3/4 ASCII) som endar
+// på linjeskift (lengd utan NUL) eller NUL (med). Elles 0. Kravet om avslutting gjer at
+// ein prolog som 55 41 54 41 55 … («UATAU…») ikkje blir teken for tekst.
+funksjon _tekst_lengd(b: liste, p: heiltall, slutt: heiltall) -> heiltall {
+    la q: heiltall = p
+    la ascii: heiltall = 0
+    mens q < slutt {
+        la c = _b(b, q)
+        la n = q - p
+        hvis c == 0 {
+            hvis n >= 4 og ascii * 4 >= n * 3 { returner n + 1 }
+            returner 0
+        }
+        hvis c < 0x80 {
+            hvis c < 0x20 og c != 9 og c != 10 {
+                hvis n >= 8 og ascii * 4 >= n * 3 og _b(b, q - 1) == 10 { returner n }
+                returner 0
+            }
+            hvis c == 0x7F { returner 0 }
+            ascii = ascii + 1
+            q = q + 1
+        } ellers {
+            la fylg: heiltall = 0
+            hvis c >= 0xC2 og c <= 0xDF { fylg = 1 }
+            ellers hvis c >= 0xE0 og c <= 0xEF { fylg = 2 }
+            ellers hvis c >= 0xF0 og c <= 0xF4 { fylg = 3 }
+            ellers {
+                hvis n >= 8 og ascii * 4 >= n * 3 og _b(b, q - 1) == 10 { returner n }
+                returner 0
+            }
+            la j: heiltall = 1
+            mens j <= fylg {
+                hvis q + j >= slutt { returner 0 }
+                la d = _b(b, q + j)
+                hvis d < 0x80 eller d > 0xBF {
+                    hvis n >= 8 og ascii * 4 >= n * 3 og _b(b, q - 1) == 10 { returner n }
+                    returner 0
+                }
+                j = j + 1
+            }
+            q = q + fylg + 1
+        }
+    }
+    returner 0
+}
+
+// Dekodar [p0, slutt) lineært. Data inne i .text (t.d. SHA-256-K-tabellen) står alltid bak
+// eit ubetinga hopp framover (E9/EB) som hoppar over ho: gapet blir dekoda spekulativt, og
+// endar dekodinga ikkje nøyaktig på hoppmålet (eller ein opkode er ugyldig), blir gapet
+// rekna som data og hoppa over (talt i «data_byte»). Svar {"ok", "start", "lengder", "data"}.
+funksjon _sveip(b: liste, p0: heiltall, slutt: heiltall, djupn: heiltall) -> ordbok {
+    la start: liste_heiltall = []
+    la lengder: liste_heiltall = []
+    la data: heiltall = 0
+    la p: heiltall = p0
+    mens p < slutt {
+        la n: heiltall = 0
+        prøv { n = instr_lengd(b, p) } fang (e) {
+            hvis djupn == 0 { kast e }
+            returner {"ok": usann}
+        }
+        hvis p + n > slutt { returner {"ok": usann} }
+        legg_til(start, p)
+        legg_til(lengder, n)
+        la neste: heiltall = p + n
+        la mål: heiltall = -1
+        hvis n == 5 og _b(b, p) == 0xE9 {
+            la r = _u32(b, p + 1)
+            hvis r >= 2147483648 { r = r - 4294967296 }
+            mål = neste + r
+        }
+        hvis n == 2 og _b(b, p) == 0xEB {
+            la r8 = _b(b, p + 1)
+            hvis r8 >= 128 { r8 = r8 - 256 }
+            mål = neste + r8
+        }
+        hvis mål > neste og mål <= slutt og djupn < 4 {
+            la sp = _sveip(b, neste, mål, djupn + 1)
+            hvis sp["ok"] {
+                la si: heiltall = 0
+                la ss = sp["start"]
+                la sl = sp["lengder"]
+                mens si < lengde(ss) { legg_til(start, ss[si])  legg_til(lengder, sl[si])  si = si + 1 }
+                data = data + sp["data"]
+            } ellers {
+                data = data + (mål - neste)
+            }
+            p = mål
+        } ellers {
+            p = neste
+            // Etter ei ubetinga avslutting (ret, jmp, ud2) kan ein NUL-terminert tekst stå
+            // (feilmeldingar som atomet sjølv skriv ut via lea rsi,[rip-…]). Han blir hoppa over.
+            hvis _er_avslutting(b, start[lengde(start) - 1], n) {
+                la t = _tekst_lengd(b, p, slutt)
+                hvis t > 0 { data = data + t  p = p + t }
+            }
+        }
+    }
+    returner {"ok": p == slutt, "start": start, "lengder": lengder, "data": data}
+}
+
+// Dekodar .text. Svar: {"instr": tal, "data_byte": tal, "stader": [[fil-offset, nr], …]} der
+// nr = −1 for dynamisk rax. Vindauget bakover er 24 instruksjonar.
+funksjon skann(b: liste) -> ordbok {
+    la tr = elf_text(b)
+    la sv = _sveip(b, tr[0], tr[1], 0)
+    hvis ikkje sv["ok"] { kast "x86_64_skann: dekodinga enda ikkje på .text-slutt " + tekst(tr[1]) }
+    la start = sv["start"]
+    la lengder = sv["lengder"]
+    la stader: liste = []
+    la i: heiltall = 0
+    mens i < lengde(start) {
+        la p: heiltall = start[i]
+        hvis lengder[i] == 2 og _b(b, p) == 0x0F og _b(b, p + 1) == 0x05 {
+            la nr: heiltall = -1
+            la k: heiltall = i - 1
+            la n_bak: heiltall = 0
+            la ferdig = usann
+            mens k >= 0 og n_bak < 24 og ferdig == usann {
+                la v = _rax_imm(b, start[k], lengder[k])
+                hvis v != -1 {
+                    nr = v
+                    ferdig = sann
+                } ellers hvis _skriv_rax(b, start[k], lengder[k]) {
+                    ferdig = sann
+                }
+                k = k - 1
+                n_bak = n_bak + 1
+            }
+            legg_til(stader, [p, nr])
+        }
+        i = i + 1
+    }
+    returner {"instr": lengde(start), "data_byte": sv["data"], "stader": stader}
+}
+
+// Sorterte, unike systemkallnummer frå skann()-stadene (−1 = dynamisk).
+funksjon nummer(stader: liste) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(stader) {
+        la nr: heiltall = stader[i][1]
+        hvis ikkje _i(ut, nr) {
+            // innsetjing i sortert rekkjefølgje
+            la nye: liste_heiltall = []
+            la j: heiltall = 0
+            la lagt = usann
+            mens j < lengde(ut) {
+                hvis ikkje lagt og nr < ut[j] { legg_til(nye, nr)  lagt = sann }
+                legg_til(nye, ut[j])
+                j = j + 1
+            }
+            hvis ikkje lagt { legg_til(nye, nr) }
+            ut = nye
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la sti = miljo_hent("NC_ELF")
+    hvis sti == "" {
+        skriv("bruk: NC_ELF=<fil.elf> nc run tools/x86_64_syscall_skann.no\n")
+        returner 2
+    }
+    la b = builtin.fil_les_binær(sti)
+    la r = skann(b)
+    la st = r["stader"]
+    skriv("instruksjonar " + tekst(r["instr"]) + " data_byte " + tekst(r["data_byte"]) + " syscall-stader " + tekst(lengde(st)) + "\n")
+    la nrs = nummer(st)
+    la i: heiltall = 0
+    mens i < lengde(nrs) {
+        la n: heiltall = 0
+        la j: heiltall = 0
+        mens j < lengde(st) {
+            hvis st[j][1] == nrs[i] { n = n + 1 }
+            j = j + 1
+        }
+        skriv("nr " + tekst(nrs[i]) + " stader " + tekst(n) + "\n")
+        i = i + 1
+    }
+    returner 0
+}
