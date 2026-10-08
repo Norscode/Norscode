@@ -1840,6 +1840,151 @@ funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
     returner r2
 }
 
+// ── Relay X5 (os-x86-io): setsockopt / getsockname / poll for socket_* ──────────
+// Same feilkontrakt som resten av socket_*-familien: oppsett-kall (bind/connect/listen,
+// og desse) gjev 0 eller −errno; kall som skapar ein fd (new/accept) eller flyttar data
+// (send/recv) kastar ved feil. Berre syscall-nummer frå std.native_sys → same kode på
+// linux-x86_64, linux-arm64, macos-arm64 og eit framtidig norscodeos-x86_64.
+
+// setsockopt(fd, nivå, namn, &verdi, 4) med ein int-verdi (t.d. SOL_SOCKET=1,
+// SO_REUSEADDR=2 på Linux). 0 eller −errno.
+funksjon socket_setsockopt(fd: heiltall, nivå: heiltall, namn: heiltall, verdi: heiltall) -> heiltall {
+    la ein: heiltall = _sk_buf() + 65520
+    builtin.raw_store64(ein, verdi & 4294967295)
+    returner builtin.sys6(nsys._nr("setsockopt"), fd, nivå, namn, ein, 4, 0)
+}
+
+// getsockname(fd) → lokal port (t.d. etter bind til port 0), eller −errno.
+funksjon socket_getsockname(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    la adr: heiltall = b + 160
+    la i: heiltall = 0
+    mens i < 32 { builtin.raw_store8(adr + i, 0) i = i + 1 }
+    builtin.raw_store64(b + 200, 16)
+    la r = builtin.sys6(nsys._nr("getsockname"), fd, adr, b + 200, 0, 0, 0)
+    hvis r < 0 { returner r }
+    la po: heiltall = nsys._layout("sockaddr_in", "port")
+    returner (builtin.raw_load8(adr + po) << 8) | builtin.raw_load8(adr + po + 1)
+}
+
+// poll/ppoll over fds med same hendingsmaske på alle (POLLIN=1, POLLOUT=4 på Linux og
+// macOS). ms < 0 = vent utan tak. Gjev revents i same rekkjefølgje (0 = ikkje klar /
+// tidsavbrot / EINTR). Andre feil kastar. Maks 1024 fd-ar.
+funksjon socket_poll(fds: liste, hendingar: heiltall, ms: heiltall) -> liste {
+    la n: heiltall = lengde(fds)
+    hvis n > 1024 { kast "socket_poll: for mange fd-ar (maks 1024)" }
+    la b = _sk_buf()
+    la tab: heiltall = b + 4096           // 1024 × 8 byte = 8 KiB, inne i data-sona
+    la sz: heiltall = nsys._layout("pollfd", "storleik")
+    la i: heiltall = 0
+    mens i < n { _sys_pollfd(tab + i * sz, fds[i], hendingar) i = i + 1 }
+    la r = _sys_poll(tab, n, ms, b + 224)
+    la ut: liste = []
+    hvis r < 0 og r != 0 - nsys._errno("EINTR") { kast "socket_poll feila: " + tekst_fra_heltall(r) }
+    la ro: heiltall = nsys._layout("pollfd", "revents")
+    i = 0
+    mens i < n {
+        hvis r > 0 { legg_til(ut, _sys_les_u16(tab + i * sz + ro)) } ellers { legg_til(ut, 0) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Relay X5: rein fd-I/O (fd_les / fd_skriv / les_stdin) og fil_prøv_skriv ──────
+// read(2)/write(2) på ein vilkårleg fd (stdin, røyr, sokkel, fil). Teksten er byte-eksakt
+// (byte k → builtin.chr(k), som socket_recv); bygd med join, ikkje kvadratisk konkat.
+
+// Byte [buf, buf+n) → tekst.
+funksjon _fd_tekst(buf: heiltall, n: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n { legg_til(delar, builtin.chr(builtin.raw_load8(buf + i))) i = i + 1 }
+    returner builtin.join(delar, "")
+}
+
+// Éin read(fd, maks) (maks blir klipt til 32 KiB). "" = EOF (eller EAGAIN på ein
+// ikkje-blokkerande fd); andre feil kastar «fd_les feila: −errno».
+funksjon fd_les(fd: heiltall, maks: heiltall) -> tekst {
+    la nm: heiltall = maks
+    hvis nm > 32768 { nm = 32768 }
+    hvis nm <= 0 { returner "" }
+    la buf: heiltall = _sk_buf() + 4096
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, nm, 0, 0, 0)
+    mens n == 0 - nsys._errno("EINTR") { n = builtin.sys6(nsys._nr("read"), fd, buf, nm, 0, 0, 0) }
+    hvis n == 0 - nsys._errno("EAGAIN") { returner "" }
+    hvis n < 0 { kast "fd_les feila: " + tekst_fra_heltall(n) }
+    returner _fd_tekst(buf, n)
+}
+
+// Skriv heile data (tekst eller liste av byte) med write(2). Gjev talet på byte, eller
+// −errno ved feil (aldri unntak). Ein lukka røyr-lesar gjev SIGPIPE som på Linux elles.
+funksjon fd_skriv(fd: heiltall, data) -> heiltall {
+    la er_tekst = builtin.type(data) == "tekst"
+    la total: heiltall = lengde(data)
+    la buf: heiltall = _sk_buf() + 4096
+    la nr_w = nsys._nr("write")
+    la eintr = 0 - nsys._errno("EINTR")
+    la sendt: heiltall = 0
+    mens sendt < total {
+        la bit = total - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        hvis er_tekst {
+            mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        } ellers {
+            mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        }
+        la off: heiltall = 0
+        mens off < bit {
+            la w = builtin.sys6(nr_w, fd, buf + off, bit - off, 0, 0, 0)
+            hvis w == eintr { w = 0 }
+            ellers hvis w < 0 { returner w }
+            ellers hvis w == 0 { returner sendt + off }
+            off = off + w
+        }
+        sendt = sendt + bit
+    }
+    returner sendt
+}
+
+// Les fd 0 til EOF. Feil (t.d. EBADF når stdin er lukka) gjev det som alt er lese.
+funksjon les_stdin() -> tekst {
+    la buf: heiltall = _sk_buf() + 4096
+    la nr_r = nsys._nr("read")
+    la eintr = 0 - nsys._errno("EINTR")
+    la delar: liste_tekst = []
+    la ferdig = usann
+    mens ikkje ferdig {
+        la n = builtin.sys6(nr_r, 0, buf, 32768, 0, 0, 0)
+        hvis n > 0 { legg_til(delar, _fd_tekst(buf, n)) }
+        ellers hvis n != eintr { ferdig = sann }
+    }
+    returner builtin.join(delar, "")
+}
+
+// fil_prøv_skriv(sti, data) → 0 eller −errno, aldri unntak. Opnar med
+// openat(AT_FDCWD, sti, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) slik at errno-en er
+// den ekte (EACCES/ENOENT/EISDIR/EROFS …), og skriv med write(2) (ENOSPC/EIO kjem
+// òg attende som −errno). −EINVAL for ugyldig sti (tom, NUL, ≥ 4096 byte).
+funksjon fil_prøv_skriv(sti, data) -> heiltall {
+    hvis ikkje _fsg_sti_ok(sti) eller sti == "" { returner _fsg_einval() }
+    hvis builtin.type(data) != "tekst" og builtin.type(data) != "liste" { returner _fsg_einval() }
+    la b = _sys_mmap_rw(4096)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, sti)
+    la flagg = nsys._flagg("O_WRONLY") | nsys._flagg("O_CREAT") | nsys._flagg("O_TRUNC") | nsys._flagg("O_CLOEXEC")
+    la fd = builtin.sys6(nsys._nr_kompat("openat"), nsys._flagg("AT_FDCWD"), b, flagg, 420, 0, 0)
+    _sys_munmap(b, 4096)
+    hvis fd < 0 { returner fd }
+    la w = fd_skriv(fd, data)
+    la c = _sys_lukk(fd)
+    hvis w < 0 { returner w }
+    hvis w < lengde(data) { returner 0 - 5 }   // EIO: kort skriving utan errno
+    hvis c < 0 { returner c }
+    returner 0
+}
+
+
 // ── builtin.network_operation («norscode-native-network-v1») i rein Norscode ────
 // Handle-ABI over sys6: listen/connect/accept/read/read_hex/write/write_hex/poll/
 // close/shutdown + udp_listen/udp_connect/recvfrom/sendto. Sokkelane er ikkje-
