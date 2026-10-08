@@ -1,0 +1,191 @@
+// norscodeos-x86_64: byggjer fiksturar med codegen-ELF-en og skannar .text etter syscall.
+//
+// Krev ein Linux x86-64-vert og ein codegen-ELF som kjenner målet norscodeos-x86_64:
+// NC_NOS_CODEGEN=<sti> (elles bootstrap/native_codegen_x86_64.elf). Kjenner ELF-en ikkje
+// målet (ikkje rebygd etter at målet kom inn), hoppar testen over med ei tydeleg melding —
+// han er då IKKJE eit prov. Kva han viser når han køyrer:
+//   1. Statiske syscall-nummer i .text ⊆ tillatne (write 1, read 0, open 2, close 3, stat 4, lseek 8,
+//      access 21, unlink 87, rmdir 84, mkdir 83, chmod 90, nanosleep 35, clock_gettime 228,
+//      getrandom 318, exit 60, socket-familien, poll 7, ppoll 271, accept4 288, pipe2 293,
+//      wait4 61, spawn 4097, krypto 4098, mmap 9/munmap 11). Ingen brk 12, clone 56, futex 202.
+//   2. Det einaste dynamiske staden (nummer frå register) er sys6-porten: …; mov rax,-38; ret; syscall; ret.
+//   3. Heap-segmentet har p_memsz 64 MiB (NC_HEAP_MIB=128 → 128 MiB); linux-x86_64 har 2 GiB.
+//   4. Stakkvakta: lea rax,[r12-960 KiB] på norscodeos (NC_STAKK_KIB=512 → 512 KiB), 7 MiB på linux.
+//   5. builtin.sys6 i brukarkode er ein kompileringsfeil på norscodeos-x86_64.
+// Handskrivne byte for dei nye sekvensane er i test_norscodeos_x86_64_encoder.no.
+
+bruk tools.x86_64_syscall_skann som skann
+bruk tools.process_runner som prosess
+
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = ""
+    la maskin = ""
+    prøv {
+        la info = builtin.system_info()
+        system = tekst(info["system"])
+        maskin = tekst(info["machine"])
+    } fang (e) {}
+    returner system == "Linux" og (maskin == "x86_64" eller maskin == "amd64")
+}
+
+funksjon byggjemiljo(root: tekst, mål: tekst, inn: tekst, ut: tekst, ekstra: ordbok_tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {
+        "NORSCODE_ROOT": root,
+        "NC_TARGET": mål,
+        "NC_INPUT": inn,
+        "NC_OUTPUT": ut,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la nokkel = nøkler(ekstra)
+    la i: heiltall = 0
+    mens i < lengde(nokkel) { m[nokkel[i]] = ekstra[nokkel[i]]  i = i + 1 }
+    returner m
+}
+
+funksjon bygg(cg: tekst, root: tekst, mål: tekst, fikstur: tekst, ut: tekst, ekstra: ordbok_tekst) -> ordbok_tekst {
+    returner prosess.køyr(cg, [], root, byggjemiljo(root, mål, root + "/tests/fixtures/nos_x86/" + fikstur + ".ncb.json", ut, ekstra), 600000)
+}
+
+funksjon les_elf(sti: tekst) -> liste {
+    returner builtin.fil_les_binær(sti)
+}
+
+funksjon u32(b: liste, p: heiltall) -> heiltall {
+    returner b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)
+}
+
+funksjon u64(b: liste, p: heiltall) -> heiltall {
+    returner u32(b, p) | (u32(b, p + 4) << 32)
+}
+
+// p_memsz til heap-segmentet (PT_LOAD med p_vaddr == 0x780000).
+funksjon heap_memsz(b: liste) -> heiltall {
+    la phoff = u64(b, 32)
+    la n = b[56] | (b[57] << 8)
+    la i: heiltall = 0
+    mens i < n {
+        la p = phoff + 56 * i
+        hvis u32(b, p) == 1 og u64(b, p + 16) == 0x780000 { returner u64(b, p + 40) }
+        i = i + 1
+    }
+    kast "fann ikkje heap-segmentet"
+}
+
+// Tel førekomstar av lea rax,[r12-X]; mov [abs32],rax (49 8D 84 24 <-X> 48 89 04 25).
+funksjon tel_stakkvakt(b: liste, bytar: heiltall) -> heiltall {
+    la v = (0 - bytar) & 4294967295
+    la sek: liste_heiltall = [0x49, 0x8D, 0x84, 0x24, v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255, 0x48, 0x89, 0x04, 0x25]
+    la tal: heiltall = 0
+    la i: heiltall = 4096
+    la slutt = lengde(b) - 12
+    mens i < slutt {
+        hvis b[i] == 0x49 og b[i + 1] == 0x8D {
+            la lik = sann
+            la k: heiltall = 0
+            mens k < 12 { hvis b[i + k] != sek[k] { lik = usann }  k = k + 1 }
+            hvis lik { tal = tal + 1 }
+        }
+        i = i + 1
+    }
+    returner tal
+}
+
+funksjon i_liste(xs: liste_heiltall, x: heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(xs) { hvis xs[i] == x { returner sann }  i = i + 1 }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje vert_linux_x86_64() {
+        skriv("test_linux_x86_64_norscodeos_syscall_skann: hoppa over (ikkje Linux x86-64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la cg = miljo_hent("NC_NOS_CODEGEN")
+    hvis cg == "" { cg = root + "/bootstrap/native_codegen_x86_64.elf" }
+    la merke = builtin.random_hex(8)
+    la ut = "/tmp/nos_x86_skann_" + merke
+    la prove = bygg(cg, root, "norscodeos-x86_64", "heap_krypto", ut + "_prove.elf", {})
+    hvis tekst(prove["status"]) != "ferdig" eller heltall_fra_tekst(tekst(prove["exit_code"])) != 0 {
+        skriv("test_linux_x86_64_norscodeos_syscall_skann: HOPPA OVER — codegen-ELF-en kjenner ikkje norscodeos-x86_64 (rebygg og installer han; sjå docs/NORSCODEOS_X86_64.md §8): " + cg + "\n")
+        returner 0
+    }
+    // Strengt tillatne statiske nummer (oppgåve-lista + mmap/munmap frå fil_les-straumvegen).
+    la strengt: liste_heiltall = [0, 1, 2, 3, 4, 7, 8, 9, 11, 21, 35, 41, 42, 43, 44, 45, 49, 50, 51, 54, 60, 61, 83, 84, 87, 90, 228, 271, 288, 293, 318, 4097, 4098]
+    la fiksturar: liste_tekst = ["heap_krypto", "rekursjon", "filio", "kart", "spawn_args"]
+    la i: heiltall = 0
+    mens i < lengde(fiksturar) {
+        la f = tekst(fiksturar[i])
+        la sti = ut + "_" + f + ".elf"
+        la r = bygg(cg, root, "norscodeos-x86_64", f, sti, {})
+        assert_eq(tekst(r["exit_code"]), "0")
+        la b = les_elf(sti)
+        la s = skann.skann(b)
+        la nrs = skann.nummer(s["stader"])
+        la dyn: heiltall = 0
+        la j: heiltall = 0
+        mens j < lengde(s["stader"]) {
+            hvis s["stader"][j][1] == -1 { dyn = dyn + 1 }
+            j = j + 1
+        }
+        // Berre sys6-porten har nummer frå register.
+        assert_eq(dyn, 1)
+        j = 0
+        mens j < lengde(nrs) {
+            hvis nrs[j] != -1 og ikkje i_liste(strengt, nrs[j]) {
+                skriv(f + ": utillate syscall " + tekst(nrs[j]) + "\n")
+                assert_eq(nrs[j], -2)
+            }
+            j = j + 1
+        }
+        assert(ikkje i_liste(nrs, 12))
+        assert(ikkje i_liste(nrs, 56))
+        assert(ikkje i_liste(nrs, 202))
+        // Den dynamiske staden er `0F 05 C3` rett bak `mov rax,-38; ret`.
+        la p: heiltall = 0
+        j = 0
+        mens j < lengde(s["stader"]) {
+            hvis s["stader"][j][1] == -1 { p = s["stader"][j][0] }
+            j = j + 1
+        }
+        la venta: liste_heiltall = [0x48, 0xC7, 0xC0, 0xDA, 0xFF, 0xFF, 0xFF, 0xC3, 0x0F, 0x05, 0xC3]
+        j = 0
+        mens j < lengde(venta) { assert_eq(b[p - 8 + j], venta[j])  j = j + 1 }
+        // Heap og stakkvakt.
+        assert_eq(heap_memsz(b), 67108864)
+        assert_eq(tel_stakkvakt(b, 983040) >= 1, sann)
+        assert_eq(tel_stakkvakt(b, 7340032), 0)
+        filops_slett(sti)
+        i = i + 1
+    }
+    // NC_HEAP_MIB og NC_STAKK_KIB.
+    la st = ut + "_param.elf"
+    assert_eq(tekst(bygg(cg, root, "norscodeos-x86_64", "rekursjon", st, {"NC_HEAP_MIB": "128", "NC_STAKK_KIB": "512"})["exit_code"]), "0")
+    la bp = les_elf(st)
+    assert_eq(heap_memsz(bp), 134217728)
+    assert(tel_stakkvakt(bp, 524288) >= 1)
+    filops_slett(st)
+    // Linux-målet: 2 GiB heap og 7 MiB stakkvakt (uendra).
+    la lt = ut + "_linux.elf"
+    assert_eq(tekst(bygg(cg, root, "linux-x86_64", "rekursjon", lt, {})["exit_code"]), "0")
+    la bl = les_elf(lt)
+    assert_eq(heap_memsz(bl), 2147483648)
+    assert(tel_stakkvakt(bl, 7340032) >= 1)
+    filops_slett(lt)
+    // Ugyldige parametrar blir avviste ved bygging.
+    assert(tekst(bygg(cg, root, "norscodeos-x86_64", "rekursjon", st, {"NC_STAKK_KIB": "abc"})["exit_code"]) != "0")
+    // Brukarkode med builtin.sys6 på norscodeos-målet: kompileringsfeil (fiksturen er
+    // generert med bundle av tests/fixtures/nos_x86/sys6_nektar.no).
+    assert(tekst(bygg(cg, root, "norscodeos-x86_64", "sys6_nektar", st, {})["exit_code"]) != "0")
+    filops_slett(ut + "_prove.elf")
+    skriv("test_linux_x86_64_norscodeos_syscall_skann OK\n")
+    returner 0
+}
+
+funksjon filops_slett(sti: tekst) -> heiltall {
+    prøv { builtin.fil_slett(sti) } fang (e) {}
+    returner 0
+}
