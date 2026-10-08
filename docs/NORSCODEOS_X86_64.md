@@ -112,7 +112,7 @@ les `envp` ([0x780008]). Ingen nye namn er innførde; verifisert på målet (fik
 1. **Codegen-ELF** (`bootstrap/native_codegen_x86_64.elf` + `.srchash`/`.depshash` + pinne i
    `tools/active_surface_allowlist.txt`): `native_codegen_v2.no`, `heap_layout.no` endra. Bygg:
    `nc bundle` av `native_codegen_v2.no` → NCB, køyr gamal ELF med `NC_INPUT`/`NC_OUTPUT` → `cg1`,
-   og `cg1` på same NCB → `cg2` (fikspunkt: sha like). Lokal sha256 (20:38, tre 2026-10-08):
+   og `cg1` på same NCB → `cg2` (fikspunkt: sha like). Lokal sha256:
    `09b25595b34c1d65169bbafa2764baca544c4e4aba67c756c8138b2070855d48`. Krev godkjenning før
    installasjon. `test_native_codegen_srchash` er raud til dette er gjort.
 2. **Seed** (`nc_main.no`-lukkinga): `std/native_gap.no`, `std/native_sys.no`,
