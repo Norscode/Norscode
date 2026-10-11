@@ -34,6 +34,7 @@ funksjon byggjemiljo(root: tekst, mål: tekst, inn: tekst, ut: tekst, ekstra: or
         "NC_TARGET": mål,
         "NC_INPUT": inn,
         "NC_OUTPUT": ut,
+        "NORSCODE_GC_ALLOC": "",
         "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
         "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
     }
@@ -43,8 +44,52 @@ funksjon byggjemiljo(root: tekst, mål: tekst, inn: tekst, ut: tekst, ekstra: or
     returner m
 }
 
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+// Fiksturane ligg som .no (ingen committa bytekode): kompiler til NCB i /tmp rett før codegen-ELF-en les han.
+funksjon fikstur_ncb(root: tekst, fikstur: tekst) -> tekst {
+    la ncb = "/tmp/nos_x86_fikstur_" + fikstur + ".ncb.json"
+    la r = prosess.køyr(runtime(root), ["bundle", "--output", ncb, root + "/tests/fixtures/nos_x86/" + fikstur + ".no"], root, {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, 600000)
+    assert_eq(tekst(r["exit_code"]), "0")
+    returner ncb
+}
+
 funksjon bygg(cg: tekst, root: tekst, mål: tekst, fikstur: tekst, ut: tekst, ekstra: ordbok_tekst) -> ordbok_tekst {
-    returner prosess.køyr(cg, [], root, byggjemiljo(root, mål, root + "/tests/fixtures/nos_x86/" + fikstur + ".ncb.json", ut, ekstra), 600000)
+    returner prosess.køyr(cg, [], root, byggjemiljo(root, mål, fikstur_ncb(root, fikstur), ut, ekstra), 600000)
+}
+
+// Finst byterekkja `mal` i `b`?
+funksjon inneheld(b: liste, mal: liste_heiltall) -> boolsk {
+    la i: heiltall = 0
+    la siste: heiltall = lengde(b) - lengde(mal)
+    mens i <= siste {
+        hvis b[i] == mal[0] {
+            la lik = sann
+            la k: heiltall = 1
+            mens k < lengde(mal) og lik {
+                hvis b[i + k] != mal[k] { lik = usann }
+                k = k + 1
+            }
+            hvis lik { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
 }
 
 funksjon les_elf(sti: tekst) -> liste {
@@ -110,12 +155,23 @@ funksjon start() -> heiltall {
     la ut = "/tmp/nos_x86_skann_" + merke
     la prove = bygg(cg, root, "norscodeos-x86_64", "heap_krypto", ut + "_prove.elf", {})
     hvis tekst(prove["status"]) != "ferdig" eller heltall_fra_tekst(tekst(prove["exit_code"])) != 0 {
+        prosess.skriv_resultat(prove)
         skriv("test_linux_x86_64_norscodeos_syscall_skann: HOPPA OVER — codegen-ELF-en kjenner ikkje norscodeos-x86_64 (rebygg og installer han; sjå docs/NORSCODEOS_X86_64.md §8): " + cg + "\n")
         returner 0
     }
     // Strengt tillatne statiske nummer (oppgåve-lista + mmap/munmap frå fil_les-straumvegen).
     la strengt: liste_heiltall = [0, 1, 2, 3, 4, 7, 8, 9, 11, 21, 35, 41, 42, 43, 44, 45, 49, 50, 51, 54, 60, 61, 83, 84, 87, 90, 228, 271, 288, 293, 318, 4097, 4098]
-    la fiksturar: liste_tekst = ["heap_krypto", "rekursjon", "filio", "kart", "spawn_args"]
+    la fiksturar: liste_tekst = ["heap_krypto", "rekursjon", "filio", "kart"]
+    // spawn_args: ELF-en (~2 MB, med heile spawn-motoren i std.native_gap) er for stor for den
+    // tolka skanneren (OOM i 1 GiB-GC-heapen). Her sjekkar vi berre at han bygger og at
+    // spawn-kallet (`mov eax,4097` = B8 01 10 00 00) ligg i han; dei fire
+    // fiksturane under dekkjer full dekoding av syscall-mengda.
+    la sp_sti = ut + "_spawn_args.elf"
+    la sp = bygg(cg, root, "norscodeos-x86_64", "spawn_args", sp_sti, {})
+    assert_eq(tekst(sp["exit_code"]), "0")
+    la sp_b = les_elf(sp_sti)
+    assert(inneheld(sp_b, [0xB8, 0x01, 0x10, 0x00, 0x00]) eller inneheld(sp_b, [0x48, 0xC7, 0xC0, 0x01, 0x10, 0x00, 0x00]))
+    filops_slett(sp_sti)
     la i: heiltall = 0
     mens i < lengde(fiksturar) {
         la f = tekst(fiksturar[i])
@@ -178,7 +234,7 @@ funksjon start() -> heiltall {
     // Ugyldige parametrar blir avviste ved bygging.
     assert(tekst(bygg(cg, root, "norscodeos-x86_64", "rekursjon", st, {"NC_STAKK_KIB": "abc"})["exit_code"]) != "0")
     // Brukarkode med builtin.sys6 på norscodeos-målet: kompileringsfeil (fiksturen er
-    // generert med bundle av tests/fixtures/nos_x86/sys6_nektar.no).
+    // kompilert frå tests/fixtures/nos_x86/sys6_nektar.no).
     assert(tekst(bygg(cg, root, "norscodeos-x86_64", "sys6_nektar", st, {})["exit_code"]) != "0")
     filops_slett(ut + "_prove.elf")
     skriv("test_linux_x86_64_norscodeos_syscall_skann OK\n")
