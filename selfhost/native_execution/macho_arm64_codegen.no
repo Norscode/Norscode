@@ -1547,7 +1547,7 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
     // CALL-dispatch med rett arietet); stubben gjeld berre andre arietetar (som sha256_bytes).
     returner n == "argv_list_v1" eller n == "argv_operation" eller
         n == "host_exec_ncb_json" eller n == "system_operation" eller
-        n == "sha256_bytes" eller n == "sha256" eller
+        n == "sha256_bytes" eller n == "sha256_bytes_hex" eller n == "sha256" eller
         n == "hmac_sha256" eller n == "hmac_sha256_bytes" eller
         n == "filesystem_write_operation" eller n == "filesystem_read_operation" eller
         n == "jit_operation" eller n == "pbkdf2_sha256" eller n == "argon2id" eller
@@ -10160,10 +10160,34 @@ funksjon ncval_lambda_captures(funksjonar, order) -> ordbok {
 // bl_patchar samlar [pos_i_native, mål-namn(, kind)] for lenking av multi-
 // drivaren. kind == "lamaddr" → adr+movz/movk+add-sekvens (closure→fn-adresse);
 // elles bl. lam_captures = fanga-namn for DENNE funksjonen (om lambda) elles [].
+// Kompiler ein funksjon; sprekk betinga hopp (cbz, ±1 MiB) fordi funksjonen er større enn 1 MiB
+// (kompiler_arm64_ncval i macho_arm64_codegen sjølv), blir han rekompilert med fjernhopp
+// (cbnz over ubetinga b). Vanlege funksjonar får uendra kode.
+la ncval_far_grein = usann
+
+funksjon ncval_med_fjernhopp(kode, os, funksjonar, params, er_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures, fn_namn: tekst, fn_modul: tekst) -> ordbok_tekst {
+    la bp = []
+    ncval_far_grein = usann
+    la res = kompiler_arm64_ncval(kode, os, funksjonar, params, er_entry, bp, globals, initializers, memmode, lam_captures, fn_namn, fn_modul)
+    hvis res["ok"] != "sann" og finnes_nøkkel(res, "far") og res["far"] == "sann" {
+        bp = []
+        ncval_far_grein = sann
+        res = kompiler_arm64_ncval(kode, os, funksjonar, params, er_entry, bp, globals, initializers, memmode, lam_captures, fn_namn, fn_modul)
+    }
+    ncval_far_grein = usann
+    la k = 0
+    mens k < lengde(bp) {
+        legg_til(bl_patchar, bp[k])
+        k = k + 1
+    }
+    returner res
+}
+
 funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures, fn_namn: tekst, fn_modul: tekst) -> ordbok_tekst {
     // F23: namne-bloben for feilmeldingane («… ved <fn>»), sjå ncd_namn_adr.
     la fnctx = [fn_namn, 0 - 1]
     hvis lam_captures == null { lam_captures = [] }
+    la far_grein = ncval_far_grein
     hvis memmode == null { memmode = usann }
     hvis builtin.type(kode) != "liste" {
         returner {"ok": "usann", "error": "AArch64 NcVal krev instruksjonsliste", "image": []}
@@ -10904,8 +10928,16 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la topp = opnd_les(native, djupn, 0, memmode, home_off)
             legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
             la posisjon = lengde(native)
-            legg_u32(native, 0x34000009)                        // cbz w9, <patch>
-            legg_til(grein_patchar, [posisjon, instr[1], "cbz", 9])
+            hvis far_grein {
+                // Fjernhopp (>1 MiB funksjon): cbnz w9, +8 hoppar over ein ubetinga b <mål> (±128 MiB).
+                legg_u32(native, 0x35000049)                    // cbnz w9, +8
+                posisjon = lengde(native)
+                legg_u32(native, 0x14000000)                    // b <patch>
+                legg_til(grein_patchar, [posisjon, instr[1], "b", 0])
+            } ellers {
+                legg_u32(native, 0x34000009)                    // cbz w9, <patch>
+                legg_til(grein_patchar, [posisjon, instr[1], "cbz", 9])
+            }
         } ellers hvis op == "FINALLY_PUSH" {
             // Omgang 7: registrer finally-handler. Record (16 B) på cleanup-stakken:
             // [finally-adresse (adr)][__exc_top__ ved push (til pruning ved unwind)].
@@ -12596,7 +12628,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la byte_delta = mål - patch[0]
             skriv_u32(native, patch[0], 0x10000000 | (((byte_delta / 4) & 0x7FFFF) << 5) | patch[3])
         } ellers {
-            hvis ord_delta < -262144 eller ord_delta > 262143 { returner {"ok": "usann", "error": "NcVal JUMP_IF_FALSE utanfor rekkevidde", "image": []} }
+            hvis ord_delta < -262144 eller ord_delta > 262143 { returner {"ok": "usann", "error": "NcVal JUMP_IF_FALSE utanfor rekkevidde", "far": "sann", "image": []} }
             skriv_u32(native, patch[0], 0x34000000 | ((ord_delta & 0x7FFFF) << 5) | patch[3])
         }
         p = p + 1
@@ -13461,10 +13493,10 @@ funksjon ncval_compile_program_delar(ncb, os) -> ordbok_tekst {
         // Prøv rask reg-modus (x19–x24, byte-identisk med før). Sprekk operand-
         // stakken (>6), rekompiler funksjonen i mem-modus der operandane bur i
         // minne-heimar etter lokalvariablane (operand-spilling).
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
+        la res = ncval_med_fjernhopp(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
+            res = ncval_med_fjernhopp(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         }
         // NC_BUILTIN_REPORT=1 (A1-review): ein funksjon som stoppar, blir notert (STOPPA),
         // og kompileringa held fram med neste, so rapporten dekkjer heile programmet.
@@ -13900,10 +13932,10 @@ funksjon ncval_compile_range(ncb, os: tekst, order, globals, start: heiltall, co
         la fn_caps = []
         hvis finnes_nøkkel(lambda_captures, fname) { fn_caps = lambda_captures[fname] }
         la bl_patchar = []
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
+        la res = ncval_med_fjernhopp(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
+            res = ncval_med_fjernhopp(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps, fname, ncd_fn_modul(funksjonar, fname))
         }
         hvis res["ok"] != "sann" { returner {"ok": "usann", "error": "[" + fname + "] " + tekst(res["error"]), "frags": []} }
         legg_til(frags, {"name": fname, "words": res["image"], "patches": bl_patchar})
@@ -14241,13 +14273,20 @@ funksjon sett_utdata_kjorbar(sti: tekst) -> ordbok_tekst {
         root = builtin.slice(sti, 0, 3)
         relativ = builtin.slice(sti, 3, lengde(sti))
     }
-    returner builtin.filesystem_write_operation({
-        "abi": "norscode-native-filesystem-v1",
-        "operation": "chmod",
-        "root": root,
-        "relative": relativ,
-        "mode": "493"
-    })
+    // Er codegen-en sjølv AOT-kompilert til arm64 (macOS-vertet kodegen-binær), er native_fs_chmod ein
+    // NATIV-GAP-stubb som kastar; då er filmodus «ikkje tilgjengeleg» (kallaren melder det) og
+    // eigaren av utdata-fila (nc bygg-native, build_cross_codegen) set kjørbar-biten sjølv.
+    prøv {
+        returner builtin.filesystem_write_operation({
+            "abi": "norscode-native-filesystem-v1",
+            "operation": "chmod",
+            "root": root,
+            "relative": relativ,
+            "mode": "493"
+        })
+    } fang (e) {
+        returner {"status": "feil", "error": tekst(e), "value": "-1"}
+    }
 }
 
 funksjon start() -> heiltall {
