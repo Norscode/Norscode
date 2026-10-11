@@ -1636,9 +1636,186 @@ funksjon _pg_windows_spawn_synkron(req) {
     returner r
 }
 
+// ── norscodeos-x86_64: synkron spawn utan fork ──────────────────────────────────
+// NorscodeOS har ingen fork/execve. Vegen er pipe2 ×3 + spawn (privat syscall 4097) +
+// read (poll over stdout/stderr) + wait4:
+//   spawn(rdi = NUL-terminert namn på ei initrd-/manifestoppføring, rsi = fd-kart = tre
+//         qword {fd0, fd1, fd2} i forelderen) → pid eller −errno; barnet får fd 0/1/2 frå
+//         kartet (forelderen lukkar barne-endane etterpå).
+//   wait4(pid, &status, 0, 0) → berre eigne born; status er Linux-kodinga (exit(k) → k<<8,
+//         drepen → signalnummer).
+// Avgrensingar: args/cwd/environment blir ikkje sende (spawn-ABI-en har dei ikkje), timeout_ms
+// blir ikkje handheva (ingen kill i delmengda), max_output_bytes kuttar berre utdata.
+// Skratsj: éin mmap på 16 KiB (gjenbrukt; kjerna har ingen munmap). Krev MINNE-kapabilitet.
+la _nos_skratsj_adr = 0
+
+funksjon _nos_er_mål() -> boolsk {
+    prøv { returner tekst(builtin.native_target()) == "norscodeos-x86_64" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon _NOS_SKRATSJ() -> heiltall { returner 16384 }
+funksjon _NOS_LESBUF() -> heiltall { returner 4096 }      // [4096, 12288) lesebuffer
+funksjon _NOS_LESBUF_N() -> heiltall { returner 8192 }
+
+funksjon _nos_skratsj() -> heiltall {
+    hvis _nos_skratsj_adr > 0 { returner _nos_skratsj_adr }
+    la a = _sys_mmap_rw(_NOS_SKRATSJ())
+    hvis a > 0 {
+        _nos_skratsj_adr = a
+        returner a
+    }
+    // Utan MINNE-kapabilitet (mmap nektar) finst ingen skratsj: spawn feilar reint. Ingen
+    // heap_merke-reserve her — linux-arm64-codegen kjenner ikkje builtin-en, og std blir
+    // kompilert for alle mål.
+    returner 0
+}
+
+funksjon _nos_les_fd(fd: heiltall, buf: heiltall) -> tekst {
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, _NOS_LESBUF_N(), 0, 0, 0)
+    hvis n <= 0 { returner "" }
+    la teikn: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n {
+        legg_til(teikn, builtin.chr(builtin.raw_load8(buf + i)))
+        i = i + 1
+    }
+    returner builtin.join(teikn, "")
+}
+
+funksjon _nos_lukk(fd: heiltall) -> heiltall {
+    hvis fd >= 0 { builtin.sys6(nsys._nr("close"), fd, 0, 0, 0, 0, 0) }
+    returner 0
+}
+
+funksjon _nos_spawn_synkron(req) {
+    la exe = ""
+    hvis finnes_nøkkel(req, "executable") { exe = tekst(req["executable"]) }
+    la namn = exe
+    hvis builtin.starts_with(namn, "/initrd/") { namn = builtin.slice(namn, 8, lengde(namn)) }
+    hvis namn == "" { returner _pg_synkron_feil("tom executable") }
+    hvis lengde(namn) > 63 { returner _pg_synkron_feil("namnet er for langt for spawn (maks 63)") }
+    la maks: heiltall = 8388608
+    hvis finnes_nøkkel(req, "max_output_bytes") {
+        la mb = heltall_fra_tekst(tekst(req["max_output_bytes"]))
+        hvis mb > 0 { maks = mb }
+    }
+    la sk = _nos_skratsj()
+    hvis sk <= 0 { returner _pg_synkron_feil("mmap av spawn-skratsjen feila (manglar MINNE-kapabilitet?)") }
+    // [0,64) namn · [64,88) fd-kart · [96,120) 3 × int[2] røyr · [128,136) wait-status ·
+    // [136,152) 2 × pollfd · [4096,12288) lesebuffer
+    la fds: liste_heiltall = []
+    la k: heiltall = 0
+    mens k < 3 {
+        builtin.raw_store64(sk + 96 + 8 * k, 0)
+        la r = builtin.sys6(nsys._nr("pipe2"), sk + 96 + 8 * k, 0, 0, 0, 0, 0)
+        hvis r < 0 {
+            la j: heiltall = 0
+            mens j < lengde(fds) { _nos_lukk(fds[j])  j = j + 1 }
+            returner _pg_synkron_feil("pipe2 feila (" + tekst(r) + ")")
+        }
+        la par = builtin.raw_load64(sk + 96 + 8 * k)
+        legg_til(fds, par & 4294967295)
+        legg_til(fds, (par >> 32) & 4294967295)
+        k = k + 1
+    }
+    // fds: [inn_les, inn_skriv, ut_les, ut_skriv, feil_les, feil_skriv]
+    _pg_cstr(sk, namn)
+    builtin.raw_store64(sk + 64, fds[0])
+    builtin.raw_store64(sk + 72, fds[3])
+    builtin.raw_store64(sk + 80, fds[5])
+    hvis ikkje nsys._har_nr("spawn") { returner _pg_synkron_feil("spawn (4097) finst berre på norscodeos-x86_64") }
+    la pid = builtin.sys6(nsys._nr("spawn"), sk, sk + 64, 0, 0, 0, 0)
+    _nos_lukk(fds[0])
+    _nos_lukk(fds[3])
+    _nos_lukk(fds[5])
+    hvis pid < 0 {
+        _nos_lukk(fds[1])
+        _nos_lukk(fds[2])
+        _nos_lukk(fds[4])
+        returner _pg_synkron_feil("spawn(" + namn + ") feila (" + tekst(pid) + ")")
+    }
+    // stdin: skriv alt (i bitar via lesebufferen), så EOF.
+    la inn = ""
+    hvis finnes_nøkkel(req, "stdin") og req["stdin"] != null { inn = tekst(req["stdin"]) }
+    la buf = sk + _NOS_LESBUF()
+    la pos: heiltall = 0
+    mens pos < lengde(inn) {
+        la n: heiltall = lengde(inn) - pos
+        hvis n > _NOS_LESBUF_N() { n = _NOS_LESBUF_N() }
+        la i: heiltall = 0
+        mens i < n {
+            builtin.raw_store8(buf + i, builtin.char_code(builtin.slice(inn, pos + i, pos + i + 1)))
+            i = i + 1
+        }
+        la w = builtin.sys6(nsys._nr("write"), fds[1], buf, n, 0, 0, 0)
+        hvis w <= 0 { pos = lengde(inn) } ellers { pos = pos + w }
+    }
+    _nos_lukk(fds[1])
+    // stdout/stderr: poll over begge, so eit barn som fyller stderr-røyret ikkje heng.
+    la ut: liste_tekst = []
+    la feil: liste_tekst = []
+    la ut_n: heiltall = 0
+    la feil_n: heiltall = 0
+    la ut_fd: heiltall = fds[2]
+    la feil_fd: heiltall = fds[4]
+    la pollin = nsys._flagg("POLLIN")
+    la eintr = 0 - nsys._errno("EINTR")
+    la sekvensiell = usann
+    mens ut_fd >= 0 eller feil_fd >= 0 {
+        la les_ut = usann
+        la les_feil = usann
+        hvis sekvensiell {
+            hvis ut_fd >= 0 { les_ut = sann } ellers { les_feil = sann }
+        } ellers {
+            // pollfd = {int fd; short events; short revents}; fd −1 blir hoppa over.
+            builtin.raw_store64(sk + 136, (ut_fd & 4294967295) | (pollin << 32))
+            builtin.raw_store64(sk + 144, (feil_fd & 4294967295) | (pollin << 32))
+            la r = builtin.sys6(nsys._nr("poll"), sk + 136, 2, -1, 0, 0, 0)
+            hvis r < 0 og r != eintr {
+                sekvensiell = sann       // poll manglar (t.d. −ENOSYS): eitt røyr om gongen
+            } ellers hvis r > 0 {
+                les_ut = ut_fd >= 0 og ((builtin.raw_load64(sk + 136) >> 48) & 65535) != 0
+                les_feil = feil_fd >= 0 og ((builtin.raw_load64(sk + 144) >> 48) & 65535) != 0
+            }
+        }
+        hvis les_ut {
+            la del = _nos_les_fd(ut_fd, buf)
+            hvis del == "" {
+                _nos_lukk(ut_fd)
+                ut_fd = -1
+            } ellers hvis ut_n < maks { legg_til(ut, del)  ut_n = ut_n + lengde(del) }
+        }
+        hvis les_feil {
+            la del = _nos_les_fd(feil_fd, buf)
+            hvis del == "" {
+                _nos_lukk(feil_fd)
+                feil_fd = -1
+            } ellers hvis feil_n < maks { legg_til(feil, del)  feil_n = feil_n + lengde(del) }
+        }
+    }
+    builtin.raw_store64(sk + 128, 0)
+    la w4 = builtin.sys6(nsys._nr("wait4"), pid, sk + 128, 0, 0, 0, 0)
+    la status = builtin.raw_load64(sk + 128) & 4294967295
+    la kode: heiltall = 127
+    hvis w4 == pid {
+        hvis (status & 127) == 0 { kode = (status >> 8) & 255 } ellers { kode = 128 + (status & 127) }
+    }
+    la ut_t = builtin.join(ut, "")
+    la feil_t = builtin.join(feil, "")
+    hvis lengde(ut_t) > maks { ut_t = builtin.slice(ut_t, 0, maks) }
+    hvis lengde(feil_t) > maks { feil_t = builtin.slice(feil_t, 0, maks) }
+    la svar = _pg_res("ferdig", pid, "", kode, ut_t, feil_t, "", 0, 0)
+    hvis w4 != pid { svar["error"] = "wait4 feila (" + tekst(w4) + ")" }
+    svar["abi"] = "norscode-process-spawn-v1"
+    fjern_nokkel(svar, "handle")
+    returner svar
+}
+
 funksjon process_spawn_argv_gap(req) {
     hvis builtin.type(req) != "ordbok" { returner _pg_synkron_feil("ugyldig request") }
     hvis _pg_er_windows() { returner _pg_windows_spawn_synkron(req) }
+    hvis _nos_er_mål() { returner _nos_spawn_synkron(req) }
     la r = _pg_spawn(req, sann)
     hvis r["status"] == "feil" { returner _pg_synkron_feil(tekst(r["error"])) }
     la handle = tekst(r["handle"])
@@ -1810,11 +1987,17 @@ funksjon _sk_recv_liste(fd: heiltall, maks: heiltall) -> liste_heiltall {
 }
 
 funksjon socket_recv(fd: heiltall, maks: heiltall) -> tekst {
-    la l = _sk_recv_liste(fd, maks)
-    la ut = ""
-    la i: heiltall = 0
-    mens i < lengde(l) { ut = ut + builtin.chr(l[i]) i = i + 1 }
-    returner ut
+    // Relay X5: rett frå bufferen til tekst med join (var `ut = ut + chr` per byte, altså
+    // kvadratisk: 16 KiB tok ~40 ms og 32 KiB-straum gav 0,2 MB/s i x86_tcp_bench).
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n_maks = maks
+    hvis n_maks > 32768 { n_maks = 32768 }
+    hvis n_maks <= 0 { returner "" }
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, n_maks, 0, 0, 0)
+    hvis n == 0 - nsys._errno("EAGAIN") { returner "" }  // timeout
+    hvis n < 0 { kast "socket_recv feila: " + tekst_fra_heltall(n) }
+    returner _fd_tekst(buf, n)
 }
 
 funksjon socket_recv_bytes(fd: heiltall, maks: heiltall) -> liste_heiltall {
@@ -1839,6 +2022,151 @@ funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
     hvis r1 < 0 { returner r1 }
     returner r2
 }
+
+// ── Relay X5 (os-x86-io): setsockopt / getsockname / poll for socket_* ──────────
+// Same feilkontrakt som resten av socket_*-familien: oppsett-kall (bind/connect/listen,
+// og desse) gjev 0 eller −errno; kall som skapar ein fd (new/accept) eller flyttar data
+// (send/recv) kastar ved feil. Berre syscall-nummer frå std.native_sys → same kode på
+// linux-x86_64, linux-arm64, macos-arm64 og eit framtidig norscodeos-x86_64.
+
+// setsockopt(fd, nivå, namn, &verdi, 4) med ein int-verdi (t.d. SOL_SOCKET=1,
+// SO_REUSEADDR=2 på Linux). 0 eller −errno.
+funksjon socket_setsockopt(fd: heiltall, nivå: heiltall, namn: heiltall, verdi: heiltall) -> heiltall {
+    la ein: heiltall = _sk_buf() + 65520
+    builtin.raw_store64(ein, verdi & 4294967295)
+    returner builtin.sys6(nsys._nr("setsockopt"), fd, nivå, namn, ein, 4, 0)
+}
+
+// getsockname(fd) → lokal port (t.d. etter bind til port 0), eller −errno.
+funksjon socket_getsockname(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    la adr: heiltall = b + 160
+    la i: heiltall = 0
+    mens i < 32 { builtin.raw_store8(adr + i, 0) i = i + 1 }
+    builtin.raw_store64(b + 200, 16)
+    la r = builtin.sys6(nsys._nr("getsockname"), fd, adr, b + 200, 0, 0, 0)
+    hvis r < 0 { returner r }
+    la po: heiltall = nsys._layout("sockaddr_in", "port")
+    returner (builtin.raw_load8(adr + po) << 8) | builtin.raw_load8(adr + po + 1)
+}
+
+// poll/ppoll over fds med same hendingsmaske på alle (POLLIN=1, POLLOUT=4 på Linux og
+// macOS). ms < 0 = vent utan tak. Gjev revents i same rekkjefølgje (0 = ikkje klar /
+// tidsavbrot / EINTR). Andre feil kastar. Maks 1024 fd-ar.
+funksjon socket_poll(fds: liste, hendingar: heiltall, ms: heiltall) -> liste {
+    la n: heiltall = lengde(fds)
+    hvis n > 1024 { kast "socket_poll: for mange fd-ar (maks 1024)" }
+    la b = _sk_buf()
+    la tab: heiltall = b + 4096           // 1024 × 8 byte = 8 KiB, inne i data-sona
+    la sz: heiltall = nsys._layout("pollfd", "storleik")
+    la i: heiltall = 0
+    mens i < n { _sys_pollfd(tab + i * sz, fds[i], hendingar) i = i + 1 }
+    la r = _sys_poll(tab, n, ms, b + 224)
+    la ut: liste = []
+    hvis r < 0 og r != 0 - nsys._errno("EINTR") { kast "socket_poll feila: " + tekst_fra_heltall(r) }
+    la ro: heiltall = nsys._layout("pollfd", "revents")
+    i = 0
+    mens i < n {
+        hvis r > 0 { legg_til(ut, _sys_les_u16(tab + i * sz + ro)) } ellers { legg_til(ut, 0) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Relay X5: rein fd-I/O (fd_les / fd_skriv / les_stdin) og fil_prøv_skriv ──────
+// read(2)/write(2) på ein vilkårleg fd (stdin, røyr, sokkel, fil). Teksten er byte-eksakt
+// (byte k → builtin.chr(k), som socket_recv); bygd med join, ikkje kvadratisk konkat.
+
+// Byte [buf, buf+n) → tekst.
+funksjon _fd_tekst(buf: heiltall, n: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n { legg_til(delar, builtin.chr(builtin.raw_load8(buf + i))) i = i + 1 }
+    returner builtin.join(delar, "")
+}
+
+// Éin read(fd, maks) (maks blir klipt til 32 KiB). "" = EOF (eller EAGAIN på ein
+// ikkje-blokkerande fd); andre feil kastar «fd_les feila: −errno».
+funksjon fd_les(fd: heiltall, maks: heiltall) -> tekst {
+    la nm: heiltall = maks
+    hvis nm > 32768 { nm = 32768 }
+    hvis nm <= 0 { returner "" }
+    la buf: heiltall = _sk_buf() + 4096
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, nm, 0, 0, 0)
+    mens n == 0 - nsys._errno("EINTR") { n = builtin.sys6(nsys._nr("read"), fd, buf, nm, 0, 0, 0) }
+    hvis n == 0 - nsys._errno("EAGAIN") { returner "" }
+    hvis n < 0 { kast "fd_les feila: " + tekst_fra_heltall(n) }
+    returner _fd_tekst(buf, n)
+}
+
+// Skriv heile data (tekst eller liste av byte) med write(2). Gjev talet på byte, eller
+// −errno ved feil (aldri unntak). Ein lukka røyr-lesar gjev SIGPIPE som på Linux elles.
+funksjon fd_skriv(fd: heiltall, data) -> heiltall {
+    la er_tekst = builtin.type(data) == "tekst"
+    la total: heiltall = lengde(data)
+    la buf: heiltall = _sk_buf() + 4096
+    la nr_w = nsys._nr("write")
+    la eintr = 0 - nsys._errno("EINTR")
+    la sendt: heiltall = 0
+    mens sendt < total {
+        la bit = total - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        hvis er_tekst {
+            mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        } ellers {
+            mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        }
+        la off: heiltall = 0
+        mens off < bit {
+            la w = builtin.sys6(nr_w, fd, buf + off, bit - off, 0, 0, 0)
+            hvis w == eintr { w = 0 }
+            ellers hvis w < 0 { returner w }
+            ellers hvis w == 0 { returner sendt + off }
+            off = off + w
+        }
+        sendt = sendt + bit
+    }
+    returner sendt
+}
+
+// Les fd 0 til EOF. Feil (t.d. EBADF når stdin er lukka) gjev det som alt er lese.
+funksjon les_stdin() -> tekst {
+    la buf: heiltall = _sk_buf() + 4096
+    la nr_r = nsys._nr("read")
+    la eintr = 0 - nsys._errno("EINTR")
+    la delar: liste_tekst = []
+    la ferdig = usann
+    mens ikkje ferdig {
+        la n = builtin.sys6(nr_r, 0, buf, 32768, 0, 0, 0)
+        hvis n > 0 { legg_til(delar, _fd_tekst(buf, n)) }
+        ellers hvis n != eintr { ferdig = sann }
+    }
+    returner builtin.join(delar, "")
+}
+
+// fil_prøv_skriv(sti, data) → 0 eller −errno, aldri unntak. Opnar med
+// openat(AT_FDCWD, sti, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) slik at errno-en er
+// den ekte (EACCES/ENOENT/EISDIR/EROFS …), og skriv med write(2) (ENOSPC/EIO kjem
+// òg attende som −errno). −EINVAL for ugyldig sti (tom, NUL, ≥ 4096 byte).
+funksjon fil_prøv_skriv(sti, data) -> heiltall {
+    hvis ikkje _fsg_sti_ok(sti) eller sti == "" { returner _fsg_einval() }
+    hvis builtin.type(data) != "tekst" og builtin.type(data) != "liste" { returner _fsg_einval() }
+    la b = _sys_mmap_rw(4096)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, sti)
+    la flagg = nsys._flagg("O_WRONLY") | nsys._flagg("O_CREAT") | nsys._flagg("O_TRUNC") | nsys._flagg("O_CLOEXEC")
+    la fd = builtin.sys6(nsys._nr_kompat("openat"), nsys._flagg("AT_FDCWD"), b, flagg, 420, 0, 0)
+    _sys_munmap(b, 4096)
+    hvis fd < 0 { returner fd }
+    la w = fd_skriv(fd, data)
+    la c = _sys_lukk(fd)
+    hvis w < 0 { returner w }
+    hvis w < lengde(data) { returner 0 - 5 }   // EIO: kort skriving utan errno
+    hvis c < 0 { returner c }
+    returner 0
+}
+
 
 // ── builtin.network_operation («norscode-native-network-v1») i rein Norscode ────
 // Handle-ABI over sys6: listen/connect/accept/read/read_hex/write/write_hex/poll/
@@ -4479,7 +4807,7 @@ funksjon serve_klar(revents: heiltall) -> boolsk {
 }
 
 // Éi ikkje-blokkerande lesing (≤ 32 KiB). {"status": ok|eof|ventar|feil, "data", "n"}.
-// Teksten blir bygd byte for byte med builtin.chr, som socket_recv.
+// Teksten blir bygd med _fd_tekst (join, lineært), som socket_recv.
 funksjon serve_les(fd: heiltall, maks: heiltall) -> ordbok {
     la b = _s29_buf()
     hvis b == 0 { returner {"status": "feil", "data": "", "n": 0 - 1} }
@@ -4491,10 +4819,7 @@ funksjon serve_les(fd: heiltall, maks: heiltall) -> ordbok {
     hvis n == 0 - nsys._errno("EAGAIN") eller n == 0 - nsys._errno("EINTR") { returner {"status": "ventar", "data": "", "n": 0} }
     hvis n < 0 { returner {"status": "feil", "data": "", "n": n} }
     hvis n == 0 { returner {"status": "eof", "data": "", "n": 0} }
-    la ut = ""
-    la i: heiltall = 0
-    mens i < n { ut = ut + builtin.chr(builtin.raw_load8(buf + i)) i = i + 1 }
-    returner {"status": "ok", "data": ut, "n": n}
+    returner {"status": "ok", "data": _fd_tekst(buf, n), "n": n}
 }
 
 // Vent til fd er skrivbar, høgst ms. Sann = skrivbar (eller feil, som sendto då rapporterer).
