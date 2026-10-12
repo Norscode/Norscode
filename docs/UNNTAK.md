@@ -56,6 +56,8 @@ Unntak
  |- ArgumentFeil        (aritetsfeil, feil tal argument til innebygd)
  |- MetodeFeil          (ukjend metode / metode på ingenting)
  |- FilFeil
+ |- FrosenFeil          (skriving til ei frosen samling, sjå FROSNE_SAMLINGAR.md)
+ |- GeneratorFeil       (neste() på ein generator som køyrer, sjå GENERATORAR.md)
  |- HostFeil
  |   |- HostTypeFeil, HostHandleFeil, HostMetodeFeil
  `- FutureFeil

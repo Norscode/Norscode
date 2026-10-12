@@ -702,6 +702,7 @@ funksjon vm_verdi_typenamn(v) -> tekst {
 // (fjerna att etterpå), og ein syklisk struktur blir vist som «Namn(...)».
 // Containarar utan strukturar går uendra til verts-tekst().
 funksjon vm_tekst_av(functions, v) {
+    hvis vm_spesial_aktiv == 1 { v = vm_tin(v, 0) }
     la t = builtin.type(v)
     hvis t != "ordbok" og t != "liste" { returner tekst(v) }
     hvis ikkje vm_har_struktur_djup(v, 0) { returner tekst(v) }
@@ -761,6 +762,11 @@ funksjon vm_vis_verdi(functions, v, djupn: heiltall) {
 funksjon vm_lik(functions, a, b) -> boolsk {
     la ta = builtin.type(a)
     hvis ta != "ordbok" og ta != "liste" { returner a == b }
+    hvis vm_spesial_aktiv == 1 {
+        // F46: frosne samlingar er like når innhaldet er likt.
+        a = vm_tin(a, 0)
+        b = vm_tin(b, 0)
+    }
     hvis ikkje vm_har_struktur_djup(a, 0) { returner a == b }
     returner vm_lik_djup(functions, a, b, 0)
 }
@@ -834,12 +840,14 @@ funksjon vm_metode_løys(functions, mott, metode: tekst) {
     }
     la t = builtin.type(mott)
     hvis t == "ordbok" {
-        hvis vm_map_har_nokkel(mott, "__struktur__") {
-            la fn_namn = tekst(mott["__struktur__"]) + "." + metode
+        // F46: ei frosen struktur får metodane til strukturen; self er framleis den frosne boksen.
+        la mott_u = vm_frosen_utpakk(mott)
+        hvis vm_map_har_nokkel(mott_u, "__struktur__") {
+            la fn_namn = tekst(mott_u["__struktur__"]) + "." + metode
             hvis vm_map_har_nokkel(functions, fn_namn) { returner ["fn", fn_namn] }
         }
-        hvis vm_map_har_nokkel(mott, metode) {
-            la felt = mott[metode]
+        hvis vm_map_har_nokkel(mott_u, metode) {
+            la felt = mott_u[metode]
             hvis builtin.type(felt) == "ordbok" og vm_map_har_nokkel(felt, "__lambda__") { returner ["closure", felt] }
         }
     }
@@ -979,7 +987,7 @@ funksjon vm_unntak_forelder(t: tekst) -> tekst {
     hvis t == "HostTypeFeil" eller t == "HostHandleFeil" eller t == "HostMetodeFeil" { returner "HostFeil" }
     hvis t == "TimeoutFeil" eller t == "AvbruttFeil" { returner "FutureFeil" }
     hvis t == "TypeFeil" eller t == "VerdiFeil" eller t == "IndeksFeil" eller t == "ArgumentFeil" eller t == "MetodeFeil" { returner "Unntak" }
-    hvis t == "FilFeil" eller t == "HostFeil" eller t == "FutureFeil" { returner "Unntak" }
+    hvis t == "FilFeil" eller t == "HostFeil" eller t == "FutureFeil" eller t == "FrosenFeil" eller t == "GeneratorFeil" { returner "Unntak" }
     returner ""
 }
 
@@ -1232,6 +1240,7 @@ la vm_green_rekkje: liste = []          // handle-ar som kan få slice (state ru
 la vm_green_pools: ordbok = {}          // pool-handle → pool
 la vm_green_cur_t: ordbok = {}          // trådposten til sliceen som køyrer no
 la vm_green_koop_aktive: heiltall = 0   // F36: levande kooperative asynk-oppgåver (ikkje preemptert)
+la vm_spesial_aktiv: heiltall = 0       // F45/F46: 1 etter fyrste generator/frys (slår på ekstra sjekkar)
 
 // Grøn-tilstanden som inngangs- og instruksjonsløkka les, ligg i functions-kartet
 // (parameter), ikkje i modulglobalar: ein frosen C-æra-vert (macOS-/Windows-seeden)
@@ -3926,6 +3935,13 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         namn = builtin.slice(namn, 8, lengde(namn))
     slutt
 
+    // F45/F46: generatorar og frosne samlingar (berre aktivt etter fyrste bruk).
+    hvis vm_spesial_aktiv == 1 {
+        hvis namn == "builtin.lengde" og lengde(args) > 0 og vm_er_generator(args[0]) { returner vm_gen_lengde(active_functions, args[0]) }
+        hvis (namn == "builtin.type" eller namn == "builtin.type_av") og lengde(args) > 0 og vm_er_generator(args[0]) { returner "generator" }
+        args = vm_frosen_args(namn, args)
+    }
+
     // Reine, capability-frie intrinsics ligg i den varme compilerløypa.
     // Handter dei før metrikk-/security-dispatchen: den gamle lineære
     // dispatchen gjorde kvart lexer-teikn til hundrevis av VM-greiner.
@@ -5299,6 +5315,28 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         hvis lengde(args) != 2 { kast "ArgumentFeil: er_instans tek to argument" }
         returner vm_er_instans(active_functions, args[0], tekst(args[1]))
     }
+    // F46: frys(x) / er_frosen(x) / tin(x)
+    hvis namn == "builtin.frys" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: frys tek eitt argument" }
+        returner vm_frys(args[0], 0)
+    }
+    hvis namn == "builtin.er_frosen" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: er_frosen tek eitt argument" }
+        returner vm_er_frosen(args[0])
+    }
+    hvis namn == "builtin.tin" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: tin tek eitt argument" }
+        returner vm_tin(args[0], 0)
+    }
+    // F45: neste(gen) / gen.neste() / gen.ferdig()
+    hvis namn == "builtin.gen_neste" {
+        hvis lengde(args) != 1 eller ikkje vm_er_generator(args[0]) { kast "TypeFeil: neste() krev ein generator" }
+        returner vm_gen_neste(active_functions, args[0])
+    }
+    hvis namn == "builtin.gen_ferdig" {
+        hvis lengde(args) != 1 eller ikkje vm_er_generator(args[0]) { kast "TypeFeil: ferdig() krev ein generator" }
+        returner vm_gen_ferdig(active_functions, args[0])
+    }
     // R4/F32: unntak_passar(e, "A|B") — passar unntaket ein av typane (rota
     // Unntak, innebygde undertypar, brukartypar, modulkvalifiserte grensesnitt)?
     hvis namn == "builtin.unntak_passar" {
@@ -5399,6 +5437,253 @@ funksjon vm_map_get(obj, nokkel)
     slutt
     returner 0
 slutt
+
+// ─── F45 generatorar og F46 frosne samlingar ─────────────────────────────────
+// Sjå docs/GENERATORAR.md og docs/FROSNE_SAMLINGAR.md.
+//
+// Generator: ein funksjon med `gi` har "generator": true i NCB. Eit kall gjev ei
+// ordbok {"__generator__": fn, args, state, resume, ...} utan å køyre kroppen.
+// Kroppen køyrer i ein nøsta køyr_funksjon-aktivering som parkerer rammen ved
+// GI (same resume-mekanisme som await/grøne trådar) og blir teken opp att av
+// neste kall. `for x i gen()` går via lengde()/INDEX_GET på generatoren
+// (lengde = 0 eller «stor» etter om eit nytt element finst; INDEX_GET gjev
+// neste element) slik at for-bytekoden er uendra og framleis lat.
+//
+// Frosen samling: ordbok {"__frosen__": djup kopi}. Alle element som er
+// samlingar er sjølve frosne. Lesing går gjennom utpakking (INDEX_GET,
+// LOAD_FIELD, innebygde); skriving (INDEX_SET, STORE_FIELD, mutasjons-builtins)
+// kastar FrosenFeil.
+funksjon vm_er_generator(v) -> boolsk {
+    hvis builtin.type(v) != "ordbok" { returner usann }
+    returner vm_map_har_nokkel(v, "__generator__")
+}
+
+funksjon vm_er_frosen_boks(v) -> boolsk {
+    hvis builtin.type(v) != "ordbok" { returner usann }
+    returner vm_map_har_nokkel(v, "__frosen__")
+}
+
+funksjon vm_frosen_utpakk(v) {
+    hvis vm_er_frosen_boks(v) { returner v["__frosen__"] }
+    returner v
+}
+
+funksjon vm_frys(v, djupn: heiltall) {
+    hvis djupn > 200 { kast "VerdiFeil: frys: for djup eller syklisk struktur" }
+    vm_spesial_aktiv = 1
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la ny_l = []
+        la i: heiltall = 0
+        mens i < lengde(v) {
+            legg_til(ny_l, vm_frys(v[i], djupn + 1))
+            i = i + 1
+        }
+        la boks_l = {}
+        boks_l["__frosen__"] = ny_l
+        returner boks_l
+    }
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(v, "__frosen__") eller vm_map_har_nokkel(v, "__generator__") eller vm_map_har_nokkel(v, "__lambda__") { returner v }
+        la ny_o = {}
+        la nk = nøkler(v)
+        la j: heiltall = 0
+        mens j < lengde(nk) {
+            ny_o[nk[j]] = vm_frys(v[nk[j]], djupn + 1)
+            j = j + 1
+        }
+        // Strukturmerka kan vere gøymde for nøkler() (sjå vm_struktur_nøkler).
+        hvis vm_map_har_nokkel(v, "__struktur__") { ny_o["__struktur__"] = v["__struktur__"] }
+        hvis vm_map_har_nokkel(v, "__type__") { ny_o["__type__"] = v["__type__"] }
+        la boks_o = {}
+        boks_o["__frosen__"] = ny_o
+        returner boks_o
+    }
+    returner v
+}
+
+// Djup mutabel kopi (utan frosne bokser).
+funksjon vm_tin(v, djupn: heiltall) {
+    hvis djupn > 200 { kast "VerdiFeil: tin: for djup eller syklisk struktur" }
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la ny_l = []
+        la i: heiltall = 0
+        mens i < lengde(v) {
+            legg_til(ny_l, vm_tin(v[i], djupn + 1))
+            i = i + 1
+        }
+        returner ny_l
+    }
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(v, "__frosen__") { returner vm_tin(v["__frosen__"], djupn + 1) }
+        hvis vm_map_har_nokkel(v, "__generator__") eller vm_map_har_nokkel(v, "__lambda__") { returner v }
+        la ny_o = {}
+        la nk = nøkler(v)
+        la j: heiltall = 0
+        mens j < lengde(nk) {
+            ny_o[nk[j]] = vm_tin(v[nk[j]], djupn + 1)
+            j = j + 1
+        }
+        hvis vm_map_har_nokkel(v, "__struktur__") { ny_o["__struktur__"] = v["__struktur__"] }
+        hvis vm_map_har_nokkel(v, "__type__") { ny_o["__type__"] = v["__type__"] }
+        returner ny_o
+    }
+    returner v
+}
+
+// Uforanderlege (og dermed trygt delbare) verdiar: skalarar og frosne samlingar.
+funksjon vm_er_frosen(v) -> boolsk {
+    la t = builtin.type(v)
+    hvis t == "liste" { returner usann }
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(v, "__frosen__") { returner sann }
+        hvis vm_map_har_nokkel(v, "__generator__") { returner usann }
+        returner usann
+    }
+    returner sann
+}
+
+funksjon vm_er_mutator(namn: tekst) -> boolsk {
+    la k = namn
+    hvis builtin.starts_with(k, "builtin.") { k = builtin.slice(k, 8, lengde(k)) }
+    hvis k == "legg_til" eller k == "pop_siste" eller k == "fjern_siste" eller k == "fjern" eller k == "fjern_indeks" eller k == "sett_inn" eller k == "fjern_nokkel" eller k == "fjern_nøkkel" { returner sann }
+    hvis builtin.starts_with(k, "liste.") {
+        la m = builtin.slice(k, 6, lengde(k))
+        returner builtin.starts_with(m, "fjern") eller builtin.starts_with(m, "sett_inn") eller builtin.starts_with(m, "omvendt") eller builtin.starts_with(m, "legg") eller builtin.starts_with(m, "sorter") eller builtin.starts_with(m, "tom")
+    }
+    returner usann
+}
+
+funksjon vm_djup_utpakk_namn(namn: tekst) -> boolsk {
+    returner namn == "builtin.tekst" eller namn == "builtin.skriv" eller namn == "builtin.json_stringify" eller namn == "builtin.print" eller namn == "builtin.tekst_av"
+}
+
+// Førebu argument til ein innebygd: frosne bokser blir pakka ut (grunt, djupt
+// for tekst-/utskriftsfunksjonar). Mutasjon av ei frosen samling kastar.
+funksjon vm_frosen_args(namn: tekst, args) {
+    hvis namn == "builtin.frys" eller namn == "builtin.er_frosen" eller namn == "builtin.tin" eller namn == "builtin.gen_neste" eller namn == "builtin.gen_ferdig" { returner args }
+    la har = usann
+    la i: heiltall = 0
+    mens i < lengde(args) {
+        hvis vm_er_frosen_boks(args[i]) { har = sann }
+        i = i + 1
+    }
+    hvis ikkje har { returner args }
+    hvis vm_er_mutator(namn) {
+        hvis lengde(args) > 0 og vm_er_frosen_boks(args[0]) {
+            kast "FrosenFeil: kan ikkje endre ei frosen samling (" + namn + ")"
+        }
+        returner args
+    }
+    la djup = vm_djup_utpakk_namn(namn)
+    la ny = []
+    la j: heiltall = 0
+    mens j < lengde(args) {
+        hvis djup { legg_til(ny, vm_tin(args[j], 0)) } ellers { legg_til(ny, vm_frosen_utpakk(args[j])) }
+        j = j + 1
+    }
+    returner ny
+}
+
+funksjon vm_gen_ny(fn_namn: tekst, args) {
+    vm_spesial_aktiv = 1
+    la g = {}
+    g["__generator__"] = fn_namn
+    la a = []
+    la i: heiltall = 0
+    mens i < lengde(args) {
+        legg_til(a, args[i])
+        i = i + 1
+    }
+    g["args"] = a
+    g["state"] = "ny"
+    g["resume"] = {}
+    g["har_fram"] = 0
+    g["fram"] = null
+    returner g
+}
+
+// Køyr generatoren til neste gi (eller slutt). Gjev [ferdig, verdi].
+funksjon vm_gen_steg(functions, g) {
+    la st = g["state"]
+    hvis st == "ferdig" { returner [1, null] }
+    hvis st == "køyrer" { kast "GeneratorFeil: generatoren køyrer allereie (neste() på seg sjølv)" }
+    g["state"] = "køyrer"
+    la aktive = functions["__vm_active_frames__"]
+    la for_n = lengde(aktive)
+    la gammal = functions["__vm_debug_resume_state__"]
+    la v = 0
+    prøv {
+        hvis st == "ny" {
+            functions["__vm_debug_resume_state__"] = {"active": "usann", "reason": ""}
+            functions["__gen_start__"] = "1"
+            v = køyr_funksjon(tekst(g["__generator__"]), g["args"], functions, 1)
+        } ellers {
+            la rs = g["resume"]
+            legg_til(aktive, rs["frame"])
+            functions["__vm_debug_resume_state__"] = rs
+            v = køyr_funksjon(tekst(rs["fn_namn"]), [], functions, 1)
+        }
+    } fang (e) {
+        functions["__gen_start__"] = "0"
+        g["state"] = "ferdig"
+        g["resume"] = {}
+        la aktive2 = functions["__vm_active_frames__"]
+        mens lengde(aktive2) > for_n { fjern_siste(aktive2) }
+        functions["__vm_debug_resume_state__"] = gammal
+        kast e
+    }
+    la slot = functions["__vm_debug_resume_state__"]
+    functions["__vm_debug_resume_state__"] = gammal
+    hvis builtin.type(slot) == "ordbok" og vm_map_har_nokkel(slot, "active") og slot["active"] == "sann" {
+        hvis vm_map_har_nokkel(slot, "reason") og slot["reason"] == "gen" {
+            g["resume"] = slot
+            g["state"] = "ventar"
+            returner [0, v]
+        }
+        g["state"] = "ferdig"
+        g["resume"] = {}
+        kast "GeneratorFeil: await/suspensjon inne i ein generator er ikkje støtta"
+    }
+    g["state"] = "ferdig"
+    g["resume"] = {}
+    returner [1, null]
+}
+
+// Sørg for at neste element ligg i g["fram"]; 1 viss det finst eit.
+funksjon vm_gen_fyll(functions, g) -> heiltall {
+    hvis g["har_fram"] == 1 { returner 1 }
+    la r = vm_gen_steg(functions, g)
+    hvis r[0] == 1 { returner 0 }
+    g["fram"] = r[1]
+    g["har_fram"] = 1
+    returner 1
+}
+
+// neste(gen): neste verdi, eller ingenting når generatoren er ferdig.
+funksjon vm_gen_neste(functions, g) {
+    hvis g["har_fram"] == 1 {
+        la v = g["fram"]
+        g["fram"] = null
+        g["har_fram"] = 0
+        returner v
+    }
+    la r = vm_gen_steg(functions, g)
+    hvis r[0] == 1 { returner null }
+    returner r[1]
+}
+
+// gen_ferdig(gen): sant når generatoren ikkje har fleire element.
+funksjon vm_gen_ferdig(functions, g) -> boolsk {
+    returner vm_gen_fyll(functions, g) == 0
+}
+
+// lengde(gen) for for-lykkja: 0 når ferdig, elles ei stor verdi (idx < lengde).
+funksjon vm_gen_lengde(functions, g) -> heiltall {
+    hvis vm_gen_fyll(functions, g) == 1 { returner 1000000000000 }
+    returner 0
+}
 
 // ─── Hovud-VM-løkke ──────────────────────────────────────────────────────────
 // finn_funksjon: fuzzy function lookup (same logikk som nc_vm.c fn_find)
@@ -5570,7 +5855,7 @@ funksjon vm_opcode_operandar(op: tekst) -> liste_heiltall {
     hvis op == "BUILD_LIST" eller op == "BUILD_MAP" { returner [1, 1] }
     hvis op == "TRY_BEGIN" { returner [1, 2] }
     hvis op == "FINALLY_END" { returner [3, 3] }
-    hvis op == "POP" eller op == "DUP" eller op == "SWAP" eller op == "OVER" eller op == "BINARY_ADD" eller op == "BINARY_SUB" eller op == "BINARY_MUL" eller op == "BINARY_DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" eller op == "UNARY_NEG" eller op == "UNARY_NOT" eller op == "UNARY_BNOT" eller op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_GT" eller op == "COMPARE_LE" eller op == "COMPARE_GE" eller op == "INDEX_GET" eller op == "INDEX_SET" eller op == "RETURN" eller op == "TRY_END" eller op == "THROW" eller op == "LOAD_EXCEPTION" eller op == "LOAD_PENDING" eller op == "CLEAR_PENDING" eller op == "PRINT" eller op == "HALT" { returner [0, 0] }
+    hvis op == "POP" eller op == "DUP" eller op == "SWAP" eller op == "OVER" eller op == "BINARY_ADD" eller op == "BINARY_SUB" eller op == "BINARY_MUL" eller op == "BINARY_DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" eller op == "UNARY_NEG" eller op == "UNARY_NOT" eller op == "UNARY_BNOT" eller op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_GT" eller op == "COMPARE_LE" eller op == "COMPARE_GE" eller op == "INDEX_GET" eller op == "INDEX_SET" eller op == "RETURN" eller op == "TRY_END" eller op == "THROW" eller op == "LOAD_EXCEPTION" eller op == "LOAD_PENDING" eller op == "CLEAR_PENDING" eller op == "PRINT" eller op == "HALT" eller op == "GI" { returner [0, 0] }
     returner [-1, -1]
 }
 
@@ -7264,6 +7549,15 @@ funksjon køyr_funksjon(
     }
 
     la fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
+    // F45: kall på ein generator-funksjon (utanfor CALL-bytekoden) gjev generatoren;
+    // kroppen startar først ved neste() (vm_gen_steg set __gen_start__).
+    hvis ikkje resuming og vm_map_har_nokkel(fn_def, "generator") {
+        hvis vm_map_har_nokkel(functions, "__gen_start__") og functions["__gen_start__"] == "1" {
+            functions["__gen_start__"] = "0"
+        } ellers {
+            returner vm_gen_ny(fn_namn, arg_verdiar)
+        }
+    }
     // usann når ei continuation-ramme er teken attende (RETURN/unwind): då er
     // fn_def framleis callee sin, og LOAD/STORE_GLOBAL hentar kallaren sin
     // definisjon (modulen) frå fn_namn før bruk.
@@ -7844,6 +8138,32 @@ funksjon køyr_funksjon(
         hvis op == "INDEX_GET" {
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 {
+                hvis vm_er_generator(obj) {
+                    // F45: for-lykkje over generator — hent neste element (indeksen er lykkjeteljaren).
+                    la gen_el = 0
+                    la gen_feil = 0
+                    la gen_feila = usann
+                    prøv {
+                        gen_el = vm_gen_neste(functions, obj)
+                    } fang (gen_exc) {
+                        gen_feil = gen_exc
+                        gen_feila = sann
+                    }
+                    aktive_rammer = functions["__vm_active_frames__"]
+                    vm_metrics_kart = functions["__vm_metrics__"]
+                    vm_globale_ok = usann
+                    hvis gen_feila {
+                        stack_push(ramme, gen_feil)
+                        tvungen_op = "THROW"
+                        fortsett
+                    }
+                    stack_push(ramme, gen_el)
+                    ip = ip + 1
+                    fortsett
+                }
+                hvis vm_er_frosen_boks(obj) { obj = obj["__frosen__"] }
+            }
             hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
                 hvis indeks < 0 eller indeks >= lengde(obj) {
                     stack_push(ramme, "IndeksFeil: indeks " + tekst(indeks) +
@@ -7874,6 +8194,11 @@ funksjon køyr_funksjon(
             la verdi = stack_pop(ramme)
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 og vm_er_frosen_boks(obj) {
+                stack_push(ramme, "FrosenFeil: kan ikkje endre ei frosen samling (indekstilordning)")
+                tvungen_op = "THROW"
+                fortsett
+            }
             hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
                 hvis indeks < 0 eller indeks >= lengde(obj) {
                     stack_push(ramme, "IndeksFeil: indeks " + tekst(indeks) +
@@ -7894,6 +8219,7 @@ funksjon køyr_funksjon(
         // ── Felt-aksess (struktur) ───────────────────────────────────────
         hvis op == "LOAD_FIELD" {
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 { obj = vm_frosen_utpakk(obj) }
             la felt: tekst = instr[1]
             la felt_verdi = vm_sikker_get(obj, felt)
             la felt_heap_id = vm_heap_track_f(fast_mode, vm_heap, felt_verdi)
@@ -7906,6 +8232,11 @@ funksjon køyr_funksjon(
         hvis op == "STORE_FIELD" {
             la verdi = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 og vm_er_frosen_boks(obj) {
+                stack_push(ramme, "FrosenFeil: kan ikkje endre feltet " + tekst(instr[1]) + " i ei frosen samling")
+                tvungen_op = "THROW"
+                fortsett
+            }
             la felt: tekst = instr[1]
             obj[felt] = verdi
             ip = ip + 1
@@ -8007,6 +8338,21 @@ funksjon køyr_funksjon(
             // [mottakar, metodenamn, args…]. Eksakt oppslag (vm_metode_løys):
             // strukturmetoden får [mottakar, args…], ein closure i feltet får
             // [args…]; elles ein fangbar MetodeFeil via THROW-maskineriet.
+            hvis op == "CALL" og mål_namn == "builtin.kall_metode" og lengde(call_args) >= 2 og vm_spesial_aktiv == 1 og vm_er_generator(call_args[0]) {
+                // F45: gen.neste() / gen.ferdig() går til dei innebygde.
+                la gm = tekst(call_args[1])
+                la gm_obj = call_args[0]
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                hvis gm == "neste" eller gm == "ferdig" {
+                    mål_namn = "builtin.gen_" + gm
+                    call_args = [gm_obj]
+                    call_heap_ids = []
+                } ellers {
+                    stack_push(ramme, "MetodeFeil: generator har ingen metode " + gm + "()")
+                    tvungen_op = "THROW"
+                    fortsett
+                }
+            }
             hvis op == "CALL" og mål_namn == "builtin.kall_metode" og lengde(call_args) >= 2 {
                 la m_løys = vm_metode_løys(functions, call_args[0], tekst(call_args[1]))
                 hvis m_løys[0] == "feil" {
@@ -8119,6 +8465,14 @@ funksjon køyr_funksjon(
                     vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
                     stack_push(ramme, vm_aritet_melding(løyst_namn, ar_forventa, ar_fekk, dynamisk_kall))
                     tvungen_op = "THROW"
+                    fortsett
+                }
+                // F45: kall på ein generator-funksjon gjev generatoren utan å køyre kroppen.
+                hvis vm_map_har_nokkel(kall_def, "generator") {
+                    la gen_obj = vm_gen_ny(løyst_namn, call_args)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                    stack_push(ramme, gen_obj)
+                    ip = ip + 1
                     fortsett
                 }
             }
@@ -8550,6 +8904,27 @@ funksjon køyr_funksjon(
             vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             ip = ip + 1
             fortsett
+        }
+
+        // ── F45: gi (generator-yield) ─────────────────────────────────────
+        // Poppar verdien, parkerer rammen i resume-slotten (reason «gen») og
+        // returnerer verdien til vm_gen_steg. Rammen blir teken opp att av neste kall.
+        hvis op == "GI" {
+            la gi_verdi = stack_pop(ramme)
+            ramme["state"] = "waiting"
+            ramme["ip"] = ip + 1
+            la gi_state: ordbok_tekst = {}
+            gi_state["active"] = "sann"
+            gi_state["reason"] = "gen"
+            gi_state["fn_namn"] = fn_namn
+            gi_state["ip"] = ip + 1
+            gi_state["frame"] = ramme
+            gi_state["continuations"] = continuations
+            gi_state["tail_chain_count"] = tail_chain_count
+            gi_state["function_start_ms"] = function_start_ms
+            functions["__vm_debug_resume_state__"] = gi_state
+            fjern_siste(aktive_rammer)
+            returner gi_verdi
         }
 
         // ── Retur ────────────────────────────────────────────────────────
