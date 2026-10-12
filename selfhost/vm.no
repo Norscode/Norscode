@@ -360,6 +360,8 @@ funksjon vm_json_utan_merke(v) -> tekst {
 // konstruktøren hans listar i "interfaces". Eit ukvalifisert namn (utan ".")
 // blir samanlikna med det korte typenamnet.
 funksjon vm_er_instans(functions, v, mål: tekst) -> boolsk {
+    // R4: rota Unntak og dei innebygde unntakstypane (TypeFeil, IndeksFeil …).
+    hvis builtin.index_of(mål, ".") < 0 og (mål == "Unntak" eller vm_unntak_forelder(mål) != "") { returner vm_unntak_passar_ett(functions, mål, v) }
     hvis ikkje vm_er_struktur(v) { returner usann }
     la tagg = tekst(v["__struktur__"])
     hvis tagg == mål { returner sann }
@@ -439,13 +441,13 @@ funksjon vm_exception_type(verdi) -> tekst {
     returner vm_type_name(verdi)
 }
 
-funksjon vm_handler_match(handler, verdi) -> boolsk {
+funksjon vm_handler_match(functions, handler, verdi) -> boolsk {
     la expected = handler["catch_type"]
     hvis expected == "" eller expected == "*" eller expected == "alle" { returner sann }
-    hvis expected == vm_exception_type(verdi) { returner sann }
-    // Ein struktur med eit eige type-felt kan fangast på begge namna.
-    hvis builtin.type(verdi) == "ordbok" og vm_map_har_nokkel(verdi, "type") og expected == tekst(verdi["type"]) { returner sann }
-    returner expected == "tekst" og builtin.type(verdi) == "tekst"
+    // R4/F32: «A|B» er multi-catch (fang (e: A eller B)); første treff vinn.
+    hvis builtin.index_of(expected, "|") >= 0 { returner vm_unntak_passar(functions, expected, verdi) }
+    hvis vm_unntak_passar_ett(functions, expected, verdi) { returner sann }
+    returner usann
 }
 
 // R1/F11: tekstform for eit UFANGA unntak, «Type: melding». Tekst-unntak er
@@ -463,6 +465,8 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
     la t = builtin.type(verdi)
     hvis t == "tekst" { returner verdi }
     hvis t != "ordbok" { returner vm_type_name(verdi) + ": " + tekst(verdi) }
+    // R4: pakka tekst-unntak (unntak_pakk) skriv originalteksten.
+    hvis vm_map_har_nokkel(verdi, "stakk") og vm_map_har_nokkel(verdi, "undertrykte") og vm_map_har_nokkel(verdi, "tekst") { returner tekst(verdi["tekst"]) }
     la type_namn = "Feil"
     hvis vm_map_har_nokkel(verdi, "__type__") eller vm_map_har_nokkel(verdi, "type") {
         type_namn = vm_exception_type(verdi)
@@ -481,7 +485,7 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
         la ni: heiltall = 0
         mens ni < lengde(nk) {
             la k = tekst(nk[ni])
-            hvis k != "__type__" og k != "__struktur__" og k != "type" og k != "årsak" og k != "cause" {
+            hvis k != "__type__" og k != "__struktur__" og k != "type" og k != "årsak" og k != "cause" og k != "stakk" og k != "undertrykte" {
                 legg_til(delar, k + "=" + tekst(verdi[k]))
             }
             ni = ni + 1
@@ -502,7 +506,34 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
 // på det (stdout og stderr blir lesne saman). Brukt av vertsprogramma
 // (nc_main, vm_executor). Utan /dev/stderr fell vi attende til stdout.
 funksjon vm_skriv_ufanga(verdi) -> heiltall {
-    la linje = "ERROR: " + vm_ufanga_tekst(verdi) + "\n"
+    returner vm_skriv_ufanga_med(verdi, "")
+}
+
+// R4/F34: som vm_skriv_ufanga, men skriv òg stakksporet («    ved f (fil:linje)»)
+// når functions-kartet til NCB-en som kasta har eit spor for akkurat dette
+// unntaket. Verten sender ncb["functions"].
+funksjon vm_skriv_ufanga_ncb(verdi, functions) -> heiltall {
+    returner vm_skriv_ufanga_med(verdi, vm_ufanga_spor(verdi, functions))
+}
+
+// Stakksporet (eller "") som hører til det ufanga unntaket `verdi`.
+funksjon vm_ufanga_spor(verdi, functions) -> tekst {
+    hvis functions != null og builtin.type(functions) == "ordbok" og vm_map_har_nokkel(functions, "__vm_stakk__") {
+        la sv = functions["__vm_stakk_verdi__"]
+        hvis builtin.type(verdi) == "ordbok" eller (builtin.type(verdi) == "tekst" og builtin.type(sv) == "tekst" og sv == verdi) {
+            returner vm_stakk_tekst(functions["__vm_stakk__"])
+        }
+    }
+    returner ""
+}
+
+// Heile rapporten som blir skriven til stderr for eit ufanga unntak.
+funksjon vm_ufanga_rapport(verdi, functions) -> tekst {
+    returner "ERROR: " + vm_ufanga_tekst(verdi) + "\n" + vm_ufanga_spor(verdi, functions)
+}
+
+funksjon vm_skriv_ufanga_med(verdi, spor: tekst) -> heiltall {
+    la linje = "ERROR: " + vm_ufanga_tekst(verdi) + "\n" + spor
     la skrive = usann
     prøv {
         hvis fil_finnes("/dev/stderr") {
@@ -516,10 +547,162 @@ funksjon vm_skriv_ufanga(verdi) -> heiltall {
     returner 1
 }
 
-funksjon vm_find_handler(try_stack, verdi) -> heiltall {
+// ─── R4: unntakshierarki, pakking og stakkspor ───────────────────────────────
+// Unntaksverdiar er uendra (tekst «Type: melding», ordbok med type-felt eller
+// struktur-instans). Rota «Unntak» fangar alt; dei innebygde typane har fast
+// forelder-kart (sjå docs/UNNTAK.md). Brukartypar høyrer til rota og til kvart
+// grensesnitt strukturen implementerer (fang (e: Grensesnitt)).
+funksjon vm_unntak_forelder(t: tekst) -> tekst {
+    hvis t == "DivisjonMedNull" eller t == "ModuloMedNull" eller t == "ValideringsFeil" { returner "VerdiFeil" }
+    hvis t == "HostTypeFeil" eller t == "HostHandleFeil" eller t == "HostMetodeFeil" { returner "HostFeil" }
+    hvis t == "TimeoutFeil" eller t == "AvbruttFeil" { returner "FutureFeil" }
+    hvis t == "TypeFeil" eller t == "VerdiFeil" eller t == "IndeksFeil" eller t == "ArgumentFeil" eller t == "MetodeFeil" { returner "Unntak" }
+    hvis t == "FilFeil" eller t == "HostFeil" eller t == "FutureFeil" { returner "Unntak" }
+    returner ""
+}
+
+// Er `alt` (eitt typenamn utan «|») ein type unntaket `verdi` tilfredsstiller?
+funksjon vm_unntak_passar_ett(functions, alt: tekst, verdi) -> boolsk {
+    hvis alt == "" eller alt == "*" eller alt == "alle" eller alt == "Unntak" { returner sann }
+    // Modulkvalifisert namn = struktur eller grensesnitt (løyst ved kompilering).
+    hvis builtin.index_of(alt, ".") >= 0 { returner vm_er_instans(functions, verdi, alt) }
+    la t = vm_exception_type(verdi)
+    hvis alt == t { returner sann }
+    // Ein struktur med eit eige type-felt kan fangast på begge namna.
+    hvis builtin.type(verdi) == "ordbok" og vm_map_har_nokkel(verdi, "type") og alt == tekst(verdi["type"]) { returner sann }
+    hvis alt == "tekst" og builtin.type(verdi) == "tekst" { returner sann }
+    la p = vm_unntak_forelder(t)
+    la n: heiltall = 0
+    mens p != "" og n < 8 {
+        hvis p == alt { returner sann }
+        p = vm_unntak_forelder(p)
+        n = n + 1
+    }
+    returner usann
+}
+
+// «A|B|C»: sant viss minst éin av typane passar.
+funksjon vm_unntak_passar(functions, typar: tekst, verdi) -> boolsk {
+    la delar = builtin.split(typar, "|")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        hvis vm_unntak_passar_ett(functions, tekst(delar[i]), verdi) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Filnamn for ein modul: «selfhost.vm» → «selfhost/vm.no». Hovudmodulen har
+// ikkje noko filnamn i NCB-en; verten kan setje functions["__vm_hovudfil__"].
+funksjon vm_modul_fil(functions, modul: tekst) -> tekst {
+    hvis modul == "__main__" {
+        hvis vm_map_har_nokkel(functions, "__vm_hovudfil__") { returner tekst(functions["__vm_hovudfil__"]) }
+        returner "__main__"
+    }
+    returner builtin.join(builtin.split(modul, "."), "/") + ".no"
+}
+
+// Stakkspor (innerste ramma først) frå dei aktive rammene: liste av
+// {funksjon, fil, linje}. Blir berre bygd ved kast. Ei ramme som ventar på eit
+// kall (state «waiting») har ip peikande rett etter CALL-instruksjonen.
+funksjon vm_bygg_stakk(functions, rammer) {
+    la ut = []
+    la i: heiltall = lengde(rammer) - 1
+    mens i >= 0 og lengde(ut) < 64 {
+        la r = rammer[i]
+        la namn = tekst(r["namn"])
+        la ip: heiltall = r["ip"]
+        hvis r["state"] == "waiting" { ip = ip - 1 }
+        la linje: heiltall = 0
+        la modul = "__main__"
+        la kort = namn
+        hvis vm_map_har_nokkel(functions, namn) {
+            la def = functions[namn]
+            hvis builtin.type(def) == "ordbok" {
+                hvis vm_map_har_nokkel(def, "module") { modul = tekst(def["module"]) }
+                hvis vm_map_har_nokkel(def, "source_lines") og ip >= 0 og ip < lengde(def["source_lines"]) {
+                    linje = def["source_lines"][ip]
+                }
+            }
+        }
+        hvis builtin.starts_with(namn, modul + ".") { kort = builtin.slice(namn, lengde(modul) + 1, lengde(namn)) }
+        la post = {}
+        post["funksjon"] = kort
+        post["fil"] = vm_modul_fil(functions, modul)
+        post["linje"] = linje
+        legg_til(ut, post)
+        i = i - 1
+    }
+    returner ut
+}
+
+// Kallt av THROW: byggjer og lagrar sporet, med mindre ein rethrow ber om å
+// behalde det førre (unntak_behald_stakk()).
+funksjon vm_registrer_kast(functions, rammer, verdi) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_behald_stakk__") og functions["__vm_behald_stakk__"] == "sann" {
+        functions["__vm_behald_stakk__"] = ""
+        returner 0
+    }
+    functions["__vm_stakk__"] = vm_bygg_stakk(functions, rammer)
+    functions["__vm_stakk_verdi__"] = verdi
+    returner 0
+}
+
+// unntak_pakk(e): unntaket som ordbok med stakk og undertrykte. Eit unntak som
+// alt er pakka kjem uendra attende. Tekst-unntak «Type: melding» får type og
+// melding utpakka (og «tekst» = originalen); ordbok/struktur blir kopiert.
+funksjon vm_unntak_pakk(functions, v) {
+    hvis builtin.type(v) == "ordbok" og vm_map_har_nokkel(v, "stakk") og vm_map_har_nokkel(v, "undertrykte") { returner v }
+    la stakk = []
+    hvis vm_map_har_nokkel(functions, "__vm_stakk__") {
+        la sv = functions["__vm_stakk_verdi__"]
+        hvis builtin.type(v) != "tekst" eller (builtin.type(sv) == "tekst" og sv == v) { stakk = functions["__vm_stakk__"] }
+    }
+    la ut = {}
+    hvis builtin.type(v) == "ordbok" {
+        la nk = nøkler(v)
+        la i: heiltall = 0
+        mens i < lengde(nk) {
+            ut[nk[i]] = v[nk[i]]
+            i = i + 1
+        }
+    } ellers {
+        ut["type"] = vm_exception_type(v)
+        hvis builtin.type(v) == "tekst" {
+            ut["tekst"] = v
+            la colon = builtin.index_of(v, ":")
+            hvis colon > 0 {
+                la rest = builtin.slice(v, colon + 1, lengde(v))
+                hvis builtin.starts_with(rest, " ") { rest = builtin.slice(rest, 1, lengde(rest)) }
+                ut["melding"] = rest
+            } ellers {
+                ut["melding"] = v
+            }
+        } ellers {
+            ut["melding"] = tekst(v)
+        }
+    }
+    ut["stakk"] = stakk
+    ut["undertrykte"] = []
+    returner ut
+}
+
+// Lesbart stakkspor, ei linje per ramme.
+funksjon vm_stakk_tekst(stakk) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(stakk) {
+        la p = stakk[i]
+        ut = ut + "    ved " + tekst(p["funksjon"]) + " (" + tekst(p["fil"]) + ":" + tekst(p["linje"]) + ")\n"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_find_handler(functions, try_stack, verdi) -> heiltall {
     la i: heiltall = lengde(try_stack) - 1
     mens i >= 0 {
-        hvis vm_handler_match(try_stack[i], verdi) { returner i }
+        hvis vm_handler_match(functions, try_stack[i], verdi) { returner i }
         i = i - 1
     }
     returner -1
@@ -545,7 +728,7 @@ funksjon vm_unwind_continuations(functions, continuations, current_frame, meldin
         la forelder = continuations[lengde(continuations) - 1]
         fjern_siste(continuations)
         la forelder_try = forelder["try_stack"]
-        la handler_index = vm_find_handler(forelder_try, melding)
+        la handler_index = vm_find_handler(functions, forelder_try, melding)
         la forelder_cleanup = forelder["cleanup_stack"]
         hvis lengde(forelder_cleanup) > 0 {
             la cleanup = forelder_cleanup[lengde(forelder_cleanup) - 1]
@@ -4613,6 +4796,8 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     hvis namn == "builtin.typenamn" {
         hvis lengde(args) != 1 { kast "ArgumentFeil: typenamn tek eitt argument" }
         hvis vm_er_struktur(args[0]) { returner tekst(args[0]["__type__"]) }
+        // R4: pakka unntak (unntak_pakk) har unntakstypen som typenamn.
+        hvis builtin.type(args[0]) == "ordbok" og vm_map_har_nokkel(args[0], "stakk") og vm_map_har_nokkel(args[0], "undertrykte") { returner vm_exception_type(args[0]) }
         returner builtin.type(args[0])
     }
     // R2/F21: er_instans(v, "modul.Type") — kompilatoren løyser Type (struktur
@@ -4620,6 +4805,28 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     hvis namn == "builtin.er_instans" {
         hvis lengde(args) != 2 { kast "ArgumentFeil: er_instans tek to argument" }
         returner vm_er_instans(active_functions, args[0], tekst(args[1]))
+    }
+    // R4/F32: unntak_passar(e, "A|B") — passar unntaket ein av typane (rota
+    // Unntak, innebygde undertypar, brukartypar, modulkvalifiserte grensesnitt)?
+    hvis namn == "builtin.unntak_passar" {
+        hvis lengde(args) != 2 { kast "ArgumentFeil: unntak_passar tek to argument" }
+        returner vm_unntak_passar(active_functions, tekst(args[1]), args[0])
+    }
+    // unntak_pakk(e): unntaket med e.stakk (liste av {funksjon, fil, linje}) og
+    // e.undertrykte (liste). Sjå docs/UNNTAK.md.
+    hvis namn == "builtin.unntak_pakk" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: unntak_pakk tek eitt argument" }
+        returner vm_unntak_pakk(active_functions, args[0])
+    }
+    // unntak_behald_stakk(): neste kast (rethrow) beheld stakksporet til førre kast.
+    hvis namn == "builtin.unntak_behald_stakk" {
+        active_functions["__vm_behald_stakk__"] = "sann"
+        returner null
+    }
+    // unntak_type(e): unntakstypen som tekst (same namn som fang (e: Type) matchar).
+    hvis namn == "builtin.unntak_type" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: unntak_type tek eitt argument" }
+        returner vm_exception_type(args[0])
     }
 
     // R2/F20: metodekall utanom CALL-opkoden (CALL-armen i køyr_funksjon
@@ -7544,6 +7751,8 @@ funksjon køyr_funksjon(
             }
 
             hvis call_failed {
+                // R4/F34: stakksporet blir bygd før dei nøsta rammene blir fjerna.
+                vm_registrer_kast(functions, aktive_rammer, call_error)
                 // Vanleg unnatak (ikkje GreenVenter) frå eit kall i ytste slice:
                 // ei eventuell venting i tråden er over.
                 hvis er_green_slice { vm_green_vent_rydd() }
@@ -7556,7 +7765,7 @@ funksjon køyr_funksjon(
                 }
                 vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
 
-                la call_handler_index = vm_find_handler(try_stack, call_error)
+                la call_handler_index = vm_find_handler(functions, try_stack, call_error)
                 la call_cleanup_stack = ramme["cleanup_stack"]
                 hvis lengde(call_cleanup_stack) > 0 {
                     la call_cleanup = call_cleanup_stack[lengde(call_cleanup_stack) - 1]
@@ -7734,8 +7943,9 @@ funksjon køyr_funksjon(
             vm_metric_inc_f(fast_mode, vm_metrics_kart, "throws")
             la unntak_melding = stack_pop(ramme)
             ramme["last_exception"] = unntak_melding
+            vm_registrer_kast(functions, aktive_rammer, unntak_melding)
 
-            la lokal_handler_index = vm_find_handler(try_stack, unntak_melding)
+            la lokal_handler_index = vm_find_handler(functions, try_stack, unntak_melding)
             hvis lokal_handler_index >= 0 { vm_prune_handlers(try_stack, lokal_handler_index) }
 
             la cleanup_stack = ramme["cleanup_stack"]
@@ -7763,7 +7973,7 @@ funksjon køyr_funksjon(
                     la forelder = continuations[lengde(continuations) - 1]
                     fjern_siste(continuations)
                     la forelder_try = forelder["try_stack"]
-                    la forelder_handler_index = vm_find_handler(forelder_try, unntak_melding)
+                    la forelder_handler_index = vm_find_handler(functions, forelder_try, unntak_melding)
                     la forelder_cleanup = forelder["cleanup_stack"]
                     hvis lengde(forelder_cleanup) > 0 {
                         la cleanup = forelder_cleanup[lengde(forelder_cleanup) - 1]
