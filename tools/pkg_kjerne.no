@@ -1,0 +1,1442 @@
+// tools/pkg_kjerne.no — kjerna i `nc pkg` (pakkehandtering med register)
+//
+// Semver-løysing med konfliktmelding, transitive avhengnadar med syklus-
+// deteksjon, deterministisk låsefil (norscode.lock), sjekksum-verifisert
+// installasjon til .norscode/pakkar/<namn>/, arkivformat (NKA1), filbasert
+// register (indeks.json + arkiv/) og HTTP-register (klient og tenar over
+// native sokkel). Rein Norscode. Sjå docs/PAKKER.md.
+
+bruk std.filops som fo
+bruk std.sha256 som sha
+bruk std.socket som socket
+
+// ─── Små hjelparar ──────────────────────────────────────────────────────────
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner tekst(miljo_hent(namn)) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon sluttar_med(t: tekst, suffiks: tekst) -> bool {
+    hvis lengde(t) < lengde(suffiks) { returner usann }
+    returner builtin.slice(t, lengde(t) - lengde(suffiks), lengde(t)) == suffiks
+}
+
+funksjon sorter_tekst(liste) -> liste_tekst {
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(liste) {
+        la x = tekst(liste[i])
+        legg_til(ut, x)
+        la j = lengde(ut) - 1
+        mens j > 0 og ut[j] < ut[j - 1] {
+            la tmp = ut[j]
+            ut[j] = ut[j - 1]
+            ut[j - 1] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon sorterte_nøklar(d) -> liste_tekst {
+    returner sorter_tekst(nøkler(d))
+}
+
+funksjon json_str(s: tekst) -> tekst {
+    la ut = "\""
+    la i = 0
+    mens i < lengde(s) {
+        la c = s[i]
+        hvis c == "\\" { ut = ut + "\\\\" }
+        ellers hvis c == "\"" { ut = ut + "\\\"" }
+        ellers hvis c == "\n" { ut = ut + "\\n" }
+        ellers hvis c == "\r" { ut = ut + "\\r" }
+        ellers hvis c == "\t" { ut = ut + "\\t" }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut + "\""
+}
+
+funksjon er_siffer_tekst(s: tekst) -> bool {
+    hvis lengde(s) == 0 eller lengde(s) > 6 { returner usann }
+    la i = 0
+    mens i < lengde(s) {
+        la c = s[i]
+        hvis c < "0" eller c > "9" { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon namn_gyldig(n: tekst) -> bool {
+    hvis lengde(n) == 0 eller lengde(n) > 64 { returner usann }
+    la i = 0
+    mens i < lengde(n) {
+        la c = n[i]
+        la ok = (c >= "a" og c <= "z") eller (c >= "0" og c <= "9") eller c == "_"
+        hvis ikkje ok { returner usann }
+        i = i + 1
+    }
+    hvis n[0] >= "0" og n[0] <= "9" { returner usann }
+    returner sann
+}
+
+// ─── Semver ─────────────────────────────────────────────────────────────────
+// Ein versjon x.y.z blir koda som eitt heiltal: x*10^12 + y*10^6 + z.
+
+funksjon ver_gyldig(v: tekst) -> bool {
+    la d = builtin.split(v, ".")
+    hvis lengde(d) != 3 { returner usann }
+    returner er_siffer_tekst(d[0]) og er_siffer_tekst(d[1]) og er_siffer_tekst(d[2])
+}
+
+funksjon ver_nøkkel_tal(a: heiltall, b: heiltall, c: heiltall) -> heiltall {
+    returner a * 1000000000000 + b * 1000000 + c
+}
+
+funksjon ver_nøkkel(v: tekst) -> heiltall {
+    hvis ikkje ver_gyldig(v) { kast "ugyldig versjon: " + v + " (forventa x.y.z)" }
+    la d = builtin.split(v, ".")
+    returner ver_nøkkel_tal(heltall_fra_tekst(d[0]), heltall_fra_tekst(d[1]), heltall_fra_tekst(d[2]))
+}
+
+funksjon ver_tekst(k: heiltall) -> tekst {
+    la a = k / 1000000000000
+    la b = (k / 1000000) % 1000000
+    la c = k % 1000000
+    returner tekst(a) + "." + tekst(b) + "." + tekst(c)
+}
+
+// Delvis versjon (1, 1.2, 1.2.3) → [antal, maj, min, pat]
+funksjon ver_delvis(v: tekst) -> liste_heiltall {
+    la d = builtin.split(v, ".")
+    hvis lengde(d) < 1 eller lengde(d) > 3 { kast "ugyldig versjonskrav: " + v }
+    la ut: liste_heiltall = [lengde(d), 0, 0, 0]
+    la i = 0
+    mens i < lengde(d) {
+        hvis ikkje er_siffer_tekst(d[i]) { kast "ugyldig versjonskrav: " + v }
+        ut[i + 1] = heltall_fra_tekst(d[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Eit krav er ei liste av samanlikningar «op:nøkkel» (op: ge gt lt le eq).
+funksjon krav_tolk(spec: tekst) -> liste_tekst {
+    la sp = builtin.trim(builtin.replace(spec, ",", " "))
+    hvis sp == "" eller sp == "*" { returner [] }
+    la råe = builtin.split(sp, " ")
+    la tokens: liste_tekst = []
+    la i = 0
+    mens i < lengde(råe) {
+        la t = builtin.trim(råe[i])
+        hvis t != "" {
+            hvis (t == ">=" eller t == "<=" eller t == ">" eller t == "<" eller t == "=" eller t == "^" eller t == "~") og i + 1 < lengde(råe) {
+                i = i + 1
+                legg_til(tokens, t + builtin.trim(råe[i]))
+            } ellers { legg_til(tokens, t) }
+        }
+        i = i + 1
+    }
+    la ut: liste_tekst = []
+    la k = 0
+    mens k < lengde(tokens) {
+        la t = tokens[k]
+        la op = ""
+        la rest = t
+        hvis builtin.starts_with(t, ">=") { op = "ge"
+            rest = builtin.slice(t, 2, lengde(t)) }
+        ellers hvis builtin.starts_with(t, "<=") { op = "le"
+            rest = builtin.slice(t, 2, lengde(t)) }
+        ellers hvis builtin.starts_with(t, ">") { op = "gt"
+            rest = builtin.slice(t, 1, lengde(t)) }
+        ellers hvis builtin.starts_with(t, "<") { op = "lt"
+            rest = builtin.slice(t, 1, lengde(t)) }
+        ellers hvis builtin.starts_with(t, "^") { op = "caret"
+            rest = builtin.slice(t, 1, lengde(t)) }
+        ellers hvis builtin.starts_with(t, "~") { op = "tilde"
+            rest = builtin.slice(t, 1, lengde(t)) }
+        ellers hvis builtin.starts_with(t, "=") { op = "eq"
+            rest = builtin.slice(t, 1, lengde(t)) }
+        ellers { op = "eq" }
+        la p = ver_delvis(rest)
+        la n = p[0]
+        la lo = ver_nøkkel_tal(p[1], p[2], p[3])
+        hvis op == "ge" { legg_til(ut, "ge:" + tekst(lo)) }
+        ellers hvis op == "gt" { legg_til(ut, "gt:" + tekst(lo)) }
+        ellers hvis op == "lt" { legg_til(ut, "lt:" + tekst(lo)) }
+        ellers hvis op == "le" { legg_til(ut, "le:" + tekst(lo)) }
+        ellers hvis op == "caret" {
+            la hi = 0
+            hvis p[1] > 0 eller n == 1 { hi = ver_nøkkel_tal(p[1] + 1, 0, 0) }
+            ellers hvis p[2] > 0 eller n == 2 { hi = ver_nøkkel_tal(0, p[2] + 1, 0) }
+            ellers { hi = ver_nøkkel_tal(0, 0, p[3] + 1) }
+            legg_til(ut, "ge:" + tekst(lo))
+            legg_til(ut, "lt:" + tekst(hi))
+        } ellers hvis op == "tilde" {
+            la hi = 0
+            hvis n == 1 { hi = ver_nøkkel_tal(p[1] + 1, 0, 0) }
+            ellers { hi = ver_nøkkel_tal(p[1], p[2] + 1, 0) }
+            legg_til(ut, "ge:" + tekst(lo))
+            legg_til(ut, "lt:" + tekst(hi))
+        } ellers {
+            // eq: full versjon = nøyaktig; delvis (1 / 1.2) = joker-område
+            hvis n == 3 { legg_til(ut, "eq:" + tekst(lo)) }
+            ellers {
+                la hi = 0
+                hvis n == 1 { hi = ver_nøkkel_tal(p[1] + 1, 0, 0) }
+                ellers { hi = ver_nøkkel_tal(p[1], p[2] + 1, 0) }
+                legg_til(ut, "ge:" + tekst(lo))
+                legg_til(ut, "lt:" + tekst(hi))
+            }
+        }
+        k = k + 1
+    }
+    returner ut
+}
+
+funksjon krav_gyldig(spec: tekst) -> bool {
+    prøv { krav_tolk(spec) } fang (e) { returner usann }
+    returner sann
+}
+
+funksjon krav_oppfylt(spec: tekst, versjon: tekst) -> bool {
+    la v = ver_nøkkel(versjon)
+    la cs = krav_tolk(spec)
+    la i = 0
+    mens i < lengde(cs) {
+        la d = builtin.split(cs[i], ":")
+        la op = d[0]
+        la g = heltal_stor(d[1])
+        hvis op == "ge" og ikkje (v >= g) { returner usann }
+        hvis op == "gt" og ikkje (v > g) { returner usann }
+        hvis op == "lt" og ikkje (v < g) { returner usann }
+        hvis op == "le" og ikkje (v <= g) { returner usann }
+        hvis op == "eq" og v != g { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon heltal_stor(s: tekst) -> heiltall {
+    la t = 0
+    la i = 0
+    mens i < lengde(s) {
+        t = t * 10 + (char_code(s[i]) - 48)
+        i = i + 1
+    }
+    returner t
+}
+
+// ─── Manifest (norcode.toml) ────────────────────────────────────────────────
+
+funksjon toml_verdi(linje: tekst) -> tekst {
+    la eq = builtin.index_of(linje, "=")
+    hvis eq < 0 { returner "" }
+    la v = builtin.trim(builtin.slice(linje, eq + 1, lengde(linje)))
+    hvis lengde(v) >= 2 og v[0] == "\"" {
+        la slutt = builtin.index_of(builtin.slice(v, 1, lengde(v)), "\"")
+        hvis slutt >= 0 { returner builtin.slice(v, 1, slutt + 1) }
+    }
+    returner v
+}
+
+funksjon toml_nøkkel(linje: tekst) -> tekst {
+    la eq = builtin.index_of(linje, "=")
+    hvis eq < 0 { returner "" }
+    returner builtin.trim(builtin.slice(linje, 0, eq))
+}
+
+// Les ein verdi frå ein seksjon: toml_hent(tekst, "project", "name")
+funksjon toml_hent(innhald: tekst, seksjon: tekst, nøkkel: tekst) -> tekst {
+    la linjer = builtin.split(innhald, "\n")
+    la no = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "[") og sluttar_med(l, "]") {
+            no = builtin.slice(l, 1, lengde(l) - 1)
+        } ellers hvis no == seksjon og l != "" og ikkje builtin.starts_with(l, "#") {
+            hvis toml_nøkkel(l) == nøkkel { returner toml_verdi(l) }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Alle nøkkel/verdi-par i ein seksjon, i filrekkjefølgje: [«namn=verdi», ...]
+funksjon toml_seksjon(innhald: tekst, seksjon: tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    la linjer = builtin.split(innhald, "\n")
+    la no = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "[") og sluttar_med(l, "]") {
+            no = builtin.slice(l, 1, lengde(l) - 1)
+        } ellers hvis no == seksjon og l != "" og ikkje builtin.starts_with(l, "#") {
+            la k = toml_nøkkel(l)
+            hvis k != "" { ut[k] = toml_verdi(l) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Er avhengnadskravet ei lokal sti (eksisterande path-avhengnad)?
+funksjon er_sti_krav(spec: tekst) -> bool {
+    returner builtin.starts_with(spec, ".") eller builtin.starts_with(spec, "/")
+}
+
+// Registeravhengnadar frå eit manifest: ordbok namn → krav (stiavhengnadar utelatne)
+funksjon manifest_avhengnadar(innhald: tekst) -> ordbok_tekst {
+    la alle = toml_seksjon(innhald, "dependencies")
+    la ut: ordbok_tekst = {}
+    la ks = sorterte_nøklar(alle)
+    la i = 0
+    mens i < lengde(ks) {
+        la spec = tekst(alle[ks[i]])
+        hvis ikkje er_sti_krav(spec) { ut[ks[i]] = spec }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Set (eller legg til) ei avhengnad i [dependencies]; resten av fila er uendra.
+funksjon manifest_sett_dep(innhald: tekst, namn: tekst, spec: tekst) -> tekst {
+    la linje_ny = namn + " = \"" + spec + "\""
+    la linjer = builtin.split(innhald, "\n")
+    la ut: liste_tekst = []
+    la no = ""
+    la sett = usann
+    la fann_seksjon = usann
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "[") og sluttar_med(l, "]") {
+            hvis no == "dependencies" og ikkje sett {
+                legg_til(ut, linje_ny)
+                sett = sann
+            }
+            no = builtin.slice(l, 1, lengde(l) - 1)
+            hvis no == "dependencies" { fann_seksjon = sann }
+            legg_til(ut, linjer[i])
+        } ellers hvis no == "dependencies" og l != "" og toml_nøkkel(l) == namn {
+            hvis ikkje sett { legg_til(ut, linje_ny) }
+            sett = sann
+        } ellers { legg_til(ut, linjer[i]) }
+        i = i + 1
+    }
+    hvis ikkje sett {
+        hvis fann_seksjon {
+            // seksjonen var sist i fila
+            la sist = lengde(ut) - 1
+            mens sist >= 0 og builtin.trim(ut[sist]) == "" {
+                ut = builtin.slice(ut, 0, sist)
+                sist = sist - 1
+            }
+            legg_til(ut, linje_ny)
+            legg_til(ut, "")
+        } ellers {
+            la sist = lengde(ut) - 1
+            mens sist >= 0 og builtin.trim(ut[sist]) == "" {
+                ut = builtin.slice(ut, 0, sist)
+                sist = sist - 1
+            }
+            legg_til(ut, "")
+            legg_til(ut, "[dependencies]")
+            legg_til(ut, linje_ny)
+            legg_til(ut, "")
+        }
+    }
+    returner builtin.join(ut, "\n")
+}
+
+funksjon manifest_fjern_dep(innhald: tekst, namn: tekst) -> tekst {
+    la linjer = builtin.split(innhald, "\n")
+    la ut: liste_tekst = []
+    la no = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "[") og sluttar_med(l, "]") {
+            no = builtin.slice(l, 1, lengde(l) - 1)
+            legg_til(ut, linjer[i])
+        } ellers hvis no == "dependencies" og l != "" og toml_nøkkel(l) == namn {
+            // hopp over
+        } ellers { legg_til(ut, linjer[i]) }
+        i = i + 1
+    }
+    returner builtin.join(ut, "\n")
+}
+
+// ─── Arkiv (NKA1): tekstbasert, deterministisk, sjekksum-bart ───────────────
+//   NKA1\n
+//   FIL <byte-lengd> <sti>\n<innhald>\n   (gjentatt, sortert på sti)
+//   SLUTT\n
+
+funksjon sti_trygg(sti: tekst) -> bool {
+    hvis sti == "" eller builtin.starts_with(sti, "/") eller builtin.contains(sti, "\\") { returner usann }
+    la seg = builtin.split(sti, "/")
+    la i = 0
+    mens i < lengde(seg) {
+        hvis seg[i] == "" eller seg[i] == ".." eller seg[i] == "." { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon arkiv_bygg(filer: liste_tekst, innhald: liste_tekst) -> tekst {
+    // filer og innhald er parallelle lister; stiane må vere unike
+    la rekkje: liste_tekst = sorter_tekst(filer)
+    la ut = "NKA1\n"
+    la i = 0
+    mens i < lengde(rekkje) {
+        la sti = rekkje[i]
+        hvis ikkje sti_trygg(sti) eller builtin.contains(sti, " ") { kast "ugyldig arkivsti: " + sti }
+        la k = 0
+        la funn = -1
+        mens k < lengde(filer) {
+            hvis filer[k] == sti { funn = k }
+            k = k + 1
+        }
+        la tekst_inn = tekst(innhald[funn])
+        ut = ut + "FIL " + tekst(lengde(tekst_inn)) + " " + sti + "\n" + tekst_inn + "\n"
+        i = i + 1
+    }
+    returner ut + "SLUTT\n"
+}
+
+// Returnerer {"stiar": liste, "innhald": liste}; kastar ved skadd arkiv.
+funksjon arkiv_les(a: tekst) -> ordbok_tekst {
+    hvis ikkje builtin.starts_with(a, "NKA1\n") { kast "ugyldig arkiv: manglar NKA1-hovud" }
+    la pos = 5
+    la stiar: liste_tekst = []
+    la innh: liste_tekst = []
+    mens sann {
+        la nl = builtin.index_of(builtin.slice(a, pos, lengde(a)), "\n")
+        hvis nl < 0 { kast "ugyldig arkiv: uventa slutt" }
+        la hovud = builtin.slice(a, pos, pos + nl)
+        pos = pos + nl + 1
+        hvis hovud == "SLUTT" {
+            hvis pos != lengde(a) { kast "ugyldig arkiv: data etter SLUTT" }
+            returner {"stiar": stiar, "innhald": innh}
+        }
+        hvis ikkje builtin.starts_with(hovud, "FIL ") { kast "ugyldig arkiv: ukjend linje" }
+        la rest = builtin.slice(hovud, 4, lengde(hovud))
+        la sp = builtin.index_of(rest, " ")
+        hvis sp <= 0 { kast "ugyldig arkiv: feil FIL-linje" }
+        la lengd_t = builtin.slice(rest, 0, sp)
+        hvis ikkje er_siffer_tekst(lengd_t) og lengd_t != "0" { kast "ugyldig arkiv: feil lengd" }
+        la n = heltal_stor(lengd_t)
+        la sti = builtin.slice(rest, sp + 1, lengde(rest))
+        hvis ikkje sti_trygg(sti) { kast "usikker arkivsti: " + sti }
+        hvis pos + n + 1 > lengde(a) { kast "ugyldig arkiv: avkorta innhald for " + sti }
+        legg_til(stiar, sti)
+        legg_til(innh, builtin.slice(a, pos, pos + n))
+        hvis builtin.slice(a, pos + n, pos + n + 1) != "\n" { kast "ugyldig arkiv: innhaldslengd stemmer ikkje for " + sti }
+        pos = pos + n + 1
+    }
+    returner {}
+}
+
+funksjon arkiv_hent_fil(a: ordbok_tekst, sti: tekst) -> tekst {
+    la i = 0
+    mens i < lengde(a["stiar"]) {
+        hvis a["stiar"][i] == sti { returner tekst(a["innhald"][i]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon arkiv_pakk_ut(arkivtekst: tekst, mål: tekst) -> heiltall {
+    la a = arkiv_les(arkivtekst)
+    fo.lag_katalogar(mål)
+    la i = 0
+    mens i < lengde(a["stiar"]) {
+        la full = mål + "/" + a["stiar"][i]
+        la mappe = fo.katalog(full)
+        hvis mappe != "" { fo.lag_katalogar(mappe) }
+        fil_skriv(full, tekst(a["innhald"][i]))
+        i = i + 1
+    }
+    returner lengde(a["stiar"])
+}
+
+funksjon ekskludert_namn(n: tekst) -> bool {
+    returner builtin.starts_with(n, ".") eller n == "build" eller n == "norscode.lock" eller n == "node_modules"
+}
+
+funksjon samle_filer(rot: tekst, relativ: tekst, stiar: liste_tekst) -> heiltall {
+    la mappe = rot
+    hvis relativ != "" { mappe = rot + "/" + relativ }
+    la barn = fo.lista_katalog(mappe)
+    la i = 0
+    mens i < lengde(barn) {
+        la n = tekst(barn[i])
+        hvis ikkje ekskludert_namn(n) {
+            la rel = n
+            hvis relativ != "" { rel = relativ + "/" + n }
+            hvis fo.katalog_finnes(rot + "/" + rel) { samle_filer(rot, rel, stiar) }
+            ellers { legg_til(stiar, rel) }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// Pakk ein pakkekatalog (med norcode.toml) til arkivtekst.
+funksjon pakke_arkiv_frå_katalog(rot: tekst) -> tekst {
+    la stiar: liste_tekst = []
+    samle_filer(rot, "", stiar)
+    la innh: liste_tekst = []
+    la i = 0
+    mens i < lengde(stiar) {
+        legg_til(innh, fil_les(rot + "/" + stiar[i]))
+        i = i + 1
+    }
+    returner arkiv_bygg(stiar, innh)
+}
+
+// ─── Register: indeks.json ──────────────────────────────────────────────────
+//   {"pakkar": {"<namn>": {"versjonar": {"<x.y.z>": {
+//       "arkiv": "arkiv/<namn>-<x.y.z>.nka", "sha256": "…",
+//       "avhengnader": {"<namn>": "<krav>"}}}}}}
+
+funksjon indeks_tom() -> ordbok_tekst {
+    returner {"pakkar": {}}
+}
+
+funksjon indeks_tolk(json: tekst) -> ordbok_tekst {
+    hvis builtin.trim(json) == "" { returner indeks_tom() }
+    la j = builtin.json_parse_raw(json)
+    hvis ikkje finnes_nøkkel(j, "pakkar") { kast "ugyldig indeks.json: manglar «pakkar»" }
+    returner j
+}
+
+funksjon indeks_serialiser(ind: ordbok_tekst) -> tekst {
+    la namn = sorterte_nøklar(ind["pakkar"])
+    la ut = "{\n  \"pakkar\": {"
+    la i = 0
+    mens i < lengde(namn) {
+        hvis i > 0 { ut = ut + "," }
+        la p = ind["pakkar"][namn[i]]
+        ut = ut + "\n    " + json_str(namn[i]) + ": {\"versjonar\": {"
+        la vs = sorterte_versjonar(nøkler(p["versjonar"]))
+        la k = 0
+        mens k < lengde(vs) {
+            hvis k > 0 { ut = ut + "," }
+            la e = p["versjonar"][vs[k]]
+            ut = ut + "\n      " + json_str(vs[k]) + ": {\"arkiv\": " + json_str(tekst(e["arkiv"])) +
+                ", \"sha256\": " + json_str(tekst(e["sha256"])) + ", \"avhengnader\": {"
+            la ds = sorterte_nøklar(e["avhengnader"])
+            la m = 0
+            mens m < lengde(ds) {
+                hvis m > 0 { ut = ut + ", " }
+                ut = ut + json_str(ds[m]) + ": " + json_str(tekst(e["avhengnader"][ds[m]]))
+                m = m + 1
+            }
+            ut = ut + "}}"
+            k = k + 1
+        }
+        ut = ut + "\n    }}"
+        i = i + 1
+    }
+    returner ut + "\n  }\n}\n"
+}
+
+// Versjonar sortert stigande
+funksjon sorterte_versjonar(liste) -> liste_tekst {
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(liste) {
+        legg_til(ut, tekst(liste[i]))
+        la j = lengde(ut) - 1
+        mens j > 0 og ver_nøkkel(ut[j]) < ver_nøkkel(ut[j - 1]) {
+            la tmp = ut[j]
+            ut[j] = ut[j - 1]
+            ut[j - 1] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Legg ei utgjeving inn i indeksen (kastar ved duplikat).
+funksjon indeks_legg_til(ind: ordbok_tekst, namn: tekst, versjon: tekst, arkiv_sti: tekst,
+                         sjekksum: tekst, avh: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje finnes_nøkkel(ind["pakkar"], namn) {
+        ind["pakkar"][namn] = {"versjonar": {}}
+    }
+    hvis finnes_nøkkel(ind["pakkar"][namn]["versjonar"], versjon) {
+        kast "duplikat: " + namn + "@" + versjon + " er allereie publisert (utgjevingar er uforanderlege)"
+    }
+    ind["pakkar"][namn]["versjonar"][versjon] = {"arkiv": arkiv_sti, "sha256": sjekksum, "avhengnader": avh}
+    returner ind
+}
+
+// ─── Register-transport (katalog eller HTTP) ────────────────────────────────
+
+funksjon er_http(reg: tekst) -> bool {
+    returner builtin.starts_with(reg, "http://")
+}
+
+funksjon reg_katalog(reg: tekst) -> tekst {
+    hvis builtin.starts_with(reg, "file://") { returner builtin.slice(reg, 7, lengde(reg)) }
+    returner reg
+}
+
+funksjon http_vent(h: ordbok_tekst, hendingar: heiltall, frist: heiltall) -> bool {
+    la start = builtin.tid_ms()
+    la p = socket.native_poll(h, hendingar)
+    mens p["status"] == "ventende" og builtin.tid_ms() - start < frist {
+        prøv { builtin.vent.sov(1) } fang (e) { }
+        p = socket.native_poll(h, hendingar)
+    }
+    returner p["status"] != "ventende" og p["status"] != "feil"
+}
+
+// Minimal HTTP/1.1-klient (Connection: close). Returnerer {"status": N, "body": …};
+// status 0 = tilkoplingsfeil. Ingen JSON-omvegar, so kroppen er byte-eksakt.
+funksjon http_førespurnad(metode: tekst, url: tekst, hovud: ordbok_tekst, kropp: tekst) -> ordbok_tekst {
+    hvis ikkje builtin.starts_with(url, "http://") { returner {"status": 0, "body": "berre http:// er støtta: " + url} }
+    la rest = builtin.slice(url, 7, lengde(url))
+    la sl = builtin.index_of(rest, "/")
+    la autoritet = rest
+    la sti = "/"
+    hvis sl >= 0 {
+        autoritet = builtin.slice(rest, 0, sl)
+        sti = builtin.slice(rest, sl, lengde(rest))
+    }
+    la vert = autoritet
+    la port = 80
+    la kol = builtin.index_of(autoritet, ":")
+    hvis kol >= 0 {
+        vert = builtin.slice(autoritet, 0, kol)
+        port = heltall_fra_tekst(builtin.slice(autoritet, kol + 1, lengde(autoritet)))
+    }
+    hvis vert == "localhost" { vert = "127.0.0.1" }
+    la frist = 15000
+    la h = socket.native_tilkoble(vert, port)
+    hvis h["status"] == "feil" { returner {"status": 0, "body": "kunne ikkje kople til " + autoritet} }
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje http_vent(h, 2, frist) {
+            socket.native_lukk(h)
+            returner {"status": 0, "body": "tidsavbrot ved tilkopling til " + autoritet}
+        }
+    }
+    la req = metode + " " + sti + " HTTP/1.1\r\nHost: " + autoritet + "\r\n"
+    la ks = nøkler(hovud)
+    la i = 0
+    mens i < lengde(ks) {
+        req = req + tekst(ks[i]) + ": " + tekst(hovud[ks[i]]) + "\r\n"
+        i = i + 1
+    }
+    req = req + "User-Agent: nc-pkg/1\r\nConnection: close\r\nContent-Length: " + tekst(lengde(kropp)) + "\r\n\r\n" + kropp
+    hvis ikkje sokkel_skriv_alt(h, req, frist) {
+        socket.native_lukk(h)
+        returner {"status": 0, "body": "skrivefeil mot " + autoritet}
+    }
+    la rå = ""
+    la start = builtin.tid_ms()
+    la ferdig = usann
+    mens ikkje ferdig og builtin.tid_ms() - start < frist {
+        la r = socket.native_les(h, 65536)
+        hvis r["status"] == "ventende" {
+            hvis ikkje http_vent(h, 1, frist) { ferdig = sann }
+        } ellers {
+            la d = tekst(r["data"])
+            hvis d == "" { ferdig = sann }
+            ellers { rå = rå + d }
+        }
+    }
+    socket.native_lukk(h)
+    returner http_svar_tolk(rå)
+}
+
+funksjon http_svar_tolk(rå: tekst) -> ordbok_tekst {
+    la he = builtin.index_of(rå, "\r\n\r\n")
+    hvis he < 0 { returner {"status": 0, "body": "ugyldig HTTP-svar"} }
+    la første = builtin.slice(rå, 0, builtin.index_of(rå, "\r\n"))
+    la sp = builtin.split(første, " ")
+    hvis lengde(sp) < 2 { returner {"status": 0, "body": "ugyldig HTTP-statuslinje"} }
+    la kropp = builtin.slice(rå, he + 4, lengde(rå))
+    returner {"status": heltall_fra_tekst(sp[1]), "body": kropp}
+}
+
+funksjon sokkel_skriv_alt(h: ordbok_tekst, data: tekst, frist: heiltall) -> bool {
+    la off = 0
+    mens off < lengde(data) {
+        la w = socket.native_skriv(h, builtin.slice(data, off, lengde(data)))
+        hvis w["status"] == "ventende" {
+            hvis ikkje http_vent(h, 2, frist) { returner usann }
+        } ellers {
+            la n = heltall_fra_tekst(tekst(w["value"]))
+            hvis n <= 0 { returner usann }
+            off = off + n
+        }
+    }
+    returner sann
+}
+
+// Les ei registerressurs: returnerer tekst, kastar ved feil.
+funksjon reg_les(reg: tekst, rel: tekst) -> tekst {
+    hvis er_http(reg) {
+        la r = http_førespurnad("GET", reg + "/" + rel, {}, "")
+        hvis r["status"] != 200 {
+            kast "register " + reg + "/" + rel + ": HTTP " + tekst(r["status"]) + " " + tekst(r["body"])
+        }
+        returner tekst(r["body"])
+    }
+    la sti = reg_katalog(reg) + "/" + rel
+    hvis ikkje fo.fil_finnes(sti) { kast "register: finn ikkje " + sti }
+    returner fil_les(sti)
+}
+
+funksjon reg_indeks(reg: tekst) -> ordbok_tekst {
+    hvis ikkje er_http(reg) og ikkje fo.fil_finnes(reg_katalog(reg) + "/indeks.json") { returner indeks_tom() }
+    returner indeks_tolk(reg_les(reg, "indeks.json"))
+}
+
+// ─── Publisering ────────────────────────────────────────────────────────────
+
+// Valider eit arkiv og hent metadata frå norcode.toml i det.
+// Returnerer {"namn","versjon","avhengnader"}.
+funksjon arkiv_metadata(arkivtekst: tekst) -> ordbok_tekst {
+    la a = arkiv_les(arkivtekst)
+    la m = arkiv_hent_fil(a, "norcode.toml")
+    hvis m == "" { kast "arkivet manglar norcode.toml" }
+    la namn = toml_hent(m, "project", "name")
+    la versjon = toml_hent(m, "project", "version")
+    hvis ikkje namn_gyldig(namn) { kast "ugyldig pakkenamn «" + namn + "» (berre a-z, 0-9, _)" }
+    hvis ikkje ver_gyldig(versjon) { kast "ugyldig versjon «" + versjon + "» (forventa x.y.z)" }
+    la avh = manifest_avhengnadar(m)
+    la ks = nøkler(avh)
+    la i = 0
+    mens i < lengde(ks) {
+        hvis ikkje namn_gyldig(tekst(ks[i])) { kast "ugyldig avhengnadsnamn: " + tekst(ks[i]) }
+        hvis ikkje krav_gyldig(tekst(avh[ks[i]])) { kast "ugyldig krav for " + tekst(ks[i]) + ": " + tekst(avh[ks[i]]) }
+        i = i + 1
+    }
+    returner {"namn": namn, "versjon": versjon, "avhengnader": avh}
+}
+
+// Skriv ei utgjeving inn i eit katalogregister (brukt av klient og av tenaren).
+funksjon register_publiser_lokalt(rot: tekst, arkivtekst: tekst) -> ordbok_tekst {
+    la md = arkiv_metadata(arkivtekst)
+    la ind = indeks_tom()
+    hvis fo.fil_finnes(rot + "/indeks.json") { ind = indeks_tolk(fil_les(rot + "/indeks.json")) }
+    la rel = "arkiv/" + tekst(md["namn"]) + "-" + tekst(md["versjon"]) + ".nka"
+    la sum = sha.hash(arkivtekst)
+    ind = indeks_legg_til(ind, tekst(md["namn"]), tekst(md["versjon"]), rel, sum, md["avhengnader"])
+    fo.lag_katalogar(rot + "/arkiv")
+    fil_skriv(rot + "/" + rel, arkivtekst)
+    fil_skriv(rot + "/indeks.json", indeks_serialiser(ind))
+    returner {"namn": md["namn"], "versjon": md["versjon"], "sha256": sum, "arkiv": rel}
+}
+
+funksjon register_publiser(reg: tekst, arkivtekst: tekst) -> ordbok_tekst {
+    hvis er_http(reg) {
+        la md = arkiv_metadata(arkivtekst)
+        la hovud: ordbok_tekst = {}
+        la tok = env("NORSCODE_PKG_TOKEN")
+        hvis tok != "" { hovud["Authorization"] = "Bearer " + tok }
+        la r = http_førespurnad("PUT", reg + "/arkiv/" + tekst(md["namn"]) + "/" + tekst(md["versjon"]), hovud, arkivtekst)
+        hvis r["status"] != 201 { kast "publisering feila: HTTP " + tekst(r["status"]) + " " + tekst(r["body"]) }
+        returner {"namn": md["namn"], "versjon": md["versjon"], "sha256": sha.hash(arkivtekst),
+                  "arkiv": "arkiv/" + tekst(md["namn"]) + "-" + tekst(md["versjon"]) + ".nka"}
+    }
+    returner register_publiser_lokalt(reg_katalog(reg), arkivtekst)
+}
+
+// ─── Referanse-registertenar ────────────────────────────────────────────────
+// Rein funksjon: (rot, metode, sti, autorisasjon, kropp) → {status, ctype, body}.
+// Gjenbrukt av sokkelløkka (register_betjen) og av nc serve-appen.
+
+funksjon svar(status: heiltall, ctype: tekst, kropp: tekst) -> ordbok_tekst {
+    returner {"status": status, "ctype": ctype, "body": kropp}
+}
+
+funksjon register_handter(rot: tekst, metode: tekst, sti: tekst, auth: tekst, kropp: tekst) -> ordbok_tekst {
+    la q = builtin.index_of(sti, "?")
+    hvis q >= 0 { sti = builtin.slice(sti, 0, q) }
+    hvis metode == "GET" {
+        hvis sti == "/" eller sti == "/helse" { returner svar(200, "text/plain", "ok") }
+        hvis sti == "/indeks.json" {
+            hvis fo.fil_finnes(rot + "/indeks.json") { returner svar(200, "application/json", fil_les(rot + "/indeks.json")) }
+            returner svar(200, "application/json", indeks_serialiser(indeks_tom()))
+        }
+        hvis builtin.starts_with(sti, "/arkiv/") {
+            la fil = builtin.slice(sti, 7, lengde(sti))
+            hvis ikkje sti_trygg(fil) eller builtin.contains(fil, "/") { returner svar(400, "text/plain", "ugyldig arkivnamn") }
+            hvis fo.fil_finnes(rot + "/arkiv/" + fil) { returner svar(200, "application/octet-stream", fil_les(rot + "/arkiv/" + fil)) }
+            returner svar(404, "text/plain", "ukjent arkiv")
+        }
+        returner svar(404, "text/plain", "ukjend sti")
+    }
+    hvis metode == "PUT" og builtin.starts_with(sti, "/arkiv/") {
+        la krevd = env("NORSCODE_PKG_REGISTER_TOKEN")
+        hvis krevd != "" og auth != "Bearer " + krevd { returner svar(401, "text/plain", "manglar eller feil token") }
+        la delar = builtin.split(builtin.slice(sti, 7, lengde(sti)), "/")
+        hvis lengde(delar) != 2 { returner svar(400, "text/plain", "forventa /arkiv/<namn>/<versjon>") }
+        prøv {
+            la md = arkiv_metadata(kropp)
+            hvis tekst(md["namn"]) != delar[0] eller tekst(md["versjon"]) != delar[1] {
+                returner svar(400, "text/plain", "namn/versjon i URL stemmer ikkje med norcode.toml i arkivet")
+            }
+            la r = register_publiser_lokalt(rot, kropp)
+            returner svar(201, "application/json", "{\"namn\": " + json_str(tekst(r["namn"])) + ", \"versjon\": " + json_str(tekst(r["versjon"])) + ", \"sha256\": " + json_str(tekst(r["sha256"])) + "}")
+        } fang (e) {
+            la m = tekst(e)
+            hvis builtin.contains(m, "duplikat") { returner svar(409, "text/plain", m) }
+            returner svar(400, "text/plain", m)
+        }
+    }
+    returner svar(405, "text/plain", "metode ikkje støtta")
+}
+
+funksjon statusfrase(k: heiltall) -> tekst {
+    hvis k == 200 { returner "OK" }
+    hvis k == 201 { returner "Created" }
+    hvis k == 400 { returner "Bad Request" }
+    hvis k == 401 { returner "Unauthorized" }
+    hvis k == 404 { returner "Not Found" }
+    hvis k == 409 { returner "Conflict" }
+    returner "Error"
+}
+
+funksjon hovud_verdi(hovud: tekst, namn: tekst) -> tekst {
+    la linjer = builtin.split(hovud, "\r\n")
+    la i = 0
+    mens i < lengde(linjer) {
+        la kol = builtin.index_of(linjer[i], ":")
+        hvis kol > 0 og tekst_til_liten(builtin.slice(linjer[i], 0, kol)) == tekst_til_liten(namn) {
+            returner builtin.trim(builtin.slice(linjer[i], kol + 1, lengde(linjer[i])))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Les og svar på éi tilkopling. Returnerer HTTP-status (0 ved feil).
+funksjon register_betjen_tilkopling(peer: ordbok_tekst, rot: tekst) -> heiltall {
+    la frist = 15000
+    la rå = ""
+    la start = builtin.tid_ms()
+    la he = -1
+    la lengd = 0
+    mens builtin.tid_ms() - start < frist {
+        hvis he < 0 {
+            he = builtin.index_of(rå, "\r\n\r\n")
+            hvis he >= 0 {
+                la cl = hovud_verdi(builtin.slice(rå, 0, he), "content-length")
+                hvis cl != "" { lengd = heltall_fra_tekst(cl) }
+            }
+        }
+        hvis he >= 0 og lengde(rå) >= he + 4 + lengd { returner register_svar(peer, rot, rå, he, lengd, frist) }
+        la r = socket.native_les(peer, 65536)
+        hvis r["status"] == "ventende" {
+            hvis ikkje http_vent(peer, 1, frist) { returner 0 }
+        } ellers {
+            la d = tekst(r["data"])
+            hvis d == "" {
+                hvis he >= 0 { returner register_svar(peer, rot, rå, he, lengd, frist) }
+                returner 0
+            }
+            rå = rå + d
+        }
+    }
+    returner 0
+}
+
+funksjon register_svar(peer: ordbok_tekst, rot: tekst, rå: tekst, he: heiltall, lengd: heiltall, frist: heiltall) -> heiltall {
+    la hovud = builtin.slice(rå, 0, he)
+    la kropp = builtin.slice(rå, he + 4, he + 4 + lengd)
+    la første = builtin.slice(hovud, 0, builtin.index_of(hovud, "\r\n"))
+    hvis builtin.index_of(hovud, "\r\n") < 0 { første = hovud }
+    la d = builtin.split(første, " ")
+    la s = svar(400, "text/plain", "ugyldig førespurnad")
+    hvis lengde(d) >= 2 {
+        s = register_handter(rot, d[0], d[1], hovud_verdi(hovud, "authorization"), kropp)
+    }
+    la ut = "HTTP/1.1 " + tekst(s["status"]) + " " + statusfrase(s["status"]) + "\r\nContent-Type: " + tekst(s["ctype"]) +
+        "\r\nContent-Length: " + tekst(lengde(tekst(s["body"]))) + "\r\nConnection: close\r\n\r\n" + tekst(s["body"])
+    sokkel_skriv_alt(peer, ut, frist)
+    socket.native_lukk(peer)
+    returner s["status"]
+}
+
+// Aksepter og betjen maks_n tilkoplingar (0 = for alltid) på ein lyttesokkel.
+// inaktiv_ms > 0: stopp om ingen tilkopling kjem innan so lang tid.
+funksjon register_betjen(lyttar: ordbok_tekst, rot: tekst, maks_n: heiltall, inaktiv_ms: heiltall) -> heiltall {
+    la teljar = 0
+    la sist = builtin.tid_ms()
+    mens maks_n == 0 eller teljar < maks_n {
+        la peer = socket.native_aksepter(lyttar)
+        hvis peer["status"] == "connected" {
+            register_betjen_tilkopling(peer, rot)
+            teljar = teljar + 1
+            sist = builtin.tid_ms()
+        } ellers hvis peer["status"] == "ventende" {
+            hvis inaktiv_ms > 0 og builtin.tid_ms() - sist > inaktiv_ms { returner teljar }
+            prøv { builtin.vent.sov(2) } fang (e) { }
+        } ellers { kast "aksept feila: " + tekst(peer["status"]) }
+    }
+    returner teljar
+}
+
+funksjon register_lytt_og_betjen(rot: tekst, vert: tekst, port: heiltall) -> heiltall {
+    la l = socket.native_lytt(vert, port, 64)
+    hvis l["status"] != "listening" { kast "kunne ikkje lytte på " + vert + ":" + tekst(port) }
+    skriv("nc pkg register-serve: " + rot + " på http://" + vert + ":" + tekst(l["port"]) + "\n")
+    returner register_betjen(l, rot, 0, 0)
+}
+
+// ─── Lockfil (norscode.lock) ────────────────────────────────────────────────
+
+// pakker: ordbok namn → {"versjon","sha256","arkiv","krav": liste «dep=krav»}
+funksjon lock_serialiser(pakker: ordbok_tekst) -> tekst {
+    la ut = "# norscode.lock — generert av `nc pkg`. Ikkje rediger for hand.\nlock_versjon = 1\n"
+    la ns = sorterte_nøklar(pakker)
+    la i = 0
+    mens i < lengde(ns) {
+        la p = pakker[ns[i]]
+        ut = ut + "\n[[pakke]]\nnamn = " + json_str(ns[i]) + "\nversjon = " + json_str(tekst(p["versjon"])) +
+            "\nsha256 = " + json_str(tekst(p["sha256"])) + "\narkiv = " + json_str(tekst(p["arkiv"])) + "\nkrav = ["
+        la ks = sorter_tekst(p["krav"])
+        la k = 0
+        mens k < lengde(ks) {
+            hvis k > 0 { ut = ut + ", " }
+            ut = ut + json_str(ks[k])
+            k = k + 1
+        }
+        ut = ut + "]\n"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lock_les_streng_liste(v: tekst) -> liste_tekst {
+    // ["a=^1", "b=2"] → liste. Tekstane inneheld ikkje " eller \.
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(v) {
+        hvis v[i] == "\"" {
+            la slutt = builtin.index_of(builtin.slice(v, i + 1, lengde(v)), "\"")
+            hvis slutt < 0 { kast "skadd norscode.lock (krav)" }
+            legg_til(ut, builtin.slice(v, i + 1, i + 1 + slutt))
+            i = i + slutt + 2
+        } ellers { i = i + 1 }
+    }
+    returner ut
+}
+
+funksjon lock_tolk(innhald: tekst) -> ordbok_tekst {
+    la pakker: ordbok_tekst = {}
+    la linjer = builtin.split(innhald, "\n")
+    la cur: ordbok_tekst = {}
+    la har = usann
+    la i = 0
+    mens i <= lengde(linjer) {
+        la l = ""
+        hvis i < lengde(linjer) { l = builtin.trim(linjer[i]) }
+        hvis l == "[[pakke]]" eller i == lengde(linjer) {
+            hvis har {
+                hvis ikkje finnes_nøkkel(cur, "namn") eller ikkje finnes_nøkkel(cur, "versjon") eller ikkje finnes_nøkkel(cur, "sha256") {
+                    kast "skadd norscode.lock: ufullstendig pakkeoppføring"
+                }
+                pakker[cur["namn"]] = {"versjon": cur["versjon"], "sha256": cur["sha256"], "arkiv": cur["arkiv"], "krav": cur["krav"]}
+            }
+            cur = {"krav": []}
+            har = sann
+        } ellers hvis l != "" og ikkje builtin.starts_with(l, "#") og har {
+            la k = toml_nøkkel(l)
+            hvis k == "krav" {
+                la eq = builtin.index_of(l, "=")
+                cur["krav"] = lock_les_streng_liste(builtin.slice(l, eq + 1, lengde(l)))
+            } ellers hvis k == "namn" eller k == "versjon" eller k == "sha256" eller k == "arkiv" {
+                cur[k] = toml_verdi(l)
+            }
+        }
+        i = i + 1
+    }
+    returner pakker
+}
+
+// ─── Løysar ─────────────────────────────────────────────────────────────────
+
+funksjon kopier_krav(krav: ordbok_tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    la ks = nøkler(krav)
+    la i = 0
+    mens i < lengde(ks) {
+        la ny: liste_tekst = []
+        la gml = krav[ks[i]]
+        la j = 0
+        mens j < lengde(gml) {
+            legg_til(ny, tekst(gml[j]))
+            j = j + 1
+        }
+        ut[tekst(ks[i])] = ny
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon kopier_valg(valg: ordbok_tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    la ks = nøkler(valg)
+    la i = 0
+    mens i < lengde(ks) {
+        ut[tekst(ks[i])] = tekst(valg[ks[i]])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Krav er lagra som «spec\tfrå»-tekstar
+funksjon krav_alle_oppfylt(kravliste, versjon: tekst) -> bool {
+    la i = 0
+    mens i < lengde(kravliste) {
+        la spec = builtin.split(tekst(kravliste[i]), "\t")[0]
+        hvis ikkje krav_oppfylt(spec, versjon) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon krav_beskriv(kravliste) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(kravliste) {
+        la d = builtin.split(tekst(kravliste[i]), "\t")
+        hvis i > 0 { ut = ut + ", " }
+        ut = ut + d[0] + " (frå " + d[1] + ")"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon versjonar_tekst(vs) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(vs) {
+        hvis i > 0 { ut = ut + ", " }
+        ut = ut + tekst(vs[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Backtracking-løysar. ind = indeks, valg = namn→versjon, krav = namn→[«spec\tfrå»],
+// kø = namn som står att å velje, pref = føretrekte versjonar (frå låsefil), st = feildata.
+funksjon løys_rek(ind: ordbok_tekst, valg: ordbok_tekst, krav: ordbok_tekst, kø: liste_tekst,
+                  pref: ordbok_tekst, st: ordbok_tekst) -> ordbok_tekst {
+    // hopp over namn som alt er valde
+    la q = 0
+    mens q < lengde(kø) og finnes_nøkkel(valg, kø[q]) { q = q + 1 }
+    hvis q >= lengde(kø) { returner valg }
+    la namn = kø[q]
+    la rest = builtin.slice(kø, q + 1, lengde(kø))
+    hvis ikkje finnes_nøkkel(ind["pakkar"], namn) {
+        st["feil"] = "ukjend pakke «" + namn + "» i registeret (kravd av " + krav_beskriv(krav[namn]) + ")"
+        returner {}
+    }
+    la alle = sorterte_versjonar(nøkler(ind["pakkar"][namn]["versjonar"]))
+    la kandidatar: liste_tekst = []
+    // høgaste først; føretrekt (låst) versjon aller først
+    la i = lengde(alle) - 1
+    mens i >= 0 {
+        hvis krav_alle_oppfylt(krav[namn], alle[i]) { legg_til(kandidatar, alle[i]) }
+        i = i - 1
+    }
+    hvis finnes_nøkkel(pref, namn) {
+        la p = tekst(pref[namn])
+        la fl = -1
+        la k = 0
+        mens k < lengde(kandidatar) {
+            hvis kandidatar[k] == p { fl = k }
+            k = k + 1
+        }
+        hvis fl > 0 {
+            la ny: liste_tekst = [p]
+            la m = 0
+            mens m < lengde(kandidatar) {
+                hvis m != fl { legg_til(ny, kandidatar[m]) }
+                m = m + 1
+            }
+            kandidatar = ny
+        }
+    }
+    hvis lengde(kandidatar) == 0 {
+        st["feil"] = "versjonskonflikt for «" + namn + "»: krava " + krav_beskriv(krav[namn]) +
+            " har ingen felles versjon; tilgjengeleg: " + versjonar_tekst(alle)
+        returner {}
+    }
+    la c = 0
+    mens c < lengde(kandidatar) {
+        la v = kandidatar[c]
+        la valg2 = kopier_valg(valg)
+        valg2[namn] = v
+        la krav2 = kopier_krav(krav)
+        la kø2: liste_tekst = []
+        la m = 0
+        mens m < lengde(rest) {
+            legg_til(kø2, rest[m])
+            m = m + 1
+        }
+        la ok = sann
+        la avh = ind["pakkar"][namn]["versjonar"][v]["avhengnader"]
+        la dn = sorterte_nøklar(avh)
+        la d = 0
+        mens d < lengde(dn) og ok {
+            la dep = dn[d]
+            la spec = tekst(avh[dep])
+            hvis ikkje finnes_nøkkel(krav2, dep) { krav2[dep] = [] }
+            legg_til(krav2[dep], spec + "\t" + namn + "@" + v)
+            hvis finnes_nøkkel(valg2, dep) {
+                hvis ikkje krav_oppfylt(spec, tekst(valg2[dep])) {
+                    ok = usann
+                    st["feil"] = "versjonskonflikt for «" + dep + "»: krava " + krav_beskriv(krav2[dep]) +
+                        " kan ikkje oppfyllast samtidig; valt versjon " + tekst(valg2[dep])
+                }
+            } ellers { legg_til(kø2, dep) }
+            d = d + 1
+        }
+        hvis ok {
+            la r = løys_rek(ind, valg2, krav2, kø2, pref, st)
+            hvis lengde(nøkler(r)) > 0 { returner r }
+        }
+        c = c + 1
+    }
+    returner {}
+}
+
+// Løys rotkrav (ordbok namn→krav). Returnerer ordbok namn→versjon, kastar med
+// konfliktmelding. Kastar òg ved syklus i avhengnadsgrafen.
+funksjon løys(ind: ordbok_tekst, rotkrav: ordbok_tekst, pref: ordbok_tekst) -> ordbok_tekst {
+    la krav: ordbok_tekst = {}
+    la kø: liste_tekst = []
+    la ns = sorterte_nøklar(rotkrav)
+    la i = 0
+    mens i < lengde(ns) {
+        krav[ns[i]] = [tekst(rotkrav[ns[i]]) + "\trot"]
+        legg_til(kø, ns[i])
+        i = i + 1
+    }
+    la st: ordbok_tekst = {"feil": "ingen løysing"}
+    la r = løys_rek(ind, {}, krav, kø, pref, st)
+    hvis lengde(nøkler(r)) == 0 og lengde(ns) > 0 { kast tekst(st["feil"]) }
+    sjekk_syklar(ind, r, ns)
+    returner r
+}
+
+// DFS over valde pakkar; kastar «syklus: a -> b -> a».
+funksjon sjekk_syklar(ind: ordbok_tekst, valg: ordbok_tekst, rot: liste_tekst) -> heiltall {
+    la ferdig: ordbok_tekst = {}
+    la i = 0
+    mens i < lengde(rot) {
+        syklus_besøk(ind, valg, rot[i], [], ferdig)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon syklus_besøk(ind: ordbok_tekst, valg: ordbok_tekst, namn: tekst, sti: liste_tekst, ferdig: ordbok_tekst) -> heiltall {
+    la k = 0
+    mens k < lengde(sti) {
+        hvis sti[k] == namn {
+            la linje = ""
+            la m = k
+            mens m < lengde(sti) {
+                linje = linje + sti[m] + " -> "
+                m = m + 1
+            }
+            kast "syklus i avhengnadar: " + linje + namn
+        }
+        k = k + 1
+    }
+    hvis finnes_nøkkel(ferdig, namn) { returner 0 }
+    la sti2: liste_tekst = []
+    la j = 0
+    mens j < lengde(sti) {
+        legg_til(sti2, sti[j])
+        j = j + 1
+    }
+    legg_til(sti2, namn)
+    la avh = ind["pakkar"][namn]["versjonar"][tekst(valg[namn])]["avhengnader"]
+    la dn = sorterte_nøklar(avh)
+    la d = 0
+    mens d < lengde(dn) {
+        syklus_besøk(ind, valg, dn[d], sti2, ferdig)
+        d = d + 1
+    }
+    ferdig[namn] = "ja"
+    returner 0
+}
+
+// Bygg lock-pakkar frå eit løysingsresultat og indeksen
+funksjon lock_frå_løysing(ind: ordbok_tekst, valg: ordbok_tekst) -> ordbok_tekst {
+    la pakker: ordbok_tekst = {}
+    la ns = sorterte_nøklar(valg)
+    la i = 0
+    mens i < lengde(ns) {
+        la v = tekst(valg[ns[i]])
+        la e = ind["pakkar"][ns[i]]["versjonar"][v]
+        la krav: liste_tekst = []
+        la dn = sorterte_nøklar(e["avhengnader"])
+        la d = 0
+        mens d < lengde(dn) {
+            legg_til(krav, dn[d] + "=" + tekst(e["avhengnader"][dn[d]]))
+            d = d + 1
+        }
+        pakker[ns[i]] = {"versjon": v, "sha256": tekst(e["sha256"]), "arkiv": tekst(e["arkiv"]), "krav": krav}
+        i = i + 1
+    }
+    returner pakker
+}
+
+// Er låsefila i samsvar med manifestkrava? (alle rotkrav oppfylt, alle krav
+// mellom låste pakkar oppfylt, ingen pakke utan eigar)
+funksjon lock_konsistent(pakker: ordbok_tekst, rotkrav: ordbok_tekst) -> bool {
+    la ns = nøkler(rotkrav)
+    la nådd: ordbok_tekst = {}
+    la kø: liste_tekst = []
+    la i = 0
+    mens i < lengde(ns) {
+        la n = tekst(ns[i])
+        hvis ikkje finnes_nøkkel(pakker, n) { returner usann }
+        hvis ikkje krav_oppfylt(tekst(rotkrav[n]), tekst(pakker[n]["versjon"])) { returner usann }
+        legg_til(kø, n)
+        i = i + 1
+    }
+    la q = 0
+    mens q < lengde(kø) {
+        la n = kø[q]
+        q = q + 1
+        hvis ikkje finnes_nøkkel(nådd, n) {
+            nådd[n] = "ja"
+            la krav = pakker[n]["krav"]
+            la k = 0
+            mens k < lengde(krav) {
+                la eq = builtin.index_of(tekst(krav[k]), "=")
+                la dep = builtin.slice(tekst(krav[k]), 0, eq)
+                la spec = builtin.slice(tekst(krav[k]), eq + 1, lengde(tekst(krav[k])))
+                hvis ikkje finnes_nøkkel(pakker, dep) { returner usann }
+                hvis ikkje krav_oppfylt(spec, tekst(pakker[dep]["versjon"])) { returner usann }
+                legg_til(kø, dep)
+                k = k + 1
+            }
+        }
+    }
+    returner lengde(nøkler(nådd)) == lengde(nøkler(pakker))
+}
+
+// ─── Installasjon ───────────────────────────────────────────────────────────
+
+funksjon pakkar_katalog(prosjekt: tekst) -> tekst { returner prosjekt + "/.norscode/pakkar" }
+funksjon cache_katalog(prosjekt: tekst) -> tekst { returner prosjekt + "/.norscode/cache" }
+
+// Hent og VERIFISER arkivet for ei låst pakke. Feil sjekksum = hard feil.
+funksjon hent_verifisert_arkiv(reg: tekst, prosjekt: tekst, namn: tekst, p: ordbok_tekst) -> tekst {
+    la cache_fil = cache_katalog(prosjekt) + "/" + namn + "-" + tekst(p["versjon"]) + ".nka"
+    la data = ""
+    la frå_cache = usann
+    hvis fo.fil_finnes(cache_fil) {
+        data = fil_les(cache_fil)
+        frå_cache = sann
+        hvis sha.hash(data) != tekst(p["sha256"]) {
+            // skadd cache: kast og hent på nytt
+            fo.slett_fil(cache_fil)
+            data = ""
+            frå_cache = usann
+        }
+    }
+    hvis ikkje frå_cache {
+        data = reg_les(reg, tekst(p["arkiv"]))
+        la faktisk = sha.hash(data)
+        hvis faktisk != tekst(p["sha256"]) {
+            kast "sjekksumfeil for " + namn + "@" + tekst(p["versjon"]) + ": låsefila krev " + tekst(p["sha256"]) +
+                " men arkivet har " + faktisk + " — avbryt (arkivet er endra eller skadd)"
+        }
+        fo.lag_katalogar(cache_katalog(prosjekt))
+        fil_skriv(cache_fil, data)
+    }
+    returner data
+}
+
+// Installer eksakt det låsefila seier. Fjernar pakkar som ikkje er låste.
+funksjon installer_frå_lock(reg: tekst, prosjekt: tekst, pakker: ordbok_tekst) -> liste_tekst {
+    la rot = pakkar_katalog(prosjekt)
+    fo.lag_katalogar(rot)
+    la ns = sorterte_nøklar(pakker)
+    // hent og verifiser ALT før noko blir rørt
+    la data: liste_tekst = []
+    la i = 0
+    mens i < lengde(ns) {
+        legg_til(data, hent_verifisert_arkiv(reg, prosjekt, ns[i], pakker[ns[i]]))
+        i = i + 1
+    }
+    // fjern utdaterte
+    la eksisterande = fo.lista_katalog(rot)
+    la e = 0
+    mens e < lengde(eksisterande) {
+        la n = tekst(eksisterande[e])
+        hvis ikkje finnes_nøkkel(pakker, n) { fo.slett_tre(rot + "/" + n) }
+        e = e + 1
+    }
+    la ut: liste_tekst = []
+    i = 0
+    mens i < lengde(ns) {
+        la mål = rot + "/" + ns[i]
+        fo.slett_tre(mål)
+        arkiv_pakk_ut(data[i], mål)
+        legg_til(ut, ns[i] + "@" + tekst(pakker[ns[i]]["versjon"]))
+        i = i + 1
+    }
+    returner ut
+}
+
+// ─── Prosjekt-operasjonar (brukt av CLI-et) ─────────────────────────────────
+
+funksjon manifest_sti(prosjekt: tekst) -> tekst { returner prosjekt + "/norcode.toml" }
+funksjon lock_sti(prosjekt: tekst) -> tekst { returner prosjekt + "/norscode.lock" }
+
+funksjon manifest_les(prosjekt: tekst) -> tekst {
+    hvis ikkje fo.fil_finnes(manifest_sti(prosjekt)) { kast "finn ikkje norcode.toml i " + prosjekt + " (køyr `nc pkg init`)" }
+    returner fil_les(manifest_sti(prosjekt))
+}
+
+// Registeradresse: flagg > NORSCODE_PKG_REGISTER > [registry] url i manifestet
+funksjon register_for(prosjekt: tekst, flagg: tekst) -> tekst {
+    hvis flagg != "" { returner flagg }
+    la e = env("NORSCODE_PKG_REGISTER")
+    hvis e != "" { returner e }
+    hvis fo.fil_finnes(manifest_sti(prosjekt)) {
+        la u = toml_hent(fil_les(manifest_sti(prosjekt)), "registry", "url")
+        hvis u != "" { returner u }
+    }
+    kast "ingen register: sett [registry] url i norcode.toml, NORSCODE_PKG_REGISTER eller --register"
+}
+
+funksjon lock_les(prosjekt: tekst) -> ordbok_tekst {
+    hvis ikkje fo.fil_finnes(lock_sti(prosjekt)) { returner {} }
+    returner lock_tolk(fil_les(lock_sti(prosjekt)))
+}
+
+funksjon lock_pref(pakker: ordbok_tekst) -> ordbok_tekst {
+    la pref: ordbok_tekst = {}
+    la ks = nøkler(pakker)
+    la i = 0
+    mens i < lengde(ks) {
+        pref[tekst(ks[i])] = tekst(pakker[ks[i]]["versjon"])
+        i = i + 1
+    }
+    returner pref
+}
+
+funksjon pkg_init(prosjekt: tekst, namn: tekst) -> tekst {
+    hvis fo.fil_finnes(manifest_sti(prosjekt)) { kast "norcode.toml finst allereie i " + prosjekt }
+    hvis ikkje namn_gyldig(namn) { kast "ugyldig pakkenamn «" + namn + "» (berre a-z, 0-9, _; ikkje først siffer)" }
+    fo.lag_katalogar(prosjekt)
+    fil_skriv(manifest_sti(prosjekt), "[project]\nname = \"" + namn + "\"\nversion = \"0.1.0\"\nentry = \"app.no\"\n\n[dependencies]\n")
+    returner "oppretta " + manifest_sti(prosjekt)
+}
+
+// Kjerneflyt: løys (eller følg lock), skriv lock, installer. frossen = ikkje
+// endre låsefila (feil om ho ikkje stemmer). pref_utan = pakke som skal
+// oppdaterast (ikkje føretrekk låst versjon). Returnerer oppsummering.
+funksjon pkg_installer(prosjekt: tekst, reg: tekst, frossen: bool, oppdater_alt: bool, oppdater_namn: tekst) -> liste_tekst {
+    la mf = manifest_les(prosjekt)
+    la rotkrav = manifest_avhengnadar(mf)
+    la ks = nøkler(rotkrav)
+    la i = 0
+    mens i < lengde(ks) {
+        hvis ikkje namn_gyldig(tekst(ks[i])) { kast "ugyldig avhengnadsnamn: " + tekst(ks[i]) }
+        hvis ikkje krav_gyldig(tekst(rotkrav[ks[i]])) { kast "ugyldig krav for " + tekst(ks[i]) + ": " + tekst(rotkrav[ks[i]]) }
+        i = i + 1
+    }
+    la gammal = lock_les(prosjekt)
+    la pakker: ordbok_tekst = {}
+    hvis lengde(nøkler(rotkrav)) == 0 {
+        pakker = {}
+        hvis frossen og lengde(nøkler(gammal)) > 0 { kast "norscode.lock er ikkje oppdatert (--frozen)" }
+    } ellers hvis lock_konsistent(gammal, rotkrav) og ikkje oppdater_alt og oppdater_namn == "" {
+        pakker = gammal
+    } ellers {
+        hvis frossen { kast "norscode.lock samsvarar ikkje med norcode.toml (--frozen)" }
+        la ind = reg_indeks(reg)
+        la pref = lock_pref(gammal)
+        hvis oppdater_alt { pref = {} }
+        hvis oppdater_namn != "" {
+            la p2: ordbok_tekst = {}
+            la pk = nøkler(pref)
+            la x = 0
+            mens x < lengde(pk) {
+                hvis tekst(pk[x]) != oppdater_namn { p2[tekst(pk[x])] = pref[pk[x]] }
+                x = x + 1
+            }
+            pref = p2
+        }
+        la valg = løys(ind, rotkrav, pref)
+        pakker = lock_frå_løysing(ind, valg)
+    }
+    la lock_ny = lock_serialiser(pakker)
+    hvis ikkje frossen {
+        hvis ikkje fo.fil_finnes(lock_sti(prosjekt)) eller fil_les(lock_sti(prosjekt)) != lock_ny {
+            fil_skriv(lock_sti(prosjekt), lock_ny)
+        }
+    }
+    returner installer_frå_lock(reg, prosjekt, pakker)
+}
+
+funksjon pkg_add(prosjekt: tekst, reg: tekst, namn: tekst, spec: tekst) -> liste_tekst {
+    hvis ikkje namn_gyldig(namn) { kast "ugyldig pakkenamn: " + namn }
+    la mf = manifest_les(prosjekt)
+    hvis spec == "" {
+        la ind = reg_indeks(reg)
+        hvis ikkje finnes_nøkkel(ind["pakkar"], namn) { kast "ukjend pakke «" + namn + "» i registeret" }
+        la vs = sorterte_versjonar(nøkler(ind["pakkar"][namn]["versjonar"]))
+        spec = "^" + vs[lengde(vs) - 1]
+    }
+    hvis ikkje krav_gyldig(spec) { kast "ugyldig versjonskrav: " + spec }
+    fil_skriv(manifest_sti(prosjekt), manifest_sett_dep(mf, namn, spec))
+    prøv {
+        returner pkg_installer(prosjekt, reg, usann, usann, "")
+    } fang (e) {
+        fil_skriv(manifest_sti(prosjekt), mf)
+        kast e
+    }
+    returner []
+}
+
+funksjon pkg_remove(prosjekt: tekst, reg: tekst, namn: tekst) -> liste_tekst {
+    la mf = manifest_les(prosjekt)
+    hvis ikkje finnes_nøkkel(manifest_avhengnadar(mf), namn) { kast "«" + namn + "» er ikkje ei avhengnad i norcode.toml" }
+    fil_skriv(manifest_sti(prosjekt), manifest_fjern_dep(mf, namn))
+    returner pkg_installer(prosjekt, reg, usann, usann, "")
+}
+
+funksjon pkg_publiser(prosjekt: tekst, reg: tekst) -> ordbok_tekst {
+    manifest_les(prosjekt)
+    returner register_publiser(reg, pakke_arkiv_frå_katalog(prosjekt))
+}
+
+funksjon pkg_søk(reg: tekst, q: tekst) -> liste_tekst {
+    la ind = reg_indeks(reg)
+    la ns = sorterte_nøklar(ind["pakkar"])
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(ns) {
+        hvis q == "" eller builtin.contains(ns[i], q) {
+            la vs = sorterte_versjonar(nøkler(ind["pakkar"][ns[i]]["versjonar"]))
+            legg_til(ut, ns[i] + " " + vs[lengde(vs) - 1])
+        }
+        i = i + 1
+    }
+    returner ut
+}
