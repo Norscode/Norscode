@@ -888,6 +888,92 @@ funksjon feil_frå_unntak(e) -> ordbok<tekst, tekst> {
     returner {"status": 500, "body": body}
 }
 
+// 4.1: HTTPFeil-hierarkiet (std/httpfeil.no). Statuskoden til ein HTTPFeil-struktur
+// (duck-typing på __type__, same namn som std.httpfeil), eller 0 når det ikkje er ein.
+funksjon serve_http_feil_status(e) -> heiltall {
+    hvis e == null eller builtin.type(e) != "ordbok" eller ikkje har_nokkel(e, "__type__") { returner 0 }
+    la typ = tekst(e["__type__"])
+    hvis builtin.ends_with(typ, "HTTPFeilGenerell") {
+        hvis har_nokkel(e, "kode") {
+            la kv = e["kode"]
+            hvis builtin.type(kv) == "heltall" { returner kv }
+            hvis is_int_text(tekst(kv)) { returner heltall_fra_tekst(tekst(kv)) }
+        }
+        returner 500
+    }
+    hvis builtin.ends_with(typ, "UgyldigInput") { returner 400 }
+    hvis builtin.ends_with(typ, "IkkjeAutorisert") { returner 401 }
+    hvis builtin.ends_with(typ, "Forbode") { returner 403 }
+    hvis builtin.ends_with(typ, "IkkjeFunnet") { returner 404 }
+    hvis builtin.ends_with(typ, "Konflikt") { returner 409 }
+    hvis builtin.ends_with(typ, "ServerFeil") { returner 500 }
+    returner 0
+}
+
+// Respons frå std.httpfeil_handterar.til_respons ({status, body, content_type, headers})
+// → serve-forma ({status, body, __headers__}).
+funksjon serve_http_feil_respons(hr: ordbok<tekst, tekst>) -> ordbok<tekst, tekst> {
+    la hdr: ordbok<tekst, tekst> = {}
+    hvis har_nokkel(hr, "content_type") { hdr["Content-Type"] = tekst(hr["content_type"]) }
+    hvis har_nokkel(hr, "headers") og hr["headers"] != null og builtin.type(hr["headers"]) == "ordbok" {
+        la hk = nøkler(hr["headers"])
+        la hi = 0
+        mens hi < lengde(hk) {
+            hdr[tekst(hk[hi])] = hr["headers"][hk[hi]]
+            hi = hi + 1
+        }
+    }
+    la ut: ordbok<tekst, tekst> = {"status": hr["status"], "body": ""}
+    hvis har_nokkel(hr, "body") { ut["body"] = hr["body"] }
+    hvis har_nokkel(hr, "__headers__") { hdr = hr["__headers__"] }
+    hvis lengde(nøkler(hdr)) > 0 { ut["__headers__"] = hdr }
+    returner ut
+}
+
+// Som feil_frå_unntak, men med HTTPFeil-støtte: registrerte feilhandterarar per type
+// (std.httpfeil_handterar, når appen importerer modulen), ellers standardsvaret
+// {"detail": detalj} med statuskoden til feilen.
+funksjon feil_frå_unntak_ncb(ncb: ordbok<tekst, tekst>, ctx, e) -> ordbok<tekst, tekst> {
+    hvis e != null og builtin.type(e) == "ordbok" og har_nokkel(e, "__type__") {
+        la fns = ncb["functions"]
+        la hfn = "std.httpfeil_handterar.til_respons"
+        hvis fns != null og har_nokkel(fns, hfn) {
+            prøv {
+                la hr = køyre_ncb_funksjon(hfn, [ctx, e], fns)
+                hvis hr != null og builtin.type(hr) == "ordbok" og har_nokkel(hr, "status") {
+                    returner serve_http_feil_respons(hr)
+                }
+            } fang (hx) {
+                skriv("[serve] Feilhandterar kasta: " + tekst(hx) + "\n")
+                returner {"status": 500, "body": "Intern feil"}
+            }
+        }
+        la st = serve_http_feil_status(e)
+        hvis st > 0 {
+            la detalj = null
+            hvis har_nokkel(e, "detalj") { detalj = e["detalj"] }
+            la d: ordbok<tekst, tekst> = {
+                "status": st,
+                "body": "{\"detail\":" + nc_serve_til_json(detalj, 0) + "}",
+                "__headers__": {"Content-Type": "application/json; charset=utf-8"}
+            }
+            hvis har_nokkel(e, "headers") og e["headers"] != null og builtin.type(e["headers"]) == "ordbok" og lengde(nøkler(e["headers"])) > 0 {
+                la eh = e["headers"]
+                la ehk = nøkler(eh)
+                la ehi = 0
+                la hh = d["__headers__"]
+                mens ehi < lengde(ehk) {
+                    hh[tekst(ehk[ehi])] = eh[ehk[ehi]]
+                    ehi = ehi + 1
+                }
+                d["__headers__"] = hh
+            }
+            returner d
+        }
+    }
+    returner feil_frå_unntak(e)
+}
+
 // Returnerer no ei respons-ORDBOK (ikkje ferdig HTTP-tekst). serve_handle_one
 // køyrer anvend_response_middlewares + response_to_http sentralt på alle svar.
 funksjon avgjer_standard_handler_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, tekst>, svar, head_fallback: boolsk, request_if_modified_since: tekst, request_if_match: tekst) -> ordbok<tekst, tekst> {
@@ -1120,7 +1206,7 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                             prøv {
                                 guard_result = køyre_ncb_funksjon(guard_fn, [ctx], ncb["functions"])
                             } fang (e) {
-                                la feil = feil_frå_unntak(e)
+                                la feil = feil_frå_unntak_ncb(ncb, ctx, e)
                                 returner anvend_error_middlewares(ncb, feil)
                             }
                             hvis er_respons_ordbok(guard_result) {
@@ -1167,7 +1253,7 @@ funksjon avgjer_route_respons(ncb: ordbok<tekst, tekst>, parsed: ordbok<tekst, t
                     } fang (e) {
                         // 2.6: map unntak → 422 (ValideringsFeil) / httpfeil-status /
                         // 500 (utan å lekke unntaksmeldinga med mindre NC_SERVE_DEBUG=1).
-                        la feil = feil_frå_unntak(e)
+                        la feil = feil_frå_unntak_ncb(ncb, ctx, e)
                         returner anvend_error_middlewares(ncb, feil)
                     }
                     hvis sig_feil != null {
