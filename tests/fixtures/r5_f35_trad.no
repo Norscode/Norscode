@@ -1,0 +1,253 @@
+# Fikstur for tests/test_r5_f35_trad.no (R5 / F35): trådar med lambdakropp, typa
+# resultat, unntak gjennom join (med stakkspor frå tråden), avbrot (AvbruttFeil)
+# og re-entrant lås. Kvart scenario legg ei rapportlinje «namn=verdi» i `ut`.
+bruk std.samtid som sm
+bruk std.kanal som kanal
+
+la ut = []
+
+funksjon rapport(namn: tekst, verdi) -> heiltall {
+    legg_til(ut, namn + "=" + tekst(verdi))
+    returner 0
+}
+
+# ── (a) closure-fangst ───────────────────────────────────────────────────────
+funksjon fang_scenario() -> heiltall {
+    la n = 7
+    la t = sm.tråd(fun() -> n * 6)
+    n = 100
+    rapport("a1_verdi_ved_oppretting", t.join())
+
+    la delt = []
+    la t2 = sm.tråd_start(fun() -> legg_til(delt, "frå-tråd"))
+    t2.join()
+    rapport("a2_delt_liste", lengde(delt))
+
+    la tekstverdi = "hei"
+    la t3 = sm.tråd(fun() -> tekstverdi + " verda")
+    rapport("a3_tekst", t3.join())
+    returner 0
+}
+
+# ── (b) typa resultat og unntak gjennom join ────────────────────────────────
+funksjon lag_liste() -> liste {
+    returner [1, 2, 3]
+}
+
+funksjon lag_ordbok() -> ordbok {
+    returner {"a": 1, "b": "to"}
+}
+
+funksjon djup() {
+    kast "VerdiFeil: djup-feil"
+}
+
+funksjon midt() {
+    djup()
+}
+
+struktur MinFeil {
+    kode
+}
+
+funksjon kast_struktur() {
+    kast MinFeil(42)
+}
+
+funksjon resultat_scenario() -> heiltall {
+    rapport("b1_heiltall", builtin.type(sm.tråd_start(fun() -> 40 + 2).join()))
+    rapport("b2_liste", lengde(sm.tråd_start(fun() -> lag_liste()).join()))
+    la o = sm.tråd_start(fun() -> lag_ordbok()).join()
+    rapport("b3_ordbok", tekst(o["a"]) + o["b"])
+    rapport("b4_ingenting", sm.tråd_start(fun() -> ingenting).join() == ingenting)
+
+    la t = sm.tråd_start(fun() -> midt())
+    la fanga = "ingen"
+    la stakk_topp = ""
+    la stakk_har_join = "nei"
+    prøv {
+        t.join()
+    } fang (e: VerdiFeil) {
+        fanga = unntak_type(e)
+        la p = unntak_pakk(e)
+        stakk_topp = p["stakk"][0]["funksjon"]
+        for ramme i p["stakk"] {
+            hvis ramme["funksjon"] == "resultat_scenario" { stakk_har_join = "ja" }
+        }
+    }
+    rapport("b5_type", fanga)
+    rapport("b6_stakk_topp_er_trådramme", stakk_topp)
+    rapport("b7_stakk_har_ikkje_join_staden", stakk_har_join)
+
+    la t2 = sm.tråd_start(fun() -> kast_struktur())
+    la kode = 0
+    prøv {
+        t2.join()
+    } fang (e: MinFeil) {
+        kode = e.kode
+    }
+    rapport("b8_struktur_unntak", kode)
+
+    # join på nytt gjev same resultat (verdi) / same unntak.
+    la t3 = sm.tråd_start(fun() -> 5)
+    rapport("b9_join_to_gonger", tekst(t3.join()) + tekst(t3.join()))
+    returner 0
+}
+
+# ── (c) avbrot ──────────────────────────────────────────────────────────────
+funksjon sov_til_avbrot() -> tekst {
+    prøv {
+        sm.sov(8000)
+        returner "ikkje-avbroten"
+    } fang (e: AvbruttFeil) {
+        returner "avbroten"
+    }
+    returner "?"
+}
+
+funksjon sov_utan_fang() -> tekst {
+    sm.sov(8000)
+    returner "ikkje-avbroten"
+}
+
+funksjon kanal_vent(k) -> tekst {
+    prøv {
+        la m = kanal.motta_vent(k)
+        returner "fekk"
+    } fang (e: AvbruttFeil) {
+        returner "kanal-avbroten"
+    }
+    returner "?"
+}
+
+funksjon poll_avbrot(starta) -> tekst {
+    la lopp = 0
+    mens ikkje sm.avbrote() {
+        lopp = lopp + 1
+        hvis lopp > 200000 { returner "aldri" }
+    }
+    la for_sov = sm.avbrote()
+    la kasta = "nei"
+    prøv {
+        sm.sov(1)
+    } fang (e: AvbruttFeil) {
+        kasta = "ja"
+    }
+    returner tekst(for_sov) + "," + kasta + "," + tekst(sm.avbrote())
+}
+
+funksjon avbrot_scenario() -> heiltall {
+    la t0 = builtin.tid_ms()
+    la t = sm.tråd_start(fun() -> sov_til_avbrot())
+    sm.sov(40)
+    rapport("c1_ikkje_avbroten_enno", t.avbrote())
+    t.avbryt()
+    rapport("c2_fanga_avbrot", t.join())
+    rapport("c3_raskt", builtin.tid_ms() - t0 < 4000)
+
+    # Ufanga AvbruttFeil propagerer gjennom join, og er ein FutureFeil.
+    la t2 = sm.tråd_start(fun() -> sov_utan_fang())
+    sm.sov(30)
+    t2.avbryt()
+    la fanga = "ingen"
+    prøv {
+        t2.join()
+    } fang (e: FutureFeil) {
+        fanga = unntak_type(e)
+    }
+    rapport("c4_ufanga_gjennom_join", fanga)
+
+    # Avbrot under kanal-venting: mutexen lekk ikkje, kanalen er brukbar etterpå.
+    la k = kanal.ny_blokkerande_kanal(2)
+    la t3 = sm.tråd_start(fun() -> kanal_vent(k))
+    sm.sov(30)
+    t3.avbryt()
+    rapport("c5_kanal_avbrot", t3.join())
+    kanal.send_vent(k, "ei-melding")
+    la m = kanal.motta_vent(k)
+    rapport("c6_kanal_brukbar_etterpå", m["verdi"])
+
+    # Flagget utan blokkering: avbrote() ser det, neste sov kastar og nullstiller.
+    la t4 = sm.tråd_start(fun() -> poll_avbrot(0))
+    sm.sov(20)
+    t4.avbryt()
+    rapport("c7_poll_og_nullstilling", t4.join())
+
+    # Avbrot av ein tråd som alt er ferdig er ufarleg.
+    la t5 = sm.tråd_start(fun() -> 1)
+    t5.join()
+    t5.avbryt()
+    rapport("c8_avbrot_etter_ferdig", t5.resultat())
+    returner 0
+}
+
+# ── (d) re-entrant lås ──────────────────────────────────────────────────────
+funksjon prov_lås(l, ms: heiltall) -> boolsk {
+    la fekk = sm.lås_skaff_innan(l, ms)
+    hvis fekk { sm.lås_slepp(l) }
+    returner fekk
+}
+
+funksjon ta_lås_avbrytbart(l) -> tekst {
+    prøv {
+        sm.lås_skaff(l)
+        sm.lås_slepp(l)
+        returner "fekk-låsen"
+    } fang (e: AvbruttFeil) {
+        returner "lås-avbroten"
+    }
+    returner "?"
+}
+
+funksjon lås_scenario() -> heiltall {
+    la l = sm.ny_lås()
+    sm.lås_skaff(l)
+    sm.lås_skaff(l)
+    sm.lås_skaff(l)
+    rapport("d1_djupn", sm.lås_djupn(l))
+    # Same tråd tar låsen fleire gonger utan dødlås (hovudtråden fortset å køyre).
+    sm.lås_slepp(l)
+    sm.lås_slepp(l)
+    rapport("d2_andre_tråd_blokkerer_framleis", sm.tråd_start(fun() -> prov_lås(l, 60)).join())
+    rapport("d3_djupn_etter_to", sm.lås_djupn(l))
+    # Ventande tråd kjem inn først etter siste frigjeving.
+    la ventar = sm.tråd_start(fun() -> prov_lås(l, 5000))
+    sm.sov(30)
+    sm.lås_slepp(l)
+    rapport("d4_ventar_får_låsen_etter_siste", ventar.join())
+    rapport("d5_djupn_null", sm.lås_djupn(l))
+
+    # Re-entrans inne i ein tråd + ein annan tråd som ventar på låsen.
+    la l2 = sm.ny_lås()
+    la inni = sm.tråd_start(fun() -> djupn_i_tråd(l2))
+    rapport("d6_tråd_djupn", inni.join())
+
+    # Avbrot av ein tråd som ventar på låsen: låsen er framleis brukbar etterpå.
+    la l3 = sm.ny_lås()
+    sm.lås_skaff(l3)
+    la v = sm.tråd_start(fun() -> ta_lås_avbrytbart(l3))
+    sm.sov(30)
+    v.avbryt()
+    rapport("d7_lås_avbrot", v.join())
+    sm.lås_slepp(l3)
+    rapport("d8_lås_fri_etterpå", sm.tråd_start(fun() -> prov_lås(l3, 2000)).join())
+    returner 0
+}
+
+funksjon djupn_i_tråd(l) -> tekst {
+    sm.lås_skaff(l)
+    sm.lås_skaff(l)
+    la a = sm.lås_djupn(l)
+    sm.lås_slepp(l)
+    la b = sm.lås_djupn(l)
+    sm.lås_slepp(l)
+    returner tekst(a) + tekst(b) + tekst(sm.lås_djupn(l))
+}
+
+funksjon start() -> tekst {
+    fang_scenario()
+    resultat_scenario()
+    avbrot_scenario()
+    lås_scenario()
+    returner builtin.join(ut, "|")
+}

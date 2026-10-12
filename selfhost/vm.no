@@ -922,6 +922,7 @@ la vm_green_trådar: ordbok = {}         // handle → trådpost
 la vm_green_rekkje: liste = []          // handle-ar som kan få slice (state running)
 la vm_green_pools: ordbok = {}          // pool-handle → pool
 la vm_green_cur_t: ordbok = {}          // trådposten til sliceen som køyrer no
+la vm_green_koop_aktive: heiltall = 0   // F36: levande kooperative asynk-oppgåver (ikkje preemptert)
 
 // Grøn-tilstanden som inngangs- og instruksjonsløkka les, ligg i functions-kartet
 // (parameter), ikkje i modulglobalar: ein frosen C-æra-vert (macOS-/Windows-seeden)
@@ -2879,6 +2880,10 @@ funksjon vm_await_value(verdi) {
             kast "FutureFeil"
         }
         hvis status == "ferdig" eller status == "fullfort" eller status == "fullført" {
+            // F36: ei oppgåve som returnerte ei anna future (`returner f()`) flatar ut.
+            hvis vm_map_har_nokkel(verdi, "__task__") og builtin.type(verdi["verdi"]) == "ordbok" og vm_map_har_nokkel(verdi["verdi"], "__future__") {
+                returner vm_await_value(verdi["verdi"])
+            }
             returner verdi["verdi"]
         }
         hvis status == "ventende" eller status == "kjorer" eller status == "kjører" {
@@ -2893,6 +2898,10 @@ funksjon vm_future_ventar(verdi) -> boolsk {
     hvis builtin.type(verdi) != "ordbok" { returner usann }
     hvis ikkje vm_map_har_nokkel(verdi, "__future__") { returner usann }
     la status = tekst(verdi["status"])
+    hvis status == "ferdig" og vm_map_har_nokkel(verdi, "__task__") {
+        // F36: `returner f()` i ein asynk funksjon gjev ei future som verdi; vent flatar ut.
+        returner vm_future_ventar(verdi["verdi"])
+    }
     returner status == "ventende" eller status == "kjorer" eller status == "kjører"
 }
 
@@ -4233,6 +4242,13 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         hvis sync_op == "cancel" og builtin.starts_with(sync_h, "green-thread:") {
             returner vm_green_cancel(sync_h)
         }
+        // F35: avbrot (AvbruttFeil ved neste blokkerande operasjon).
+        hvis sync_op == "interrupt" og builtin.starts_with(sync_h, "green-thread:") {
+            returner vm_green_avbryt_tråd(sync_h)
+        }
+        hvis sync_op == "interrupted" og vm_green_på_i(active_functions) {
+            returner vm_green_avbrote_svar(sync_h)
+        }
         hvis vm_green_på_i(active_functions) og (sync_op == "mutex_lock" eller sync_op == "condition_wait") {
             returner vm_green_sync(args[0], sync_op)
         }
@@ -4370,12 +4386,28 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     }
 
     hvis namn == "builtin.await_value" {
+        // F35/F36: ei avbroten oppgåve/tråd får AvbruttFeil i staden for å vente;
+        // ei feila future gjenopprettar stakksporet frå oppgåva.
+        hvis vm_green_på_i(active_functions) og vm_future_ventar(args[0]) og vm_green_avbrutt_no() {
+            vm_green_avbrot_kast("vent")
+        }
+        vm_future_gjenopprett_stakk(active_functions, args[0])
         returner vm_await_value(args[0])
+    }
+    // F35: unntak_sett_stakk(e, stakk): neste kast av e beheld det oppgitte stakksporet.
+    hvis namn == "builtin.unntak_sett_stakk" {
+        hvis lengde(args) != 2 { kast "ArgumentFeil: unntak_sett_stakk tek to argument" }
+        active_functions["__vm_stakk__"] = args[1]
+        active_functions["__vm_stakk_verdi__"] = args[0]
+        active_functions["__vm_behald_stakk__"] = "sann"
+        returner null
     }
     hvis namn == "builtin.vent.timeout" eller namn == "vent.timeout" {
         returner vm_future("timeout", args[0])
     }
     hvis namn == "builtin.vent.kanseller" eller namn == "vent.kanseller" {
+        // F36: kanselleringa når oppgåva bak future-en (om han har ei).
+        vm_async_kanseller(args[0])
         returner vm_future("kansellert", args[0])
     }
     hvis namn == "builtin.vent.er_timeoutet" eller namn == "vent.er_timeoutet" {
@@ -5765,6 +5797,10 @@ funksjon vm_green_ny(functions, fn_løyst: tekst, fn_args, id: tekst, nr: heilta
     t["pool_fn"] = ""
     t["pool_slot"] = 0
     t["daemon"] = 0      // R1/F12: 1 = blir ikkje joina ved programslutt
+    t["koop"] = 0        // F36: 1 = asynk-oppgåve, aldri preemptert (gjev berre frå seg ved vent/sov)
+    t["avbryt"] = 0      // F35: avbrotsflagg (AvbruttFeil ved neste blokkerande operasjon)
+    t["arglist"] = 0     // F36: liste med posisjonsargument (0 = bruk args som eitt ordbok-argument)
+    t["future"] = 0      // F36: future-ordboka som blir fullført når oppgåva er ferdig
     vm_green_trådar[id] = t
     vm_green_aktive = vm_green_aktive + 1
     functions["__vm_green_på__"] = "1"
@@ -5780,6 +5816,11 @@ funksjon vm_green_er_ferdig(t) -> boolsk {
 funksjon vm_green_ferdig(t) -> heiltall {
     vm_green_aktive = vm_green_aktive - 1
     hvis vm_green_aktive < 0 { vm_green_aktive = 0 }
+    hvis t["koop"] == 1 {
+        t["koop"] = 2   // berre éin gong
+        vm_green_koop_aktive = vm_green_koop_aktive - 1
+        hvis vm_green_koop_aktive < 0 { vm_green_koop_aktive = 0 }
+    }
     la gfn = t["functions"]
     hvis vm_green_aktive > 0 { gfn["__vm_green_på__"] = "1" } ellers { gfn["__vm_green_på__"] = "0" }
     t["frames"] = []
@@ -5846,6 +5887,7 @@ funksjon vm_green_slice(t) -> heiltall {
     vm_green_cur_t = t
     vm_green_i_slice = 1
     vm_green_budsjett = vm_green_kvantum
+    hvis t["koop"] == 1 { vm_green_budsjett = 1000000000 }   // F36: kooperativ, ingen preemption
     vm_green_yielded = 0
     vm_green_yield_ok = 0
     t["venter"] = 0
@@ -5857,7 +5899,11 @@ funksjon vm_green_slice(t) -> heiltall {
         functions["__vm_green_start__"] = "1"
         hvis t["starta"] == 0 {
             t["starta"] = 1
-            v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
+            hvis builtin.type(t["arglist"]) == "liste" {
+                v = køyr_funksjon(tekst(t["fn"]), t["arglist"], functions, 1)
+            } ellers {
+                v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
+            }
         } ellers {
             v = køyr_funksjon(tekst(t["resume"]["fn_namn"]), [], functions, 1)
         }
@@ -5877,6 +5923,12 @@ funksjon vm_green_slice(t) -> heiltall {
     } fang (e) {
         t["state"] = "error"
         t["error"] = tekst(e)
+        t["error_raw"] = e
+        // F35/F36: stakksporet til unntaket følgjer med til join/vent (R4/F34).
+        hvis vm_map_har_nokkel(functions, "__vm_stakk__") {
+            t["stakk"] = functions["__vm_stakk__"]
+            t["stakk_verdi"] = functions["__vm_stakk_verdi__"]
+        }
         ferdig = 1
     }
     functions["__vm_green_start__"] = "0"
@@ -5891,7 +5943,10 @@ funksjon vm_green_slice(t) -> heiltall {
     vm_green_i_slice = 0
     vm_green_yield_ok = 0
     vm_green_yielded = 0
-    hvis ferdig == 1 { vm_green_ferdig(t) }
+    hvis ferdig == 1 {
+        vm_green_ferdig(t)
+        hvis builtin.type(t["future"]) == "ordbok" { vm_async_fullfor(t) }
+    }
     returner arbeid
 }
 
@@ -5988,7 +6043,7 @@ funksjon vm_green_runde() -> heiltall {
                 la sov_til = t["sov_til"]
                 hvis sov_til > 0 {
                     hvis no_ms < 0 { no_ms = builtin.tid_ms() }
-                    hvis no_ms < sov_til { kan = 0 }
+                    hvis no_ms < sov_til og t["avbryt"] == 0 { kan = 0 }
                 }
                 hvis kan == 1 {
                     arbeid = arbeid + vm_green_slice(t)
@@ -6102,6 +6157,7 @@ funksjon vm_green_join(req, h: tekst) {
     la timeout = vm_green_felt_heiltal(req, "timeout_ms", -1)
     hvis ikkje vm_green_er_ferdig(t) og timeout != 0 {
         hvis kan_yield == 1 {
+            hvis vm_green_avbrutt_no() { vm_green_avbrot_kast("join") }
             hvis vm_green_vent(timeout, "join") == 1 { returner vm_green_join_resultat(t, "timeout") }
         } ellers hvis vm_green_i_slice == 0 {
             la frist: heiltall = -2
@@ -6210,6 +6266,12 @@ funksjon vm_green_sync(req, op: tekst) {
                 vd["signal"] = 1
                 vd["fase"] = 2
                 meg["vent_frist"] = -1
+            } ellers hvis vm_green_avbrutt_no() {
+                // F35: avbrot under venting. Mutex blir teken att (fase 2) FØR
+                // AvbruttFeil blir kasta (samtid._vent), som Java.
+                vd["fase"] = 2
+                vd["avbrote"] = 1
+                meg["vent_frist"] = -1
             } ellers hvis vm_green_vent(tm, "condition") == 1 {
                 vd["fase"] = 2
             }
@@ -6218,7 +6280,12 @@ funksjon vm_green_sync(req, op: tekst) {
             vm_green_vent(-1, "condition-mutex")
         }
         la sig = vd["signal"]
+        la avb = vm_map_har_nokkel(vd, "avbrote")
         vm_green_vent_ferdig()
+        hvis avb {
+            meg["avbryt"] = 0
+            returner vm_green_sync_svar("interrupted")
+        }
         hvis sig == 1 { returner vm_green_sync_svar("ready") }
         returner vm_green_sync_svar("timeout")
     }
@@ -6294,6 +6361,7 @@ funksjon vm_green_sov(ms: heiltall) -> heiltall {
     la kan_yield = vm_green_ta_yield()
     hvis ms <= 0 { returner 0 }
     hvis kan_yield == 1 {
+        hvis vm_green_avbrutt_no() { vm_green_avbrot_kast("sov") }
         la meg = vm_green_cur_t
         la frist = meg["vent_frist"]
         hvis frist == -1 {
@@ -6321,6 +6389,144 @@ funksjon vm_green_sov(ms: heiltall) -> heiltall {
         hvis vm_green_runde() == 0 { builtin.vent.sov(1) }
         no = builtin.tid_ms()
     }
+    returner 0
+}
+
+// ─── F35: avbrot (AvbruttFeil ved blokkerande operasjonar) ─────────────────
+// Eit avbrotsflagg (t["avbryt"]) blir sett av tråd.avbryt()/oppgåve-kansellering og
+// sjekka av sov, join, condition_wait (kanal-/lås-/semafor-venting) og vent på ein
+// ventande future i den grøne tråden. Flagget blir nullstilt når AvbruttFeil blir
+// kasta (som Thread.interrupted()). Ein tråd som ikkje blokkerer ser flagget først
+// ved neste blokkerande operasjon (eller via avbrote()).
+
+funksjon vm_green_avbrutt_no() -> boolsk {
+    hvis vm_green_i_slice != 1 { returner usann }
+    hvis ikkje vm_map_har_nokkel(vm_green_cur_t, "id") { returner usann }
+    returner vm_green_cur_t["avbryt"] == 1
+}
+
+funksjon vm_green_avbrot_kast(grunn: tekst) -> heiltall {
+    vm_green_cur_t["avbryt"] = 0
+    vm_green_vent_ferdig()
+    kast "AvbruttFeil: avbrote under " + grunn
+    returner 0
+}
+
+funksjon vm_green_avbryt_tråd(h: tekst) {
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) {
+        returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": h, "thread_id": "",
+                  "value": "", "error": "invalid handle"}
+    }
+    la t = vm_green_trådar[h]
+    hvis ikkje vm_green_er_ferdig(t) { t["avbryt"] = 1 }
+    returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h,
+              "thread_id": tekst_fra_heltall(t["gid"]), "value": "", "error": ""}
+}
+
+// "interrupted": handle tom = tråden som køyrer no (hovudtråden er aldri avbroten).
+funksjon vm_green_avbrote_svar(h: tekst) {
+    la verdi = "0"
+    hvis h == "" {
+        hvis vm_green_avbrutt_no() { verdi = "1" }
+    } ellers hvis vm_map_har_nokkel(vm_green_trådar, h) {
+        hvis vm_green_trådar[h]["avbryt"] == 1 { verdi = "1" }
+    }
+    returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h, "thread_id": "",
+              "value": verdi, "error": ""}
+}
+
+// ─── F36: ekte asynk (oppgåver som grøne trådar, kooperativ planleggjar) ────
+// Eit kall til ein `asynk funksjon` i programkøyring (køyr_ncb) startar ei OPPGÅVE:
+// ein kooperativ grøn tråd (aldri preemptert) med eigen rammeliste, og returnerer
+// ei future-ordbok {__future__, status: ventende, __task__: <tråd-handle>}. Kroppen
+// startar ikkje før kallaren gjev frå seg kontrollen (vent på ei ventande future,
+// sov/sov_asynk, thread_join, programslutt). `vent` i hovudtråden driv
+// planleggaren (vm_await_hovudtråd); `vent` i ei oppgåve parkerer oppgåva (same
+// suspender som await-resume) og lèt andre køyre. Innbyggings-API-et
+// (køyr_funksjon utan __vm_program__) beheld synkron kjøring av asynk-funksjonar.
+
+funksjon vm_def_er_asynk(def) -> boolsk {
+    hvis builtin.type(def) != "ordbok" { returner usann }
+    hvis ikkje vm_map_har_nokkel(def, "is_async") { returner usann }
+    la a = def["is_async"]
+    returner a == sann eller tekst(a) == "sann" eller tekst(a) == "true"
+}
+
+funksjon vm_async_start(functions, fn_løyst: tekst, argv) {
+    la nr = vm_green_ny_nr()
+    la id = "green-thread:" + tekst_fra_heltall(nr)
+    la t = vm_green_ny(functions, fn_løyst, {}, id, nr)
+    t["state"] = "running"
+    t["koop"] = 1
+    vm_green_koop_aktive = vm_green_koop_aktive + 1
+    la kopi: liste = []
+    la i: heiltall = 0
+    mens i < lengde(argv) {
+        legg_til(kopi, argv[i])
+        i = i + 1
+    }
+    t["arglist"] = kopi
+    la fut = vm_future("ventende", "")
+    fut["__task__"] = id
+    t["future"] = fut
+    legg_til(vm_green_rekkje, id)
+    returner fut
+}
+
+// Oppgåva er ferdig (kalla frå vm_green_slice / kansellering): fullfør future-en.
+funksjon vm_async_fullfor(t) -> heiltall {
+    la fut = t["future"]
+    hvis t["state"] == "finished" {
+        fut["verdi"] = t["value"]
+        fut["status"] = "ferdig"
+    } ellers hvis t["state"] == "cancelled" {
+        fut["status"] = "kansellert"
+    } ellers {
+        la e = t["error_raw"]
+        hvis vm_exception_type(e) == "AvbruttFeil" {
+            fut["status"] = "kansellert"
+        } ellers {
+            fut["feil"] = e
+            fut["status"] = "feil"
+            hvis vm_map_har_nokkel(t, "stakk") {
+                fut["stakk"] = t["stakk"]
+                fut["stakk_verdi"] = t["stakk_verdi"]
+            }
+        }
+    }
+    hvis vm_map_har_nokkel(vm_green_trådar, t["id"]) { fjern_nokkel(vm_green_trådar, t["id"]) }
+    returner 0
+}
+
+// Be om kansellering av oppgåva bak ei future. Ikkje starta: ferdig med ein gong.
+// Elles AvbruttFeil ved oppgåva sitt neste ventepunkt (sov/vent/kanal/lås).
+// Returnerer 1 når future-en høyrde til ei levande oppgåve.
+funksjon vm_async_kanseller(fut) -> heiltall {
+    hvis builtin.type(fut) != "ordbok" { returner 0 }
+    hvis ikkje vm_map_har_nokkel(fut, "__task__") { returner 0 }
+    la h = tekst(fut["__task__"])
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) { returner 0 }
+    la t = vm_green_trådar[h]
+    hvis vm_green_er_ferdig(t) { returner 0 }
+    hvis t["starta"] == 0 {
+        t["state"] = "cancelled"
+        t["error"] = "AvbruttFeil"
+        vm_green_ferdig(t)
+        vm_async_fullfor(t)
+        returner 1
+    }
+    t["avbryt"] = 1
+    returner 1
+}
+
+// Gjenoppretter stakksporet frå ei feila future før unntaket blir kasta på nytt.
+funksjon vm_future_gjenopprett_stakk(functions, fut) -> heiltall {
+    hvis builtin.type(fut) != "ordbok" { returner 0 }
+    hvis ikkje vm_map_har_nokkel(fut, "stakk") { returner 0 }
+    hvis tekst(fut["status"]) != "feil" { returner 0 }
+    functions["__vm_stakk__"] = fut["stakk"]
+    functions["__vm_stakk_verdi__"] = fut["stakk_verdi"]
+    functions["__vm_behald_stakk__"] = "sann"
     returner 0
 }
 
@@ -6590,6 +6796,8 @@ funksjon køyr_funksjon(
         functions["__vm_green_start__"] = "0"
     }
     la green_på = vm_green_på_i(functions)
+    // F36: asynk-funksjonar blir oppgåver berre i programkøyring (køyr_ncb).
+    la asynk_modus = vm_map_har_nokkel(functions, "__vm_program__")
     la trace_raw = miljo_hent("NORSCODE_VM_TRACE")
     hvis trace_raw != "" og heltall_fra_tekst(trace_raw) == 1 { skriv("ENTER " + fn_namn + "\n") }
     la trace_frames_raw = miljo_hent("NORSCODE_VM_TRACE_FRAMES")
@@ -6750,7 +6958,8 @@ funksjon køyr_funksjon(
                 vm_green_tikk = vm_green_tikk + 1
                 hvis vm_green_tikk >= vm_green_kvantum {
                     vm_green_tikk = 0
-                    vm_green_runde()
+                    // F36: kooperative asynk-oppgåver køyrer berre når hovudkoden ventar.
+                    hvis vm_green_aktive > vm_green_koop_aktive { vm_green_runde() }
                     // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
                     // debug-abort); les dei hoista verdiane på nytt.
                     aktive_rammer = functions["__vm_active_frames__"]
@@ -7524,6 +7733,19 @@ funksjon køyr_funksjon(
                 }
             }
 
+            // F36: kall til ein asynk funksjon startar ei oppgåve og gjev ei future.
+            hvis asynk_modus og løyst_namn != "" {
+                la asynk_def = vm_def_hent(vm_def_cache, functions, løyst_namn)
+                hvis vm_def_er_asynk(asynk_def) {
+                    la asynk_fut = vm_async_start(functions, løyst_namn, call_args)
+                    green_på = vm_green_på_i(functions)
+                    stack_push(ramme, asynk_fut)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                    ip = ip + 1
+                    fortsett
+                }
+            }
+
             hvis løyst_namn != "" {
                 la jit_used = usann
                 la jit_value = 0
@@ -7548,6 +7770,7 @@ funksjon køyr_funksjon(
                     fortsett
                 }
             }
+
 
             // Tail-call trampoline: CALL rett før RETURN treng ikkje ei ny
             // vertsramme når ingen lokal try-handler skal overleve kallet.
