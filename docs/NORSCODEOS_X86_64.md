@@ -92,6 +92,20 @@ les `envp` ([0x780008]). Ingen nye namn er innførde; verifisert på målet (fik
 - sys6: gjort til std-intern (ikkje fjerna), fordi `std.native_gap` (sokkel, spawn, fil-straum)
   treng han. Brukarkode får kompileringsfeil; porten avgrensar nummera ved køyring.
 
+### Ingen kollektor på norscodeos-x86_64 utan NORSCODE_GC_ALLOC
+
+Paritet-safepointet (GC-modus av) tel safepoint og kallar `gc_collect_native` når teljaren når
+terskelen (2^31) og heapen har vakse minst éin port sidan sist. Kollektoren treng GC-metadata på
+faste adresser (bitmap `0x40600000`, live-map, mark-stakk) som ligg langt utanfor det 64 MiB store
+heap-segmentet. Kjerna mappar berre `PT_LOAD`, so første collect gav ring-3-#PF (cr2 `0x40600000`;
+sett i ei HTTP-økt etter ~239 tunge økter). På norscodeos-x86_64 utan `NORSCODE_GC_ALLOC=1` er
+safepoint-stubben difor ein no-op (`jmp .skip`); `NORSCODE_GC_ALLOC=1` er framleis avvist for målet.
+Linux-x86_64 (2 GiB-segment) er uendra og samlar som før.
+
+- `NC_SAFEPOINT_TERSKEL` (1..2147483647, standard 2147483647): overstyrer terskelen i paritet-
+  safepointet ved bygging. Utan env er alle ELF-ar byte-identiske med før. Brukt av
+  `tests/test_x86_safepoint_nos.no` (terskel 1000) for å utløyse kollektor-vegen utan 2^31 safepoint.
+
 ## 7. Verifikasjon (08.10.2026, Docker linux/amd64)
 
 - Fiksturar (`tests/fixtures/nos_x86`, NCB frose ved 079bfaf utanom nye) bygde for begge mål og
