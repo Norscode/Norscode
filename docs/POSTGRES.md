@@ -92,6 +92,8 @@ docker exec rCpg-db psql -U postgres -d test -c "SET password_encryption='md5'; 
 # pg_hba.conf: host all u_trust all trust / u_md5 md5 / u_clear password / u_scram scram-sha-256, så pg_reload_conf()
 ```
 
+TLS-testen: lag sertifikat med `openssl req -x509 ... -addext subjectAltName=DNS:localhost,IP:127.0.0.1`, set `ssl=on`, `ssl_cert_file`/`ssl_key_file` og `authentication_timeout='600s'` (TLS-handtrykket i VM-en tok 20-160 s avhengig av maskinlast; Postgres sin standard på 60 s stengjer tilkoplinga midt i handtrykket). Ed25519-sertifikat gjekk over 15 min i VM-en og er ikkje verifisert; RSA-sertifikat er verifisert.
+
 Port 55432 er tatt av kontainaren `norscode-pg` på utviklarmaskina, så testane brukte 55442.
 
 ## Avgrensingar
