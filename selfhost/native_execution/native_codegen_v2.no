@@ -69,6 +69,22 @@ funksjon ER_WINDOWS() -> boolsk { returner X86_MAL() == "windows-x86_64" }
 // nummer), og -ENOSYS i staden for clone/futex/lstat/getdents64/rename/symlink/uname/getcwd/
 // readlink. Linux-vegen er byte-identisk (kvar gate er `hvis ER_NOS()`).
 funksjon ER_NOS() -> boolsk { returner X86_MAL() == "norscodeos-x86_64" }
+// NC_SAFEPOINT_TERSKEL: heiltal 1..2147483647 (same validering som NC_HEAP_MIB); tom = standard.
+funksjon sp_terskel_frå_env(standard: heltall) -> heltall {
+    la raa = miljo_hent("NC_SAFEPOINT_TERSKEL")
+    hvis raa == "" { returner standard }
+    la n: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(raa) {
+        la c = builtin.char_code(builtin.slice(raa, i, i + 1))
+        hvis c < 48 eller c > 57 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL må vere eit heiltal (1..2147483647), fekk «" + raa + "»" }
+        n = n * 10 + (c - 48)
+        hvis n > 2147483647 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL er for stor: " + raa }
+        i = i + 1
+    }
+    hvis n < 1 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL må vere ≥ 1 (fekk " + raa + ")" }
+    returner n
+}
 // Rekursjonsvakta: stakk-grensa ([STACK_LIMIT_VA]) = initiell rsp − STAKK_GRENSE_BYTE.
 // linux-x86_64/windows-x86_64: 7 MiB (hovudtråden har 8 MiB). norscodeos-x86_64: 960 KiB som
 // standard — NorscodeOS-kjernen gjev ring-3-prosessen ei lat stakkregion med sidekvote, og
@@ -10838,6 +10854,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la gc_port_bytes: heltall = 67108864
     hvis miljo_hent("NORSCODE_GC_TERSKEL_BYTES") != "" { gc_port_bytes = heltall_fra_tekst(miljo_hent("NORSCODE_GC_TERSKEL_BYTES")) }
     hvis gc_mode == "1" { sp_terskel = 1000 }
+    // NC_SAFEPOINT_TERSKEL=<1..2147483647>: overstyrer terskelen i flagg-AV-grenen (v3) so
+    // kollektor-vegen kan prøvast utan 2^31 safepoint (test: tests/test_x86_safepoint_nos.no).
+    // Utan env er terskelen uendra (2147483647) → byte-identisk output. Har ingen verknad i GC-modus.
+    hvis gc_mode != "1" { sp_terskel = sp_terskel_frå_env(sp_terskel) }
     // Stubben si adresse blir REGISTRERT her (atomics["gc_safepoint"]) — kallarane
     // brukte «TEXT_VA + rt_size - 93» (= dei siste 93 bytane av runtimeen), som er
     // FEIL så snart noko blir appenda etter stubben (main sine cache-trampoline-
@@ -10876,6 +10896,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la sp_pcollect: heltall = -1
     la sp_pskip1: heltall = -1
     la sp_pskip1b: heltall = -1
+    la sp_nos_hopp: heltall = -1
     hvis gc_mode == "1" {
         // port_dyn = GC_INIT_PORT (64 KiB) frå init_heap → første collect etter 64 KiB allokert (F2b).
         copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.GC_ALLOC_BYTES_VA(X86_MAL()))   // mov rax,[alloc]
@@ -10888,6 +10909,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         copy(bytes, [0x48, 0x3D]) u32(bytes, hl.GC_SOFT_BUDGET())                   // cmp rax,8 MiB
         sp_pskip1b = emit_jcc_placeholder(bytes, 0x82)                           // jb .skip
     } ellers {
+        // norscodeos-x86_64 UTAN GC-modus: ingen kollektor. Heap-segmentet er 64 MiB (HEAP_SZ_MÅL), og
+        // GC-metadata (bitmap @0x40600000, live-map, mark-stakk) ligg utanfor det kjerna mappar —
+        // første collect (teljaren når 2^31 safepoint, t.d. etter ~239 tunge HTTP-økter) gav ring-3-#PF
+        // (rip i gc_bitmap_clear/gc_mark_roots, cr2=0x40600000). OS-program held heapen flat med
+        // heap_merke/heap_sett. Hopp rett til .skip; resten av v3-koden er då uoppnåeleg.
+        hvis X86_MAL() == "norscodeos-x86_64" { sp_nos_hopp = emit_jmp_placeholder(bytes) }
         // ── v3 (paritet flagg AV): (teljar ≥ terskel OG bump−sist ≥ port) ELLER bump ≥ SOFT ──
         copy(bytes, [0x48, 0xA1])                       // mov rax,[counter]
         u64(bytes, safepoint_adresse)
@@ -10994,6 +11021,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la sp_skip = lengde(bytes)                     // .skip:
     patch_jump(bytes, sp_pskip1, sp_skip)
     hvis sp_pskip1b >= 0 { patch_jump(bytes, sp_pskip1b, sp_skip) }
+    hvis sp_nos_hopp >= 0 { patch_jump(bytes, sp_nos_hopp, sp_skip) }
     copy(bytes, [0xC3])                            // ret
     // R2: dynamiske kall (ncb_call_fn/CALL_VALUE), assert-sjekkar og bytes_new.
     emit_r2_atom(bytes, atomics)
