@@ -1,0 +1,356 @@
+bruk std.pg som pg
+
+// Integrasjonstest for Postgres-klienten (wire v3) mot ein ekte tenar: autentisering (trust,
+// klartekst, md5, SCRAM-SHA-256), utvida protokoll med parametrar og binærformat, typekonvertering,
+// transaksjonsstatus, feil med SQLSTATE, notisar, førebudde setningar, COPY, LISTEN/NOTIFY og pool.
+//
+// Miljøstyrt: utan NORSCODE_PG_TEST_DSN hoppar testen over med melding (og består), med mindre
+// NORSCODE_PG_REQUIRE=1 (då feilar han). Valfrie ekstra DSN-ar for kvar autentiseringsmetode:
+//   NORSCODE_PG_TEST_DSN        trust, superbrukar    host=127.0.0.1 port=55442 dbname=test user=u_trust
+//   NORSCODE_PG_TEST_CLEAR_DSN  klartekstpassord      … user=u_clear password=clear-pw
+//   NORSCODE_PG_TEST_MD5_DSN    md5                   … user=u_md5 password=md5-pw
+//   NORSCODE_PG_TEST_SCRAM_DSN  SCRAM-SHA-256         … user=u_scram password=scram-pw
+// Oppskrift (eigen tenar): docs/POSTGRES.md.
+
+funksjon _felt(dsn: tekst, nokkel: tekst) -> tekst {
+    la delar = builtin.split(dsn, " ")
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], nokkel + "=") { returner builtin.slice(delar[i], lengde(nokkel) + 1, lengde(delar[i])) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _med_passord(dsn: tekst, passord: tekst) -> tekst {
+    la delar = builtin.split(dsn, " ")
+    la ut: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        hvis ikkje builtin.starts_with(delar[i], "password=") { legg_til(ut, delar[i]) }
+        i = i + 1
+    }
+    legg_til(ut, "password=" + passord)
+    returner builtin.join(ut, " ")
+}
+
+funksjon _fangar(f) -> tekst {
+    la m = ""
+    prøv { f() } fang (e) { m = tekst(e) }
+    returner m
+}
+
+funksjon _auth(namn: tekst, miljo: tekst) {
+    la dsn = miljo_hent(miljo)
+    hvis dsn == "" {
+        skriv("test_pg_integrasjon: " + namn + " HOPPA OVER (" + miljo + " ikkje sett)\n")
+        returner
+    }
+    la c = pg.open(dsn)
+    assert_eq(pg.query_verdi(c, "SELECT current_user", []), _felt(dsn, "user"))
+    assert_eq(pg.tx_status(c), "I")
+    pg.close(c)
+    # feil passord: PgServerFeil 28P01, og passordet står ikkje i feilmeldinga
+    hvis _felt(dsn, "password") != "" {
+        la feil = _fangar(funksjon() { pg.open(_med_passord(dsn, "heilt-feil-pw-123")) })
+        assert(builtin.starts_with(feil, "PgServerFeil:"))
+        assert(builtin.index_of(feil, "28P01") >= 0)
+        assert(builtin.index_of(feil, "heilt-feil-pw-123") < 0)
+        assert(pg.er_server_feil(feil))
+        assert_eq(pg.feil_sqlstate(feil), "28P01")
+        assert_eq(pg.feil_klasse(feil), "28")
+    }
+    skriv("test_pg_integrasjon: " + namn + " OK\n")
+}
+
+funksjon _typar(c) {
+    pg.execute_raw(c, "DROP TABLE IF EXISTS rcpg_typar")
+    pg.execute_raw(c, "CREATE TABLE rcpg_typar (i2 int2, i4 int4, i8 int8, f4 float4, f8 float8, n numeric(12,4), b bool, t text, v varchar(20), by bytea, d date, ts timestamp, tz timestamptz, tm time, j json, jb jsonb, u uuid, ia int4[], ta text[])")
+    pg.execute(c, "INSERT INTO rcpg_typar VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+        ["-7", "123456", "9000000000", "1.5", "-2.25", "-12345.6700", "t", "blåbær 🙂", "kort", "\\xdeadbeef",
+         "2024-02-29", "2024-03-15 12:34:56.789012", "2024-03-15 12:34:56+00", "12:34:56", "{\"a\": [1, 2]}", "{\"b\":   true}",
+         "550e8400-e29b-41d4-a716-446655440000", "{1,NULL,3}", "{x,\"y z\",NULL}"])
+    pg.execute_raw(c, "INSERT INTO rcpg_typar (i4) VALUES (NULL)")
+    pg.execute_raw(c, "SET TimeZone = 'UTC'")
+    la tekst_rad = pg.query_typa(c, "SELECT * FROM rcpg_typar WHERE i4 IS NOT NULL", [])[0]
+    la bin_rad = pg.query_binar(c, "SELECT * FROM rcpg_typar WHERE i4 IS NOT NULL", [])[0]
+    la rader = [tekst_rad, bin_rad]
+    la r: heltall = 0
+    mens r < 2 {
+        la x = rader[r]
+        assert_eq(x["i2"], -7)
+        assert_eq(x["i4"], 123456)
+        assert_eq(x["i8"], 9000000000)
+        assert(x["f4"] == 1.5)
+        assert(x["f8"] == 0 - 2.25)
+        assert_eq(x["n"], "-12345.6700")
+        assert_eq(x["b"], sann)
+        assert_eq(x["t"], "blåbær 🙂")
+        assert_eq(x["v"], "kort")
+        assert_eq(lengde(x["by"]), 4)
+        assert_eq(x["by"][0], 222)
+        assert_eq(x["by"][3], 239)
+        assert_eq(x["d"], "2024-02-29")
+        assert_eq(x["ts"], "2024-03-15 12:34:56.789012")
+        assert_eq(x["tm"], "12:34:56")
+        assert_eq(x["u"], "550e8400-e29b-41d4-a716-446655440000")
+        assert_eq(lengde(x["ia"]), 3)
+        assert_eq(x["ia"][0], 1)
+        assert(x["ia"][1] == null)
+        assert_eq(x["ia"][2], 3)
+        assert_eq(x["ta"][1], "y z")
+        assert(x["ta"][2] == null)
+        r = r + 1
+    }
+    # json/jsonb: tekst (jsonb normaliserer mellomrom)
+    assert_eq(tekst_rad["j"], "{\"a\": [1, 2]}")
+    assert_eq(tekst_rad["jb"], "{\"b\": true}")
+    assert_eq(bin_rad["jb"], "{\"b\": true}")
+    assert_eq(bin_rad["j"], "{\"a\": [1, 2]}")
+    # timestamptz i UTC
+    assert_eq(builtin.slice(bin_rad["tz"], 0, 22), "2024-03-15 12:34:56+00")
+    # NULL-rad: alt null i begge formata
+    la nullrad = pg.query_binar(c, "SELECT * FROM rcpg_typar WHERE i4 IS NULL", [])[0]
+    assert(nullrad["i2"] == null)
+    assert(nullrad["t"] == null)
+    assert(nullrad["ia"] == null)
+    assert(nullrad["by"] == null)
+
+    # Binære parametrar: type deklarert, ingen tekstparsing. bytea tur-retur med alle byte-verdiar.
+    la alle: liste_heiltall = []
+    la k: heltall = 0
+    mens k < 256 { legg_til(alle, k) k = k + 1 }
+    la tur = pg.query_binar(c, "SELECT $1::bytea AS b, $2::int8 AS i, $3::bool AS t, $4::float8 AS f, $5::uuid AS u, $6::text AS s",
+        [pg.param(17, alle), pg.param(20, -4000000000), pg.param(16, usann), pg.param(701, 0 - 0.125),
+         pg.param(2950, "550e8400-e29b-41d4-a716-446655440000"), pg.param(25, "æøå 🙂")])[0]
+    assert_eq(lengde(tur["b"]), 256)
+    assert_eq(tur["b"][0], 0)
+    assert_eq(tur["b"][200], 200)
+    assert_eq(tur["b"][255], 255)
+    assert_eq(tur["i"], -4000000000)
+    assert_eq(tur["t"], usann)
+    assert(tur["f"] == 0 - 0.125)
+    assert_eq(tur["u"], "550e8400-e29b-41d4-a716-446655440000")
+    assert_eq(tur["s"], "æøå 🙂")
+    # NULL-parameter i utvida protokoll
+    assert(pg.query_typa(c, "SELECT $1::int AS x", [pg.sql_null()])[0]["x"] == null)
+    # numeric med mange sifre og ulike skalaer
+    la nums = ["0", "0.0001", "-0.5", "100000000", "12345678901234567890.123456789", "1e-9", "NaN"]
+    k = 0
+    mens k < lengde(nums) {
+        la t = pg.query_verdi(c, "SELECT $1::numeric::text", [nums[k]])
+        la b = pg.query_binar(c, "SELECT $1::numeric AS n", [nums[k]])[0]["n"]
+        assert_eq(b, t)
+        k = k + 1
+    }
+    # dato/tid rundt kalenderkanter, binært format mot tenarens eigen tekstutskrift
+    la dato = ["1900-03-01", "1999-12-31", "2000-01-01", "2000-02-29", "2100-03-01", "0001-01-01", "9999-12-31", "1969-07-20"]
+    k = 0
+    mens k < lengde(dato) {
+        assert_eq(pg.query_binar(c, "SELECT $1::date AS d", [dato[k]])[0]["d"], dato[k])
+        k = k + 1
+    }
+    la tider = ["1969-07-20 20:17:40", "2000-01-01 00:00:00", "1999-12-31 23:59:59.999999", "2038-01-19 03:14:08.5", "0100-01-01 00:00:00"]
+    k = 0
+    mens k < lengde(tider) {
+        assert_eq(pg.query_binar(c, "SELECT $1::timestamp AS d", [tider[k]])[0]["d"], tider[k])
+        k = k + 1
+    }
+    assert_eq(pg.query_binar(c, "SELECT 'infinity'::timestamp AS d", [])[0]["d"], "infinity")
+    # flyttal: spesialverdiar og avrunding
+    assert(pg.query_binar(c, "SELECT 0.1::float8 AS f", [])[0]["f"] == 0.1)
+    assert(pg.query_typa(c, "SELECT 0.1::float8 AS f", [])[0]["f"] == 0.1)
+    assert(pg.query_binar(c, "SELECT 1e-310::float8 AS f", [])[0]["f"] > 0)
+    # 2-dimensjonal array
+    la dim2 = pg.query_binar(c, "SELECT ARRAY[[1,2],[3,4]] AS a", [])[0]["a"]
+    assert_eq(dim2[1][0], 3)
+    assert_eq(pg.query_typa(c, "SELECT ARRAY[[1,2],[3,4]] AS a", [])[0]["a"][1][1], 4)
+    pg.execute_raw(c, "DROP TABLE rcpg_typar")
+}
+
+funksjon _transaksjonar_og_feil(c) {
+    pg.execute_raw(c, "DROP TABLE IF EXISTS rcpg_tx")
+    pg.execute_raw(c, "CREATE TABLE rcpg_tx (id int CONSTRAINT rcpg_tx_pk PRIMARY KEY, v text NOT NULL CHECK (v <> 'forbode'))")
+    assert_eq(pg.tx_status(c), "I")
+    pg.begin(c)
+    assert_eq(pg.tx_status(c), "T")
+    assert(pg.i_transaksjon(c))
+    pg.execute(c, "INSERT INTO rcpg_tx VALUES ($1, $2)", ["1", "a"])
+    # feil inne i transaksjon: status E, kommandoar nektast til ROLLBACK
+    la f1 = _fangar(funksjon() { pg.execute(c, "INSERT INTO rcpg_tx VALUES ($1, $2)", ["1", "dobbel"]) })
+    assert(pg.er_unik_brot(f1))
+    assert_eq(pg.feil_klasse(f1), "23")
+    assert(builtin.starts_with(f1, "PgServerFeil:"))
+    la felt = pg.feil_felt()
+    assert_eq(felt["C"], "23505")
+    assert_eq(felt["n"], "rcpg_tx_pk")
+    assert_eq(felt["t"], "rcpg_tx")
+    assert_eq(felt["S"], "ERROR")
+    assert(builtin.index_of(felt["D"], "(id)=(1)") >= 0)
+    assert_eq(pg.tx_status(c), "E")
+    la f2 = _fangar(funksjon() { pg.query_raw(c, "SELECT 1") })
+    assert_eq(pg.feil_sqlstate(f2), "25P02")
+    pg.rollback(c)
+    assert_eq(pg.tx_status(c), "I")
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM rcpg_tx"), 0)
+    # tilkoplinga er brukbar etter feil utanfor transaksjon
+    la f3 = _fangar(funksjon() { pg.execute(c, "INSERT INTO rcpg_tx VALUES (1, 'forbode')", []) })
+    assert_eq(pg.feil_sqlstate(f3), "23514")
+    assert_eq(pg.feil_felt()["n"], "rcpg_tx_v_check")
+    la f4 = _fangar(funksjon() { pg.query_raw(c, "SELEKT 1") })
+    assert_eq(pg.feil_sqlstate(f4), "42601")
+    assert(builtin.index_of(pg.feil_felt()["P"], "1") == 0)
+    la f5 = _fangar(funksjon() { pg.query_raw(c, "SELECT 1/0") })
+    assert_eq(pg.feil_sqlstate(f5), "22012")
+    # med_transaksjon: commit ved suksess, rollback + vidarekasting ved unntak
+    pg.med_transaksjon(c, funksjon(cc) { pg.execute(cc, "INSERT INTO rcpg_tx VALUES ($1, $2)", ["10", "ok"]) })
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM rcpg_tx"), 1)
+    la f6 = _fangar(funksjon() {
+        pg.med_transaksjon(c, funksjon(cc) {
+            pg.execute(cc, "INSERT INTO rcpg_tx VALUES (11, 'x')", [])
+            kast "MinFeil: avbryt"
+        })
+    })
+    assert_eq(f6, "MinFeil: avbryt")
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM rcpg_tx"), 1)
+    assert_eq(pg.tx_status(c), "I")
+    # savepoint
+    pg.begin(c)
+    pg.savepoint(c, "sp1")
+    pg.execute(c, "INSERT INTO rcpg_tx VALUES (20, 'a')", [])
+    pg.rollback_to(c, "sp1")
+    pg.commit(c)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM rcpg_tx WHERE id = 20"), 0)
+    pg.execute_raw(c, "DROP TABLE rcpg_tx")
+}
+
+funksjon _notisar_og_varsel(c) {
+    pg.notisar(c)
+    la sett = {"n": 0}
+    pg.sett_notiskrok(funksjon(felt) { sett["n"] = sett["n"] + 1 })
+    pg.execute_raw(c, "DO $$ BEGIN RAISE NOTICE 'hei %', 42; RAISE WARNING 'åtvaring'; END $$")
+    pg.fjern_notiskrok()
+    la n = pg.notisar(c)
+    assert_eq(lengde(n), 2)
+    assert_eq(n[0]["M"], "hei 42")
+    assert_eq(n[0]["S"], "NOTICE")
+    assert_eq(n[1]["S"], "WARNING")
+    assert_eq(sett["n"], 2)
+    assert_eq(lengde(pg.notisar(c)), 0)
+    # LISTEN/NOTIFY: varsel kjem med neste svar frå tenaren
+    pg.lytt(c, "rcpg_kanal")
+    pg.varsle(c, "rcpg_kanal", "nyttelast æ")
+    pg.query_int(c, "SELECT 1")
+    la v = pg.varsel(c)
+    assert_eq(lengde(v), 1)
+    assert_eq(v[0]["kanal"], "rcpg_kanal")
+    assert_eq(v[0]["nyttelast"], "nyttelast æ")
+    assert_eq(v[0]["pid"], pg.backend_pid(c))
+    assert(pg.backend_pid(c) > 0)
+    # tenarparametrar frå ParameterStatus
+    assert_eq(pg.parameter(c, "client_encoding"), "UTF8")
+    assert(builtin.index_of(pg.parameter(c, "server_version"), ".") > 0)
+    assert_eq(pg.parameter(c, "finst_ikkje"), "")
+}
+
+funksjon _prep_og_fleire(c) {
+    pg.execute_raw(c, "DROP TABLE IF EXISTS rcpg_p")
+    pg.execute_raw(c, "CREATE TABLE rcpg_p (id int, navn text)")
+    la ps = pg.prepare(c, "ins", "INSERT INTO rcpg_p VALUES ($1, $2)")
+    assert_eq(lengde(ps["param_oidar"]), 2)
+    assert_eq(ps["param_oidar"][0], 23)
+    assert_eq(ps["param_oidar"][1], 25)
+    assert_eq(lengde(ps["kolonnar"]), 0)
+    assert_eq(pg.execute_prep(c, "ins", ["1", "Ola"]), 1)
+    assert_eq(pg.execute_prep(c, "ins", ["2", "Åse"]), 1)
+    la sel = pg.prepare(c, "sel", "SELECT id, navn FROM rcpg_p WHERE id >= $1 ORDER BY id")
+    assert_eq(lengde(sel["kolonnar"]), 2)
+    assert_eq(sel["kolonnar"][1], "navn")
+    la r = pg.query_prep(c, "sel", ["1"])
+    assert_eq(lengde(r), 2)
+    assert_eq(r[1]["navn"], "Åse")
+    la rb = pg.query_prep_binar(c, "sel", [pg.param(23, 2)])
+    assert_eq(lengde(rb), 1)
+    assert_eq(rb[0]["id"], 2)
+    pg.lukk_prep(c, "sel")
+    la f = _fangar(funksjon() { pg.query_prep(c, "sel", ["1"]) })
+    assert_eq(pg.feil_sqlstate(f), "26000")
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM rcpg_p"), 2)
+    # fleire kommandoar i éin enkel spørring
+    la fl = pg.query_fleire(c, "SELECT 1 AS a; SELECT 'x' AS b, 'y' AS c; UPDATE rcpg_p SET navn = 'z'")
+    assert_eq(lengde(fl), 3)
+    assert_eq(fl[0]["rader"][0]["a"], "1")
+    assert_eq(fl[1]["kolonnar"][1], "c")
+    assert_eq(fl[1]["tag"], "SELECT 1")
+    assert_eq(fl[2]["tag"], "UPDATE 2")
+    pg.execute_raw(c, "DROP TABLE rcpg_p")
+}
+
+funksjon _pool_test(dsn: tekst) {
+    la p = pg.pool_ny(dsn, 2)
+    la a = pg.pool_hent(p)
+    la b = pg.pool_hent(p)
+    assert(a != b)
+    assert_eq(pg.pool_stat(p)["i_bruk"], 2)
+    la full = _fangar(funksjon() { pg.pool_hent(p) })
+    assert(builtin.index_of(full, "pool er full") >= 0)
+    pg.begin(b)
+    pg.pool_slepp(p, b)
+    assert_eq(pg.pool_stat(p)["ledige"], 1)
+    la c2 = pg.pool_hent(p)
+    assert_eq(c2, b)
+    assert_eq(pg.tx_status(c2), "I")
+    pg.pool_slepp(p, a)
+    pg.pool_slepp(p, c2)
+    assert_eq(pg.pool_stat(p)["ledige"], 2)
+    # ei lukka tilkopling blir ikkje gjenbrukt
+    pg.close(a)
+    la c3 = pg.pool_hent(p)
+    assert(pg.er_tilkopla(c3))
+    assert(c3 != a)
+    pg.pool_slepp(p, c3)
+    pg.pool_lukk(p)
+    assert(ikkje pg.er_tilkopla(c3))
+}
+
+funksjon _cancel_og_copy(c) {
+    assert(pg.avbryt(c))
+    assert_eq(pg.query_int(c, "SELECT 5"), 5)
+    pg.execute_raw(c, "DROP TABLE IF EXISTS rcpg_cp")
+    pg.execute_raw(c, "CREATE TABLE rcpg_cp (id int, t text, n int)")
+    la inn = [["1", "a\tb", "10"], ["2", pg.sql_null(), "20"], ["3", "æ\\ø\nlinje", pg.sql_null()]]
+    assert_eq(pg.copy_inn(c, "COPY rcpg_cp FROM STDIN", inn), 3)
+    la ut = pg.copy_ut(c, "COPY (SELECT * FROM rcpg_cp ORDER BY id) TO STDOUT")
+    assert_eq(lengde(ut), 3)
+    assert_eq(ut[0][1], "a\tb")
+    assert(ut[1][1] == pg.sql_null())
+    assert_eq(ut[2][1], "æ\\ø\nlinje")
+    assert(ut[2][2] == pg.sql_null())
+    pg.execute_raw(c, "DROP TABLE rcpg_cp")
+}
+
+funksjon start() -> heltall {
+    la dsn = miljo_hent("NORSCODE_PG_TEST_DSN")
+    hvis dsn == "" {
+        hvis miljo_hent("NORSCODE_PG_REQUIRE") == "1" {
+            skriv("test_pg_integrasjon: NORSCODE_PG_TEST_DSN manglar, men NORSCODE_PG_REQUIRE=1\n")
+            assert(usann)
+        }
+        skriv("test_pg_integrasjon: HOPPA OVER (NORSCODE_PG_TEST_DSN ikkje sett; sjå docs/POSTGRES.md)\n")
+        returner 0
+    }
+    _auth("trust", "NORSCODE_PG_TEST_DSN")
+    _auth("klartekst", "NORSCODE_PG_TEST_CLEAR_DSN")
+    _auth("md5", "NORSCODE_PG_TEST_MD5_DSN")
+    _auth("scram-sha-256", "NORSCODE_PG_TEST_SCRAM_DSN")
+    la c = pg.open(dsn)
+    _typar(c)
+    _transaksjonar_og_feil(c)
+    _notisar_og_varsel(c)
+    _prep_og_fleire(c)
+    _cancel_og_copy(c)
+    pg.close(c)
+    _pool_test(dsn)
+    skriv("test_pg_integrasjon OK\n")
+    returner 0
+}
