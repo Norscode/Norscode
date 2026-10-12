@@ -1,0 +1,115 @@
+bruk std.pg som pg
+bruk std.pg_csv som csv
+bruk std.pgserver som srv
+bruk std.norsdb_db som norsdb
+
+// G6: COPY med CSV-format (FORMAT csv, HEADER, DELIMITER, QUOTE, NULL) i std.pg og std.pgserver.
+// Same scenario køyrer mot pgserver (alltid) og mot ein ekte PostgreSQL 17 når NORSCODE_PG_TEST_DSN er sett
+// (t.d. "host=127.0.0.1 port=55432 dbname=test user=norscode"). Rå CopyData-tekst blir samanlikna byte for byte.
+
+funksjon scenario(c, namn: tekst, nl: tekst) {
+    la N = pg.sql_null()
+    pg.execute_raw(c, "DROP TABLE IF EXISTS " + namn)
+    pg.execute_raw(c, "CREATE TABLE " + namn + " (id INTEGER, namn TEXT, notat TEXT, tal INTEGER)")
+
+    // inn: HEADER hoppar over første rad; komma, sitat, linjeskift og unicode i felt; NULL i heiltalskolonne
+    la inn = [["id", "namn", "notat", "tal"],
+              ["1", "Ola", "vanleg", "10"],
+              ["2", "Å;se", "har \"sitat\", komma", "20"],
+              ["3", "Kari", "", N],
+              ["4", "fleire" + nl + "linjer", "x", "40"]]
+    assert_eq(pg.copy_inn_csv(c, "COPY " + namn + " (id, namn, notat, tal) FROM STDIN WITH (FORMAT csv, HEADER)", inn), 4)
+    assert_eq(pg.query_int(c, "SELECT COUNT(*) FROM " + namn), 4)
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM " + namn + " WHERE id = 2", []), "Å;se")
+    assert_eq(pg.query_verdi(c, "SELECT notat FROM " + namn + " WHERE id = 2", []), "har \"sitat\", komma")
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM " + namn + " WHERE id = 4", []), "fleire" + nl + "linjer")
+
+    // ut: rå tekst er identisk med det PostgreSQL skriv
+    la rå = pg._copy_ut_data(c, "COPY (SELECT id, namn, notat, tal FROM " + namn + " ORDER BY id) TO STDOUT WITH (FORMAT csv)")
+    la fl = "fleire" + nl + "linjer"
+    hvis nl == "\n" { fl = "\"" + fl + "\"" }
+    assert_eq(rå, "1,Ola,vanleg,10\n2,Å;se,\"har \"\"sitat\"\", komma\",20\n3,Kari,\"\",\n4," + fl + ",x,40\n")
+    la rå_h = pg._copy_ut_data(c, "COPY (SELECT id, namn FROM " + namn + " WHERE id = 1) TO STDOUT WITH (FORMAT csv, HEADER, DELIMITER ';')")
+    assert_eq(rå_h, "id;namn\n1;Ola\n")
+
+    // ut → rader: "" (sitert tom) er ikkje NULL, tom ikkje-sitert er NULL
+    la ut = pg.copy_ut_csv_utan_overskrift(c, "COPY (SELECT id, namn, notat, tal FROM " + namn + " ORDER BY id) TO STDOUT WITH (FORMAT csv, HEADER)")
+    assert_eq(lengde(ut), 4)
+    assert_eq(ut[1][1], "Å;se")
+    assert_eq(ut[1][2], "har \"sitat\", komma")
+    assert_eq(ut[2][2], "")
+    assert_eq(ut[2][3], N)
+    assert_eq(ut[3][1], "fleire" + nl + "linjer")
+    la med = pg.copy_ut_csv(c, "COPY (SELECT id, namn FROM " + namn + " WHERE id = 1) TO STDOUT WITH (FORMAT csv, HEADER)")
+    assert_eq(lengde(med), 2)
+    assert_eq(med[0][0], "id")
+    assert_eq(med[1][1], "Ola")
+
+    // eigne skiljeteikn, sitatteikn og NULL-streng; gammal syntaks (WITH CSV …)
+    pg.execute_raw(c, "DELETE FROM " + namn)
+    la v2 = [["5", "a;b", "n1", "7"], ["6", "enkelt'sitat", "NA", N]]
+    assert_eq(pg.copy_inn_csv(c, "COPY " + namn + " FROM STDIN WITH (FORMAT csv, DELIMITER ';', QUOTE '''', NULL 'NA')", v2), 2)
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM " + namn + " WHERE id = 6", []), "enkelt'sitat")
+    la rå2 = pg._copy_ut_data(c, "COPY (SELECT id, namn, notat, tal FROM " + namn + " ORDER BY id) TO STDOUT WITH (FORMAT csv, DELIMITER ';', QUOTE '''', NULL 'NA')")
+    assert_eq(rå2, "5;'a;b';n1;7\n6;'enkelt''sitat';'NA';NA\n")
+    la ut2 = pg.copy_ut_csv(c, "COPY " + namn + " TO STDOUT WITH CSV DELIMITER ';' QUOTE '''' NULL AS 'NA'")
+    assert_eq(ut2[0][1], "a;b")
+    assert_eq(ut2[1][2], "NA")
+    assert_eq(ut2[1][3], N)
+
+    // tekstformat er framleis uendra
+    pg.execute_raw(c, "DELETE FROM " + namn)
+    assert_eq(pg.copy_inn(c, "COPY " + namn + " (id, namn) FROM STDIN", [["9", "tekst\tmed tab"]]), 1)
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM " + namn + " WHERE id = 9", []), "tekst\tmed tab")
+
+    // CSV-feil gir feilmelding, ikkje krasj
+    la feila = usann
+    prøv { pg.copy_inn_csv(c, "COPY finst_ikkje FROM STDIN WITH (FORMAT csv)", [["1"]]) } fang (e) { feila = sann }
+    assert(feila)
+    assert_eq(pg.query_int(c, "SELECT 1"), 1)
+    pg.execute_raw(c, "DROP TABLE " + namn)
+}
+
+funksjon start() -> heiltal {
+    // Rein enhetstest av kodeken (ingen tilkopling)
+    la v = csv.valg("COPY t FROM STDIN WITH (FORMAT csv, HEADER true, DELIMITER ';', NULL 'x')")
+    assert(v["csv"])
+    assert(v["header"])
+    assert_eq(v["delim"], ";")
+    assert_eq(v["null"], "x")
+    assert_eq(v["quote"], "\"")
+    la g = csv.valg("COPY t TO STDOUT CSV")
+    assert(g["csv"])
+    assert_eq(g["delim"], ",")
+    assert_eq(g["null"], "")
+    assert(ikkje csv.valg("COPY t FROM STDIN")["csv"])
+    assert_eq(csv.kod_rad(["a,b", csv.null_merke(), "", "ok", "sitat\"x"], g), "\"a,b\",,\"\",ok,\"sitat\"\"x\"")
+    la rader = csv.les_data("a,\"b,\"\"c\"\"\",,\"\"\nny,rad,,\n", g)
+    assert_eq(lengde(rader), 2)
+    assert_eq(rader[0][1], "b,\"c\"")
+    assert_eq(rader[0][2], csv.null_merke())
+    assert_eq(rader[0][3], "")
+    assert_eq(rader[1][0], "ny")
+
+    // pgserver
+    la db = norsdb.open("")
+    la s = srv.ny(db, "127.0.0.1", 0)
+    pg.sett_ventekrok(fun() -> srv.pump(s))
+    la c = pg.open_cfg("127.0.0.1", s["port"], "test", "hvem", "")
+    scenario(c, "csvtest", " ")
+    pg.close(c)
+    pg.fjern_ventekrok()
+    srv.stopp(s)
+
+    // ekte PostgreSQL
+    la dsn = miljo_hent("NORSCODE_PG_TEST_DSN")
+    hvis dsn == "" {
+        skriv("test_pg_copy_csv: pgserver OK, PostgreSQL hoppa over (NORSCODE_PG_TEST_DSN ikkje sett)\n")
+    } ellers {
+        la pc = pg.open(dsn)
+        scenario(pc, "norscode_csvtest", "\n")
+        pg.close(pc)
+        skriv("test_pg_copy_csv: OK (pgserver og PostgreSQL)\n")
+    }
+    returner 0
+}
