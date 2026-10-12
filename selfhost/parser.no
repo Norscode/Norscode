@@ -141,13 +141,127 @@ funksjon er_type_token(type)
     returner type == "IDENT" eller type == "TEKST" eller type == "HELTALL" eller type == "BOOL"
 slutt
 
+// ─── F43: annotasjonar ───────────────────────────────────────────────────────
+// `@namn` / `@namn(lit, lit, …)` framfor funksjon eller struktur (og framfor
+// strukturfelt). Argumenta er literalar: tekst, tal, sann/usann, null. Rein
+// metadata (sjå docs/REFLEKSJON.md): parseren legg dei i nøkkelen
+// `annotasjonar` på Funksjon/Struktur/Felt-noden som liste av
+// {"namn": tekst, "argument": [{"type": "tekst|heltall|desimaltall|bool|null", "verdi": …}]}.
+funksjon ann_literal(state)
+    la tok = gjeldende(state)
+    la t = tok["type"]
+    la linje = token_linje(tok)
+    hvis t == "STRING"
+        neste(state)
+        la v = token_verdi(tok)
+        hvis v == "__nclit__empty_" + "text_v1"
+            v = ""
+        slutt
+        returner {"type": "tekst", "verdi": v}
+    slutt
+    hvis t == "SANN"
+        neste(state)
+        returner {"type": "bool", "verdi": sann}
+    slutt
+    hvis t == "USANN"
+        neste(state)
+        returner {"type": "bool", "verdi": usann}
+    slutt
+    hvis t == "NULL"
+        neste(state)
+        returner {"type": "null", "verdi": null}
+    slutt
+    la negativ = usann
+    hvis t == "MINUS"
+        neste(state)
+        negativ = sann
+        tok = gjeldende(state)
+        t = tok["type"]
+    slutt
+    hvis t == "NUMBER"
+        neste(state)
+        la tv = tekst(token_verdi(tok))
+        hvis builtin.starts_with(tv, "0x") eller builtin.starts_with(tv, "0X")
+            parserfeil(state, "annotasjon: heksadesimalt tal er ikkje støtta (linje " + til_tekst(linje) + ")")
+        slutt
+        hvis negativ
+            tv = "-" + tv
+        slutt
+        hvis builtin.contains(tv, ".") eller builtin.contains(tv, "e") eller builtin.contains(tv, "E")
+            returner {"type": "desimaltall", "verdi": tv}
+        slutt
+        returner {"type": "heltall", "verdi": tv}
+    slutt
+    parserfeil(state, "annotasjonsargument må vere ein literal (tekst, tal, sann, usann eller null)")
+    returner null
+slutt
+
+funksjon les_annotasjon(state)
+    la at = forvent(state, "AT", "forventa @")
+    la nt = gjeldende(state)
+    la namn = tekst(token_verdi(nt))
+    la ok = nt["type"] != "STRING" og nt["type"] != "NUMBER" og lengde(namn) > 0
+    hvis ok
+        la c = builtin.char_code(builtin.slice(namn, 0, 1))
+        ok = (c >= 97 og c <= 122) eller (c >= 65 og c <= 90) eller c == 95 eller c >= 128
+    slutt
+    hvis ikkje ok
+        parserfeil(state, "forventa annotasjonsnamn etter @")
+    slutt
+    neste(state)
+    la ann = {"namn": namn, "argument": [], "linje": token_linje(at)}
+    hvis gjeldende(state)["type"] == "LPAREN" og token_linje(gjeldende(state)) == token_linje(nt)
+        neste(state)
+        mens gjeldende(state)["type"] != "RPAREN" og ikkje er_slutt(state)
+            legg_til(ann["argument"], ann_literal(state))
+            hvis gjeldende(state)["type"] == "COMMA"
+                neste(state)
+            ellers
+                bryt
+            slutt
+        slutt
+        forvent(state, "RPAREN", "forventa ) etter annotasjonsargument")
+    slutt
+    returner ann
+slutt
+
+// Festar ventande annotasjonar til deklarasjonen som vart parsa etter dei.
+funksjon ann_fest(state, rot)
+    la v = state["ann_ventar"]
+    hvis v == null eller lengde(v) == 0
+        returner 0
+    slutt
+    la n = state["ann_n"]
+    hvis lengde(rot["barn"]) <= n
+        returner 0
+    slutt
+    la d = rot["barn"][n]
+    hvis d["type"] != "Funksjon" og d["type"] != "Struktur"
+        state["ann_ventar"] = []
+        parserfeil(state, "annotasjonar kan berre stå framfor funksjon eller struktur (fann " + d["type"] + " på linje " + til_tekst(d["linje"]) + ")")
+    slutt
+    d["annotasjonar"] = v
+    state["ann_ventar"] = []
+    returner 0
+slutt
+
 funksjon parse_program(tokens)
     state = ny_state(tokens)
     rot = ny_node("Program", "", 1, 1)
     tests = []
 
+    state["ann_ventar"] = []
+    state["ann_n"] = 0
     mens ikkje er_slutt(state)
+        ann_fest(state, rot)
         type = gjeldende(state)["type"]
+        hvis type == "AT"
+            hvis lengde(state["ann_ventar"]) == 0
+                state["ann_n"] = lengde(rot["barn"])
+            slutt
+            legg_til(state["ann_ventar"], les_annotasjon(state))
+            fortsett
+        slutt
         hvis type == "ASYNC" eller type == "FUNKSJON"
             legg_barn(rot, parse_funksjon(state))
             fortsett
@@ -261,6 +375,10 @@ funksjon parse_program(tokens)
         legg_barn(rot, parse_setning(state))
     slutt
 
+    ann_fest(state, rot)
+    hvis lengde(state["ann_ventar"]) > 0
+        parserfeil(state, "annotasjon utan deklarasjon")
+    slutt
     rot["tests"] = tests
     // R2/F15: semantic.sjekk_konst treng berre gå gjennom AST-en når det finst konst.
     rot["har_konst"] = har_nokkel(state, "har_konst")
@@ -440,6 +558,10 @@ funksjon parse_struktur(state)
         // R3/F28: ein valfri type-annotasjon (`x: heltall`) blir lagra som nøklane
         // typeuttrykk/typetekst på Felt-noden (barna er uendra; runtime er erased).
         // R3/F31: `privat felt: type` — feltet er berre synleg i modulen.
+        felt_ann = []
+        mens gjeldende(state)["type"] == "AT"
+            legg_til(felt_ann, les_annotasjon(state))
+        slutt
         felt_privat = usann
         hvis gjeldende(state)["type"] == "IDENT" og token_verdi(gjeldende(state)) == "privat" og se_frem(state, 1)["type"] == "IDENT"
             neste(state)
@@ -449,6 +571,9 @@ funksjon parse_struktur(state)
         felt_node = ny_node("Felt", token_verdi(felt_tok), token_linje(felt_tok), token_kolonne(felt_tok))
         hvis felt_privat
             felt_node["privat"] = sann
+        slutt
+        hvis lengde(felt_ann) > 0
+            felt_node["annotasjonar"] = felt_ann
         slutt
         legg_barn(node, felt_node)
         hvis gjeldende(state)["type"] == "COLON"
