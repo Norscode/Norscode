@@ -36,14 +36,14 @@ Statiske syscall i `.text` (skanna med `tools/x86_64_syscall_skann.no`):
 write 1, read 0, open 2, close 3, stat 4, lseek 8, access 21, unlink 87, rmdir 84, mkdir 83,
 chmod 90, nanosleep 35, clock_gettime 228, getrandom 318, exit 60 — plus (i std-vegane)
 socket 41, connect 42, accept 43, sendto 44, recvfrom 45, bind 49, listen 50, getsockname 51,
-setsockopt 54, poll 7, ppoll 271, accept4 288, pipe2 293, wait4 61, spawn 4097, krypto 4098,
+setsockopt 54, poll 7, ppoll 271, accept4 288, pipe2 293, wait4 61, kill 62, spawn 4097, krypto 4098,
 og mmap 9 / munmap 11 (skratsj for spawn/socket/argon2 og straum-lesaren i `fil_les`; krev
 MINNE-kapabilitet). Aldri `brk` 12, `clone` 56, `futex` 202, `fork` 57, `execve` 59.
 
 Dei fleste av desse går ikkje som statiske `syscall` men gjennom **sys6-porten**, som er sist i
 runtimen: `cmp rax,imm32; je .gjer` per tillate nummer, deretter `mov rax,-38; ret`, og
 `.gjer: syscall; ret`. Porten er den einaste `syscall` med nummer frå register. Tillate nummer
-(`nos_sys6_tillatne`): 0 1 2 3 4 5 7 8 9 11 21 22 24 35 39 41–55 60 61 83 84 87 90 110 228 231
+(`nos_sys6_tillatne`): 0 1 2 3 4 5 7 8 9 11 21 22 24 35 39 41–55 60 61 62 83 84 87 90 110 228 231
 271 288 293 318 4097. Utover lista over gjeld dette kjerne-delmengda frå OS-README (fstat 5,
 pipe 22, sched_yield 24, getpid 39, getppid 110, exit_group 231) og dei resterande
 sokkel-kalla (sendmsg/recvmsg/shutdown/getpeername/socketpair/getsockopt 46–48, 52, 53, 55).

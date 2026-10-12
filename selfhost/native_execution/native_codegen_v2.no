@@ -3941,6 +3941,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])       // mov eax,228
         copy(bytes, [0x0F, 0x05])                         // syscall
     }
+    // FEILKONTRAKT (punkt 6, som random_byte): feilar clock_gettime (rax < 0, t.d. seccomp/
+    // manglande klokke-kapabilitet) blir svaret −errno, ikkje søppel frå uinitialisert stakk.
+    copy(bytes, [0x48, 0x85, 0xC0, 0x78, 0x29])           // test rax,rax; js feil (+41)
     copy(bytes, [0x48, 0x8B, 0x04, 0x24])                 // mov rax,[rsp] (sek)
     copy(bytes, [0x48, 0x69, 0xC0, 0xE8, 0x03, 0x00, 0x00]) // imul rax,rax,1000
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
@@ -3951,7 +3954,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x01, 0xF8])                       // add rax,rdi
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
-    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
+    copy(bytes, [0xEB, 0x07])                             // jmp ferdig (+7)
+    copy(bytes, [0x48, 0x89, 0xC7])                       // feil: mov rdi,rax (−errno)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // ferdig: rax = int-NcVal
     legg_til(bytes, 0xC3)                                 // ret
 
     // ── random_byte() → int 0..255 via getrandom(2) (x86-64 #318) ────────────────
@@ -10669,7 +10675,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 funksjon nos_sys6_tillatne() -> liste_heiltall {
     returner [0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 21, 22, 24, 35, 39,
               41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-              60, 61, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
+              60, 61, 62, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
 }
 
 funksjon nos_nr_tillate(nr: heiltall) -> boolsk {
@@ -11596,6 +11602,8 @@ funksjon er_tryggleiks_builtin(fn_nm: tekst) -> boolsk {
 la builtin_rapport_uloyste: liste_tekst = []
 // Modulen til funksjonen kompiler_fn_v2 held på med (sys6-porten for norscodeos-x86_64).
 la nos_gjeldande_modul: tekst = ""
+// Namnet på funksjonen som blir kompilert (feilmelding for ukjende kall, punkt 9).
+la nos_gjeldande_fn: tekst = ""
 
 funksjon builtin_rapport_noter(fn_nm: tekst, nargs: heiltall) -> heiltall {
     hvis miljo_hent("NC_BUILTIN_REPORT") != "1" { returner 0 }
@@ -12159,12 +12167,17 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         } ellers {
             copy(buf, [0x31, 0xFF, 0x48, 0x89, 0xE6, 0x0F, 0x05])
         }
+        // FEILKONTRAKT (punkt 6): clock_gettime < 0 → tid_ms() gjev −errno (som random_byte),
+        // ikkje søppel frå uinitialisert stakk. Epoke-ms er alltid ≥ 0, so < 0 er eintydig feil.
+        copy(buf, [0x48, 0x85, 0xC0, 0x78, 0x25])                                    // test rax,rax; js feil (+37)
         copy(buf, [0x48, 0x69, 0x3C, 0x24])
         u32(buf, 1000)
         copy(buf, [0x48, 0x8B, 0x44, 0x24, 0x08, 0x31, 0xD2])
         copy(buf, [0x48, 0xB9])
         u64(buf, 1000000)
         copy(buf, [0x48, 0xF7, 0xF1, 0x48, 0x01, 0xC7, 0x48, 0x83, 0xC4, 0x10])
+        copy(buf, [0xEB, 0x07])                                                      // jmp ferdig (+7)
+        copy(buf, [0x48, 0x89, 0xC7, 0x48, 0x83, 0xC4, 0x10])                        // feil: mov rdi,rax; add rsp,16
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)
         returner
@@ -12469,6 +12482,14 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         // gc-litmus) har ikkje env.write → miljo_sett kastar Sikkerheitsfeil. Då
         // skriv vi berre åtvaringa utan dedup.
         builtin_rapport_noter(fn_nm, nargs)
+        // Punkt 9 (norscodeos-x86_64): eit ukjent/uløyst kall er KOMPILERINGSFEIL, ikkje stille
+        // null-fallback — på OS-målet finst ingen VM-fallback-krok som kunne ha svart. Gammal
+        // åtferd (null-fallback + åtvaring) med NC_UKJENT_KALL=null. Andre mål er uendra.
+        hvis ER_NOS() og miljo_hent("NC_UKJENT_KALL") != "null" {
+            kast "native codegen (norscodeos-x86_64): ukjent kall " + fn_nm + "/" + tekst_fra_heltall(nargs) +
+                 " i funksjonen " + nos_gjeldande_fn + " (modul «" + nos_gjeldande_modul +
+                 "») har ingen rute i bunten; null-fallback er av på OS-målet (NC_UKJENT_KALL=null gjev gammal åtferd)"
+        }
         // a12fix: tryggleiksbuiltins utan rute er BYGGFEIL, ikkje null-fallback. Eit
         // AOT-program med builtin.random_hex men utan std.native_gap fekk token == "" utan
         // unnatak (CSRF-/sesjons-/MFA-token tomme); pbkdf2/argon2id ville gje "" som hash.
@@ -12872,6 +12893,7 @@ funksjon kompiler_v2(ncb_json) {
         la m_def = fns[m_fn]
         la m_vars = samle_vars_fn(m_def)
         hvis fi2 < 100 { native_codegen_trace("målepass vars=" + tekst_fra_heltall(fi2)) }
+        nos_gjeldande_fn = m_fn
         la m_code = kompiler_fn_v2(m_def, m_vars, fn_vas, rd_offs,
             fn_vas[m_fn], gc_safepoint_va, atomic_vas, global_vas)
         hvis fi2 < 100 { native_codegen_trace("målepass kode=" + tekst_fra_heltall(fi2)) }
@@ -12946,6 +12968,7 @@ funksjon kompiler_v2(ncb_json) {
         la fn: tekst = sorted[fi3]
         la fn_def2 = fns[fn]
         la fn_vars = samle_vars_fn(fn_def2)
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def2, fn_vars, fn_vas, rd_offs,
             TEXT_VA() + lengde(text), gc_safepoint_va, atomic_vas, global_vas)
         copy(text, fn_code)
@@ -13418,6 +13441,7 @@ funksjon ncval_x86_measure_with(oppsett, start: heiltall, count: heiltall) -> or
         la fn: tekst = sorted[fi]
         la fn_def = fns[fn]
         la fn_vars = samle_vars_fn(fn_def)
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def, fn_vars, placeholder, rd_offs,
             TEXT_VA(), gc_safepoint_va, atomic_vas, global_vas)
         sizes[fn] = lengde(fn_code)
@@ -13449,6 +13473,7 @@ funksjon ncval_x86_emit_with(oppsett, sizes, start: heiltall, count: heiltall) -
         la fn_def = fns[fn]
         la fn_vars = samle_vars_fn(fn_def)
         // eiga_va = den endelege VA-en for denne funksjonen (= fn_vas[fn]).
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def, fn_vars, fn_vas, rd_offs,
             fn_vas[fn], gc_safepoint_va, atomic_vas, global_vas)
         copy(bytes, fn_code)
