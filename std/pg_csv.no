@@ -1,0 +1,226 @@
+# pg_csv.no — CSV-format for PostgreSQL COPY (G6). Delt av std.pg (klient) og std.pgserver (tenar).
+#
+#   la v = csv.valg("COPY t (a, b) FROM STDIN WITH (FORMAT csv, HEADER, DELIMITER ';', NULL 'NULL')")
+#   la linje = csv.kod_rad(["a;b", csv.null_merke(), ""], v)      # "\"a;b\";NULL;\"\""
+#   la rader = csv.les_data(tekst, v)                             # liste av liste<tekst>; NULL er csv.null_merke()
+#
+# Støtta vilkår: FORMAT csv|text, HEADER [true|false|on|off], DELIMITER 'c', QUOTE 'c', ESCAPE 'c', NULL 'x',
+# og den gamle forma «COPY … WITH CSV HEADER DELIMITER ',' NULL AS 'x'». ENCODING, FORCE_* o.l. blir ignorerte.
+# Same verdi som pg.sql_null() (NUL-teikn + «pg:null»).
+
+funksjon null_merke() -> tekst {
+    returner builtin.chr(0) + "pg:null"
+}
+
+# Del opp valdelen i symbol: ord og siterte literalar. Gir liste av {"t": tekst, "lit": boolsk}.
+funksjon _symbol(s: tekst) -> liste {
+    la ut = []
+    la ord: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        hvis ch == "'" {
+            hvis lengde(ord) > 0 { legg_til(ut, {"t": builtin.join(ord, ""), "lit": usann}); ord = [] }
+            la lit: liste_tekst = []
+            i = i + 1
+            la ferdig = usann
+            mens i < lengde(s) og ikkje ferdig {
+                la c2 = builtin.slice(s, i, i + 1)
+                hvis c2 == "'" {
+                    hvis i + 1 < lengde(s) og builtin.slice(s, i + 1, i + 2) == "'" {
+                        legg_til(lit, "'")
+                        i = i + 2
+                    } ellers {
+                        ferdig = sann
+                        i = i + 1
+                    }
+                } ellers {
+                    legg_til(lit, c2)
+                    i = i + 1
+                }
+            }
+            legg_til(ut, {"t": builtin.join(lit, ""), "lit": sann})
+        } ellers hvis ch == " " eller ch == "," eller ch == "(" eller ch == ")" eller ch == "\n" eller ch == "\t" eller ch == ";" {
+            hvis lengde(ord) > 0 { legg_til(ut, {"t": builtin.join(ord, ""), "lit": usann}); ord = [] }
+            i = i + 1
+        } ellers {
+            legg_til(ord, ch)
+            i = i + 1
+        }
+    }
+    hvis lengde(ord) > 0 { legg_til(ut, {"t": builtin.join(ord, ""), "lit": usann}) }
+    returner ut
+}
+
+# Tolk «\t», «\\» i delimiter-literalen (E'\t' blir allereie sendt som «\t» eller TAB).
+funksjon _teikn(s: tekst, standard: tekst) -> tekst {
+    hvis s == "" { returner standard }
+    hvis s == "\\t" { returner "\t" }
+    returner builtin.slice(s, 0, 1)
+}
+
+# Les vilkåra frå COPY-setninga. Gir {"csv", "header", "delim", "quote", "esc", "null"}.
+funksjon valg(sql: tekst) -> ordbok {
+    la u = builtin.upper(sql)
+    la start = builtin.index_of(u, " FROM STDIN")
+    la lengd = 11
+    hvis start < 0 { start = builtin.index_of(u, " TO STDOUT"); lengd = 10 }
+    la v = {"csv": usann, "header": usann, "delim": "\t", "quote": "\"", "esc": "", "null": "\\N"}
+    hvis start < 0 { returner v }
+    la sym = _symbol(builtin.slice(sql, start + lengd, lengde(sql)))
+    la delim_sett = usann
+    la null_sett = usann
+    la i: heltall = 0
+    mens i < lengde(sym) {
+        la t = builtin.upper(sym[i]["t"])
+        hvis sym[i]["lit"] {
+            i = i + 1
+            fortsett
+        }
+        hvis t == "FORMAT" og i + 1 < lengde(sym) {
+            hvis builtin.upper(sym[i + 1]["t"]) == "CSV" { v["csv"] = sann }
+            i = i + 2
+            fortsett
+        }
+        hvis t == "CSV" { v["csv"] = sann }
+        hvis t == "HEADER" {
+            v["header"] = sann
+            hvis i + 1 < lengde(sym) og ikkje sym[i + 1]["lit"] {
+                la n = builtin.upper(sym[i + 1]["t"])
+                hvis n == "FALSE" eller n == "OFF" eller n == "0" { v["header"] = usann; i = i + 1 }
+                hvis n == "TRUE" eller n == "ON" eller n == "1" eller n == "MATCH" { i = i + 1 }
+            }
+        }
+        hvis t == "DELIMITER" eller t == "QUOTE" eller t == "ESCAPE" eller t == "NULL" {
+            la j = i + 1
+            hvis j < lengde(sym) og builtin.upper(sym[j]["t"]) == "AS" og ikkje sym[j]["lit"] { j = j + 1 }
+            hvis j < lengde(sym) og sym[j]["lit"] {
+                hvis t == "DELIMITER" { v["delim"] = _teikn(sym[j]["t"], "\t"); delim_sett = sann }
+                hvis t == "QUOTE" { v["quote"] = _teikn(sym[j]["t"], "\"") }
+                hvis t == "ESCAPE" { v["esc"] = _teikn(sym[j]["t"], "") }
+                hvis t == "NULL" { v["null"] = sym[j]["t"]; null_sett = sann }
+                i = j
+            }
+        }
+        i = i + 1
+    }
+    hvis v["csv"] {
+        hvis ikkje delim_sett { v["delim"] = "," }
+        hvis ikkje null_sett { v["null"] = "" }
+    }
+    hvis v["esc"] == "" { v["esc"] = v["quote"] }
+    returner v
+}
+
+# Éi CSV-linje (utan linjeskift) frå celler. NULL-merket blir NULL-strengen utan sitat.
+funksjon kod_rad(celler, v) -> tekst {
+    la ut: liste_tekst = []
+    la q = v["quote"]
+    la i: heltall = 0
+    mens i < lengde(celler) {
+        la c = celler[i]
+        hvis c == null_merke() {
+            legg_til(ut, v["null"])
+        } ellers {
+            la trengst = c == v["null"] eller c == "\\." eller builtin.index_of(c, v["delim"]) >= 0 eller builtin.index_of(c, q) >= 0 eller builtin.index_of(c, "\n") >= 0 eller builtin.index_of(c, "\r") >= 0
+            hvis c == "" og v["null"] == "" { trengst = sann }
+            hvis trengst {
+                la inne = c
+                hvis builtin.index_of(inne, q) >= 0 { inne = tekst_erstatt(inne, q, v["esc"] + q) }
+                hvis v["esc"] != q og builtin.index_of(inne, v["esc"]) >= 0 {
+                    # eigen escape-teikn som ikkje er sitatteiknet må dobblast
+                    inne = c
+                    la deler = builtin.split(c, v["esc"])
+                    inne = builtin.join(deler, v["esc"] + v["esc"])
+                    inne = tekst_erstatt(inne, q, v["esc"] + q)
+                }
+                legg_til(ut, q + inne + q)
+            } ellers {
+                legg_til(ut, c)
+            }
+        }
+        i = i + 1
+    }
+    returner builtin.join(ut, v["delim"])
+}
+
+# Lesing av heile CSV-teksten. Rader med eitt felt «\.» (slutt-markør) blir hoppa over.
+funksjon les_data(data: tekst, v) -> liste {
+    la rader = []
+    la rad = []
+    la fld: liste_tekst = []
+    la n = lengde(data)
+    la q = v["quote"]
+    la d = v["delim"]
+    la esc = v["esc"]
+    la i_q = usann
+    la var_sitert = usann
+    la har_innhald = usann
+    la i: heltall = 0
+    mens i < n {
+        la ch = builtin.slice(data, i, i + 1)
+        la neste = ""
+        hvis i + 1 < n { neste = builtin.slice(data, i + 1, i + 2) }
+        hvis i_q {
+            hvis esc != q og ch == esc og neste == q {
+                legg_til(fld, q)
+                i = i + 2
+            } ellers hvis ch == q {
+                hvis neste == q {
+                    legg_til(fld, q)
+                    i = i + 2
+                } ellers {
+                    i_q = usann
+                    i = i + 1
+                }
+            } ellers {
+                legg_til(fld, ch)
+                i = i + 1
+            }
+        } ellers {
+            hvis ch == q {
+                i_q = sann
+                var_sitert = sann
+                har_innhald = sann
+                i = i + 1
+            } ellers hvis ch == d {
+                legg_til(rad, _felt(fld, var_sitert, v))
+                fld = []
+                var_sitert = usann
+                har_innhald = sann
+                i = i + 1
+            } ellers hvis ch == "\n" eller (ch == "\r" og neste == "\n") {
+                hvis ch == "\r" { i = i + 1 }
+                hvis har_innhald eller lengde(fld) > 0 {
+                    legg_til(rad, _felt(fld, var_sitert, v))
+                    _legg_rad(rader, rad)
+                }
+                rad = []
+                fld = []
+                var_sitert = usann
+                har_innhald = usann
+                i = i + 1
+            } ellers {
+                legg_til(fld, ch)
+                har_innhald = sann
+                i = i + 1
+            }
+        }
+    }
+    hvis har_innhald eller lengde(fld) > 0 {
+        legg_til(rad, _felt(fld, var_sitert, v))
+        _legg_rad(rader, rad)
+    }
+    returner rader
+}
+
+funksjon _felt(fld, sitert: boolsk, v) -> tekst {
+    la s = builtin.join(fld, "")
+    hvis ikkje sitert og s == v["null"] { returner null_merke() }
+    returner s
+}
+
+funksjon _legg_rad(rader, rad) {
+    hvis lengde(rad) == 1 og rad[0] == "\\." { returner }
+    legg_til(rader, rad)
+}

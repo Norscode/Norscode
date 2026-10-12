@@ -1,0 +1,683 @@
+# tls13_klient.no - TLS 1.3-KLIENT (RFC 8446) i rein Norscode, til ekte tenarar (OpenSSL/Postgres).
+#
+# Byte-inn/byte-ut tilstandsmaskin utan eigen I/O: start() gir ClientHello-recorden,
+# motta() tek imot tenarbyte og gir {status, ut, feil}, så krypter_app()/dekrypter_straum()
+# for applikasjonsdata. Sokkelen blir drive av kallaren (sjå std/pg.no).
+#
+# Suite:   TLS_CHACHA20_POLY1305_SHA256 (standard), TLS_AES_128_GCM_SHA256 (valfri, treg i VM).
+# Gruppe:  secp256r1 (std.p256, ~5 s per skalarmultiplikasjon i tolka VM). X25519 er ikkje med:
+#          Postgres sin standard (ssl_ecdh_curve = prime256v1) godtek berre P-256.
+# Sigalg:  rsa_pss_rsae_sha256, ecdsa_secp256r1_sha256, ed25519 (CertificateVerify blir ALLTID verifisert).
+# Tillit:  ca_pem (innhaldet i ei PEM-fil): leaf identisk med, eller signert av (evt. via mellomsertifikat
+#          tenaren sender), eit sertifikat i fila + gyldigheitstid + vertsnamn (verify-full).
+#          Det finst ingen modus som hoppar over verifiseringa.
+# Ikkje støtta: HelloRetryRequest (gir tydeleg feil), PSK/0-RTT, klientsertifikat, AES-256-GCM/SHA-384.
+bruk std.tls13_handshake som hs
+bruk std.tls13_record som rec
+bruk std.p256 som ec
+bruk std.sha256 som sha
+bruk std.x509 som x509
+bruk std.ed25519 som eddsa
+bruk std.base64 som base64
+
+funksjon SUITE_CHACHA20() -> heiltall { returner 4867 }   # 0x1303
+funksjon SUITE_AES128() -> heiltall { returner 4865 }     # 0x1301
+funksjon GRUPPE_P256() -> heiltall { returner 23 }        # 0x0017
+funksjon SIG_RSA_PSS() -> heiltall { returner 2052 }      # 0x0804
+funksjon SIG_ECDSA() -> heiltall { returner 1027 }        # 0x0403
+
+# ── Små byte-hjelparar ──────────────────────────────────────────────────────
+funksjon _kopi(a: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    returner ut
+}
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut = _kopi(a)
+    la i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la d = 0
+    la i = 0
+    mens i < lengde(a) { d = d | (a[i] ^ b[i]) i = i + 1 }
+    returner d == 0
+}
+funksjon _del(d: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    returner builtin.slice(d, a, b)
+}
+funksjon _hex_til_bytes(h: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la ds = "0123456789abcdef"
+    la i = 0
+    mens i + 1 < lengde(h) {
+        legg_til(ut, builtin.index_of(ds, builtin.slice(h, i, i + 1)) * 16 + builtin.index_of(ds, builtin.slice(h, i + 1, i + 2)))
+        i = i + 2
+    }
+    returner ut
+}
+funksjon _tekst_bytes(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(s) { legg_til(ut, builtin.char_code(builtin.slice(s, i, i + 1)) & 255) i = i + 1 }
+    returner ut
+}
+funksjon _tilfeldig(n: heiltall) -> liste_heiltall {
+    returner _hex_til_bytes(builtin.random_hex(n))
+}
+
+# ── Hash/HMAC/HKDF med det native SHA-256-atomet (reservevei: rein std.sha256) ─
+funksjon _sha(data: liste_heiltall) -> liste_heiltall {
+    la h = ""
+    prøv { h = builtin.sha256_bytes(data) } fang (e) { h = "" }
+    hvis lengde(h) != 64 { h = sha.hash_bytes(data) }
+    returner _hex_til_bytes(h)
+}
+
+funksjon _hmac(nokkel: liste_heiltall, melding: liste_heiltall) -> liste_heiltall {
+    la k = _kopi(nokkel)
+    hvis lengde(k) > 64 { k = _sha(k) }
+    mens lengde(k) < 64 { legg_til(k, 0) }
+    la ipad: liste_heiltall = []
+    la opad: liste_heiltall = []
+    la i = 0
+    mens i < 64 { legg_til(ipad, k[i] ^ 54) legg_til(opad, k[i] ^ 92) i = i + 1 }
+    i = 0
+    mens i < lengde(melding) { legg_til(ipad, melding[i]) i = i + 1 }
+    la indre = _sha(ipad)
+    i = 0
+    mens i < 32 { legg_til(opad, indre[i]) i = i + 1 }
+    returner _sha(opad)
+}
+
+funksjon _hkdf_extract(salt: liste_heiltall, ikm: liste_heiltall) -> liste_heiltall {
+    la s = salt
+    hvis lengde(s) == 0 {
+        s = []
+        la i = 0
+        mens i < 32 { legg_til(s, 0) i = i + 1 }
+    }
+    returner _hmac(s, ikm)
+}
+
+# HKDF-Expand-Label (RFC 8446 §7.1), utdata <= 32 byte.
+funksjon _expand_label(secret: liste_heiltall, label: tekst, context: liste_heiltall, lengde_ut: heiltall) -> liste_heiltall {
+    la full = _tekst_bytes("tls13 " + label)
+    la info: liste_heiltall = [(lengde_ut >> 8) & 255, lengde_ut & 255, lengde(full)]
+    la i = 0
+    mens i < lengde(full) { legg_til(info, full[i]) i = i + 1 }
+    legg_til(info, lengde(context))
+    i = 0
+    mens i < lengde(context) { legg_til(info, context[i]) i = i + 1 }
+    legg_til(info, 1)
+    la blokk = _hmac(secret, info)
+    returner _del(blokk, 0, lengde_ut)
+}
+
+funksjon _derive(secret: liste_heiltall, label: tekst, thash: liste_heiltall) -> liste_heiltall {
+    returner _expand_label(secret, label, thash, 32)
+}
+
+funksjon _nullbytes(n: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < n { legg_til(ut, 0) i = i + 1 }
+    returner ut
+}
+
+funksjon _trafikknokkel(suite: heiltall, secret: liste_heiltall) -> ordbok {
+    la lengd = 32
+    hvis suite == SUITE_AES128() { lengd = 16 }
+    returner {"key": _expand_label(secret, "key", [], lengd), "iv": _expand_label(secret, "iv", [], 12)}
+}
+
+# ── Record-lag ──────────────────────────────────────────────────────────────
+funksjon _krypter(suite: heiltall, k: ordbok, seq: heiltall, typ: heiltall, data: liste_heiltall) -> liste_heiltall {
+    hvis suite == SUITE_AES128() { returner rec.krypter_post_aesgcm(k["key"], k["iv"], seq, typ, data) }
+    returner rec.krypter_post(k["key"], k["iv"], seq, typ, data)
+}
+funksjon _dekrypter(suite: heiltall, k: ordbok, seq: heiltall, post: liste_heiltall) -> ordbok {
+    hvis suite == SUITE_AES128() { returner rec.dekrypter_post_aesgcm(k["key"], k["iv"], seq, post) }
+    returner rec.dekrypter_post(k["key"], k["iv"], seq, post)
+}
+
+funksjon _rec_klar(typ: heiltall, body: liste_heiltall) -> liste_heiltall {
+    la n = lengde(body)
+    returner _saman([typ & 255, 3, 3, (n >> 8) & 255, n & 255], body)
+}
+
+# Hent ut komplette records frå inbuf: gir {records, rest}.
+funksjon _split(buf: liste_heiltall) -> ordbok {
+    la records: liste = []
+    la p = 0
+    mens p + 5 <= lengde(buf) {
+        la len = (buf[p + 3] << 8) | buf[p + 4]
+        hvis p + 5 + len > lengde(buf) { bryt }
+        legg_til(records, _del(buf, p, p + 5 + len))
+        p = p + 5 + len
+    }
+    returner {"records": records, "rest": _del(buf, p, lengde(buf))}
+}
+
+# ── Tid (UTC ISO "YYYY-MM-DDTHH:MM:SSZ") ────────────────────────────────────
+funksjon _tosifra(n: heiltall) -> tekst {
+    hvis n < 10 { returner "0" + tekst(n) }
+    returner tekst(n)
+}
+funksjon iso_frå_epoke_ms(ms: heiltall) -> tekst {
+    la sek = ms / 1000
+    la dagar = sek / 86400
+    la rest = sek - dagar * 86400
+    # sivil dato frå dagar sidan 1970-01-01 (Howard Hinnant)
+    la z = dagar + 719468
+    la era = z / 146097
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = mp + 3
+    hvis mp >= 10 { m = mp - 9 }
+    hvis m <= 2 { y = y + 1 }
+    returner tekst(y) + "-" + _tosifra(m) + "-" + _tosifra(d) + "T" + _tosifra(rest / 3600) + ":" + _tosifra((rest % 3600) / 60) + ":" + _tosifra(rest % 60) + "Z"
+}
+
+# ── PEM og sertifikat ───────────────────────────────────────────────────────
+# Alle «BEGIN CERTIFICATE»-blokker i ein PEM-tekst som DER-byte-lister.
+funksjon pem_sertifikat(pem: tekst) -> liste {
+    la ut: liste = []
+    la delar = builtin.split(pem, "-----BEGIN CERTIFICATE-----")
+    la i = 1
+    mens i < lengde(delar) {
+        la slutt = builtin.split(delar[i], "-----END CERTIFICATE-----")
+        hvis lengde(slutt) >= 2 {
+            la body = builtin.replace(builtin.replace(builtin.replace(builtin.replace(slutt[0], "\n", ""), "\r", ""), " ", ""), "\t", "")
+            la der = base64.dekod_bytes(body)
+            hvis lengde(der) > 0 { legg_til(ut, der) }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _er_ip(h: tekst) -> boolsk {
+    hvis lengde(h) == 0 { returner usann }
+    hvis builtin.contains(h, ":") { returner sann }
+    la i = 0
+    mens i < lengde(h) {
+        la c = builtin.char_code(builtin.slice(h, i, i + 1))
+        hvis ikkje ((c >= 48 og c <= 57) eller c == 46) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# Vertsnamn mot SAN (DNS med enkel wildcard, IP) og CN berre om sertifikatet ikkje har SAN.
+funksjon vert_matchar(info: ordbok, hostname: tekst) -> boolsk {
+    hvis hostname == "" { returner usann }
+    la hn = builtin.lower(hostname)
+    la sans = info["sans"]
+    la ip = _er_ip(hostname)
+    la har_san = lengde(sans) > 0
+    la i = 0
+    mens i < lengde(sans) {
+        la san = sans[i]
+        hvis ip {
+            hvis builtin.starts_with(san, "IP:") {
+                hvis builtin.slice(san, 3, lengde(san)) == hostname { returner sann }
+            }
+        } ellers hvis builtin.starts_with(san, "DNS:") {
+            la navn = builtin.lower(builtin.slice(san, 4, lengde(san)))
+            hvis navn == hn { returner sann }
+            hvis builtin.starts_with(navn, "*.") {
+                la suffiks = builtin.slice(navn, 1, lengde(navn))
+                hvis builtin.ends_with(hn, suffiks) {
+                    la fram = builtin.slice(hn, 0, lengde(hn) - lengde(suffiks))
+                    hvis lengde(fram) > 0 og ikkje builtin.contains(fram, ".") { returner sann }
+                }
+            }
+        }
+        i = i + 1
+    }
+    hvis har_san eller ip { returner usann }
+    # Ingen SAN: CN (utdatert, men nødvendig for gamle sertifikat)
+    la delar = builtin.split(info["subject"], ",")
+    i = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        hvis builtin.starts_with(d, "CN=") {
+            hvis builtin.lower(builtin.slice(d, 3, lengde(d))) == hn { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+# Sjekk gyldigheitstid for eit sertifikat (ISO-strengar kan samanliknast leksikografisk).
+funksjon _tid_ok(info: ordbok, no_iso: tekst) -> boolsk {
+    hvis no_iso < info["not_before"] { returner usann }
+    hvis no_iso > info["not_after"] { returner usann }
+    returner sann
+}
+
+# Tillit: kjeda (leaf fyrst) må ende i eit sertifikat frå ankerlista (identisk eller signert av).
+# Gir "" ved suksess, ellers feilmelding.
+funksjon _sjekk_tillit(kjede: liste, ankere: liste, no_iso: tekst) -> tekst {
+    hvis lengde(ankere) == 0 { returner "ingen sertifikat i ca_fil" }
+    la i = 0
+    mens i < lengde(kjede) {
+        la c = kjede[i]
+        la info = x509.les_der(c)
+        hvis info["status"] != "ok" { returner "kunne ikkje lese sertifikat " + tekst(i) + " frå tenaren" }
+        hvis ikkje _tid_ok(info, no_iso) {
+            returner "sertifikat " + tekst(i) + " frå tenaren er utanfor gyldigheitstida (" + info["not_before"] + " .. " + info["not_after"] + ")"
+        }
+        la a = 0
+        mens a < lengde(ankere) {
+            hvis _lik(c, ankere[a]) { returner "" }
+            a = a + 1
+        }
+        a = 0
+        mens a < lengde(ankere) {
+            hvis x509.verifiser_signert_av(c, ankere[a]) {
+                la ainfo = x509.les_der(ankere[a])
+                hvis ainfo["status"] == "ok" og _tid_ok(ainfo, no_iso) { returner "" }
+                returner "CA-sertifikatet i ca_fil er utgått"
+            }
+            a = a + 1
+        }
+        # Ikkje knytt til ankera: er det signert av neste sertifikat tenaren sende?
+        hvis i + 1 >= lengde(kjede) { returner "sertifikatet frå tenaren er ikkje signert av noko sertifikat i ca_fil" }
+        hvis ikkje x509.verifiser_signert_av(c, kjede[i + 1]) { returner "sertifikatkjeda frå tenaren er ugyldig" }
+        i = i + 1
+    }
+    returner "sertifikatkjeda frå tenaren er ikkje knytt til ca_fil"
+}
+
+# ── Sesjon ──────────────────────────────────────────────────────────────────
+# opts: hostname (tekst), ca_pem (tekst, PEM-innhald), valfritt: suites (liste_heiltall),
+#       ecdh_priv (32 byte, til testar), random (32 byte, til testar), no_iso (tekst, til testar).
+funksjon ny(opts: ordbok) -> ordbok {
+    la priv: liste_heiltall = []
+    hvis har_nokkel(opts, "ecdh_priv") {
+        priv = opts["ecdh_priv"]
+    } ellers {
+        la forsok = 0
+        mens forsok < 16 {
+            priv = _tilfeldig(32)
+            hvis ec.privat_gyldig(priv) { bryt }
+            forsok = forsok + 1
+        }
+    }
+    la suites: liste_heiltall = [SUITE_CHACHA20()]
+    hvis har_nokkel(opts, "suites") { suites = opts["suites"] }
+    la rnd: liste_heiltall = []
+    hvis har_nokkel(opts, "random") { rnd = opts["random"] } ellers { rnd = _tilfeldig(32) }
+    la no_iso = ""
+    hvis har_nokkel(opts, "no_iso") { no_iso = opts["no_iso"] } ellers { no_iso = iso_frå_epoke_ms(tid_ms()) }
+    la ankere: liste = pem_sertifikat(opts["ca_pem"])
+    la sesjon = {
+        "fase": "start", "hostname": opts["hostname"], "ankere": ankere, "no_iso": no_iso,
+        "priv": priv, "random": rnd, "suites": suites, "suite": 0,
+        "transcript": [], "inbuf": [], "hs_buf": [], "app_buf": [],
+        "seq_r": 0, "seq_w": 0, "seq_r_hs": 0,
+        "kjede": [], "th_cert": [], "cert_info": {}, "cert_nokkel": {}, "peer_verified": usann, "peer_subject": "",
+        "cipher": "", "tls_version": "", "lukka": usann
+    }
+    hvis har_nokkel(opts, "ecdh_pub") { sesjon["pub"] = opts["ecdh_pub"] }
+    hvis har_nokkel(opts, "profil") { sesjon["profil"] = "" sesjon["t0"] = tid_ms() }
+    returner sesjon
+}
+
+# ClientHello som record (plaintext, type 22).
+funksjon start(s: ordbok) -> liste_heiltall {
+    # «pub» kan vere gitt på førehand (testar); elles reknar vi ut k*G.
+    la pub: liste_heiltall = []
+    hvis har_nokkel(s, "pub") { pub = s["pub"] } ellers { pub = ec.offentleg(s["priv"]) }
+    s["pub"] = pub
+    la ext: liste_heiltall = []
+    hvis ikkje _er_ip(s["hostname"]) og lengde(s["hostname"]) > 0 {
+        la entry: liste_heiltall = [0]
+        hs._legg(entry, hs._vec16(_tekst_bytes(s["hostname"])))
+        hs._legg(ext, hs._ext(hs.EXT_SERVER_NAME(), hs._vec16(entry)))
+    }
+    hs._legg(ext, hs._ext(hs.EXT_SUPPORTED_GROUPS(), hs._vec16(hs._u16(GRUPPE_P256()))))
+    la sigalgs: liste_heiltall = []
+    hs._legg(sigalgs, hs._u16(SIG_RSA_PSS()))
+    hs._legg(sigalgs, hs._u16(SIG_ECDSA()))
+    hs._legg(sigalgs, hs._u16(hs.SIG_ED25519()))
+    hs._legg(ext, hs._ext(hs.EXT_SIG_ALGS(), hs._vec16(sigalgs)))
+    hs._legg(ext, hs._ext(hs.EXT_SUPPORTED_VERSIONS(), hs._vec8(hs._u16(772))))
+    la ks_entry = hs._u16(GRUPPE_P256())
+    hs._legg(ks_entry, hs._vec16(pub))
+    hs._legg(ext, hs._ext(hs.EXT_KEY_SHARE(), hs._vec16(ks_entry)))
+    la suitebytes: liste_heiltall = []
+    la i = 0
+    mens i < lengde(s["suites"]) { hs._legg(suitebytes, hs._u16(s["suites"][i])) i = i + 1 }
+    la body: liste_heiltall = [3, 3]
+    hs._legg(body, s["random"])
+    hs._legg(body, hs._vec8([]))
+    hs._legg(body, hs._vec16(suitebytes))
+    hs._legg(body, [1, 0])
+    hs._legg(body, hs._vec16(ext))
+    la CH = hs.encode_handshake(hs.HT_CLIENT_HELLO(), body)
+    s["transcript"] = _saman(s["transcript"], CH)
+    s["fase"] = "vent_sh"
+    _logg(s, "start")
+    returner _rec_klar(22, CH)
+}
+
+funksjon _logg(s: ordbok, namn: tekst) {
+    hvis har_nokkel(s, "profil") {
+        s["profil"] = s["profil"] + namn + "=" + tekst(tid_ms() - s["t0"]) + " "
+    }
+}
+
+funksjon _feil(melding: tekst) -> ordbok {
+    returner {"status": "feil", "feil": melding, "ut": []}
+}
+
+funksjon _finished_mac(secret: liste_heiltall, thash: liste_heiltall) -> liste_heiltall {
+    returner _hmac(_expand_label(secret, "finished", [], 32), thash)
+}
+
+# ServerHello -> delt løyndom og handtrykksnøklar.
+funksjon _server_hello(s: ordbok, rec_body: liste_heiltall) -> ordbok {
+    la ph = hs.parse_handshake(rec_body, 0)
+    hvis ikkje ph["ok"] eller ph["type"] != 2 { returner _feil("ugyldig ServerHello") }
+    la sh = hs.parse_server_hello(rec_body, ph["start"], ph["end"])
+    hvis ikkje sh["ok"] { returner _feil("kunne ikkje lese ServerHello") }
+    # HelloRetryRequest har ein fast «random»-verdi (RFC 8446 §4.1.3).
+    la hrr = _hex_til_bytes("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+    hvis _lik(sh["random"], hrr) {
+        returner _feil("tenaren sende HelloRetryRequest (vil ha ei anna nøkkelgruppe enn secp256r1); ikkje støtta")
+    }
+    hvis sh["valgt_versjon"] != 772 { returner _feil("tenaren valde ikkje TLS 1.3") }
+    la suite_ok = usann
+    la i = 0
+    mens i < lengde(s["suites"]) {
+        hvis s["suites"][i] == sh["suite"] { suite_ok = sann }
+        i = i + 1
+    }
+    hvis ikkje suite_ok { returner _feil("tenaren valde ein suite vi ikkje tilbaud (" + tekst(sh["suite"]) + ")") }
+    la ks = hs.finn_ext(rec_body, sh["ext_start"], sh["ext_end"], hs.EXT_KEY_SHARE())
+    hvis ikkje ks["funne"] eller lengde(ks["data"]) < 4 { returner _feil("ServerHello manglar key_share") }
+    la kd = ks["data"]
+    la grp = (kd[0] << 8) | kd[1]
+    la kl = (kd[2] << 8) | kd[3]
+    hvis grp != GRUPPE_P256() eller 4 + kl != lengde(kd) { returner _feil("uventa nøkkelgruppe frå tenaren (" + tekst(grp) + ")") }
+    la peer = _del(kd, 4, 4 + kl)
+    la delt = ec.delt(s["priv"], peer)
+    _logg(s, "ecdh")
+    hvis lengde(delt) != 32 { returner _feil("ugyldig ECDHE-punkt frå tenaren") }
+    s["suite"] = sh["suite"]
+    s["transcript"] = _saman(s["transcript"], _del(rec_body, 0, ph["next"]))
+    la tom_hash = _sha([])
+    la early = _hkdf_extract([], _nullbytes(32))
+    la derived1 = _derive(early, "derived", tom_hash)
+    la hs_secret = _hkdf_extract(derived1, delt)
+    la th_sh = _sha(s["transcript"])
+    s["c_hs"] = _derive(hs_secret, "c hs traffic", th_sh)
+    s["s_hs"] = _derive(hs_secret, "s hs traffic", th_sh)
+    la derived2 = _derive(hs_secret, "derived", tom_hash)
+    s["master"] = _hkdf_extract(derived2, _nullbytes(32))
+    s["ck_hs"] = _trafikknokkel(s["suite"], s["c_hs"])
+    s["sk_hs"] = _trafikknokkel(s["suite"], s["s_hs"])
+    s["fase"] = "vent_flight"
+    returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+# Parse Certificate (alle oppføringar). Gir {ok, kjede}.
+funksjon _les_sertifikat(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    la p = start
+    hvis p + 1 > slutt { returner {"ok": usann, "kjede": []} }
+    p = p + 1 + d[p]
+    hvis p + 3 > slutt { returner {"ok": usann, "kjede": []} }
+    la liste_len = (d[p] << 16) | (d[p + 1] << 8) | d[p + 2]
+    p = p + 3
+    la ende = p + liste_len
+    hvis ende > slutt { returner {"ok": usann, "kjede": []} }
+    la kjede: liste = []
+    mens p + 3 <= ende {
+        la clen = (d[p] << 16) | (d[p + 1] << 8) | d[p + 2]
+        p = p + 3
+        hvis p + clen + 2 > ende { returner {"ok": usann, "kjede": []} }
+        legg_til(kjede, _del(d, p, p + clen))
+        p = p + clen
+        la elen = (d[p] << 8) | d[p + 1]
+        p = p + 2 + elen
+    }
+    returner {"ok": lengde(kjede) > 0 og p == ende, "kjede": kjede}
+}
+
+# Prosesser fullstendige handshake-meldingar i hs_buf.
+funksjon _prosesser_hs(s: ordbok) -> ordbok {
+    la buf = s["hs_buf"]
+    la p = 0
+    mens p + 4 <= lengde(buf) {
+        la m = hs.parse_handshake(buf, p)
+        hvis ikkje m["ok"] { bryt }
+        la raw = _del(buf, p, m["next"])
+        la t = m["type"]
+        hvis t == 8 {
+            s["transcript"] = _saman(s["transcript"], raw)
+        } ellers hvis t == 11 {
+            la c = _les_sertifikat(buf, m["start"], m["end"])
+            _logg(s, "cert_lest")
+            hvis ikkje c["ok"] { returner _feil("ugyldig Certificate-melding") }
+            s["kjede"] = c["kjede"]
+            la info = x509.les_der(c["kjede"][0])
+            hvis info["status"] != "ok" { returner _feil("kunne ikkje lese tenarsertifikatet: " + tekst(info["error"])) }
+            s["cert_info"] = info
+            s["peer_subject"] = info["subject"]
+            # Vertsnamn og tillit først (billig); CertificateVerify kjem i neste melding.
+            hvis ikkje vert_matchar(info, s["hostname"]) {
+                returner _feil("sertifikatet gjeld ikkje vertsnamnet " + s["hostname"] + " (SAN: " + builtin.join(info["sans"], ", ") + ", subject: " + info["subject"] + ")")
+            }
+            la tr = _sjekk_tillit(c["kjede"], s["ankere"], s["no_iso"])
+            _logg(s, "tillit")
+            hvis tr != "" { returner _feil(tr) }
+            s["transcript"] = _saman(s["transcript"], raw)
+            s["th_cert"] = _sha(s["transcript"])
+        } ellers hvis t == 15 {
+            hvis lengde(s["th_cert"]) == 0 { returner _feil("CertificateVerify utan Certificate") }
+            la cv = hs.parse_certificate_verify(buf, m["start"], m["end"])
+            hvis ikkje cv["ok"] { returner _feil("ugyldig CertificateVerify") }
+            la innhald = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", s["th_cert"])
+            la alg = cv["alg"]
+            la leaf = s["kjede"][0]
+            la ok = usann
+            hvis alg == SIG_RSA_PSS() {
+                ok = x509.verifiser_data_rsa_pss(leaf, innhald, cv["signatur"])
+            } ellers hvis alg == SIG_ECDSA() {
+                ok = x509.verifiser_data_ecdsa(leaf, innhald, cv["signatur"])
+            } ellers hvis alg == hs.SIG_ED25519() {
+                la nk = x509.hent_offentleg_nøkkel(leaf)
+                hvis nk["status"] == "ok" og nk["type"] == "ed25519" { ok = eddsa.verify(nk["pub"], innhald, cv["signatur"]) }
+            } ellers {
+                returner _feil("tenaren brukte ein signaturalgoritme vi ikkje støttar (" + tekst(alg) + ")")
+            }
+            hvis ikkje ok { returner _feil("CertificateVerify-signaturen er ugyldig (algoritme " + tekst(alg) + ")") }
+            _logg(s, "cert_verify")
+            s["peer_verified"] = sann
+            s["transcript"] = _saman(s["transcript"], raw)
+        } ellers hvis t == 20 {
+            hvis ikkje s["peer_verified"] { returner _feil("Finished utan verifisert CertificateVerify") }
+            la fin = hs.parse_finished(buf, m["start"], m["end"])
+            la th_cv = _sha(s["transcript"])
+            hvis ikkje _lik(fin["verify_data"], _finished_mac(s["s_hs"], th_cv)) { returner _feil("Finished frå tenaren stemmer ikkje") }
+            _logg(s, "finished")
+            s["transcript"] = _saman(s["transcript"], raw)
+            s["hs_buf"] = _del(buf, m["next"], lengde(buf))
+            returner {"status": "ferdig", "feil": "", "ut": []}
+        } ellers hvis t == 13 {
+            returner _feil("tenaren ber om klientsertifikat; ikkje støtta")
+        } ellers {
+            returner _feil("uventa handshake-melding " + tekst(t))
+        }
+        p = m["next"]
+    }
+    s["hs_buf"] = _del(buf, p, lengde(buf))
+    returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+# Fullfør handtrykket: app-nøklar og klient-Finished.
+funksjon _fullfor(s: ordbok) -> ordbok {
+    la th = _sha(s["transcript"])
+    s["c_ap"] = _derive(s["master"], "c ap traffic", th)
+    s["s_ap"] = _derive(s["master"], "s ap traffic", th)
+    s["ck_ap"] = _trafikknokkel(s["suite"], s["c_ap"])
+    s["sk_ap"] = _trafikknokkel(s["suite"], s["s_ap"])
+    la CFIN = hs.build_finished(_finished_mac(s["c_hs"], th))
+    la enc = _krypter(s["suite"], s["ck_hs"], 0, 22, CFIN)
+    s["transcript"] = _saman(s["transcript"], CFIN)
+    s["fase"] = "etablert"
+    s["seq_w"] = 0
+    s["seq_r"] = 0
+    hvis s["suite"] == SUITE_AES128() { s["cipher"] = "TLS_AES_128_GCM_SHA256" } ellers { s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256" }
+    s["tls_version"] = "TLSv1.3"
+    returner {"status": "ferdig", "feil": "", "ut": enc}
+}
+
+# Handtrykket: mat inn tenarbyte, få {status: ventande|ferdig|feil, ut, feil}.
+# Byte som kjem etter tenaren sin Finished (applikasjonsdata) blir liggjande i s["inbuf"].
+funksjon motta(s: ordbok, innkomande: liste_heiltall) -> ordbok {
+    s["inbuf"] = _saman(s["inbuf"], innkomande)
+    la delt = _split(s["inbuf"])
+    la records = delt["records"]
+    la ri = 0
+    mens ri < lengde(records) {
+        la r = records[ri]
+        ri = ri + 1
+        la rtype = r[0]
+        hvis rtype == 20 { fortsett }
+        hvis rtype == 21 {
+            hvis s["fase"] == "vent_sh" eller s["fase"] == "start" {
+                hvis lengde(r) >= 7 { returner _feil("tenaren sende alert " + tekst(r[6]) + " under handtrykket") }
+                returner _feil("tenaren sende alert under handtrykket")
+            }
+        }
+        hvis s["fase"] == "vent_sh" {
+            hvis rtype != 22 { returner _feil("forventa ServerHello, fekk record-type " + tekst(rtype)) }
+            la res = _server_hello(s, _del(r, 5, lengde(r)))
+            hvis res["status"] == "feil" { returner res }
+        } ellers hvis s["fase"] == "vent_flight" {
+            hvis rtype != 23 { returner _feil("forventa kryptert record, fekk type " + tekst(rtype)) }
+            la dec = _dekrypter(s["suite"], s["sk_hs"], s["seq_r_hs"], r)
+            _logg(s, "dekrypt")
+            hvis dec["status"] != "ok" { returner _feil("kunne ikkje dekryptere handtrykksrecord (" + dec["error"] + ")") }
+            s["seq_r_hs"] = s["seq_r_hs"] + 1
+            hvis dec["type"] == 21 {
+                hvis lengde(dec["plaintext"]) >= 2 { returner _feil("tenaren sende alert " + tekst(dec["plaintext"][1]) + " under handtrykket") }
+                returner _feil("tenaren sende alert under handtrykket")
+            }
+            hvis dec["type"] != 22 { returner _feil("uventa innhaldstype " + tekst(dec["type"]) + " i handtrykket") }
+            s["hs_buf"] = _saman(s["hs_buf"], dec["plaintext"])
+            la pr = _prosesser_hs(s)
+            hvis pr["status"] == "feil" { returner pr }
+            hvis pr["status"] == "ferdig" {
+                # Rest av innkomande records (applikasjonsdata) blir ståande att.
+                la rest_records = ri
+                la restbytes: liste_heiltall = []
+                mens rest_records < lengde(records) {
+                    restbytes = _saman(restbytes, records[rest_records])
+                    rest_records = rest_records + 1
+                }
+                s["inbuf"] = _saman(restbytes, delt["rest"])
+                returner _fullfor(s)
+            }
+        } ellers {
+            returner _feil("uventa fase " + s["fase"])
+        }
+    }
+    s["inbuf"] = delt["rest"]
+    returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+# ── Applikasjonsdata ────────────────────────────────────────────────────────
+# Krypter data til ein straum av records (maks 16384 byte klartekst per record).
+funksjon krypter_app(s: ordbok, data: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la p = 0
+    mens p < lengde(data) {
+        la slutt = p + 16384
+        hvis slutt > lengde(data) { slutt = lengde(data) }
+        la post = _krypter(s["suite"], s["ck_ap"], s["seq_w"], 23, _del(data, p, slutt))
+        s["seq_w"] = s["seq_w"] + 1
+        la i = 0
+        mens i < lengde(post) { legg_til(ut, post[i]) i = i + 1 }
+        p = slutt
+    }
+    returner ut
+}
+
+# close_notify-alert som record.
+funksjon lukk(s: ordbok) -> liste_heiltall {
+    hvis s["fase"] != "etablert" { returner [] }
+    la post = _krypter(s["suite"], s["ck_ap"], s["seq_w"], 21, [1, 0])
+    s["seq_w"] = s["seq_w"] + 1
+    s["fase"] = "lukka"
+    returner post
+}
+
+# Mat inn tenarbyte etter handtrykket; gir {status: ok|lukka|feil, data, ut, feil}.
+# data = dekryptert applikasjonsdata (kan vere tom), ut = byte som må sendast tilbake (KeyUpdate-svar).
+funksjon dekrypter_straum(s: ordbok, innkomande: liste_heiltall) -> ordbok {
+    hvis lengde(innkomande) > 0 { s["inbuf"] = _saman(s["inbuf"], innkomande) }
+    la delt = _split(s["inbuf"])
+    s["inbuf"] = delt["rest"]
+    la data: liste_heiltall = []
+    la ut: liste_heiltall = []
+    la ri = 0
+    mens ri < lengde(delt["records"]) {
+        la r = delt["records"][ri]
+        ri = ri + 1
+        hvis r[0] == 20 { fortsett }
+        hvis r[0] != 23 {
+            hvis r[0] == 21 { returner {"status": "lukka", "data": data, "ut": ut, "feil": ""} }
+            returner {"status": "feil", "data": data, "ut": ut, "feil": "uventa record-type " + tekst(r[0]) + " etter handtrykket"}
+        }
+        la dec = _dekrypter(s["suite"], s["sk_ap"], s["seq_r"], r)
+        hvis dec["status"] != "ok" {
+            returner {"status": "feil", "data": data, "ut": ut, "feil": "kunne ikkje dekryptere record (" + dec["error"] + ")"}
+        }
+        s["seq_r"] = s["seq_r"] + 1
+        la typ = dec["type"]
+        hvis typ == 23 {
+            la pt = dec["plaintext"]
+            la i = 0
+            mens i < lengde(pt) { legg_til(data, pt[i]) i = i + 1 }
+        } ellers hvis typ == 21 {
+            hvis lengde(dec["plaintext"]) >= 2 og dec["plaintext"][1] == 0 {
+                s["fase"] = "lukka"
+                returner {"status": "lukka", "data": data, "ut": ut, "feil": ""}
+            }
+            returner {"status": "feil", "data": data, "ut": ut, "feil": "tenaren sende alert " + tekst(dec["plaintext"][1])}
+        } ellers hvis typ == 22 {
+            # NewSessionTicket (4) blir ignorert; KeyUpdate (24) oppdaterer lesenøkkelen.
+            la pt = dec["plaintext"]
+            hvis lengde(pt) >= 5 og pt[0] == 24 {
+                s["s_ap"] = _expand_label(s["s_ap"], "traffic upd", [], 32)
+                s["sk_ap"] = _trafikknokkel(s["suite"], s["s_ap"])
+                s["seq_r"] = 0
+                hvis pt[4] == 1 {
+                    la ku = _krypter(s["suite"], s["ck_ap"], s["seq_w"], 22, [24, 0, 0, 1, 0])
+                    s["c_ap"] = _expand_label(s["c_ap"], "traffic upd", [], 32)
+                    s["ck_ap"] = _trafikknokkel(s["suite"], s["c_ap"])
+                    s["seq_w"] = 0
+                    la i = 0
+                    mens i < lengde(ku) { legg_til(ut, ku[i]) i = i + 1 }
+                }
+            }
+        } ellers {
+            returner {"status": "feil", "data": data, "ut": ut, "feil": "uventa innhaldstype " + tekst(typ)}
+        }
+    }
+    returner {"status": "ok", "data": data, "ut": ut, "feil": ""}
+}
+
+funksjon status() { returner {"abi": "norscode-tls13-klient-v1", "suites": "TLS_CHACHA20_POLY1305_SHA256,TLS_AES_128_GCM_SHA256", "gruppe": "secp256r1"} }
