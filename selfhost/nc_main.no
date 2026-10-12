@@ -1818,6 +1818,176 @@ funksjon nc_serve_lykkje(ncb: ordbok<tekst, tekst>, srv: heiltall) -> heiltall {
     returner 0
 }
 
+// ── 5a: nc serve --workers N (leiar + N arbeidarar med SO_REUSEPORT) ──────────
+// Leiaren (denne prosessen) bind ikkje sokkel sjølv: han startar N barneprosessar av same
+// binær (miljøkontrakten: NORSCODE_CMD=serve, NORSCODE_FILE, NC_SERVE_WORKER=1), og kvar
+// arbeidar lyttar på same port med SO_REUSEPORT (kjernen fordeler tilkoplingane). Leiaren
+// overvakar barna (wait4 WNOHANG), startar døde barn på nytt (tak: SERVE_RASKE_TAK raske
+// krasj på rad i same slot, deretter gjev han opp og stoppar alt med exit 1), og sender
+// SIGTERM/SIGINT vidare til arbeidarane (som drenerer sjølve, NC_SERVE_DRAIN_MS). Står ein
+// arbeidar att etter drenering + 3 s, får han SIGKILL. SIGHUP vert sendt vidare òg.
+// Dokumentasjon: docs/NC_SERVE_WORKERS.md.
+funksjon serve_arbeidarar_antal() -> heiltall {
+    hvis miljo_hent("NC_SERVE_WORKER") == "1" { returner 1 }
+    la t = builtin.trim(miljo_hent("NORSCODE_WORKERS"))
+    hvis t == "" { returner 1 }
+    la n: heiltall = 1
+    prøv { n = heltall_fra_tekst(t) } fang (e) { n = 1 }
+    hvis n < 1 { returner 1 }
+    hvis n > 64 { returner 64 }
+    returner n
+}
+
+funksjon serve_start_arbeidar(exe: tekst, miljo: ordbok<tekst, tekst>, id: heiltall) -> heiltall {
+    miljo["NC_SERVE_WORKER_ID"] = tekst_fra_heltall(id)
+    returner native_gap.prosess_start_miljo(exe, [0, 1, 2], miljo)
+}
+
+funksjon nc_serve_leiar(src: tekst, modul: tekst, host: tekst, port: tekst, antal: heiltall) -> heiltall {
+    la info = builtin.system_info()
+    la exe = tekst(info["executable"])
+    la konf = serve_konfig()
+    la miljo = {
+        "NORSCODE_CMD": "serve",
+        "NORSCODE_FILE": src,
+        "NORSCODE_MODULE": modul,
+        "NORSCODE_WORKERS": "1",
+        "NC_SERVE_WORKER": "1",
+        "NC_SERVE_PORT": port,
+        "NC_SERVE_HOST": host
+    }
+    la vidaresend = ["NORSCODE_ROOT", "NC_NATIVE"]
+    la vi: heiltall = 0
+    mens vi < lengde(vidaresend) {
+        la v = miljo_hent(vidaresend[vi])
+        hvis v != "" { miljo[vidaresend[vi]] = v }
+        vi = vi + 1
+    }
+    la sig_term = native_gap.serve_SIGTERM()
+    la sig_int = native_gap.serve_SIGINT()
+    la sig_hup = native_gap.serve_SIGHUP()
+    native_gap.serve_signal_blokker()
+    la raske_tak: heiltall = 5
+    la pids: liste = []
+    la starta: liste = []
+    la raske: liste = []
+    la neste: liste = []
+    la k: heiltall = 0
+    mens k < antal {
+        la pid = serve_start_arbeidar(exe, miljo, k)
+        hvis pid <= 0 {
+            skriv("Feil: kunne ikkje starte arbeidar " + tekst_fra_heltall(k) + " (kode " + tekst_fra_heltall(pid) + ")\n")
+            la j: heiltall = 0
+            mens j < lengde(pids) {
+                hvis pids[j] > 0 { native_gap.prosess_drep(pids[j]) }
+                j = j + 1
+            }
+            returner 1
+        }
+        legg_til(pids, pid)
+        legg_til(starta, builtin.tid_ms())
+        legg_til(raske, 0)
+        legg_til(neste, 0)
+        k = k + 1
+    }
+    skriv("[serve] Leiar: " + tekst_fra_heltall(antal) + " arbeidarar på " + host + ":" + port + ".\n")
+    la stoppar = usann
+    la stopp_frist: heiltall = 0
+    la utkode: heiltall = 0
+    mens sann {
+        la no = builtin.tid_ms()
+        la sig = native_gap.serve_signal_ventande()
+        hvis sig != 0 {
+            hvis native_gap.serve_signal_har(sig, sig_hup) {
+                native_gap.serve_signal_forkast(sig_hup)
+                skriv("[serve] Leiar: SIGHUP motteke, sender til arbeidarane.\n")
+                la h: heiltall = 0
+                mens h < lengde(pids) {
+                    hvis pids[h] > 0 { native_gap.prosess_signal(pids[h], sig_hup) }
+                    h = h + 1
+                }
+            }
+            hvis ikkje stoppar og (native_gap.serve_signal_har(sig, sig_term) eller native_gap.serve_signal_har(sig, sig_int)) {
+                stoppar = sann
+                la dms: heiltall = konf["drain_ms"]
+                stopp_frist = no + dms + 3000
+                skriv("[serve] Leiar: stoppsignal motteke, drenerer arbeidarane.\n")
+                la t: heiltall = 0
+                mens t < lengde(pids) {
+                    hvis pids[t] > 0 { native_gap.prosess_signal(pids[t], sig_term) }
+                    t = t + 1
+                }
+            }
+        }
+        la levande: heiltall = 0
+        la s: heiltall = 0
+        mens s < lengde(pids) {
+            hvis pids[s] > 0 {
+                la r = native_gap.prosess_vent_ikkje_blokkerande(pids[s])
+                hvis r["ferdig"] {
+                    skriv("[serve] Leiar: arbeidar " + tekst_fra_heltall(s) + " (pid " + tekst_fra_heltall(pids[s]) + ") slutta med " + tekst(r["status"]) + ".\n")
+                    pids[s] = 0
+                    hvis ikkje stoppar {
+                        hvis no - starta[s] < 3000 { raske[s] = raske[s] + 1 } ellers { raske[s] = 0 }
+                        hvis raske[s] > raske_tak {
+                            skriv("Feil: arbeidar " + tekst_fra_heltall(s) + " krasjar på rad, gjev opp.\n")
+                            utkode = 1
+                            stoppar = sann
+                            la dms2: heiltall = konf["drain_ms"]
+                            stopp_frist = no + dms2 + 3000
+                            la t2: heiltall = 0
+                            mens t2 < lengde(pids) {
+                                hvis pids[t2] > 0 { native_gap.prosess_signal(pids[t2], sig_term) }
+                                t2 = t2 + 1
+                            }
+                        } ellers {
+                            neste[s] = no + 200 * raske[s] + 1
+                        }
+                    }
+                } ellers {
+                    levande = levande + 1
+                }
+            } ellers hvis ikkje stoppar og neste[s] > 0 og no >= neste[s] {
+                la np = serve_start_arbeidar(exe, miljo, s)
+                neste[s] = 0
+                hvis np > 0 {
+                    pids[s] = np
+                    starta[s] = no
+                    levande = levande + 1
+                    skriv("[serve] Leiar: starta arbeidar " + tekst_fra_heltall(s) + " på nytt (pid " + tekst_fra_heltall(np) + ").\n")
+                } ellers {
+                    raske[s] = raske[s] + 1
+                    hvis raske[s] > raske_tak {
+                        skriv("Feil: kunne ikkje starte arbeidar " + tekst_fra_heltall(s) + " på nytt, gjev opp.\n")
+                        utkode = 1
+                        stoppar = sann
+                        stopp_frist = no
+                    } ellers {
+                        neste[s] = no + 200 * raske[s] + 1
+                    }
+                }
+            }
+            s = s + 1
+        }
+        hvis stoppar og levande == 0 { bryt }
+        hvis stoppar og no >= stopp_frist {
+            skriv("[serve] Leiar: dreneringsfristen er ute, drep attverande arbeidarar.\n")
+            la d: heiltall = 0
+            mens d < lengde(pids) {
+                hvis pids[d] > 0 {
+                    native_gap.prosess_drep(pids[d])
+                    native_gap.prosess_vent_ikkje_blokkerande(pids[d])
+                }
+                d = d + 1
+            }
+            bryt
+        }
+        native_gap.serve_poll([], 50)
+    }
+    skriv("[serve] Leiar: stoppa.\n")
+    returner utkode
+}
+
 // Fase 2 / 2.3: Produksjons-serve må setje opp runtime likt som vm.køyr_ncb
 // (den nøsta køyre-/test-vegen) gjer, slik at handlarar som brukar DI, vakter
 // eller modulglobalar faktisk verkar under `nc serve`:
@@ -1876,10 +2046,22 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
     la rås = miljo_hent("NORSCODE_FAKE_HTTP_REQUESTS")
     la srv = -1
     hvis rå_request == "" og rås == "" {
+        la antal_arb = serve_arbeidarar_antal()
+        hvis antal_arb > 1 {
+            // 5a: leiar som startar og overvakar arbeidarar (kvar bind sjølv med SO_REUSEPORT).
+            returner nc_serve_leiar(src_sti, modul, host, port, antal_arb)
+        }
         la sokkel = sok.ny_tcp()
         hvis sok.er_feil(sokkel) {
             skriv("Feil: kunne ikkje opprette sokkel for " + host + ":" + port + "\n")
             returner 1
+        }
+        hvis miljo_hent("NC_SERVE_WORKER") == "1" {
+            la rp = native_gap.serve_reuseport(sok.fil_deskriptor(sokkel))
+            hvis rp < 0 {
+                skriv("Feil: SO_REUSEPORT feila (" + tekst_fra_heltall(rp) + ")\n")
+                returner 1
+            }
         }
         hvis ikkje sok.bind(sokkel, host, port_nr) {
             skriv("Feil: kunne ikkje binde sokkel på " + host + ":" + port + "\n")
@@ -1929,6 +2111,9 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
         returner 1
     }
     skriv("[serve] Klar for NCB-app på " + host + ":" + port + ".\n")
+    hvis miljo_hent("NC_SERVE_WORKER") == "1" {
+        skriv("[serve] Arbeidar " + miljo_hent("NC_SERVE_WORKER_ID") + " klar (pid " + tekst_fra_heltall(native_gap.serve_pid()) + ").\n")
+    }
     hvis rå_request != "" {
         skriv(serve_handle_one(ncb, rå_request))
         la shutdown_status = køyre_livssyklus_hooks_trygt(ncb, "shutdown_hooks")
@@ -5066,7 +5251,8 @@ funksjon start() -> heltall {
         hvis direkte_invokasjon {
             src = "app.no"
             la port = "8000"
-            la workers = "4"
+            la workers = miljo_hent("NORSCODE_WORKERS")
+            hvis workers == "" { workers = "1" }
             la host = "127.0.0.1"
             la i: heiltall = 2
             mens i < lengde(argv) {
