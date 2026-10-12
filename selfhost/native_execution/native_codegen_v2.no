@@ -48,6 +48,13 @@ funksjon IMPORT_VA() { returner OSTAB_VA() + OSTAB_LEN() * 8 } // 0x772000
 // Lambda-hjelparen les og nullstiller sloten i prologen (sjå kompiler_fn_v2). Sida
 // er rot for GC-skanninga, men closuren ligg uansett på kallaren sin operandstakk.
 funksjon LAMBDA_CAPTURE_VA() { returner HOST_ABI_VA() + 4072 }
+// F37 grøne trådar (fase 1): to rå ord rett etter handler-teljaren/last_exc (same segment, nullfylt
+// av lasteren): GREEN_CUR = peikar til ctx-blokka til tråden som køyrer, GREEN_TAB = peikar til
+// ctx-tabellen (ord 0 = tal oppføringar, så ctx-peikarar; 0 = ledig) som gc_mark_roots skannar.
+// Berre i bruk når programmet har std.native_gap._gr_inngang (green_i_bruk = 1); elles uendra bytar.
+funksjon GREEN_CUR_VA() { returner hl.HANDLER_COUNT_VA(X86_MAL()) + 16 }
+funksjon GREEN_TAB_VA() { returner hl.HANDLER_COUNT_VA(X86_MAL()) + 24 }
+la green_i_bruk: heiltall = 0
 // Heap-/GC-layouten (HEAP_VA, GC_*, live-map, mark-stakk, cache-område, handler-region)
 // ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen dekkjer x86-64-måla:
 // linux-x86_64 (standard) og windows-x86_64 (WINDOWS_SEED_PLAN W1). Målet kjem frå NC_TARGET;
@@ -6229,6 +6236,62 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC4, 0x08])           // add rsp,8
     copy(bytes, [0xC3])                             // ret
 
+    // ── F37 grøne trådar (fase 1, kooperativ, éin OS-tråd) ───────────────────────
+    // ctx-blokk (rå 8-byte-ord): +0 lagra rsp, +8 handler-teljar, +16 stakkgrense (STACK_LIMIT),
+    // +24 stakk-topp (stack_base, øvre skanngrense), +32 inngangsfunksjon (NcVal*, for green_boot).
+    // green_switch(fra_ctx, til_ctx): lagrar callee-saved + rsp + handler-teljar + stakkgrenser i
+    // «fra», lastar «til» og returnerer i den tråden (boksa 0). Tråden skannast av gc_mark_roots via
+    // GREEN_TAB når han er suspendert. green_boot er retur-målet for ein ny tråds fyrste switch:
+    // han kallar ncb_kall(ctx[+32]) på den nye stakken; funksjonen må aldri returnere.
+    // Windows: stubbar (xor eax,eax; ret) — Norscode-sida gater på native_target().
+    hvis green_i_bruk == 1 {
+        hvis ER_WINDOWS() {
+            la gw_namn: liste_tekst = ["green_switch", "green_boot_va", "green_setup"]
+            la gw_i: heiltall = 0
+            mens gw_i < lengde(gw_namn) {
+                atomics[gw_namn[gw_i]] = TEXT_VA() + lengde(bytes)
+                copy(bytes, [0x31, 0xC0, 0xC3])
+                gw_i = gw_i + 1
+            }
+        } ellers {
+            atomics["green_switch"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8] (fra)
+            copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (til)
+            copy(bytes, [0x53, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,rbp,r12-r15
+            copy(bytes, [0x48, 0x89, 0x27])                 // mov [rdi],rsp
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL())) // mov rax,[count]
+            copy(bytes, [0x48, 0x89, 0x47, 0x08])           // mov [rdi+8],rax
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, STACK_LIMIT_VA())               // mov rax,[limit]
+            copy(bytes, [0x48, 0x89, 0x47, 0x10])           // mov [rdi+16],rax
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) copy(bytes, _heap_abs4(48))               // mov rax,[stack_base]
+            copy(bytes, [0x48, 0x89, 0x47, 0x18])           // mov [rdi+24],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x08])           // mov rax,[rsi+8]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL())) // mov [count],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x10])           // mov rax,[rsi+16]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, STACK_LIMIT_VA())               // mov [limit],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x18])           // mov rax,[rsi+24]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) copy(bytes, _heap_abs4(48))               // mov [stack_base],rax
+            copy(bytes, [0x48, 0x89, 0x34, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov [GREEN_CUR],rsi
+            copy(bytes, [0x48, 0x8B, 0x26])                 // mov rsp,[rsi]
+            copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5D, 0x5B]) // pop r15,r14,r13,r12,rbp,rbx
+            copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8 (justering)
+            call_rel32(bytes, RT_INT(), TEXT_VA())          // rax = boksa 0
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])     // add rsp,8; ret
+
+            // green_setup(ctx0, tabell): sett GREEN_CUR = ctx0 og GREEN_TAB = tabell.
+            atomics["green_setup"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8]
+            copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8]
+            copy(bytes, [0x48, 0x89, 0x3C, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov [GREEN_CUR],rdi
+            copy(bytes, [0x48, 0x89, 0x34, 0x25]) u32(bytes, GREEN_TAB_VA())                 // mov [GREEN_TAB],rsi
+            copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])
+            call_rel32(bytes, RT_INT(), TEXT_VA())
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+        }
+    }
+
     // heap_bump() -> boksa bump-peikar ([HEAP_VA]).
     atomics["heap_bump"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -10363,6 +10426,41 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_scan - (lengde(bytes) + 4)) & 4294967295)
     la mrt_scandone = lengde(bytes)                // .scan_done:
     patch_jump(bytes, mrt_pscandone, mrt_scandone)
+    // F37: skann dei suspenderte grøne trådstakkane [lagra rsp, stakk-topp) (GREEN_TAB). Hopp over
+    // tråden som køyrer (GREEN_CUR; stakken hans er skanna over). Callee-saved rbx/r12/r13 blir
+    // berga; gc_push bevarer alt anna.
+    hvis green_i_bruk == 1 og ikkje ER_WINDOWS() {
+        copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])  // push rbx,r12,r13
+        copy(bytes, [0x4C, 0x8B, 0x24, 0x25]) u32(bytes, GREEN_TAB_VA())  // mov r12,[GREEN_TAB]
+        copy(bytes, [0x4D, 0x85, 0xE4])              // test r12,r12
+        la gtb_ingen = emit_je_placeholder(bytes)
+        copy(bytes, [0x4D, 0x8B, 0x2C, 0x24])        // mov r13,[r12] (tal oppføringar)
+        copy(bytes, [0x49, 0x83, 0xC4, 0x08])        // add r12,8
+        la gtb_lp = lengde(bytes)                    // .lp:
+        copy(bytes, [0x4D, 0x85, 0xED])              // test r13,r13
+        la gtb_slutt = emit_je_placeholder(bytes)
+        copy(bytes, [0x49, 0x8B, 0x1C, 0x24])        // mov rbx,[r12]
+        copy(bytes, [0x49, 0x83, 0xC4, 0x08])        // add r12,8
+        copy(bytes, [0x49, 0xFF, 0xCD])              // dec r13
+        copy(bytes, [0x48, 0x85, 0xDB])              // test rbx,rbx
+        copy(bytes, [0x0F, 0x84]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // jz .lp
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GREEN_CUR_VA())  // mov rax,[GREEN_CUR]
+        copy(bytes, [0x48, 0x39, 0xC3])              // cmp rbx,rax
+        copy(bytes, [0x0F, 0x84]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // je .lp
+        copy(bytes, [0x48, 0x8B, 0x33])              // mov rsi,[rbx] (lagra rsp)
+        copy(bytes, [0x48, 0x8B, 0x53, 0x18])        // mov rdx,[rbx+24] (stakk-topp)
+        la gtb_sc = lengde(bytes)                    // .sc:
+        copy(bytes, [0x48, 0x39, 0xD6])              // cmp rsi,rdx
+        copy(bytes, [0x0F, 0x83]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // jae .lp
+        copy(bytes, [0x48, 0x8B, 0x3E])              // mov rdi,[rsi]
+        call_rel32(bytes, atomics["gc_push"], TEXT_VA())
+        copy(bytes, [0x48, 0x83, 0xC6, 0x08])        // add rsi,8
+        copy(bytes, [0xE9]) u32(bytes, (gtb_sc - (lengde(bytes) + 4)) & 4294967295)        // jmp .sc
+        la gtb_ut = lengde(bytes)                    // .ut:
+        patch_jump(bytes, gtb_ingen, gtb_ut)
+        patch_jump(bytes, gtb_slutt, gtb_ut)
+        copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B])  // pop r13,r12,rbx
+    }
     // v8 (2026-09-26, GC-modus): STRUKTURVALIDERING av liste/map før markøren følgjer dei.
     // Rota er konservativ: ein daud stakkslot kan peike på ein gammal liste-boks (framleis
     // type 3) der payloaden sidan er frigjord og gjenbrukt, t.d. som element-array full av
@@ -11026,6 +11124,23 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // R2: dynamiske kall (ncb_call_fn/CALL_VALUE), assert-sjekkar og bytes_new.
     emit_r2_atom(bytes, atomics)
     emit_r2_metode_atom(bytes, atomics)                  // R2/F20
+    // F37: green_boot/green_boot_va må komme etter ncb_kall (emit_r2_atom).
+    hvis green_i_bruk == 1 og ikkje ER_WINDOWS() {
+            atomics["green_boot"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov rax,[GREEN_CUR]
+            copy(bytes, [0x48, 0x8B, 0x78, 0x20])           // mov rdi,[rax+32] (inngangsfunksjon)
+            copy(bytes, [0x31, 0xF6])                       // xor esi,esi (ingen arg)
+            copy(bytes, [0x48, 0x83, 0xE4, 0xF0])           // and rsp,-16
+            call_rel32(bytes, atomics["ncb_kall"], TEXT_VA())
+            copy(bytes, [0x0F, 0x0B])                       // ud2 (inngangen returnerer aldri)
+
+            // green_boot_va() → boksa VA til green_boot (til den krafta fyrste ramma på ein ny stakk).
+            atomics["green_boot_va"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8
+            copy(bytes, [0xBF]) u32(bytes, atomics["green_boot"])  // mov edi,&green_boot
+            call_rel32(bytes, RT_INT(), TEXT_VA())
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])     // add rsp,8; ret
+    }
     // ── R1/F09: list_insert rdi=liste rsi=indeks (heiltals-NcVal) rdx=verdi → rax=liste ──
     // sett_inn(liste, indeks, verdi) på plass, same kontrakt som VM-armen og
     // std.native_gap.sett_inn: indeks utanfor [0, lengde] blir klamra. Legg verdien
@@ -11917,6 +12032,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.atomic_xadd" eller fn_nm == "atomic_xadd" { returner atomic_vas["atomic_xadd"] }
     hvis fn_nm == "builtin.atomic_cas" eller fn_nm == "atomic_cas" { returner atomic_vas["atomic_cas"] }
     hvis fn_nm == "builtin.thread_spawn_native" eller fn_nm == "thread_spawn_native" { returner atomic_vas["thread_spawn_native"] }
+    hvis fn_nm == "builtin.green_switch" eller fn_nm == "green_switch" { returner atomic_vas["green_switch"] }
+    hvis fn_nm == "builtin.green_boot_va" eller fn_nm == "green_boot_va" { returner atomic_vas["green_boot_va"] }
+    hvis fn_nm == "builtin.green_setup" eller fn_nm == "green_setup" { returner atomic_vas["green_setup"] }
     hvis fn_nm == "builtin.heap_bump" eller fn_nm == "heap_bump" { returner atomic_vas["heap_bump"] }
     hvis fn_nm == "builtin.obj_addr" eller fn_nm == "obj_addr" { returner atomic_vas["obj_addr"] }
     hvis fn_nm == "builtin.stack_base" eller fn_nm == "stack_base" { returner atomic_vas["stack_base"] }
@@ -12200,6 +12318,15 @@ funksjon builtin_rapport_skriv() -> heiltall {
 }
 
 funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd_offs, code_va, atomic_vas) {
+    // F37: søvn skal gje frå seg kontrollen til andre grøne trådar. Når programmet har den
+    // kooperative planleggjaren (std.native_gap._gr_sov), går vent.sov(ms) gjennom han; utan
+    // grøne trådar søv han med nanosleep som før. native_gap sjølv kallar atomet direkte.
+    hvis nargs == 1 og ikkje ER_WINDOWS() og finnes_nøkkel(fn_vas, "std.native_gap._gr_sov") og nos_gjeldande_modul != "std.native_gap" {
+        hvis fn_nm == "builtin.vent.sov" eller fn_nm == "vent.sov" eller fn_nm == "builtin.sov" eller builtin.ends_with(fn_nm, ".vent.sov") {
+            emit_user_call(buf, fn_vas["std.native_gap._gr_sov"], nargs, code_va)
+            returner
+        }
+    }
     la er_exit = fn_nm == "stopp" eller fn_nm == "exit" eller fn_nm == "builtin.exit" eller builtin.ends_with(fn_nm, ".stopp") eller builtin.ends_with(fn_nm, ".exit")
     la er_type = fn_nm == "builtin.type" eller fn_nm == "builtin.type_av" eller fn_nm == "type_av" eller fn_nm == "type"
     hvis er_exit {
@@ -12983,6 +13110,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // Køyr FØR siste-segment-matchinga slik at builtin.sha256 ikkje bind seg
     // til std.krypto.sha256 (uendeleg rekursjon).
     la gap_kand = gr.gap_rute(fn_nm)
+    // F37: thread_pool-probe (std.samtid.backend) og thread_yield er x86-lokale ruter (gap_ruter.no
+    // er delt med arm64 og blir ikkje endra her).
+    hvis lengde(gap_kand) == 0 og (fn_nm == "builtin.thread_pool" eller fn_nm == "thread_pool") { gap_kand = ["std.native_gap.thread_pool"] }
     hvis lengde(gap_kand) > 0 {
         la gap_va: heltall = 0
         la gi: heltall = 0
@@ -13348,6 +13478,8 @@ funksjon kompiler_v2(ncb_json) {
     // _start må lagre til same adresse før første miljo_hent().
     la envp_store_va: heltall = hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET()
 
+    green_i_bruk = 0
+    hvis finnes_nøkkel(fns, "std.native_gap._gr_inngang") { green_i_bruk = 1 }
     la rt_package = bygg_runtime_v2(argv_store_va)
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
@@ -13879,6 +14011,8 @@ funksjon ncval_x86_setup(ncb) {
     la data_bytes = data_res[0]
     la rd_offs = data_res[1]
     la argv_store_va: heiltall = HOST_ABI_VA()
+    green_i_bruk = 0
+    hvis finnes_nøkkel(fns, "std.native_gap._gr_inngang") { green_i_bruk = 1 }
     la rt_package = bygg_runtime_v2(argv_store_va)
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]

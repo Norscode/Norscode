@@ -4198,6 +4198,8 @@ funksjon thread_spawn(req) {
     la fn = _jit_tekst_felt(req, "fn", "")
     la args = req["args"]
     la stack_bytes = _jit_heiltal_felt(req["stack_bytes"])
+    // F37: alt som ikkje er eit thread.*-primitiv er ein brukarfunksjon → grøn tråd (kooperativ).
+    hvis ikkje builtin.starts_with(fn, "thread.") { returner _gr_spawn(req, fn, args, stack_bytes) }
     hvis stack_bytes < 65536 { stack_bytes = 65536 }
     stack_bytes = ((stack_bytes + 4095) / 4096) * 4096
 
@@ -4245,6 +4247,7 @@ funksjon thread_spawn(req) {
 
 funksjon thread_join(req) {
     la h = _jit_tekst_felt(req, "handle", "")
+    hvis builtin.starts_with(h, "green-thread:") { returner _gr_join(req, h) }
     hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
     la e = _th_tabell[h]
     la desc = e["desc"]
@@ -4264,8 +4267,14 @@ funksjon thread_join(req) {
 
 funksjon thread_sync(req) {
     la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "yield" {
+        _gr_framgang()
+        _gr_yield()
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
     hvis op == "cancel" {
         la h = _jit_tekst_felt(req, "handle", "")
+        hvis builtin.starts_with(h, "green-thread:") { returner _gr_cancel(h) }
         hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
         builtin.raw_store64(_th_tabell[h]["desc"] + 16, 1)
         returner {"abi": "norscode-native-thread-v1", "status": "cancelled"}
@@ -4295,6 +4304,17 @@ funksjon thread_sync(req) {
         hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
         la addr = _mx_tabell[mh]
         la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+        // F37: med fleire grøne trådar gjev ei ventande tråd kontrollen vidare (futex ville stoppa alle).
+        hvis _gr_aktiv() {
+            la frist = 0 - 1
+            hvis timeout_ms > 0 { frist = mono_ms() + timeout_ms }
+            mens builtin.atomic_cas(addr, 0, 1) != 0 {
+                hvis frist >= 0 og mono_ms() >= frist { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+                _gr_vent_steg()
+            }
+            _gr_framgang()
+            returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+        }
         mens builtin.atomic_cas(addr, 0, 1) != 0 {
             la r = _futex_wait(addr, 1, timeout_ms)
             hvis timeout_ms > 0 og r == 0 - nsys._errno("ETIMEDOUT") { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
@@ -4305,6 +4325,7 @@ funksjon thread_sync(req) {
         hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
         builtin.raw_store64(_mx_tabell[mh], 0)
         _futex_wake(_mx_tabell[mh], 1)
+        _gr_framgang()
         returner {"abi": "norscode-native-thread-v1", "status": "ready"}
     }
     hvis op == "condition_wait" {
@@ -4321,6 +4342,19 @@ funksjon thread_sync(req) {
             builtin.raw_store64(_mx_tabell[mutex_h], 0)
             _futex_wake(_mx_tabell[mutex_h], 1)
         }
+        hvis _gr_aktiv() {
+            // F37: kooperativ venting (seq-endring = signal; timeout_ms <= 0 = utan frist).
+            la gfrist = 0 - 1
+            hvis timeout_ms > 0 { gfrist = mono_ms() + timeout_ms }
+            mens builtin.raw_load64(caddr) == seq og (gfrist < 0 eller mono_ms() < gfrist) { _gr_vent_steg() }
+            la gsig = builtin.raw_load64(caddr) != seq
+            hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
+                mens builtin.atomic_cas(_mx_tabell[mutex_h], 0, 1) != 0 { _gr_vent_steg() }
+            }
+            _gr_framgang()
+            hvis ikkje gsig { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+            returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+        }
         hvis builtin.raw_load64(caddr) == seq { _futex_wait(caddr, seq, timeout_ms) }
         la signalisert = builtin.raw_load64(caddr) != seq
         hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
@@ -4333,6 +4367,7 @@ funksjon thread_sync(req) {
         hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent condition") }
         builtin.atomic_xadd(_mx_tabell[mh], 1)     // auk sekvensen
         _futex_wake(_mx_tabell[mh], 2147483647)
+        _gr_framgang()
         returner {"abi": "norscode-native-thread-v1", "status": "ready"}
     }
     hvis op == "mutex_destroy" eller op == "condition_destroy" {
@@ -4366,7 +4401,269 @@ funksjon thread_sync(req) {
 }
 
 funksjon thread_current_id() {
+    hvis _gr["klar"] == 1 og _gr["cur"] != 0 { returner 1073741824 + _gr["cur"] }
     returner builtin.sys6(nsys._nr_kompat("gettid"), 0, 0, 0, 0, 0, 0)   // macOS: thread_selfid
+}
+
+// ── F37: grøne trådar i AOT (kooperative, éin OS-tråd) ───────────────────────────────
+// Brukarfunksjonar starta med builtin.thread_spawn køyrer som eigne stakkar (mmap) i same
+// prosess; kontekstbyte i atomet builtin.green_switch (callee-saved + rsp + handler-teljar +
+// stakkgrenser). Ingen preemption: byte skjer berre i join, vent.sov, mutex_lock/condition_wait
+// (ventande) og thread_sync {"operation": "yield"}. Same kontrakt som VM-grøntrådane
+// (selfhost/vm.no vm_green_*): fn(args-ordbok) → verdi (som tekst) via join; unntak → status
+// «error» + error-tekst; ukjend fn → synkron «error». GC: gc_mark_roots skannar kvar suspendert
+// stakk via ctx-tabellen. Berre linux-x86_64 og norscodeos-x86_64 (norscodeos: mmap 9/munmap 11
+// er i sys6-porten; ikkje køyrt på ekte kjerne). Sjå docs/AOT_TRADAR.md.
+// Alt tilstand ligg i éi global ordbok (verts-ABI-sida har få globalslottar).
+la _gr = {"klar": 0, "tab": 0, "ctx0": 0, "cur": 0, "neste": 0, "ring": [], "slot": [], "idle": 0, "rydd": [], "trad": {}, "ts": 0}
+
+funksjon _gr_mal_ok() -> boolsk {
+    la m = builtin.native_target()
+    returner m == "linux-x86_64" eller m == "norscodeos-x86_64"
+}
+
+// Kooperativ venting (poll + yield/søvn) i staden for futex: etter fyrste grøne spawn, og alltid på
+// norscodeos-x86_64 (futex er -ENOSYS der, so futex-venting ville returnert straks).
+funksjon _gr_aktiv() -> boolsk {
+    hvis _gr["klar"] == 1 { returner sann }
+    returner builtin.native_target() == "norscodeos-x86_64"
+}
+
+funksjon _gr_init() -> heiltall {
+    hvis _gr["klar"] == 1 { returner 1 }
+    la blk = _sys_mmap_rw(8192)
+    hvis blk < 0 { returner 0 }
+    // ctx0 @blk (hovudtråden); ctx-tabell @blk+256: ord 0 = tal oppføringar (65), 1..64 = ctx-peikarar.
+    // Oppføring 0 = hovudtråden (blir skanna medan han er suspendert), 1+s = grøn tråd i slot s.
+    builtin.raw_store64(blk + 256, 65)
+    builtin.raw_store64(blk + 264, blk)
+    builtin.green_setup(blk, blk + 256)
+    _gr["ctx0"] = blk
+    _gr["tab"] = blk + 256
+    la sl = []
+    la i = 0
+    mens i < 64 { legg_til(sl, 0)  i = i + 1 }
+    _gr["slot"] = sl
+    _gr["ring"] = [0]
+    _gr["ts"] = _arena_alloc(16)
+    _gr["klar"] = 1
+    returner 1
+}
+
+funksjon _gr_ctx(nr: heiltall) -> heiltall {
+    hvis nr == 0 { returner _gr["ctx0"] }
+    returner _gr["trad"]["green-thread:" + tekst_fra_heltall(nr)]["ctx"]
+}
+
+funksjon _gr_neste_etter(nr: heiltall) -> heiltall {
+    la ring = _gr["ring"]
+    la i = 0
+    la n = lengde(ring)
+    mens i < n {
+        hvis ring[i] == nr { returner ring[(i + 1) % n] }
+        i = i + 1
+    }
+    returner ring[0]
+}
+
+funksjon _gr_fjern_fra_ring(nr: heiltall) -> heiltall {
+    la ny = []
+    la ring = _gr["ring"]
+    la i = 0
+    mens i < lengde(ring) {
+        hvis ring[i] != nr { legg_til(ny, ring[i]) }
+        i = i + 1
+    }
+    _gr["ring"] = ny
+    returner 0
+}
+
+// Frigjer stakkane til ferdige trådar. Kalla berre frå ein levande tråd (ikkje frå tråden som
+// eig stakken); ferdige trådar køyrer aldri att.
+funksjon _gr_rydd() -> heiltall {
+    la r = _gr["rydd"]
+    hvis lengde(r) == 0 { returner 0 }
+    la i = 0
+    mens i < lengde(r) {
+        _sys_munmap(r[i][0], r[i][1])
+        i = i + 1
+    }
+    _gr["rydd"] = []
+    returner 0
+}
+
+funksjon _gr_framgang() -> heiltall {
+    _gr["idle"] = 0
+    returner 0
+}
+
+// Gje kontrollen til neste trådar i ringen. Returnerer 1 om vi bytte, 0 om vi er åleine.
+funksjon _gr_yield() -> heiltall {
+    hvis _gr["klar"] != 1 { returner 0 }
+    la meg = _gr["cur"]
+    la neste = _gr_neste_etter(meg)
+    hvis neste == meg { returner 0 }
+    _gr["cur"] = neste
+    builtin.green_switch(_gr_ctx(meg), _gr_ctx(neste))
+    _gr_rydd()
+    returner 1
+}
+
+funksjon _gr_nanosleep_ms(ms: heiltall) -> heiltall {
+    la ts = _gr["ts"]
+    hvis ts == 0 {
+        ts = _arena_alloc(16)
+        _gr["ts"] = ts
+    }
+    builtin.raw_store64(ts, ms / 1000)
+    builtin.raw_store64(ts + 8, (ms % 1000) * 1000000)
+    builtin.sys6(nsys._nr("nanosleep"), ts, 0, 0, 0, 0, 0)
+    returner 0
+}
+
+// Ei tråd ventar på noko som ikkje er klart: gjev frå seg kontrollen. Når ei heil runde utan
+// framgang har gått (alle ventar), søv vi 1 ms (frist/klokke og thread.*-primitiv må kunne gå vidare).
+funksjon _gr_vent_steg() -> heiltall {
+    _gr["idle"] = _gr["idle"] + 1
+    hvis _gr["idle"] > 2 * lengde(_gr["ring"]) + 2 {
+        _gr["idle"] = 0
+        _gr_nanosleep_ms(1)
+    }
+    _gr_yield()
+    returner 0
+}
+
+// vent.sov(ms) når std.native_gap er i bunten (codegen rutar hit). Utan andre grøne trådar:
+// vanleg nanosleep. Elles søv denne tråden kooperativt medan dei andre går.
+funksjon _gr_sov(ms) {
+    la n = 0
+    hvis builtin.type(ms) == "heltall" { n = ms }
+    hvis n < 0 { n = 0 }
+    hvis _gr["klar"] != 1 eller lengde(_gr["ring"]) <= 1 {
+        hvis n > 0 { _gr_nanosleep_ms(n) }
+        returner 0
+    }
+    hvis n == 0 {
+        _gr_framgang()
+        _gr_yield()
+        returner 0
+    }
+    la frist = mono_ms() + n
+    mens mono_ms() < frist { _gr_vent_steg() }
+    _gr_framgang()
+    returner 0
+}
+
+funksjon _gr_svar(status: tekst, h: tekst, tid: tekst, verdi: tekst, feil: tekst) {
+    returner {"abi": "norscode-native-thread-v1", "status": status, "handle": h, "thread_id": tid,
+              "value": verdi, "error": feil, "backend": "aot-green"}
+}
+
+funksjon _gr_spawn(req, fn: tekst, args, stack_bytes: heiltall) {
+    hvis ikkje _gr_mal_ok() { returner _th_feil("error", "grøne trådar er ikkje støtta på " + nsys.mål() + " enno (NATIV-GAP)") }
+    hvis fn == "" { returner _th_feil("error", "invalid request") }
+    hvis ikkje builtin.host_finst(fn) { returner _th_feil("error", "ukjend trådfunksjon: " + fn) }
+    hvis builtin.type(args) != "ordbok" { args = {} }
+    hvis _gr_init() == 0 { returner _th_feil("error", "mmap feila (grøn tråd)") }
+    _gr_rydd()
+    la sl = _gr["slot"]
+    la s = 0
+    mens s < 64 og sl[s] != 0 { s = s + 1 }
+    hvis s >= 64 { returner _th_feil("error", "for mange grøne trådar (maks 64)") }
+    la storleik = stack_bytes
+    hvis storleik < 524288 { storleik = 524288 }
+    storleik = ((storleik + 4095) / 4096) * 4096
+    la base = _sys_mmap_rw(storleik)
+    hvis base < 0 { returner _th_feil("error", "mmap stakk feila") }
+    la ende = base + storleik
+    la ctx = ende - 64
+    la sp = ctx - 64
+    // Fyrste ramme: 6 nullstilte register, så retur til green_boot. green_switch «returnerer» dit.
+    builtin.raw_store64(sp + 48, builtin.green_boot_va())
+    builtin.raw_store64(ctx, sp)
+    builtin.raw_store64(ctx + 8, 30720 - 128 * (s + 1))          // eige handler-intervall (128 rammer)
+    builtin.raw_store64(ctx + 16, base + 65536)                    // rekursjonsvakt-grense
+    builtin.raw_store64(ctx + 24, ende)                            // skann-topp
+    builtin.raw_store64(ctx + 32, builtin.obj_addr("std.native_gap._gr_inngang"))
+    sl[s] = 1
+    builtin.raw_store64(_gr["tab"] + 8 * (2 + s), ctx)
+    _gr["neste"] = _gr["neste"] + 1
+    la nr = _gr["neste"]
+    la h = "green-thread:" + tekst_fra_heltall(nr)
+    _gr["trad"][h] = {"nr": nr, "ctx": ctx, "base": base, "storleik": storleik, "slot": s,
+                      "state": "kjorar", "value": "", "error": "", "fn": fn, "args": args, "cancel": 0}
+    legg_til(_gr["ring"], nr)
+    _gr_framgang()
+    returner _gr_svar("started", h, tekst_fra_heltall(1073741824 + nr), "", "")
+}
+
+// Inngangsfunksjon for ein ny grøn tråd (kalla av green_boot via ncb_kall på den nye stakken).
+funksjon _gr_inngang() {
+    la nr = _gr["cur"]
+    la t = _gr["trad"]["green-thread:" + tekst_fra_heltall(nr)]
+    prøv {
+        la v = builtin.ncb_call_fn(t["fn"], t["args"])
+        hvis builtin.type(v) == "tekst" { t["value"] = v } ellers { t["value"] = tekst(v) }
+        t["state"] = "ferdig"
+    } fang (e) {
+        t["error"] = tekst(e)
+        t["state"] = "feil"
+    }
+    _gr_avslutt(nr, t)
+    returner 0
+}
+
+// Fjern tråden frå ringen og bytt bort for alltid. Stakken blir frigjort av ein levande tråd.
+funksjon _gr_avslutt(nr: heiltall, t) {
+    la neste = _gr_neste_etter(nr)
+    _gr_fjern_fra_ring(nr)
+    builtin.raw_store64(_gr["tab"] + 8 * (2 + t["slot"]), 0)
+    _gr["slot"][t["slot"]] = 0
+    legg_til(_gr["rydd"], [t["base"], t["storleik"]])
+    _gr_framgang()
+    _gr["cur"] = neste
+    builtin.green_switch(t["ctx"], _gr_ctx(neste))
+    returner 0
+}
+
+funksjon _gr_join(req, h: tekst) {
+    hvis ikkje finnes_nøkkel(_gr["trad"], h) { returner _gr_svar("error", h, "", "", "invalid handle") }
+    la t = _gr["trad"][h]
+    la tid = tekst_fra_heltall(1073741824 + t["nr"])
+    la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+    la frist = 0 - 1
+    hvis timeout_ms > 0 { frist = mono_ms() + timeout_ms }
+    mens t["state"] == "kjorar" {
+        hvis timeout_ms == 0 { returner _gr_svar("timeout", h, tid, "", "timeout") }
+        hvis frist >= 0 og mono_ms() >= frist { returner _gr_svar("timeout", h, tid, "", "timeout") }
+        _gr_vent_steg()
+    }
+    _gr_framgang()
+    // Handtaket er konsumert etter fullført join (som native join).
+    fjern_nokkel(_gr["trad"], h)
+    hvis t["state"] == "feil" { returner _gr_svar("error", h, tid, "", t["error"]) }
+    returner _gr_svar("finished", h, tid, t["value"], "")
+}
+
+funksjon _gr_cancel(h: tekst) {
+    hvis ikkje finnes_nøkkel(_gr["trad"], h) { returner _gr_svar("error", h, "", "", "invalid handle") }
+    la t = _gr["trad"][h]
+    t["cancel"] = 1      // som i VM: berre eit flagg
+    returner _gr_svar("cancelled", h, tekst_fra_heltall(1073741824 + t["nr"]), "", "")
+}
+
+// builtin.thread_pool: berre proben til std.samtid.backend() (status på tomt handtak). Resten er
+// NATIV-GAP i AOT (pool-tasks finst berre i VM-en). Andre mål: null (uendra åtferd).
+funksjon thread_pool(req) {
+    hvis ikkje _gr_mal_ok() { returner null }
+    la pabi = "norscode-native-thread-pool-v1"
+    hvis builtin.type(req) != "ordbok" { returner null }
+    la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "status" {
+        returner {"abi": pabi, "status": "error", "pool_handle": "", "task_handle": "", "error": "invalid handle"}
+    }
+    returner {"abi": pabi, "status": "error", "pool_handle": "", "task_handle": "",
+              "error": "NATIV-GAP: thread_pool er ikkje støtta i AOT (bruk thread_spawn)"}
 }
 
 funksjon jit_operation(req) {
