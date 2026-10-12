@@ -1,0 +1,1555 @@
+// Norscode Language Server (LSP 3.17) — strøymande JSON-RPC over stdio.
+//
+// Rein Norscode. Ei vedvarande lykkje les Content-Length-ramma meldingar
+// byte-for-byte frå fd 0 og skriv ramma svar/varsel til fd 1 etter kvar
+// melding (ingen «les alt til EOF»). Sjå docs/LSP.md.
+//
+//   lsp_straum_lykkje()   køyrer lykkja (AOT: fd_les/fd_skriv; VM utan dei
+//                         builtin-ane: batch-reserve via fil_les("/dev/stdin"))
+//   lsp_behandle(tilstand, melding) -> liste av utmeldingar (rein funksjon
+//                         over tilstanden, testbar i VM utan prosessar)
+//
+// Funksjonar: initialize/initialized/shutdown/exit, didOpen/didChange
+// (inkrementell + full)/didClose, publishDiagnostics (lexer/parser/typesjekk/
+// lint frå selfhost/linter_kjerne.no), hover, definition, completion,
+// documentSymbol, formatting, references, rename.
+// Posisjonar på linja er UTF-16-einingar mot klienten, byte internt.
+
+bruk selfhost.lexer.lexer_m1
+bruk selfhost.parser
+bruk selfhost.linter_kjerne som lk
+bruk selfhost.formatter som fmt
+
+// ─── JSON ut ─────────────────────────────────────────────────────────────────
+
+funksjon lsp_js_tekst(s: tekst) -> tekst {
+    la delar = ["\""]
+    la n = lengde(s)
+    la start = 0
+    la p = 0
+    mens p < n {
+        la k = builtin.char_code(builtin.slice(s, p, p + 1))
+        hvis k == 34 eller k == 92 eller k < 32 {
+            hvis p > start { legg_til(delar, builtin.slice(s, start, p)) }
+            hvis k == 34 { legg_til(delar, "\\\"") }
+            ellers hvis k == 92 { legg_til(delar, "\\\\") }
+            ellers hvis k == 10 { legg_til(delar, "\\n") }
+            ellers hvis k == 13 { legg_til(delar, "\\r") }
+            ellers hvis k == 9 { legg_til(delar, "\\t") }
+            ellers { legg_til(delar, " ") }
+            start = p + 1
+        }
+        p = p + 1
+    }
+    hvis n > start { legg_til(delar, builtin.slice(s, start, n)) }
+    legg_til(delar, "\"")
+    returner builtin.join(delar, "")
+}
+
+// Generell serialisering: null, boolsk, heiltall, tekst, liste, ordbok.
+funksjon lsp_js(v) -> tekst {
+    la t = type(v)
+    hvis v == null { returner "null" }
+    hvis t == "boolsk" {
+        hvis v { returner "true" }
+        returner "false"
+    }
+    hvis t == "heltall" { returner tekst(v) }
+    hvis t == "desimaltall" { returner tekst(v) }
+    hvis t == "tekst" { returner lsp_js_tekst(v) }
+    hvis t == "liste" {
+        la delar = []
+        la i = 0
+        mens i < lengde(v) {
+            legg_til(delar, lsp_js(v[i]))
+            i = i + 1
+        }
+        returner "[" + builtin.join(delar, ",") + "]"
+    }
+    hvis t == "ordbok" {
+        la delar = []
+        la ks = nøkler(v)
+        la j = 0
+        mens j < lengde(ks) {
+            legg_til(delar, lsp_js_tekst(tekst(ks[j])) + ":" + lsp_js(v[ks[j]]))
+            j = j + 1
+        }
+        returner "{" + builtin.join(delar, ",") + "}"
+    }
+    returner lsp_js_tekst(tekst(v))
+}
+
+funksjon lsp_ramme_ut(body: tekst) -> tekst {
+    returner "Content-Length: " + tekst(lengde(body)) + "\r\n\r\n" + body
+}
+
+funksjon lsp_svar(id, resultat) -> tekst {
+    returner lsp_ramme_ut(lsp_js({ jsonrpc: "2.0", id: id, result: resultat }))
+}
+
+funksjon lsp_feil(id, kode: heiltall, melding: tekst) -> tekst {
+    returner lsp_ramme_ut(lsp_js({ jsonrpc: "2.0", id: id, error: { code: kode, message: melding } }))
+}
+
+funksjon lsp_varsel(metode: tekst, params) -> tekst {
+    returner lsp_ramme_ut(lsp_js({ jsonrpc: "2.0", method: metode, params: params }))
+}
+
+// ─── Tekst- og posisjonshjelparar ────────────────────────────────────────────
+
+funksjon lsp_ordteikn(k: heiltall) -> boolsk {
+    returner (k >= 97 og k <= 122) eller (k >= 65 og k <= 90) eller (k >= 48 og k <= 57) eller k == 95 eller k >= 128
+}
+
+funksjon lsp_byte_i(s: tekst, p: heiltall) -> heiltall {
+    returner builtin.char_code(builtin.slice(s, p, p + 1))
+}
+
+// UTF-16-eining (klient) → byte-forskyving på linja.
+funksjon lsp_u16_til_byte(linje: tekst, u16: heiltall) -> heiltall {
+    la n = lengde(linje)
+    la b = 0
+    la u = 0
+    mens b < n og u < u16 {
+        la k = lsp_byte_i(linje, b)
+        hvis k < 128 {
+            b = b + 1
+            u = u + 1
+        } ellers hvis k >= 240 {
+            b = b + 4
+            u = u + 2
+        } ellers hvis k >= 224 {
+            b = b + 3
+            u = u + 1
+        } ellers hvis k >= 192 {
+            b = b + 2
+            u = u + 1
+        } ellers {
+            b = b + 1
+        }
+    }
+    hvis b > n { b = n }
+    returner b
+}
+
+// Byte-forskyving på linja → UTF-16-eining.
+funksjon lsp_byte_til_u16(linje: tekst, bytes: heiltall) -> heiltall {
+    la n = lengde(linje)
+    hvis bytes > n { bytes = n }
+    la b = 0
+    la u = 0
+    mens b < bytes {
+        la k = lsp_byte_i(linje, b)
+        hvis k < 128 {
+            u = u + 1
+        } ellers hvis k >= 240 {
+            u = u + 2
+        } ellers hvis k >= 192 {
+            u = u + 1
+        }
+        b = b + 1
+    }
+    returner u
+}
+
+funksjon lsp_linjer(innhald: tekst) {
+    returner builtin.split(innhald, "\n")
+}
+
+funksjon lsp_linje_n(linjer, n: heiltall) -> tekst {
+    hvis n < 0 eller n >= lengde(linjer) { returner "" }
+    la l = linjer[n]
+    hvis builtin.ends_with(l, "\r") { returner builtin.slice(l, 0, lengde(l) - 1) }
+    returner l
+}
+
+funksjon lsp_pos(linjer, linje: heiltall, kol_byte: heiltall) {
+    returner { line: linje, character: lsp_byte_til_u16(lsp_linje_n(linjer, linje), kol_byte) }
+}
+
+funksjon lsp_rekkje(linjer, l1: heiltall, k1: heiltall, l2: heiltall, k2: heiltall) {
+    returner { start: lsp_pos(linjer, l1, k1), end: lsp_pos(linjer, l2, k2) }
+}
+
+// Byte-forskyving i heile teksten for (linje, UTF-16-teikn).
+funksjon lsp_forskyving(innhald: tekst, linje: heiltall, teikn: heiltall) -> heiltall {
+    la linjer = lsp_linjer(innhald)
+    la off = 0
+    la i = 0
+    mens i < linje og i < lengde(linjer) {
+        off = off + lengde(linjer[i]) + 1
+        i = i + 1
+    }
+    hvis linje >= lengde(linjer) { returner lengde(innhald) }
+    la l = linjer[linje]
+    returner off + lsp_u16_til_byte(l, teikn)
+}
+
+// Ordet rundt kolonne (byte) på linja: [start, slutt) eller null.
+funksjon lsp_ord_grenser(l: tekst, kol: heiltall) {
+    la n = lengde(l)
+    hvis kol > n { kol = n }
+    la a = kol
+    mens a > 0 og lsp_ordteikn(lsp_byte_i(l, a - 1)) { a = a - 1 }
+    la b = kol
+    mens b < n og lsp_ordteikn(lsp_byte_i(l, b)) { b = b + 1 }
+    hvis b <= a { returner null }
+    returner [a, b]
+}
+
+// Bruk ordgrensene og gjer første teikn ikkje-siffer til ein gyldig identifikator.
+funksjon lsp_ord_ved(l: tekst, kol: heiltall) -> tekst {
+    la g = lsp_ord_grenser(l, kol)
+    hvis g == null { returner "" }
+    returner builtin.slice(l, g[0], g[1])
+}
+
+// Er posisjon (linje,kol) inne i ein streng eller kommentar? (grov, per linje)
+funksjon lsp_i_kommentar_eller_streng(l: tekst, kol: heiltall) -> boolsk {
+    la i = 0
+    la i_streng = usann
+    mens i < kol og i < lengde(l) {
+        la c = builtin.slice(l, i, i + 1)
+        hvis i_streng {
+            hvis c == "\\" { i = i + 1 }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers {
+            hvis c == "\"" { i_streng = sann }
+            ellers hvis c == "/" og builtin.slice(l, i + 1, i + 2) == "/" { returner sann }
+        }
+        i = i + 1
+    }
+    returner i_streng
+}
+
+// ─── URI ↔ sti ───────────────────────────────────────────────────────────────
+
+funksjon lsp_uri_til_sti(uri: tekst) -> tekst {
+    la s = uri
+    hvis builtin.starts_with(s, "file://") { s = builtin.slice(s, 7, lengde(s)) }
+    hvis builtin.contains(s, "%") {
+        s = builtin.replace(s, "%20", " ")
+        s = builtin.replace(s, "%C3%A6", "æ")
+        s = builtin.replace(s, "%C3%B8", "ø")
+        s = builtin.replace(s, "%C3%A5", "å")
+    }
+    returner s
+}
+
+funksjon lsp_sti_til_uri(sti: tekst) -> tekst {
+    returner "file://" + builtin.replace(sti, " ", "%20")
+}
+
+// ─── Dokument og symbolindeks ────────────────────────────────────────────────
+
+funksjon lsp_ny_tilstand() {
+    returner {
+        initialisert: usann,
+        shutdown: usann,
+        avslutta: usann,
+        rot: "",
+        dokument: {},
+        ventande: [],
+        meldingar: 0
+    }
+}
+
+// Parse dokumentet; ved feil blir førre vellukka AST behalden (indeks kan vere gammal).
+funksjon lsp_oppdater_indeks(dok) {
+    la ast = null
+    prøv {
+        ast = selfhost.parser.parse_program(lexer_m1.lex(dok["innhald"]))
+    } fang (e) {
+        ast = null
+    }
+    hvis ast != null {
+        dok["ast"] = ast
+        dok["ast_gyldig"] = sann
+    } ellers {
+        dok["ast_gyldig"] = usann
+    }
+    returner dok
+}
+
+funksjon lsp_hent_dok(tilstand, uri) {
+    hvis uri == null { returner null }
+    hvis finnes_nøkkel(tilstand["dokument"], uri) { returner tilstand["dokument"][uri] }
+    returner null
+}
+
+funksjon lsp_sett_dok(tilstand, uri: tekst, innhald: tekst, versjon) {
+    la dok = { uri: uri, innhald: innhald, versjon: versjon, ast: null, ast_gyldig: usann }
+    lsp_oppdater_indeks(dok)
+    hvis finnes_nøkkel(tilstand["dokument"], uri) {
+        la gammal = tilstand["dokument"][uri]
+        hvis dok["ast"] == null { dok["ast"] = gammal["ast"] }
+    }
+    tilstand["dokument"][uri] = dok
+    returner dok
+}
+
+funksjon lsp_toppnivaa(dok) {
+    hvis dok == null eller dok["ast"] == null { returner [] }
+    returner dok["ast"]["barn"]
+}
+
+funksjon lsp_barn_type(node, t: tekst) {
+    la barn = node["barn"]
+    la i = 0
+    mens i < lengde(barn) {
+        hvis barn[i]["type"] == t { returner barn[i] }
+        i = i + 1
+    }
+    returner null
+}
+
+funksjon lsp_type_av(node) -> tekst {
+    hvis node == null { returner "" }
+    hvis finnes_nøkkel(node, "typetekst") { returner tekst(node["typetekst"]) }
+    returner ""
+}
+
+funksjon lsp_param_tekst(p) -> tekst {
+    la t = lsp_barn_type(p, "Type")
+    la s = tekst(p["verdi"])
+    hvis finnes_nøkkel(p, "vararg") og p["vararg"] == sann { s = "..." + s }
+    hvis t != null og lsp_type_av(t) != "" { s = s + ": " + lsp_type_av(t) }
+    returner s
+}
+
+funksjon lsp_signatur(fn_node) -> tekst {
+    la ps = lsp_barn_type(fn_node, "Parametere")
+    la delar = []
+    hvis ps != null {
+        la i = 0
+        mens i < lengde(ps["barn"]) {
+            legg_til(delar, lsp_param_tekst(ps["barn"][i]))
+            i = i + 1
+        }
+    }
+    la s = "funksjon " + tekst(fn_node["verdi"]) + "(" + builtin.join(delar, ", ") + ")"
+    la rt = lsp_barn_type(fn_node, "Returtype")
+    hvis rt != null og lsp_type_av(rt) != "" { s = s + " -> " + lsp_type_av(rt) }
+    returner s
+}
+
+funksjon lsp_struktur_tekst(node) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(node["barn"]) {
+        la f = node["barn"][i]
+        hvis f["type"] == "Felt" {
+            la tt = lsp_type_av(f)
+            hvis tt != "" { legg_til(delar, tekst(f["verdi"]) + ": " + tt) }
+            ellers { legg_til(delar, tekst(f["verdi"])) }
+        }
+        i = i + 1
+    }
+    returner "struktur " + tekst(node["verdi"]) + " { " + builtin.join(delar, ", ") + " }"
+}
+
+funksjon lsp_enum_tekst(node) -> tekst {
+    la delar = []
+    la i = 0
+    mens i < lengde(node["barn"]) {
+        legg_til(delar, tekst(node["barn"][i]["verdi"]))
+        i = i + 1
+    }
+    returner "enum " + tekst(node["verdi"]) + " { " + builtin.join(delar, ", ") + " }"
+}
+
+// Dokumentasjonskommentar: samanhengande `//`-linjer rett over deklarasjonen.
+funksjon lsp_dokkommentar(linjer, deklinje: heiltall) -> tekst {
+    la rad = []
+    la n = deklinje - 2
+    mens n >= 0 {
+        la t = builtin.trim(lsp_linje_n(linjer, n))
+        hvis builtin.starts_with(t, "//") {
+            la ren = builtin.trim(builtin.slice(t, 2, lengde(t)))
+            hvis builtin.starts_with(t, "///") { ren = builtin.trim(builtin.slice(t, 3, lengde(t))) }
+            legg_til(rad, ren)
+            n = n - 1
+        } ellers {
+            bryt
+        }
+    }
+    la ut = []
+    la j = lengde(rad) - 1
+    mens j >= 0 {
+        legg_til(ut, rad[j])
+        j = j - 1
+    }
+    returner builtin.join(ut, "\n")
+}
+
+// Kolonne (0-basert byte) for namnet i ei deklarasjon på ei 1-basert linje.
+funksjon lsp_namnkolonne(linjer, linje1: heiltall, namn: tekst, frå: heiltall) -> heiltall {
+    la l = lsp_linje_n(linjer, linje1 - 1)
+    la p = frå
+    mens p <= lengde(l) - lengde(namn) {
+        hvis builtin.slice(l, p, p + lengde(namn)) == namn {
+            la framføre_ok = p == 0 eller ikkje lsp_ordteikn(lsp_byte_i(l, p - 1))
+            la etter_ok = p + lengde(namn) >= lengde(l) eller ikkje lsp_ordteikn(lsp_byte_i(l, p + lengde(namn)))
+            hvis framføre_ok og etter_ok { returner p }
+        }
+        p = p + 1
+    }
+    returner frå
+}
+
+// Finn toppnivå-deklarasjon (Funksjon/Struktur/Enum/La) med namn.
+funksjon lsp_finn_dekl(dok, namn: tekst) {
+    la barn = lsp_toppnivaa(dok)
+    la i = 0
+    mens i < lengde(barn) {
+        la n = barn[i]
+        la t = n["type"]
+        hvis (t == "Funksjon" eller t == "Struktur" eller t == "Enum" eller t == "La") og tekst(n["verdi"]) == namn { returner n }
+        i = i + 1
+    }
+    returner null
+}
+
+// Funksjonen som omsluttar 1-basert linje.
+funksjon lsp_omsluttande_fn(dok, linje1: heiltall) {
+    la barn = lsp_toppnivaa(dok)
+    la best = null
+    la i = 0
+    mens i < lengde(barn) {
+        la n = barn[i]
+        hvis (n["type"] == "Funksjon" eller n["type"] == "Test") og n["linje"] <= linje1 { best = n }
+        i = i + 1
+    }
+    returner best
+}
+
+funksjon lsp_inferer_type(node) -> tekst {
+    hvis node == null { returner "" }
+    la t = node["type"]
+    hvis t == "Heltall" { returner "heltall" }
+    hvis t == "Desimal" { returner "desimaltall" }
+    hvis t == "Tekst" { returner "tekst" }
+    hvis t == "Bool" eller t == "Sann" eller t == "Usann" { returner "bool" }
+    hvis t == "Liste" { returner "liste" }
+    hvis t == "Ordbok" { returner "ordbok" }
+    hvis t == "StructLiteral" { returner "struktur" }
+    returner ""
+}
+
+// Alle lokale deklarasjonar (parametrar + la) i funksjonen som er synlege før linje1.
+// Kvar: { namn, art: "parameter"|"variabel", type, linje (1-basert), kolonne (1-basert) }
+funksjon lsp_samle_lokale(node, linje1: heiltall, ut) {
+    hvis node == null { returner ut }
+    la t = node["type"]
+    hvis t == "Parameter" {
+        legg_til(ut, { namn: tekst(node["verdi"]), art: "parameter", typ: lsp_type_av(lsp_barn_type(node, "Type")), linje: node["linje"], kolonne: node["kolonne"] })
+    } ellers hvis t == "La" og node["linje"] <= linje1 {
+        la tt = lsp_type_av(lsp_barn_type(node, "Type"))
+        hvis tt == "" {
+            la bi = 0
+            mens bi < lengde(node["barn"]) og tt == "" {
+                hvis node["barn"][bi]["type"] != "Type" { tt = lsp_inferer_type(node["barn"][bi]) }
+                bi = bi + 1
+            }
+        }
+        legg_til(ut, { namn: tekst(node["verdi"]), art: "variabel", typ: tt, linje: node["linje"], kolonne: node["kolonne"] })
+    } ellers hvis t == "For" og node["linje"] <= linje1 {
+        legg_til(ut, { namn: tekst(node["verdi"]), art: "variabel", typ: "", linje: node["linje"], kolonne: node["kolonne"] })
+    }
+    la barn = node["barn"]
+    hvis barn != null {
+        la i = 0
+        mens i < lengde(barn) {
+            lsp_samle_lokale(barn[i], linje1, ut)
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon lsp_lokale_ved(dok, linje1: heiltall) {
+    la fn_node = lsp_omsluttande_fn(dok, linje1)
+    hvis fn_node == null { returner [] }
+    returner lsp_samle_lokale(fn_node, linje1, [])
+}
+
+funksjon lsp_finn_lokal(lokale, namn: tekst) {
+    la i = lengde(lokale) - 1
+    mens i >= 0 {
+        hvis lokale[i]["namn"] == namn { returner lokale[i] }
+        i = i - 1
+    }
+    returner null
+}
+
+// bruk-importar: [{ sti, alias, linje }]
+funksjon lsp_importar(dok) {
+    la ut = []
+    la barn = lsp_toppnivaa(dok)
+    la i = 0
+    mens i < lengde(barn) {
+        la n = barn[i]
+        hvis n["type"] == "Bruk" {
+            la sti = tekst(n["verdi"])
+            la alias = ""
+            la a = lsp_barn_type(n, "Alias")
+            hvis a != null { alias = tekst(a["verdi"]) }
+            hvis alias == "" {
+                la delar = builtin.split(sti, ".")
+                alias = delar[lengde(delar) - 1]
+            }
+            legg_til(ut, { sti: sti, alias: alias, linje: n["linje"] })
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lsp_finn_import(dok, alias: tekst) {
+    la imp = lsp_importar(dok)
+    la i = 0
+    mens i < lengde(imp) {
+        hvis imp[i]["alias"] == alias { returner imp[i] }
+        i = i + 1
+    }
+    returner null
+}
+
+// Modulsti (a.b.c) → filsti under prosjektrota, eller "".
+funksjon lsp_modul_fil(tilstand, modulsti: tekst) -> tekst {
+    la rel = builtin.replace(modulsti, ".", "/") + ".no"
+    la kandidatar = []
+    hvis tilstand["rot"] != "" { legg_til(kandidatar, tilstand["rot"] + "/" + rel) }
+    legg_til(kandidatar, rel)
+    la i = 0
+    mens i < lengde(kandidatar) {
+        hvis fil_finnes(kandidatar[i]) { returner kandidatar[i] }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Tekst for ei fil: opent dokument fyrst, deretter disk.
+funksjon lsp_fil_tekst(tilstand, sti: tekst) -> tekst {
+    la uri = lsp_sti_til_uri(sti)
+    la dok = lsp_hent_dok(tilstand, uri)
+    hvis dok != null { returner dok["innhald"] }
+    prøv { returner fil_les(sti) } fang (e) { returner "" }
+    returner ""
+}
+
+// Deklarasjon i ein tekst: [linje0, kol0, kind, signatur, dok] eller null.
+funksjon lsp_finn_i_tekst(innhald: tekst, namn: tekst) {
+    la linjer = lsp_linjer(innhald)
+    la prefiksar = ["funksjon ", "struktur ", "enum ", "la "]
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = lsp_linje_n(linjer, i)
+        la tl = builtin.trim(l)
+        la j = 0
+        mens j < lengde(prefiksar) {
+            la pf = prefiksar[j]
+            hvis builtin.starts_with(tl, pf) {
+                la rest = builtin.slice(tl, lengde(pf), lengde(tl))
+                hvis builtin.starts_with(rest, namn) {
+                    la etter = builtin.slice(rest, lengde(namn), lengde(namn) + 1)
+                    hvis etter == "" eller etter == "(" eller etter == " " eller etter == "{" eller etter == ":" eller etter == "=" {
+                        la kol = lsp_namnkolonne(linjer, i + 1, namn, 0)
+                        la sig = tl
+                        hvis builtin.ends_with(sig, "{") { sig = builtin.trim(builtin.slice(sig, 0, lengde(sig) - 1)) }
+                        returner [i, kol, pf, sig, lsp_dokkommentar(linjer, i + 1)]
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner null
+}
+
+// Namn på toppnivå-funksjonar/strukturar i ein modultekst (linjeskanning).
+funksjon lsp_modul_symbol(innhald: tekst) {
+    la ut = []
+    la linjer = lsp_linjer(innhald)
+    la i = 0
+    mens i < lengde(linjer) {
+        la tl = builtin.trim(lsp_linje_n(linjer, i))
+        la art = ""
+        la rest = ""
+        hvis builtin.starts_with(tl, "funksjon ") {
+            art = "funksjon"
+            rest = builtin.slice(tl, 9, lengde(tl))
+        } ellers hvis builtin.starts_with(tl, "struktur ") {
+            art = "struktur"
+            rest = builtin.slice(tl, 9, lengde(tl))
+        } ellers hvis builtin.starts_with(tl, "enum ") {
+            art = "enum"
+            rest = builtin.slice(tl, 5, lengde(tl))
+        }
+        hvis art != "" {
+            la e = 0
+            mens e < lengde(rest) og lsp_ordteikn(lsp_byte_i(rest, e)) { e = e + 1 }
+            hvis e > 0 {
+                la namn = builtin.slice(rest, 0, e)
+                hvis ikkje builtin.starts_with(namn, "_") {
+                    la sig = tl
+                    hvis builtin.ends_with(sig, "{") { sig = builtin.trim(builtin.slice(sig, 0, lengde(sig) - 1)) }
+                    legg_til(ut, { namn: namn, art: art, signatur: sig })
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ─── Diagnostikk ─────────────────────────────────────────────────────────────
+
+funksjon lsp_alvor(s: tekst) -> heiltall {
+    hvis s == "error" { returner 1 }
+    hvis s == "warning" { returner 2 }
+    hvis s == "info" { returner 3 }
+    returner 4
+}
+
+funksjon lsp_diagnostikk(innhald: tekst) {
+    la linjer = lsp_linjer(innhald)
+    la funn = []
+    prøv {
+        funn = lk.lint_kjelde(innhald)
+    } fang (e) {
+        returner [{ range: lsp_rekkje(linjer, 0, 0, 0, 1), severity: 3, source: "norscode", code: "lint-internal", message: "norscode-lint stoppa: " + tekst(e) }]
+    }
+    la ut = []
+    la i = 0
+    mens i < lengde(funn) {
+        la f = funn[i]
+        la l0 = f["linje"] - 1
+        la k0 = f["kolonne"] - 1
+        hvis l0 < 0 { l0 = 0 }
+        hvis k0 < 0 { k0 = 0 }
+        la lt = lsp_linje_n(linjer, l0)
+        // Rekkja strekkjer seg over ordet på posisjonen (minst eitt teikn).
+        la slutt_kol = k0
+        mens slutt_kol < lengde(lt) og lsp_ordteikn(lsp_byte_i(lt, slutt_kol)) { slutt_kol = slutt_kol + 1 }
+        hvis slutt_kol <= k0 { slutt_kol = k0 + 1 }
+        hvis slutt_kol > lengde(lt) { slutt_kol = lengde(lt) }
+        hvis slutt_kol < k0 { slutt_kol = k0 }
+        legg_til(ut, {
+            range: lsp_rekkje(linjer, l0, k0, l0, slutt_kol),
+            severity: lsp_alvor(tekst(f["severity"])),
+            source: "norscode",
+            code: tekst(f["code"]),
+            message: tekst(f["melding"])
+        })
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lsp_publiser(dok) -> tekst {
+    la d = lsp_diagnostikk(dok["innhald"])
+    la params = { uri: dok["uri"], diagnostics: d }
+    hvis dok["versjon"] != null { params["version"] = dok["versjon"] }
+    returner lsp_varsel("textDocument/publishDiagnostics", params)
+}
+
+// ─── Hover ───────────────────────────────────────────────────────────────────
+
+funksjon lsp_kodeblokk(kode: tekst, doktekst: tekst) -> tekst {
+    la s = "```norscode\n" + kode + "\n```"
+    hvis doktekst != "" { s = s + "\n\n" + doktekst }
+    returner s
+}
+
+funksjon lsp_nøkkelord_hjelp(ord: tekst) -> tekst {
+    hvis ord == "la" { returner "Deklarerer ein variabel: `la x = verdi` eller `la x: type = verdi`." }
+    hvis ord == "funksjon" { returner "Deklarerer ein funksjon: `funksjon namn(param: type) -> type { ... }`." }
+    hvis ord == "returner" { returner "Returnerer ein verdi frå funksjonen." }
+    hvis ord == "hvis" { returner "Vilkårsgrein: `hvis vilkår { ... } ellers { ... }`." }
+    hvis ord == "mens" { returner "Løkke som køyrer så lenge vilkåret er sant." }
+    hvis ord == "for" { returner "Løkke over ei liste eller eit område." }
+    hvis ord == "struktur" { returner "Deklarerer ein strukturtype med namngjevne felt." }
+    hvis ord == "enum" { returner "Deklarerer ein oppteljingstype." }
+    hvis ord == "bruk" { returner "Importerer ein modul: `bruk std.tekst som t`." }
+    hvis ord == "prøv" { returner "Fangar unntak: `prøv { ... } fang (e) { ... }`." }
+    hvis ord == "kast" { returner "Kastar eit unntak." }
+    hvis ord == "heltall" { returner "Type: 64-bits heiltal." }
+    hvis ord == "tekst" { returner "Type: tekststreng (byte-sekvens, UTF-8)." }
+    hvis ord == "bool" { returner "Type: sann/usann." }
+    returner ""
+}
+
+funksjon lsp_hover_for(tilstand, dok, linje0: heiltall, kol_b: heiltall) {
+    la linjer = lsp_linjer(dok["innhald"])
+    la l = lsp_linje_n(linjer, linje0)
+    la g = lsp_ord_grenser(l, kol_b)
+    hvis g == null { returner null }
+    la ord = builtin.slice(l, g[0], g[1])
+    hvis lsp_i_kommentar_eller_streng(l, g[0]) { returner null }
+    la rekkje = lsp_rekkje(linjer, linje0, g[0], linje0, g[1])
+    la kvalifisert = ""
+    hvis g[0] > 0 og builtin.slice(l, g[0] - 1, g[0]) == "." {
+        la qg = lsp_ord_grenser(l, g[0] - 1)
+        hvis qg != null og qg[1] == g[0] - 1 { kvalifisert = builtin.slice(l, qg[0], qg[1]) }
+    }
+
+    // modul.symbol
+    hvis kvalifisert != "" {
+        la imp = lsp_finn_import(dok, kvalifisert)
+        hvis imp != null {
+            la fil = lsp_modul_fil(tilstand, imp["sti"])
+            hvis fil != "" {
+                la tr = lsp_finn_i_tekst(lsp_fil_tekst(tilstand, fil), ord)
+                hvis tr != null {
+                    returner { contents: { kind: "markdown", value: lsp_kodeblokk(tr[3], tr[4]) }, range: rekkje }
+                }
+            }
+        }
+    }
+
+    // lokal / parameter
+    la lokale = lsp_lokale_ved(dok, linje0 + 1)
+    la lok = lsp_finn_lokal(lokale, ord)
+    hvis lok != null og kvalifisert == "" {
+        la tt = lok["typ"]
+        hvis tt == "" { tt = "utypa" }
+        returner { contents: { kind: "markdown", value: lsp_kodeblokk("(" + lok["art"] + ") " + ord + ": " + tt, "") }, range: rekkje }
+    }
+
+    // toppnivå-deklarasjon i dokumentet
+    la dekl = lsp_finn_dekl(dok, ord)
+    hvis dekl != null og kvalifisert == "" {
+        la doktekst = lsp_dokkommentar(linjer, dekl["linje"])
+        la kode = ""
+        hvis dekl["type"] == "Funksjon" { kode = lsp_signatur(dekl) }
+        ellers hvis dekl["type"] == "Struktur" { kode = lsp_struktur_tekst(dekl) }
+        ellers hvis dekl["type"] == "Enum" { kode = lsp_enum_tekst(dekl) }
+        ellers {
+            la tt = lsp_type_av(lsp_barn_type(dekl, "Type"))
+            kode = "la " + ord
+            hvis tt != "" { kode = kode + ": " + tt }
+        }
+        returner { contents: { kind: "markdown", value: lsp_kodeblokk(kode, doktekst) }, range: rekkje }
+    }
+
+    // import-alias
+    la imp2 = lsp_finn_import(dok, ord)
+    hvis imp2 != null {
+        returner { contents: { kind: "markdown", value: lsp_kodeblokk("bruk " + imp2["sti"] + " som " + ord, "") }, range: rekkje }
+    }
+
+    // strukturfelt
+    la barn = lsp_toppnivaa(dok)
+    la si = 0
+    mens si < lengde(barn) {
+        la sn = barn[si]
+        hvis sn["type"] == "Struktur" {
+            la fi = 0
+            mens fi < lengde(sn["barn"]) {
+                la f = sn["barn"][fi]
+                hvis f["type"] == "Felt" og tekst(f["verdi"]) == ord {
+                    la tt = lsp_type_av(f)
+                    hvis tt == "" { tt = "utypa" }
+                    returner { contents: { kind: "markdown", value: lsp_kodeblokk("(felt) " + tekst(sn["verdi"]) + "." + ord + ": " + tt, "") }, range: rekkje }
+                }
+                fi = fi + 1
+            }
+        }
+        si = si + 1
+    }
+
+    la hjelp = lsp_nøkkelord_hjelp(ord)
+    hvis hjelp != "" {
+        returner { contents: { kind: "markdown", value: hjelp }, range: rekkje }
+    }
+    returner null
+}
+
+// ─── Definition ──────────────────────────────────────────────────────────────
+
+funksjon lsp_lokasjon(uri: tekst, innhald: tekst, linje0: heiltall, kol_b: heiltall, namn: tekst) {
+    la linjer = lsp_linjer(innhald)
+    returner { uri: uri, range: lsp_rekkje(linjer, linje0, kol_b, linje0, kol_b + lengde(namn)) }
+}
+
+funksjon lsp_definisjon_for(tilstand, dok, linje0: heiltall, kol_b: heiltall) {
+    la linjer = lsp_linjer(dok["innhald"])
+    la l = lsp_linje_n(linjer, linje0)
+    la g = lsp_ord_grenser(l, kol_b)
+    hvis g == null { returner null }
+    la ord = builtin.slice(l, g[0], g[1])
+    // `bruk a.b.c som x`: ei modulsti under markøren peikar på modulfila.
+    hvis builtin.starts_with(builtin.trim(l), "bruk ") {
+        la a = g[0]
+        mens a > 0 og (lsp_ordteikn(lsp_byte_i(l, a - 1)) eller lsp_byte_i(l, a - 1) == 46) { a = a - 1 }
+        la b = g[1]
+        mens b < lengde(l) og (lsp_ordteikn(lsp_byte_i(l, b)) eller lsp_byte_i(l, b) == 46) { b = b + 1 }
+        la modul = builtin.slice(l, a, b)
+        la mfil = lsp_modul_fil(tilstand, modul)
+        hvis mfil != "" {
+            returner { uri: lsp_sti_til_uri(mfil), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }
+        }
+    }
+    la kvalifisert = ""
+    hvis g[0] > 0 og builtin.slice(l, g[0] - 1, g[0]) == "." {
+        la qg = lsp_ord_grenser(l, g[0] - 1)
+        hvis qg != null og qg[1] == g[0] - 1 { kvalifisert = builtin.slice(l, qg[0], qg[1]) }
+    }
+
+    hvis kvalifisert != "" {
+        la imp = lsp_finn_import(dok, kvalifisert)
+        hvis imp != null {
+            la fil = lsp_modul_fil(tilstand, imp["sti"])
+            hvis fil != "" {
+                la mtekst = lsp_fil_tekst(tilstand, fil)
+                la tr = lsp_finn_i_tekst(mtekst, ord)
+                hvis tr != null {
+                    returner lsp_lokasjon(lsp_sti_til_uri(fil), mtekst, tr[0], tr[1], ord)
+                }
+            }
+        }
+    }
+
+    la lok = lsp_finn_lokal(lsp_lokale_ved(dok, linje0 + 1), ord)
+    hvis lok != null og kvalifisert == "" {
+        la kol = lsp_namnkolonne(linjer, lok["linje"], ord, lok["kolonne"] - 1)
+        returner lsp_lokasjon(dok["uri"], dok["innhald"], lok["linje"] - 1, kol, ord)
+    }
+
+    la dekl = lsp_finn_dekl(dok, ord)
+    hvis dekl != null og kvalifisert == "" {
+        la kol = lsp_namnkolonne(linjer, dekl["linje"], ord, dekl["kolonne"] - 1)
+        returner lsp_lokasjon(dok["uri"], dok["innhald"], dekl["linje"] - 1, kol, ord)
+    }
+
+    // import-alias → modulfila (første linje)
+    la imp2 = lsp_finn_import(dok, ord)
+    hvis imp2 != null {
+        la fil2 = lsp_modul_fil(tilstand, imp2["sti"])
+        hvis fil2 != "" {
+            returner { uri: lsp_sti_til_uri(fil2), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }
+        }
+        returner null
+    }
+
+    // symbol i andre opne dokument
+    la uris = nøkler(tilstand["dokument"])
+    la u = 0
+    mens u < lengde(uris) {
+        la anna = tilstand["dokument"][uris[u]]
+        hvis anna["uri"] != dok["uri"] {
+            la d2 = lsp_finn_dekl(anna, ord)
+            hvis d2 != null {
+                la l2 = lsp_linjer(anna["innhald"])
+                la k2 = lsp_namnkolonne(l2, d2["linje"], ord, d2["kolonne"] - 1)
+                returner lsp_lokasjon(anna["uri"], anna["innhald"], d2["linje"] - 1, k2, ord)
+            }
+        }
+        u = u + 1
+    }
+    returner null
+}
+
+// ─── Completion ──────────────────────────────────────────────────────────────
+
+la LSP_NOKKELORD = ["la", "funksjon", "returner", "hvis", "ellers", "mens", "for", "bryt", "fortsett", "struktur", "enum", "bruk", "som", "prøv", "fang", "kast", "og", "eller", "ikkje", "sann", "usann", "ingenting", "test", "assert", "grensesnitt", "match", "utsett", "endeleg", "heltall", "tekst", "bool"]
+
+funksjon lsp_samsvar(prefiks: tekst, label: tekst) -> boolsk {
+    hvis prefiks == "" { returner sann }
+    returner builtin.starts_with(label, prefiks)
+}
+
+funksjon lsp_komp_element(label: tekst, kind: heiltall, detalj: tekst, doktekst: tekst) {
+    la e = { label: label, kind: kind }
+    hvis detalj != "" { e["detail"] = detalj }
+    hvis doktekst != "" { e["documentation"] = doktekst }
+    returner e
+}
+
+funksjon lsp_kjend(sett, namn: tekst) -> boolsk {
+    returner finnes_nøkkel(sett, namn)
+}
+
+funksjon lsp_komplettering_for(tilstand, dok, linje0: heiltall, kol_b: heiltall) {
+    la linjer = lsp_linjer(dok["innhald"])
+    la l = lsp_linje_n(linjer, linje0)
+    hvis kol_b > lengde(l) { kol_b = lengde(l) }
+    // Prefikset = ordteikn rett før markøren.
+    la a = kol_b
+    mens a > 0 og lsp_ordteikn(lsp_byte_i(l, a - 1)) { a = a - 1 }
+    la prefiks = builtin.slice(l, a, kol_b)
+    la ut = []
+    la sett = {}
+
+    // `modul.` / `verdi.`
+    hvis a > 0 og builtin.slice(l, a - 1, a) == "." {
+        la qg = lsp_ord_grenser(l, a - 1)
+        hvis qg != null og qg[1] == a - 1 {
+            la kv = builtin.slice(l, qg[0], qg[1])
+            la imp = lsp_finn_import(dok, kv)
+            hvis imp != null {
+                la fil = lsp_modul_fil(tilstand, imp["sti"])
+                hvis fil != "" {
+                    la syms = lsp_modul_symbol(lsp_fil_tekst(tilstand, fil))
+                    la si = 0
+                    mens si < lengde(syms) {
+                        la s = syms[si]
+                        hvis lsp_samsvar(prefiks, s["namn"]) {
+                            la kind = 3
+                            hvis s["art"] == "struktur" { kind = 22 }
+                            hvis s["art"] == "enum" { kind = 13 }
+                            legg_til(ut, lsp_komp_element(s["namn"], kind, s["signatur"], ""))
+                        }
+                        si = si + 1
+                    }
+                }
+                returner { isIncomplete: usann, items: ut }
+            }
+        }
+        // verdi.felt: felt frå alle strukturar i dokumentet
+        la barn = lsp_toppnivaa(dok)
+        la bi = 0
+        mens bi < lengde(barn) {
+            la sn = barn[bi]
+            hvis sn["type"] == "Struktur" {
+                la fi = 0
+                mens fi < lengde(sn["barn"]) {
+                    la f = sn["barn"][fi]
+                    la fnamn = tekst(f["verdi"])
+                    hvis f["type"] == "Felt" og lsp_samsvar(prefiks, fnamn) og ikkje lsp_kjend(sett, fnamn) {
+                        sett[fnamn] = 1
+                        legg_til(ut, lsp_komp_element(fnamn, 5, tekst(sn["verdi"]) + "." + fnamn + ": " + lsp_type_av(f), ""))
+                    }
+                    fi = fi + 1
+                }
+            }
+            bi = bi + 1
+        }
+        returner { isIncomplete: usann, items: ut }
+    }
+
+    // lokale
+    la lokale = lsp_lokale_ved(dok, linje0 + 1)
+    la li = 0
+    mens li < lengde(lokale) {
+        la lk2 = lokale[li]
+        hvis lsp_samsvar(prefiks, lk2["namn"]) og ikkje lsp_kjend(sett, lk2["namn"]) {
+            sett[lk2["namn"]] = 1
+            la tt = lk2["typ"]
+            hvis tt == "" { tt = "utypa" }
+            legg_til(ut, lsp_komp_element(lk2["namn"], 6, lk2["art"] + ": " + tt, ""))
+        }
+        li = li + 1
+    }
+    // toppnivå
+    la tn = lsp_toppnivaa(dok)
+    la ti = 0
+    mens ti < lengde(tn) {
+        la n = tn[ti]
+        la nt = n["type"]
+        la nnamn = tekst(n["verdi"])
+        hvis (nt == "Funksjon" eller nt == "Struktur" eller nt == "Enum" eller nt == "La") og lsp_samsvar(prefiks, nnamn) og ikkje lsp_kjend(sett, nnamn) {
+            sett[nnamn] = 1
+            hvis nt == "Funksjon" { legg_til(ut, lsp_komp_element(nnamn, 3, lsp_signatur(n), lsp_dokkommentar(linjer, n["linje"]))) }
+            ellers hvis nt == "Struktur" { legg_til(ut, lsp_komp_element(nnamn, 22, lsp_struktur_tekst(n), "")) }
+            ellers hvis nt == "Enum" { legg_til(ut, lsp_komp_element(nnamn, 13, lsp_enum_tekst(n), "")) }
+            ellers { legg_til(ut, lsp_komp_element(nnamn, 6, "la " + nnamn, "")) }
+        }
+        ti = ti + 1
+    }
+    // modulalias
+    la imps = lsp_importar(dok)
+    la ii = 0
+    mens ii < lengde(imps) {
+        hvis lsp_samsvar(prefiks, imps[ii]["alias"]) og ikkje lsp_kjend(sett, imps[ii]["alias"]) {
+            sett[imps[ii]["alias"]] = 1
+            legg_til(ut, lsp_komp_element(imps[ii]["alias"], 9, "bruk " + imps[ii]["sti"], ""))
+        }
+        ii = ii + 1
+    }
+    // nøkkelord
+    la ni = 0
+    mens ni < lengde(LSP_NOKKELORD) {
+        hvis lsp_samsvar(prefiks, LSP_NOKKELORD[ni]) og ikkje lsp_kjend(sett, LSP_NOKKELORD[ni]) {
+            sett[LSP_NOKKELORD[ni]] = 1
+            legg_til(ut, lsp_komp_element(LSP_NOKKELORD[ni], 14, "", ""))
+        }
+        ni = ni + 1
+    }
+    returner { isIncomplete: usann, items: ut }
+}
+
+// ─── documentSymbol ──────────────────────────────────────────────────────────
+
+funksjon lsp_slutt_linje(barn, ix: heiltall, antal_linjer: heiltall) -> heiltall {
+    // Siste linje (0-basert) til toppnivå-noden: rett før neste node, ellers dokumentslutt.
+    hvis ix + 1 < lengde(barn) {
+        la nl = barn[ix + 1]["linje"] - 2
+        la mi = barn[ix]["linje"] - 1
+        hvis nl < mi { nl = mi }
+        returner nl
+    }
+    returner antal_linjer - 1
+}
+
+funksjon lsp_dok_symbol(namn: tekst, detalj: tekst, kind: heiltall, linjer, l0: heiltall, k0: heiltall, l_slutt: heiltall) {
+    la lt = lsp_linje_n(linjer, l_slutt)
+    // Strip etterfølgjande tomlinjer frå rekkja.
+    mens l_slutt > l0 og builtin.trim(lsp_linje_n(linjer, l_slutt)) == "" { l_slutt = l_slutt - 1 }
+    lt = lsp_linje_n(linjer, l_slutt)
+    returner {
+        name: namn,
+        detail: detalj,
+        kind: kind,
+        range: lsp_rekkje(linjer, l0, 0, l_slutt, lengde(lt)),
+        selectionRange: lsp_rekkje(linjer, l0, k0, l0, k0 + lengde(namn))
+    }
+}
+
+funksjon lsp_symbol_for(dok) {
+    la linjer = lsp_linjer(dok["innhald"])
+    la barn = lsp_toppnivaa(dok)
+    la ut = []
+    la i = 0
+    mens i < lengde(barn) {
+        la n = barn[i]
+        la t = n["type"]
+        la namn = tekst(n["verdi"])
+        la slutt = lsp_slutt_linje(barn, i, lengde(linjer))
+        hvis t == "Funksjon" {
+            la k0 = lsp_namnkolonne(linjer, n["linje"], namn, n["kolonne"] - 1)
+            legg_til(ut, lsp_dok_symbol(namn, lsp_signatur(n), 12, linjer, n["linje"] - 1, k0, slutt))
+        } ellers hvis t == "Struktur" {
+            la k1 = lsp_namnkolonne(linjer, n["linje"], namn, n["kolonne"] - 1)
+            la sym = lsp_dok_symbol(namn, "", 23, linjer, n["linje"] - 1, k1, slutt)
+            la felt = []
+            la fi = 0
+            mens fi < lengde(n["barn"]) {
+                la f = n["barn"][fi]
+                hvis f["type"] == "Felt" {
+                    la fk = lsp_namnkolonne(linjer, f["linje"], tekst(f["verdi"]), f["kolonne"] - 1)
+                    legg_til(felt, lsp_dok_symbol(tekst(f["verdi"]), lsp_type_av(f), 8, linjer, f["linje"] - 1, fk, f["linje"] - 1))
+                }
+                fi = fi + 1
+            }
+            sym["children"] = felt
+            legg_til(ut, sym)
+        } ellers hvis t == "Enum" {
+            la k2 = lsp_namnkolonne(linjer, n["linje"], namn, n["kolonne"] - 1)
+            legg_til(ut, lsp_dok_symbol(namn, "", 10, linjer, n["linje"] - 1, k2, slutt))
+        } ellers hvis t == "La" {
+            la k3 = lsp_namnkolonne(linjer, n["linje"], namn, n["kolonne"] - 1)
+            legg_til(ut, lsp_dok_symbol(namn, lsp_type_av(lsp_barn_type(n, "Type")), 13, linjer, n["linje"] - 1, k3, n["linje"] - 1))
+        } ellers hvis t == "Bruk" {
+            legg_til(ut, lsp_dok_symbol(namn, "", 2, linjer, n["linje"] - 1, lsp_namnkolonne(linjer, n["linje"], namn, 0), n["linje"] - 1))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ─── formatting ──────────────────────────────────────────────────────────────
+
+funksjon lsp_formater(dok) {
+    la ny = ""
+    prøv {
+        ny = fmt.format_kjelde(dok["innhald"])
+    } fang (e) {
+        returner []
+    }
+    hvis ny == dok["innhald"] eller ny == "" { returner [] }
+    la linjer = lsp_linjer(dok["innhald"])
+    la siste = lengde(linjer) - 1
+    returner [{
+        range: lsp_rekkje(linjer, 0, 0, siste, lengde(lsp_linje_n(linjer, siste))),
+        newText: ny
+    }]
+}
+
+// ─── references / rename ─────────────────────────────────────────────────────
+
+// Alle forekomstar av ordet (IDENT-token, ikkje i streng/kommentar): [[linje0, kol0], ...]
+funksjon lsp_forekomstar(innhald: tekst, ord: tekst) {
+    la ut = []
+    la tokens = null
+    prøv { tokens = lexer_m1.lex(innhald) } fang (e) { tokens = null }
+    hvis tokens != null {
+        la i = 0
+        mens i < lengde(tokens) {
+            la tk = tokens[i]
+            hvis tk["value"] == ord og tk["type"] != "STRING" og tk["type"] != "EOF" {
+                legg_til(ut, [tk["line"] - 1, tk["column"] - 1])
+            }
+            i = i + 1
+        }
+        returner ut
+    }
+    // reserve: ordskanning per linje
+    la linjer = lsp_linjer(innhald)
+    la n = 0
+    mens n < lengde(linjer) {
+        la l = lsp_linje_n(linjer, n)
+        la p = 0
+        mens p <= lengde(l) - lengde(ord) {
+            hvis builtin.slice(l, p, p + lengde(ord)) == ord og (p == 0 eller ikkje lsp_ordteikn(lsp_byte_i(l, p - 1))) og (p + lengde(ord) >= lengde(l) eller ikkje lsp_ordteikn(lsp_byte_i(l, p + lengde(ord)))) og ikkje lsp_i_kommentar_eller_streng(l, p) {
+                legg_til(ut, [n, p])
+                p = p + lengde(ord)
+            } ellers {
+                p = p + 1
+            }
+        }
+        n = n + 1
+    }
+    returner ut
+}
+
+funksjon lsp_referansar_for(dok, linje0: heiltall, kol_b: heiltall, med_dekl: boolsk) {
+    la linjer = lsp_linjer(dok["innhald"])
+    la ord = lsp_ord_ved(lsp_linje_n(linjer, linje0), kol_b)
+    hvis ord == "" { returner [] }
+    la ut = []
+    la fo = lsp_forekomstar(dok["innhald"], ord)
+    la i = 0
+    mens i < lengde(fo) {
+        legg_til(ut, { uri: dok["uri"], range: lsp_rekkje(linjer, fo[i][0], fo[i][1], fo[i][0], fo[i][1] + lengde(ord)) })
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lsp_gyldig_namn(s: tekst) -> boolsk {
+    hvis s == "" { returner usann }
+    hvis lsp_byte_i(s, 0) >= 48 og lsp_byte_i(s, 0) <= 57 { returner usann }
+    la i = 0
+    mens i < lengde(s) {
+        hvis ikkje lsp_ordteikn(lsp_byte_i(s, i)) { returner usann }
+        i = i + 1
+    }
+    returner ikkje lsp_er_nokkelord(s)
+}
+
+funksjon lsp_er_nokkelord(s: tekst) -> boolsk {
+    la i = 0
+    mens i < lengde(LSP_NOKKELORD) {
+        hvis LSP_NOKKELORD[i] == s { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// ─── Inkrementell synkronisering ─────────────────────────────────────────────
+
+funksjon lsp_bruk_endringar(innhald: tekst, endringar) -> tekst {
+    la tekstverdi = innhald
+    la i = 0
+    mens i < lengde(endringar) {
+        la e = endringar[i]
+        hvis finnes_nøkkel(e, "range") og e["range"] != null {
+            la r = e["range"]
+            la a = lsp_forskyving(tekstverdi, r["start"]["line"], r["start"]["character"])
+            la b = lsp_forskyving(tekstverdi, r["end"]["line"], r["end"]["character"])
+            hvis b < a { b = a }
+            tekstverdi = builtin.slice(tekstverdi, 0, a) + tekst(e["text"]) + builtin.slice(tekstverdi, b, lengde(tekstverdi))
+        } ellers {
+            tekstverdi = tekst(e["text"])
+        }
+        i = i + 1
+    }
+    returner tekstverdi
+}
+
+// ─── Meldingshandsaming ──────────────────────────────────────────────────────
+
+funksjon lsp_capabilities() {
+    returner {
+        capabilities: {
+            textDocumentSync: { openClose: sann, change: 2 },
+            hoverProvider: sann,
+            definitionProvider: sann,
+            referencesProvider: sann,
+            renameProvider: sann,
+            completionProvider: { triggerCharacters: ["."], resolveProvider: usann },
+            documentSymbolProvider: sann,
+            documentFormattingProvider: sann
+        },
+        serverInfo: { name: "norscode-lsp", version: "0.1.0" }
+    }
+}
+
+funksjon lsp_param(params, a: tekst, b: tekst) {
+    hvis params == null eller type(params) != "ordbok" { returner null }
+    hvis ikkje finnes_nøkkel(params, a) { returner null }
+    la x = params[a]
+    hvis b == "" { returner x }
+    hvis x == null eller type(x) != "ordbok" { returner null }
+    hvis ikkje finnes_nøkkel(x, b) { returner null }
+    returner x[b]
+}
+
+funksjon lsp_markoer(params) {
+    la p = lsp_param(params, "position", "")
+    hvis p == null { returner [0, 0] }
+    returner [p["line"], p["character"]]
+}
+
+// Kolonne (UTF-16) → byte for dokumentet.
+funksjon lsp_markoer_byte(dok, params) {
+    la m = lsp_markoer(params)
+    la linjer = lsp_linjer(dok["innhald"])
+    returner [m[0], lsp_u16_til_byte(lsp_linje_n(linjer, m[0]), m[1])]
+}
+
+funksjon lsp_legg_ventande(tilstand, uri: tekst) {
+    la v = tilstand["ventande"]
+    la i = 0
+    mens i < lengde(v) {
+        hvis v[i] == uri { returner 0 }
+        i = i + 1
+    }
+    legg_til(v, uri)
+    returner 0
+}
+
+// Tøm ventande diagnostikk: éi publishDiagnostics per dokument.
+funksjon lsp_flush(tilstand) {
+    la ut = []
+    la v = tilstand["ventande"]
+    la i = 0
+    mens i < lengde(v) {
+        la dok = lsp_hent_dok(tilstand, v[i])
+        hvis dok != null { legg_til(ut, lsp_publiser(dok)) }
+        i = i + 1
+    }
+    tilstand["ventande"] = []
+    returner ut
+}
+
+// Handsamar ei dekoda melding. Gjev liste av ferdig ramma utmeldingar.
+// Diagnostikk blir lagt i tilstand["ventande"] og sendt av lsp_flush.
+funksjon lsp_behandle(tilstand, melding) {
+    la ut = []
+    hvis melding == null eller type(melding) != "ordbok" {
+        legg_til(ut, lsp_feil(null, -32600, "Ugyldig førespurnad"))
+        returner ut
+    }
+    tilstand["meldingar"] = tilstand["meldingar"] + 1
+    la metode = ""
+    hvis finnes_nøkkel(melding, "method") og melding["method"] != null { metode = tekst(melding["method"]) }
+    la har_id = finnes_nøkkel(melding, "id") og melding["id"] != null
+    la id = null
+    hvis har_id { id = melding["id"] }
+    la params = null
+    hvis finnes_nøkkel(melding, "params") { params = melding["params"] }
+
+    // Svar frå klienten på våre førespurnader: ignorer.
+    hvis metode == "" { returner ut }
+
+    hvis metode == "initialize" {
+        la rot = lsp_param(params, "rootUri", "")
+        hvis rot != null { tilstand["rot"] = lsp_uri_til_sti(tekst(rot)) }
+        ellers {
+            la mapper = lsp_param(params, "workspaceFolders", "")
+            hvis mapper != null og type(mapper) == "liste" og lengde(mapper) > 0 { tilstand["rot"] = lsp_uri_til_sti(tekst(mapper[0]["uri"])) }
+        }
+        tilstand["initialisert"] = sann
+        legg_til(ut, lsp_svar(id, lsp_capabilities()))
+        returner ut
+    }
+    hvis metode == "initialized" eller metode == "$/cancelRequest" eller metode == "$/setTrace" eller metode == "workspace/didChangeConfiguration" eller metode == "textDocument/didSave" {
+        returner ut
+    }
+    hvis metode == "shutdown" {
+        tilstand["shutdown"] = sann
+        legg_til(ut, lsp_svar(id, null))
+        returner ut
+    }
+    hvis metode == "exit" {
+        tilstand["avslutta"] = sann
+        returner ut
+    }
+    hvis tilstand["shutdown"] og har_id {
+        legg_til(ut, lsp_feil(id, -32600, "Tenaren er stengd"))
+        returner ut
+    }
+
+    hvis metode == "textDocument/didOpen" {
+        la td = lsp_param(params, "textDocument", "")
+        hvis td != null {
+            lsp_sett_dok(tilstand, tekst(td["uri"]), tekst(td["text"]), td["version"])
+            lsp_legg_ventande(tilstand, tekst(td["uri"]))
+        }
+        returner ut
+    }
+    hvis metode == "textDocument/didChange" {
+        la td = lsp_param(params, "textDocument", "")
+        hvis td != null {
+            la uri = tekst(td["uri"])
+            la dok = lsp_hent_dok(tilstand, uri)
+            la gammal = ""
+            hvis dok != null { gammal = dok["innhald"] }
+            la ny = lsp_bruk_endringar(gammal, params["contentChanges"])
+            lsp_sett_dok(tilstand, uri, ny, td["version"])
+            lsp_legg_ventande(tilstand, uri)
+        }
+        returner ut
+    }
+    hvis metode == "textDocument/didClose" {
+        la td = lsp_param(params, "textDocument", "")
+        hvis td != null {
+            la uri = tekst(td["uri"])
+            fjern_nokkel(tilstand["dokument"], uri)
+            legg_til(ut, lsp_varsel("textDocument/publishDiagnostics", { uri: uri, diagnostics: [] }))
+        }
+        returner ut
+    }
+
+    // Førespurnader med dokument og posisjon.
+    hvis metode == "textDocument/hover" eller metode == "textDocument/definition" eller metode == "textDocument/completion" eller metode == "textDocument/documentSymbol" eller metode == "textDocument/formatting" eller metode == "textDocument/references" eller metode == "textDocument/rename" {
+        la tdi = lsp_param(params, "textDocument", "uri")
+        la dok = null
+        hvis tdi != null { dok = lsp_hent_dok(tilstand, tekst(tdi)) }
+        hvis dok == null {
+            legg_til(ut, lsp_svar(id, null))
+            returner ut
+        }
+        hvis metode == "textDocument/documentSymbol" {
+            legg_til(ut, lsp_svar(id, lsp_symbol_for(dok)))
+            returner ut
+        }
+        hvis metode == "textDocument/formatting" {
+            legg_til(ut, lsp_svar(id, lsp_formater(dok)))
+            returner ut
+        }
+        la m = lsp_markoer_byte(dok, params)
+        hvis metode == "textDocument/hover" {
+            legg_til(ut, lsp_svar(id, lsp_hover_for(tilstand, dok, m[0], m[1])))
+            returner ut
+        }
+        hvis metode == "textDocument/definition" {
+            legg_til(ut, lsp_svar(id, lsp_definisjon_for(tilstand, dok, m[0], m[1])))
+            returner ut
+        }
+        hvis metode == "textDocument/completion" {
+            legg_til(ut, lsp_svar(id, lsp_komplettering_for(tilstand, dok, m[0], m[1])))
+            returner ut
+        }
+        hvis metode == "textDocument/references" {
+            legg_til(ut, lsp_svar(id, lsp_referansar_for(dok, m[0], m[1], sann)))
+            returner ut
+        }
+        // rename
+        la nytt = lsp_param(params, "newName", "")
+        hvis nytt == null eller ikkje lsp_gyldig_namn(tekst(nytt)) {
+            legg_til(ut, lsp_feil(id, -32602, "Ugyldig nytt namn"))
+            returner ut
+        }
+        la refs = lsp_referansar_for(dok, m[0], m[1], sann)
+        la endringar = []
+        la ri = 0
+        mens ri < lengde(refs) {
+            legg_til(endringar, { range: refs[ri]["range"], newText: tekst(nytt) })
+            ri = ri + 1
+        }
+        la changes = {}
+        changes[dok["uri"]] = endringar
+        legg_til(ut, lsp_svar(id, { changes: changes }))
+        returner ut
+    }
+
+    hvis har_id {
+        legg_til(ut, lsp_feil(id, -32601, "Metode ikkje støtta: " + metode))
+    }
+    returner ut
+}
+
+// ─── Ramming frå ein byte-straum ─────────────────────────────────────────────
+
+// Hent Content-Length frå ei headerblokk, eller -1.
+funksjon lsp_innhaldslengd(header: tekst) -> heiltall {
+    la linjer = builtin.split(header, "\n")
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(builtin.lower(l), "content-length:") {
+            la v = builtin.trim(builtin.slice(l, 15, lengde(l)))
+            la n = 0
+            la j = 0
+            mens j < lengde(v) {
+                la k = lsp_byte_i(v, j)
+                hvis k < 48 eller k > 57 { returner -1 }
+                n = n * 10 + (k - 48)
+                j = j + 1
+            }
+            hvis lengde(v) == 0 { returner -1 }
+            returner n
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+// Rå JSON-straum utan header (til feilsøking og til prosess-ABI-en som ikkje
+// tillèt linjeskift i stdin): eitt balansert `{...}`-objekt frå starten.
+// Gjev lengda på objektet (inkl. foranstilt kvitrom i `lead`), 0 viss ufullstendig.
+funksjon lsp_rå_objekt(buf: tekst) {
+    la n = lengde(buf)
+    la p = 0
+    mens p < n og (lsp_byte_i(buf, p) == 32 eller lsp_byte_i(buf, p) == 10 eller lsp_byte_i(buf, p) == 13 eller lsp_byte_i(buf, p) == 9) { p = p + 1 }
+    hvis p >= n eller lsp_byte_i(buf, p) != 123 { returner null }
+    la start = p
+    la djupn = 0
+    la i_streng = usann
+    mens p < n {
+        la k = lsp_byte_i(buf, p)
+        hvis i_streng {
+            hvis k == 92 { p = p + 1 }
+            ellers hvis k == 34 { i_streng = usann }
+        } ellers {
+            hvis k == 34 { i_streng = sann }
+            ellers hvis k == 123 { djupn = djupn + 1 }
+            ellers hvis k == 125 {
+                djupn = djupn - 1
+                hvis djupn == 0 {
+                    returner { body: builtin.slice(buf, start, p + 1), rest: builtin.slice(buf, p + 1, n) }
+                }
+            }
+        }
+        p = p + 1
+    }
+    returner { ufullstendig: sann }
+}
+
+// Pakk ut éi fullstendig melding frå starten av bufferet.
+// Gjev { body, rest } eller { ufullstendig: sann } eller { feil: tekst, rest }.
+funksjon lsp_pakk_ut(buf: tekst) {
+    la rå = lsp_rå_objekt(buf)
+    hvis rå != null { returner rå }
+    la h = builtin.index_of(buf, "\r\n\r\n")
+    la hlen = 4
+    hvis h < 0 {
+        h = builtin.index_of(buf, "\n\n")
+        hlen = 2
+    }
+    hvis h < 0 { returner { ufullstendig: sann } }
+    la n = lsp_innhaldslengd(builtin.slice(buf, 0, h))
+    hvis n < 0 {
+        // Ugyldig header: hopp over han.
+        returner { feil: "manglar Content-Length", rest: builtin.slice(buf, h + hlen, lengde(buf)) }
+    }
+    la start = h + hlen
+    hvis lengde(buf) < start + n { returner { ufullstendig: sann } }
+    returner { body: builtin.slice(buf, start, start + n), rest: builtin.slice(buf, start + n, lengde(buf)) }
+}
+
+// ─── I/O-lag: strøymande (AOT) eller batch-reserve (VM) ──────────────────────
+
+la LSP_IO = { modus: "ukjend", batch_gjort: usann }
+
+// Modus: "fd" (fd_les/fd_skriv finst) eller "batch" (VM: fil_les("/dev/stdin")).
+funksjon lsp_io_modus() -> tekst {
+    hvis LSP_IO["modus"] != "ukjend" { returner LSP_IO["modus"] }
+    la m = "batch"
+    prøv {
+        fd_les(-1, 1)
+        m = "fd"
+    } fang (e) {
+        la melding = tekst(e)
+        hvis builtin.contains(melding, "Ukjent innebygd") eller builtin.contains(melding, "ikkje støtta") eller builtin.contains(melding, "ukjent") {
+            m = "batch"
+        } ellers {
+            // fd_les finst (EBADF e venta på fd -1).
+            m = "fd"
+        }
+    }
+    LSP_IO["modus"] = m
+    returner m
+}
+
+// Neste bit inndata. "" = EOF.
+funksjon lsp_les_bit() -> tekst {
+    hvis lsp_io_modus() == "fd" {
+        returner fd_les(0, 32768)
+    }
+    hvis LSP_IO["batch_gjort"] { returner "" }
+    LSP_IO["batch_gjort"] = sann
+    prøv { returner fil_les("/dev/stdin") } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon lsp_skriv_ut(data: tekst) {
+    hvis data == "" { returner 0 }
+    hvis lsp_io_modus() == "fd" {
+        fd_skriv(1, data)
+        returner 0
+    }
+    skriv(data)
+    returner 0
+}
+
+// Hovudlykkja. Returnerer exit-kode: 0 etter shutdown+exit, 1 elles.
+funksjon lsp_straum_lykkje() -> heiltall {
+    la tilstand = lsp_ny_tilstand()
+    la buf = ""
+    la eof = usann
+    mens ikkje tilstand["avslutta"] {
+        // Handsam alle fullstendige meldingar som alt ligg i bufferet.
+        la fann = sann
+        mens fann og ikkje tilstand["avslutta"] {
+            la r = lsp_pakk_ut(buf)
+            hvis finnes_nøkkel(r, "ufullstendig") {
+                fann = usann
+            } ellers hvis finnes_nøkkel(r, "feil") {
+                buf = r["rest"]
+            } ellers {
+                buf = r["rest"]
+                la melding = null
+                prøv { melding = json_parse_raw(r["body"]) } fang (e) { melding = null }
+                la svar = []
+                hvis melding == null {
+                    legg_til(svar, lsp_feil(null, -32700, "Ugyldig JSON"))
+                } ellers {
+                    prøv {
+                        svar = lsp_behandle(tilstand, melding)
+                    } fang (e) {
+                        svar = []
+                        hvis type(melding) == "ordbok" og finnes_nøkkel(melding, "id") og melding["id"] != null {
+                            legg_til(svar, lsp_feil(melding["id"], -32603, "Intern feil: " + tekst(e)))
+                        }
+                    }
+                }
+                la si = 0
+                mens si < lengde(svar) {
+                    lsp_skriv_ut(svar[si])
+                    si = si + 1
+                }
+            }
+        }
+        // Ingen fleire fullstendige meldingar: send ventande diagnostikk før vi blokkerer.
+        la diag = lsp_flush(tilstand)
+        la di = 0
+        mens di < lengde(diag) {
+            lsp_skriv_ut(diag[di])
+            di = di + 1
+        }
+        hvis tilstand["avslutta"] eller eof { bryt }
+        la bit = lsp_les_bit()
+        hvis bit == "" {
+            eof = sann
+        } ellers {
+            buf = buf + bit
+        }
+        // EOF: tøm det som står att i bufferet ein siste gong.
+        hvis eof {
+            hvis lengde(buf) == 0 { bryt }
+        }
+    }
+    hvis tilstand["avslutta"] og tilstand["shutdown"] { returner 0 }
+    hvis tilstand["avslutta"] { returner 1 }
+    returner 1
+}
+
+funksjon start() -> heiltall {
+    returner lsp_straum_lykkje()
+}
