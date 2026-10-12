@@ -113,7 +113,7 @@ les `envp` ([0x780008]). Ingen nye namn er innførde; verifisert på målet (fik
    `tools/active_surface_allowlist.txt`): `native_codegen_v2.no`, `heap_layout.no` endra. Bygg:
    `nc bundle` av `native_codegen_v2.no` → NCB, køyr gamal ELF med `NC_INPUT`/`NC_OUTPUT` → `cg1`,
    og `cg1` på same NCB → `cg2` (fikspunkt: sha like). Lokal sha256:
-   `09b25595b34c1d65169bbafa2764baca544c4e4aba67c756c8138b2070855d48`. Krev godkjenning før
+   `09b25595b34c1d65169bbafa2764baca544c4e4aba67c756c8138b2070855d48` (før rA-os; med rA-os sjå §9 og rapporten). Krev godkjenning før
    installasjon. `test_native_codegen_srchash` er raud til dette er gjort.
 2. **Seed** (`nc_main.no`-lukkinga): `std/native_gap.no`, `std/native_sys.no`,
    `selfhost/native_execution/codegen_prebuilt.no` endra → nc_main-NCB endra → seedane må
@@ -121,3 +121,51 @@ les `envp` ([0x780008]). Ingen nye namn er innførde; verifisert på målet (fik
    reseed fungerer målet med `NC_TARGET=norscodeos-x86_64` rett på codegen-ELF-en.
 3. `windows-x86_64` og `linux-x86_64`: ingen funksjonell endring, men NCB-hash for
    nc_main endrar seg (ny `std.native_gap`-kode), so fikspunktportane må følgje seed-regen.
+
+## 9. rA-os: klokkefeil, ukjende kall, mono_ms, socket_prøv_*, prosess_start (12.10.2026)
+
+**Punkt 6 — klokkefeil.** `tid_ms()` (inline) og `now_ms()` (atom) las `timespec` på stakken utan å
+sjå på `rax` frå `clock_gettime`; utan KLOKKE-kapabilitet (seccomp/kjerne nektar) vart svaret
+uinitialisert stakk (t.d. 140737488289536004). No: `rax < 0` → svaret er `−errno` (heiltal < 0),
+same feilkontrakt som `random_byte()`. Epoke-millisekund er alltid ≥ 0, so `< 0` er eintydig feil.
+Kartlegging av andre innebygde syscall-atom: `random_byte` (sjekka alt), `fil_finnes`/`fil_les` (`stat`
+sjekkar `rax`), `system_info` (`uname`/`getcwd`/`readlink` skriv til nullfylt mmap-buffer, `readlink`
+sjekkar `rax`; på norscodeos faste svar) — ingen andre las ein resultatbuffer utan `rax`-sjekk.
+
+**Punkt 9 — ukjende kall.** På `norscodeos-x86_64` er eit innebygd kall utan rute i bunten
+(`builtin.xyz` som endar i null-fallbacken) **kompileringsfeil** frå brukarkode:
+`native codegen (norscodeos-x86_64): ukjent kall builtin.xyz/1 i funksjonen modul.funksjon (modul «…»)
+har ingen rute i bunten …`. Kjeldelinje finst ikkje i NCB-en codegenen får; funksjonsnamn og modul gjer
+det. `NC_UKJENT_KALL=null` gjev gammal åtferd (åtvaring + null-fallback); `NC_UKJENT_KALL=strikt` gjer
+òg kall i `std.*`-modular til feil. Kall i `std.*` (i dag berre `builtin.desimaltall` i
+`std.native_gap._jpr_tal`, som berre har rute når `std.desimaltall_tekst` er i bunten) held fram som
+åtvaring + null, elles hadde kvart program med `std.native_gap` slutta å byggje. Dei andre måla
+(`linux-x86_64`, `windows-x86_64`) er uendra: for 5 representative program er ELF-en byte-identisk
+med ein codegen utan punkt 9 (skilnaden frå committa ELF er berre punkt 6, som endrar `now_ms`-atomet).
+
+**Punkt 7 — `mono_ms()`** (`std.native_gap`, krev `bruk std.native_gap`): `clock_gettime(CLOCK_MONOTONIC=1)`
+over sys6 i millisekund (linux-x86_64, norscodeos-x86_64, linux-arm64). Feil → `−errno`. Fell tilbake på
+`tid_ms()` på VM (ingen sys6) og macOS (ingen syscall) — då veggklokke, ikkje strengt monoton. Berre
+differansar har meining.
+
+**Punkt 10 — `socket_prøv_recv(fd, maks)` / `socket_prøv_send(fd, data)` / `socket_prøv_aksepter(lyttar)`**
+gjev ordbok `{"feil": 0|−errno, "data"|"n"|"fd": …}` i staden for å kaste. EOF = `feil 0`, `data ""`;
+tidsavbrot = `feil −EAGAIN` (11). `socket_prøv_send` tek tekst eller liste av byte; `n` er byte sendt før
+feilen. Dei gamle `socket_recv/send/accept` er uendra (kastar ved −errno).
+
+**Punkt 8 — `prosess_start(namn, fd_kart)`** (pid eller −errno), **`prosess_vent_ikkje_blokkerande(pid)`**
+(`wait4(WNOHANG)` → `{"ferdig": bool, "status": heiltal}`; status = exit-kode, eller 128+signal; wait4-feil
+(t.d. ECHILD) → `ferdig=sann, status=−1, feil=−errno`), **`prosess_drep(pid)`** (`kill(pid, SIGKILL)`,
+syscall 62; 0 eller −errno). `kill` (62) er lagt til i `nos_sys6_tillatne` (kjerna legg inn kill i X6a).
+Skilnad mellom måla: på **norscodeos-x86_64** går `prosess_start` rett på `spawn` (4097) med namn på ei
+initrd-oppføring (maks 63 teikn) og `fd_kart` som `{fd0, fd1, fd2}`; på **linux-x86_64** (og andre
+fork-mål) er det `fork` + `dup2` + `execve(namn, [namn], arva envp)` — `namn` er ei filsti utan PATH-oppslag,
+og den eksisterande `process_spawn`-motoren (`_pg_spawn`) er ikkje brukt fordi han lagar eigne røyr og
+ikkje tek fd-kart. Ingen args/cwd/miljø (som spawn-ABI-en). Kallaren eig fd-ane. Berre AOT (sys6).
+
+Verifikasjon: `tests/test_x86_ra_os.no` (Linux x86-64), `tests/test_r4_os_mono_ms.no` (VM),
+`tests/test_norscodeos_x86_64_encoder.no` (byte-eksakt `now_ms`-feilsjekk, port med 62). Ikkje verifisert:
+nekta `clock_gettime` med ekte seccomp (Docker på Apple Silicon køyrer amd64 under emulering, som ikkje
+handhevar seccomp) — feilstia er i staden verifisert ved å byte-patche syscall-nummeret til eit ugyldig
+(→ `−38`) i både `tid_ms` og `now_ms`; og `wait4(WNOHANG)`/`kill` mot ekte NorscodeOS-kjerne (berre
+kompilering + port-innhald er sjekka).
