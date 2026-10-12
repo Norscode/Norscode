@@ -4928,3 +4928,187 @@ funksjon _s29_poll_mange(req) {
     r["klare"] = klare
     returner r
 }
+
+// ── rA-os punkt 7: mono_ms() — monoton klokke ──────────────────────────────────────
+// clock_gettime(CLOCK_MONOTONIC = 1) over sys6, i millisekund. Går ikkje tilbake ved
+// veggklokke-justering (tid_ms/now_ms er CLOCK_REALTIME). Feilkontrakt som tid_ms():
+// feilar syscall-en (t.d. manglande KLOKKE-kapabilitet på norscodeos-x86_64) er svaret
+// −errno (< 0), aldri søppel. Mål utan clock_gettime-syscall (macOS) og VM-en (nc run: ingen
+// sys6) fell tilbake på tid_ms() (veggklokke, ikkje strengt monoton). Telling frå vilkårleg
+// null-punkt: berre differansar har meining.
+la _mono_buf = 0
+
+funksjon _mono_nr() -> heiltall {
+    la m = nsys.mål()
+    hvis m == "linux-x86_64" eller m == "norscodeos-x86_64" { returner 228 }
+    hvis m == "linux-arm64" { returner nsys._nr("clock_gettime") }
+    returner 0
+}
+
+funksjon _mono_les(nr: heiltall) {
+    hvis _mono_buf == 0 {
+        la a = _sys_mmap_rw(4096)
+        hvis a <= 0 { returner a }
+        _mono_buf = a
+    }
+    la r = builtin.sys6(nr, 1, _mono_buf, 0, 0, 0, 0)
+    hvis r < 0 { returner r }
+    returner builtin.raw_load64(_mono_buf) * 1000 + builtin.raw_load64(_mono_buf + 8) / 1000000
+}
+
+funksjon mono_ms() -> heiltall {
+    la nr = _mono_nr()
+    hvis nr > 0 {
+        la v = null
+        prøv { v = _mono_les(nr) } fang (e) { v = null }
+        hvis builtin.type(v) == "heltall" { returner v }
+    }
+    returner builtin.tid_ms()
+}
+
+// ── rA-os punkt 10: socket_prøv_* — variantar som returnerer feil i staden for å kaste ──
+// socket_recv/send/accept kastar ved −errno (ECONNRESET, EPIPE …). Desse gjev ei ordbok med
+// feltet «feil» (0 = ok, elles −errno) og resultatet, slik at ein tenar kan halde fram når
+// ein klient forsvinn. Eksisterande socket_*-funksjonar er uendra.
+//   socket_prøv_recv(fd, maks)    → {"feil", "data"}  (EOF: feil 0, data ""; tidsavbrot: feil −EAGAIN)
+//   socket_prøv_send(fd, data)    → {"feil", "n"}     (n = byte sendt før feilen; data = tekst eller liste)
+//   socket_prøv_aksepter(lyttar)  → {"feil", "fd"}    (fd −1 ved feil)
+funksjon socket_prøv_recv(fd: heiltall, maks: heiltall) {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n_maks = maks
+    hvis n_maks > 32768 { n_maks = 32768 }
+    hvis n_maks <= 0 { returner {"feil": 0, "data": ""} }
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, n_maks, 0, 0, 0)
+    hvis n < 0 { returner {"feil": n, "data": ""} }
+    returner {"feil": 0, "data": _fd_tekst(buf, n)}
+}
+
+funksjon socket_prøv_send(fd: heiltall, data) {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la er_tekst = builtin.type(data) == "tekst"
+    la sendt: heiltall = 0
+    mens sendt < lengde(data) {
+        la bit = lengde(data) - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        hvis er_tekst {
+            mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        } ellers {
+            mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        }
+        la w = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), 0, 0)
+        hvis w < 0 { returner {"feil": w, "n": sendt} }
+        hvis w == 0 { returner {"feil": 0, "n": sendt} }
+        sendt = sendt + w
+    }
+    returner {"feil": 0, "n": sendt}
+}
+
+funksjon socket_prøv_aksepter(lyttar: heiltall) {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 96, 16)
+    la ny = _sk_nosigpipe(builtin.sys6(nsys._nr("accept"), lyttar, b + 80, b + 96, 0, 0, 0))
+    hvis ny < 0 { returner {"feil": ny, "fd": -1} }
+    returner {"feil": 0, "fd": ny}
+}
+
+// ── rA-os punkt 8: prosess_start / prosess_vent_ikkje_blokkerande / prosess_drep ────────
+// Asynkron barneprosess med eigne fd-ar, i rein Norscode over sys6.
+//   prosess_start(namn, fd_kart) → pid (> 0) eller −errno. fd_kart = [fd0, fd1, fd2]: fd-ane
+//     i FORELDEREN som barnet får som stdin/stdout/stderr (tom/null liste = arv 0,1,2).
+//     Kallaren eig fd-ane og lukkar sine eigne endar sjølv etterpå. Ingen args/cwd/miljø-
+//     overstyring (same avgrensing som spawn-ABI-en på NorscodeOS).
+//     • norscodeos-x86_64: spawn (4097) med namn på ei initrd-/manifestoppføring (maks 63
+//       teikn, «/initrd/»-prefiks valfritt); krev SPAWN- og MINNE-kapabilitet.
+//     • linux-x86_64 m.fl.: fork + dup2 + execve(namn, [namn], arva envp) — namn er ei filsti
+//       (inga PATH-oppslag). Eksisterande process_spawn-motor (_pg_spawn) lagar sine eigne
+//       røyr og tek ikkje fd-kart, difor eiga minimal fork-veg. Feilar execve, sluttar barnet med 127.
+//   prosess_vent_ikkje_blokkerande(pid) → {"ferdig": bool, "status": heiltal}: wait4(WNOHANG).
+//     ferdig=usann/status 0 = køyrer enno; ferdig=sann/status = exit-kode (eller 128+signal
+//     når drepen). Feil frå wait4 (t.d. ECHILD: alt hausta / ikkje eige barn) gjev
+//     ferdig=sann, status −1 og eit ekstra felt «feil» (−errno). EINTR = ikkje ferdig.
+//   prosess_drep(pid) → 0 eller −errno: kill(pid, SIGKILL) (syscall 62).
+la _pr_buf = 0
+
+funksjon _pr_scratch() -> heiltall {
+    hvis _pr_buf == 0 {
+        la a = _sys_mmap_rw(4096)
+        hvis a <= 0 { returner 0 }
+        _pr_buf = a
+    }
+    returner _pr_buf
+}
+
+funksjon prosess_start(namn: tekst, fd_kart) -> heiltall {
+    hvis namn == "" { returner -2 }
+    la fdar: liste_heiltall = [0, 1, 2]
+    hvis builtin.type(fd_kart) == "liste" {
+        la i: heiltall = 0
+        mens i < 3 og i < lengde(fd_kart) { fdar[i] = fd_kart[i]  i = i + 1 }
+    }
+    hvis _nos_er_mål() {
+        la exe = namn
+        hvis builtin.starts_with(exe, "/initrd/") { exe = builtin.slice(exe, 8, lengde(exe)) }
+        hvis lengde(exe) > 63 { returner -36 }
+        la sk = _nos_skratsj()
+        hvis sk <= 0 { returner -12 }
+        _pg_cstr(sk, exe)
+        builtin.raw_store64(sk + 64, fdar[0])
+        builtin.raw_store64(sk + 72, fdar[1])
+        builtin.raw_store64(sk + 80, fdar[2])
+        returner builtin.sys6(nsys._nr("spawn"), sk, sk + 64, 0, 0, 0, 0)
+    }
+    la scratch = _sys_mmap_rw(65536)
+    hvis scratch <= 0 { returner -12 }
+    hvis lengde(namn) + 64 > 32768 {
+        _sys_munmap(scratch, 65536)
+        returner -36
+    }
+    la exe_adr = scratch
+    _pg_cstr(exe_adr, namn)
+    la argv_adr: heiltall = scratch + 40000
+    builtin.raw_store64(argv_adr, exe_adr)
+    builtin.raw_store64(argv_adr + 8, 0)
+    la nul_adr: heiltall = scratch + 40016
+    builtin.raw_store64(nul_adr, 0)
+    la envp_adr = builtin.native_envp()
+    hvis envp_adr == 0 { envp_adr = nul_adr }
+    // Alle nummer slått opp FØR fork: barnet gjer berre rå syscallar (som _pg_spawn).
+    la nr_dup2 = nsys._nr_kompat("dup2")
+    la nr_execve = nsys._nr("execve")
+    la nr_exit = nsys._nr("exit")
+    la f0: heiltall = fdar[0]
+    la f1: heiltall = fdar[1]
+    la f2: heiltall = fdar[2]
+    la pid = builtin.sys6(nsys._nr_kompat("fork"), nsys._flagg("FORK_A1"), 0, 0, 0, 0, 0)
+    hvis pid == 0 {
+        hvis f0 != 0 { builtin.sys6(nr_dup2, f0, 0, 0, 0, 0, 0) }
+        hvis f1 != 1 { builtin.sys6(nr_dup2, f1, 1, 0, 0, 0, 0) }
+        hvis f2 != 2 { builtin.sys6(nr_dup2, f2, 2, 0, 0, 0, 0) }
+        builtin.sys6(nr_execve, exe_adr, argv_adr, envp_adr, 0, 0, 0)
+        builtin.sys6(nr_exit, 127, 0, 0, 0, 0, 0)
+    }
+    _sys_munmap(scratch, 65536)
+    returner pid
+}
+
+funksjon prosess_vent_ikkje_blokkerande(pid: heiltall) {
+    la st = _pr_scratch()
+    hvis st == 0 { returner {"ferdig": sann, "status": -1, "feil": -12} }
+    builtin.raw_store64(st, 0)
+    la r = builtin.sys6(nsys._nr("wait4"), pid, st, nsys._flagg("WNOHANG"), 0, 0, 0)
+    hvis r == 0 { returner {"ferdig": usann, "status": 0} }
+    hvis r == pid {
+        la status = builtin.raw_load64(st) & 4294967295
+        hvis (status & 127) == 0 { returner {"ferdig": sann, "status": (status >> 8) & 255} }
+        returner {"ferdig": sann, "status": 128 + (status & 127)}
+    }
+    hvis r == 0 - nsys._errno("EINTR") { returner {"ferdig": usann, "status": 0} }
+    returner {"ferdig": sann, "status": -1, "feil": r}
+}
+
+funksjon prosess_drep(pid: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("kill"), pid, nsys._flagg("SIGKILL"), 0, 0, 0, 0)
+}
