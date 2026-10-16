@@ -26,6 +26,7 @@
 # Chrome-testane i tests/test_wasm_*.no.
 bruk std.prosess som prosess
 bruk std.runtime.process_abi som process_abi
+bruk std.wasm_cdp som cdp
 
 funksjon basismappe() -> tekst {
     returner "build/wasm-nettlesar"
@@ -213,6 +214,92 @@ funksjon chrome_flagg(profil: tekst, url: tekst, virtuell_ms: heltall, netlog: t
     returner f
 }
 
+// Ein faktisk sluttmarkør, ikkje eit delstrengtreff i t.d. «ikkje ferdig».
+funksjon logg_ferdig(logg: tekst, markør: tekst) -> bool {
+    hvis markør == "" { returner usann }
+    returner logg == markør + "\n" eller builtin.ends_with(logg, "\n" + markør + "\n")
+}
+
+// Asynkrone serviceworker-hendingar lever uavhengig av Chrome si virtuelle klokke.
+// Les DOM over den lokale kontrollporten til testklienten sjølv melder ferdig.
+funksjon dump_til_ferdig(chrome: tekst, url: tekst, profil: tekst, markør: tekst, netlog: tekst, grense_ms: heltall) -> ordbok {
+    hvis markør == "" eller grense_ms <= 0 { kast "CDP: ugyldig ferdigvilkår" }
+    la flagg = []
+    for f i chrome_flagg(profil, "about:blank", 0, netlog) {
+        hvis f != "--dump-dom" { legg_til(flagg, f) }
+    }
+    legg_til(flagg, "--remote-debugging-address=127.0.0.1")
+    legg_til(flagg, "--remote-debugging-port=0")
+    la plan = køyr_verktøy_plan(chrome, flagg)
+    prosess.med_timeout(plan, grense_ms / 1000 + 20)
+    la h = start_bakgrunn(plan)
+    hvis h["status"] != "kjorer" { kast "CDP: Chrome starta ikkje" }
+    la c = null
+    utsett {
+        hvis c != null { cdp.lukk(c) }
+        stopp(h)
+    }
+    la t0 = builtin.tid_ms()
+    la frist = t0 + grense_ms
+    la portfil = profil + "/DevToolsActivePort"
+    la sti = ""
+    la port = 0
+    la feil = ""
+    mens sti == "" og builtin.tid_ms() < frist {
+        feil = feil + les_feil(prosess.native_async_les(h))
+        hvis builtin.fil_finnes(portfil) {
+            prøv {
+                port = heltall_fra_tekst(builtin.split(builtin.fil_les(portfil), "\n")[0])
+                for side i cdp.sider(port, frist) {
+                    hvis side["type"] == "page" og side["url"] == "about:blank" {
+                        la ws = side["webSocketDebuggerUrl"]
+                        la p = builtin.index_of(ws, "/devtools/page/")
+                        hvis p >= 0 { sti = builtin.slice(ws, p, lengde(ws)) }
+                    }
+                }
+            } fang (e) {
+                // Ein behalden profil kan ha portfila frå førre prosess. Vent på
+                // den nye prosessen, men godta aldri dette som ein ferdig test.
+                hvis builtin.tid_ms() >= frist eller ikkje builtin.contains(tekst(e), "discovery-tilkopling feila") { kast e }
+            }
+        }
+        hvis sti == "" { prosess.native_async_vent(h, 50) }
+    }
+    hvis sti == "" { kast "CDP: fann ikkje testsida før tidsgrensa" }
+    c = cdp.kople(port, sti, frist)
+    cdp.kall(c, "Runtime.enable", {}, frist)
+    la navigasjon = cdp.kall(c, "Page.navigate", {"url": url}, frist)
+    hvis har_nokkel(navigasjon, "errorText") { kast "Page load failed: " + navigasjon["errorText"] }
+    la dom = ""
+    la ferdig = usann
+    mens ikkje ferdig og builtin.tid_ms() < frist {
+        prosess.native_async_vent(h, 50)
+        feil = feil + les_feil(prosess.native_async_les(h))
+        hvis builtin.tid_ms() >= frist { bryt }
+        la r = null
+        prøv {
+            r = cdp.kall(c, "Runtime.evaluate", {"expression": "document.documentElement ? document.documentElement.outerHTML : ''", "returnByValue": sann}, frist)
+        } fang (e) {
+            hvis builtin.tid_ms() >= frist og builtin.contains(tekst(e), "tidsavbrot") { bryt }
+            kast e
+        }
+        hvis har_nokkel(r, "exceptionDetails") { kast "CDP: DOM-lesing kasta " + builtin.json_skriv(r["exceptionDetails"]) }
+        hvis har_nokkel(r, "result") og har_nokkel(r["result"], "value") {
+            dom = r["result"]["value"]
+            ferdig = logg_ferdig(logg_frå_dom(dom), markør)
+        }
+    }
+    la ms = builtin.tid_ms() - t0
+    hvis ferdig {
+        la etter = builtin.tid_ms() + 300
+        mens builtin.tid_ms() < etter {
+            prosess.native_async_vent(h, 50)
+            feil = feil + les_feil(prosess.native_async_les(h))
+        }
+    }
+    returner {"dom": dom, "konsoll": feil + c["events"], "ms": ms, "tidsavbrot": ikkje ferdig}
+}
+
 # Headless Chrome med --dump-dom: les stdout til </html> (tidsgrense `grense_ms`), les
 # konsollen litt til, stopp Chrome og drep det som er att med profilen i kommandolinja.
 # Gjev {"dom", "konsoll", "ms", "tidsavbrot"}.
@@ -366,6 +453,7 @@ funksjon stopp_serve(økt: ordbok) -> heltall {
 #   "virtuell_ms"   --virtual-time-budget (standard 5000; 0 = av)
 #   "netlog"        sann: Chrome skriv netloggen i økta, og "sidelasting" blir rekna ut
 #   "grense_ms"     tidsgrense for heile lastinga (standard 60000)
+#   "ferdiglinje"   vent på denne siste logglinja over CDP i faktisk tid, utan virtuell klokke
 # Gjev {"dom", "konsoll", "logg", "uncaught", "ms", "tidsavbrot", "mål", "sidelasting", "side_feila"}
 # (W8: sann når Chrome ikkje fekk lasta sida, t.d. utan nett og utan service worker).
 funksjon last_side(økt: ordbok, url: tekst, op: ordbok) -> ordbok {
@@ -379,7 +467,12 @@ funksjon last_side(økt: ordbok, url: tekst, op: ordbok) -> ordbok {
     hvis finnes_nøkkel(op, "grense_ms") { grense = op["grense_ms"] }
     la netlog = ""
     hvis finnes_nøkkel(op, "netlog") og op["netlog"] { netlog = økt["mappe"] + "/netlog-" + tekst(økt["sider"]) + ".json" }
-    la r = dump_rå(finn_chrome_i_økt(økt), url, profil, virtuell, netlog, grense)
+    la r = {}
+    hvis finnes_nøkkel(op, "ferdiglinje") {
+        r = dump_til_ferdig(finn_chrome_i_økt(økt), url, profil, tekst(op["ferdiglinje"]), netlog, grense)
+    } ellers {
+        r = dump_rå(finn_chrome_i_økt(økt), url, profil, virtuell, netlog, grense)
+    }
     la ut = {"dom": r["dom"], "konsoll": r["konsoll"], "ms": r["ms"], "tidsavbrot": r["tidsavbrot"]}
     ut["logg"] = logg_frå_dom(r["dom"])
     ut["uncaught"] = har_uncaught(r["konsoll"])
