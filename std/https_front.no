@@ -127,6 +127,23 @@ funksjon _backend_payload(route: ordbok) -> tekst {
     returner out + req["body"]
 }
 
+# Les høgst 64 KiB frå native socket og aldri legg meir enn responsgrensa
+# i buffer. Når grensa er nådd, les éin ekstra byte for å skilje
+# nøyaktig storleik + EOF frå ei overskriden grense.
+funksjon _response_les_maks(akkumulert: heiltall, grense: heiltall) -> heiltall {
+    hvis grense < 1 eller akkumulert < 0 eller akkumulert > grense { returner 0 }
+    la att = grense - akkumulert
+    hvis att >= 65536 { returner 65536 }
+    returner att + 1
+}
+
+funksjon _response_chunk_ok(akkumulert: heiltall, chunk_bytes: heiltall,
+                            grense: heiltall) -> boolsk {
+    hvis grense < 1 eller akkumulert < 0 eller akkumulert > grense { returner usann }
+    # Null-byte OK-status utan EOF gir elles ei endelaus proxyleseløkke.
+    returner chunk_bytes > 0 og chunk_bytes <= grense - akkumulert
+}
+
 funksjon _proxy(route: ordbok, front: ordbok) -> ordbok_tekst {
     la backend = route["backend"]
     la session = stream.opne_session(backend["host"], backend["port"], usann, front["connect_timeout_ms"])
@@ -135,14 +152,22 @@ funksjon _proxy(route: ordbok, front: ordbok) -> ordbok_tekst {
     hvis ikkje stream.skriv_alt(session, _backend_payload(route)) { stream.lukk_session(session) returner {"status": "backend_error", "raw": ""} }
     la out = ""
     la done = usann
-    mens ikkje done og lengde(out) < front["max_response_bytes"] {
-        la r = stream.les_chunk(session, 1048576)
-        hvis r["status"] == "ok" { out = out + r["data"] }
-        ellers hvis r["status"] == "eof" { done = sann }
+    mens ikkje done {
+        la maks = _response_les_maks(lengde(out), front["max_response_bytes"])
+        hvis maks == 0 { stream.lukk_session(session) returner {"status": "backend_error", "raw": ""} }
+        la r = stream.les_chunk(session, maks)
+        hvis r["status"] == "ok" {
+            la chunk = r["data"]
+            hvis ikkje _response_chunk_ok(lengde(out), lengde(chunk), front["max_response_bytes"]) {
+                stream.lukk_session(session)
+                returner {"status": "backend_error", "raw": ""}
+            }
+            out = out + chunk
+        } ellers hvis r["status"] == "eof" { done = sann }
         ellers { stream.lukk_session(session) returner {"status": "timeout", "raw": ""} }
     }
     stream.lukk_session(session)
-    hvis ikkje done eller (ikkje builtin.starts_with(out, "HTTP/1.1 ") og ikkje builtin.starts_with(out, "HTTP/1.0 ")) { returner {"status": "backend_error", "raw": ""} }
+    hvis ikkje builtin.starts_with(out, "HTTP/1.1 ") og ikkje builtin.starts_with(out, "HTTP/1.0 ") { returner {"status": "backend_error", "raw": ""} }
     returner {"status": "ok", "raw": out}
 }
 
