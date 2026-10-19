@@ -318,15 +318,28 @@ funksjon _tilstand(conn: tekst) -> ordbok_tekst {
     returner _TILK[conn]
 }
 
-# Les `key=value`-par, skilde med mellomrom. Verdien kan ikkje innehalde mellomrom.
+# Les `key=value`-par, skilde med mellomrom. Verdien kan setjast i enkle sitat (key='a b'),
+# med \' og \\ som escapes inne i sitata (libpq-stil).
 funksjon _parse_dsn(dsn: tekst) -> ordbok_tekst {
     la ut = {"host": "localhost", "port": "5432", "dbname": "", "user": "", "password": ""}
     la ord: liste_tekst = []
     la gjeldande = ""
+    la i_sitat = usann
     la i: heltall = 0
     mens i < lengde(dsn) {
         la ch = builtin.slice(dsn, i, i + 1)
-        hvis ch == " " eller ch == "\t" eller ch == "\n" {
+        hvis i_sitat {
+            hvis ch == "\\" og i + 1 < lengde(dsn) {
+                i = i + 1
+                gjeldande = gjeldande + builtin.slice(dsn, i, i + 1)
+            } ellers hvis ch == "'" {
+                i_sitat = usann
+            } ellers {
+                gjeldande = gjeldande + ch
+            }
+        } ellers hvis ch == "'" {
+            i_sitat = sann
+        } ellers hvis ch == " " eller ch == "\t" eller ch == "\n" {
             hvis gjeldande != "" {
                 legg_til(ord, gjeldande)
                 gjeldande = ""
@@ -1000,8 +1013,53 @@ funksjon bulk_insert(conn: tekst, tabell: tekst, kolonnar: liste < tekst >, rade
 
 # ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
 
+funksjon _hex_sifferverdi(ch: tekst) -> heltall {
+    returner builtin.index_of("0123456789abcdef", builtin.lower(ch))
+}
+
+# Prosent-dekod (RFC 3986) til bytestreng (eitt teikn per byte, som resten av modulen):
+# %HH -> byte, så UTF-8-sekvensar som %C3%A6 gir dei to bytane til «æ». Ugyldig %-escape blir ståande
+# bokstavleg. «+» blir ikkje rørt. Teikn over 255 i inndata blir UTF-8-koda.
+funksjon _prosent_dekod(s: tekst) -> tekst {
+    hvis builtin.index_of(s, "%") < 0 { returner s }
+    la bytes: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        la ok = usann
+        hvis ch == "%" og i + 2 < lengde(s) {
+            la h1 = _hex_sifferverdi(builtin.slice(s, i + 1, i + 2))
+            la h2 = _hex_sifferverdi(builtin.slice(s, i + 2, i + 3))
+            hvis h1 >= 0 og h2 >= 0 {
+                legg_til(bytes, h1 * 16 + h2)
+                i = i + 3
+                ok = sann
+            }
+        }
+        hvis ikkje ok {
+            la b = _utf8(ch)
+            la k: heltall = 0
+            mens k < lengde(b) {
+                legg_til(bytes, b[k])
+                k = k + 1
+            }
+            i = i + 1
+        }
+    }
+    returner _frå_utf8(bytes, 0, lengde(bytes))
+}
+
+# DSN-verdi: sitert (key='…') når han har mellomrom, sitat eller backslash.
+funksjon _dsn_verdi(v: tekst) -> tekst {
+    hvis builtin.index_of(v, " ") < 0 og builtin.index_of(v, "'") < 0 og builtin.index_of(v, "\\") < 0 og builtin.index_of(v, "\t") < 0 og builtin.index_of(v, "\n") < 0 {
+        returner v
+    }
+    returner "'" + tekst_erstatt(tekst_erstatt(v, "\\", "\\\\"), "'", "\\'") + "'"
+}
+
 funksjon _url_til_dsn(url: tekst) -> tekst {
     // postgresql://brukar:passord@host:port/database
+    // Brukar, passord, databasenamn og query-verdiar blir prosent-dekoda (p%40ss -> p@ss).
     la u = tekst_erstatt(url, "postgresql://", "")
     u = tekst_erstatt(u, "postgres://", "")
     la at_idx = builtin.index_of(u, "@")
@@ -1024,7 +1082,18 @@ funksjon _url_til_dsn(url: tekst) -> tekst {
     hvis spm_idx >= 0 {
         la q = builtin.slice(rest, spm_idx + 1, lengde(rest))
         rest = builtin.slice(rest, 0, spm_idx)
-        ekstra = " " + tekst_erstatt(q, "&", " ")
+        la par = builtin.split(q, "&")
+        la pi: heltall = 0
+        mens pi < lengde(par) {
+            la p = tekst(par[pi])
+            la peq = builtin.index_of(p, "=")
+            hvis peq > 0 {
+                ekstra = ekstra + " " + _prosent_dekod(builtin.slice(p, 0, peq)) + "=" + _dsn_verdi(_prosent_dekod(builtin.slice(p, peq + 1, lengde(p))))
+            } ellers hvis p != "" {
+                ekstra = ekstra + " " + p
+            }
+            pi = pi + 1
+        }
     }
     la slash_idx = builtin.index_of(rest, "/")
     la host_port = rest
@@ -1040,7 +1109,7 @@ funksjon _url_til_dsn(url: tekst) -> tekst {
         host = builtin.slice(host_port, 0, port_idx)
         port = builtin.slice(host_port, port_idx + 1, lengde(host_port))
     }
-    returner "host=" + host + " port=" + port + " dbname=" + database + " user=" + brukar + " password=" + passord + ekstra
+    returner "host=" + _dsn_verdi(_prosent_dekod(host)) + " port=" + port + " dbname=" + _dsn_verdi(_prosent_dekod(database)) + " user=" + _dsn_verdi(_prosent_dekod(brukar)) + " password=" + _dsn_verdi(_prosent_dekod(passord)) + ekstra
 }
 
 funksjon _esc(s: tekst) -> tekst {
@@ -1128,18 +1197,50 @@ funksjon _copy_kod(v: tekst) -> tekst {
     returner ut
 }
 
-# Avkod éi COPY-tekstformat-celle. «\N» gir sql_null().
+# Avkod éi COPY-tekstformat-celle (PostgreSQL-escapes): \b \f \n \r \t \v, \\, oktal \ooo (1-3 siffer),
+# hex \xHH (1-2 siffer); «\N» som heilt felt gir sql_null(). Anna teikn etter backslash gir teiknet sjølv
+# (\x utan hex-siffer gir «x»). Oktal/hex gir éi rå byte (same bytestreng-modell som resten av modulen).
 funksjon _copy_avkod(v: tekst) -> tekst {
     hvis v == "\\N" { returner sql_null() }
     hvis builtin.index_of(v, "\\") < 0 { returner v }
     la ut: liste_tekst = []
     la i: heltall = 0
-    mens i < lengde(v) {
+    la lengd = lengde(v)
+    mens i < lengd {
         la ch = builtin.slice(v, i, i + 1)
-        hvis ch == "\\" og i + 1 < lengde(v) {
+        hvis ch == "\\" og i + 1 < lengd {
             la n = builtin.slice(v, i + 1, i + 2)
-            hvis n == "t" { legg_til(ut, "\t") } ellers hvis n == "n" { legg_til(ut, "\n") } ellers hvis n == "r" { legg_til(ut, "\r") } ellers { legg_til(ut, n) }
-            i = i + 2
+            la nc = builtin.char_code(n)
+            hvis n == "b" { legg_til(ut, builtin.chr(8)) i = i + 2 }
+            ellers hvis n == "f" { legg_til(ut, builtin.chr(12)) i = i + 2 }
+            ellers hvis n == "n" { legg_til(ut, "\n") i = i + 2 }
+            ellers hvis n == "r" { legg_til(ut, "\r") i = i + 2 }
+            ellers hvis n == "t" { legg_til(ut, "\t") i = i + 2 }
+            ellers hvis n == "v" { legg_til(ut, builtin.chr(11)) i = i + 2 }
+            ellers hvis nc >= 48 og nc <= 55 {
+                la verdi: heltall = nc - 48
+                la k: heltall = i + 2
+                mens k < lengd og k < i + 4 {
+                    la dc = builtin.char_code(builtin.slice(v, k, k + 1))
+                    hvis dc < 48 eller dc > 55 { bryt }
+                    verdi = verdi * 8 + (dc - 48)
+                    k = k + 1
+                }
+                legg_til(ut, builtin.chr(verdi & 255))
+                i = k
+            } ellers hvis n == "x" og i + 2 < lengd og _hex_sifferverdi(builtin.slice(v, i + 2, i + 3)) >= 0 {
+                la verdi: heltall = _hex_sifferverdi(builtin.slice(v, i + 2, i + 3))
+                la k: heltall = i + 3
+                hvis k < lengd og _hex_sifferverdi(builtin.slice(v, k, k + 1)) >= 0 {
+                    verdi = verdi * 16 + _hex_sifferverdi(builtin.slice(v, k, k + 1))
+                    k = k + 1
+                }
+                legg_til(ut, builtin.chr(verdi))
+                i = k
+            } ellers {
+                legg_til(ut, n)
+                i = i + 2
+            }
         } ellers {
             legg_til(ut, ch)
             i = i + 1

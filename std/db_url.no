@@ -77,9 +77,69 @@ funksjon _pg_gjenopprett(handle) -> bool {
     returner ikkje handle["_lukka"]
 }
 
+funksjon _ord_teikn(c: heiltall) -> boolsk {
+    returner (c >= 48 og c <= 57) eller (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller c == 95 eller c > 127
+}
+
+# SQL med innhaldet i '…'-strengar og "…"-identifikatorar bytt ut med mellomrom (aldri ord-treff der inne).
+funksjon _utan_strengar(sql: tekst) -> tekst {
+    la ut: liste_tekst = []
+    la sitat = ""
+    la i: heltall = 0
+    mens i < lengde(sql) {
+        la ch = builtin.slice(sql, i, i + 1)
+        hvis sitat == "" {
+            hvis ch == "'" eller ch == "\"" {
+                sitat = ch
+                legg_til(ut, " ")
+            } ellers {
+                legg_til(ut, ch)
+            }
+        } ellers {
+            hvis ch == sitat { sitat = "" }
+            legg_til(ut, " ")
+        }
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# Heile ord (små bokstavar) i SQL utanfor strengliteralar.
+funksjon _sql_ord(sql: tekst) -> liste_tekst {
+    la s = builtin.lower(_utan_strengar(sql))
+    la ord: liste_tekst = []
+    la cur = ""
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        hvis _ord_teikn(builtin.char_code(ch)) {
+            cur = cur + ch
+        } ellers hvis cur != "" {
+            legg_til(ord, cur)
+            cur = ""
+        }
+        i = i + 1
+    }
+    hvis cur != "" { legg_til(ord, cur) }
+    returner ord
+}
+
+# Lesing = SELECT/SHOW, eller WITH som ikkje inneheld INSERT/UPDATE/DELETE/MERGE som heile ord
+# (data-modifiserande CTE). Alt anna (og usikre tilfelle) er ikkje lesing, så ingen retry.
 funksjon _er_lesing(sql: tekst) -> boolsk {
     la s = builtin.lower(builtin.trim(sql))
-    returner builtin.starts_with(s, "select") eller builtin.starts_with(s, "with") eller builtin.starts_with(s, "show")
+    hvis builtin.starts_with(s, "select") eller builtin.starts_with(s, "show") { returner sann }
+    hvis builtin.starts_with(s, "with") {
+        la ord = _sql_ord(sql)
+        la i: heltall = 0
+        mens i < lengde(ord) {
+            la o = ord[i]
+            hvis o == "insert" eller o == "update" eller o == "delete" eller o == "merge" { returner usann }
+            i = i + 1
+        }
+        returner sann
+    }
+    returner usann
 }
 
 # Køyr éi Postgres-spørring. Gir {"ok": boolsk, "r": resultat}. Set _feil ved feil.
@@ -148,20 +208,69 @@ funksjon query_rader(handle, sql: tekst) -> tekst {
 }
 
 # NorsDB bruker ?-teikn; Postgres $1, $2. Byt ut ? (utanfor strengar) med $n så same SQL fungerer på begge.
+#
+# PostgreSQL har eigne ?-operatorar (JSONB: `?`, `?|`, `?&`) som ikkje skal omskrivast. Regel:
+#  - `?|` og `?&` er alltid operatorar.
+#  - Elles er `?` ein plasshaldar berre når førre ikkje-blanke token er starten av setninga, eitt av
+#    teikna ( [ , ; = < > + - * / | ? (|| = konkatenering; ? = operand etter ein ?-operator), eller eitt av nøkkelorda values, limit,
+#    offset, by, and, or, not, when, then, else, in, like, ilike, set, where, on, returning, select,
+#    as, is, between, case, having.
+#    Etter ein identifikator, `)`, `]`, `"` eller `'` er `?` ein operator (`data ? 'key'`, `(x) ? y`).
+#  - `?` inne i '…'-strengar og "…"-identifikatorar blir aldri rørt.
+funksjon _plasshaldar_ord(o: tekst) -> boolsk {
+    returner o == "values" eller o == "limit" eller o == "offset" eller o == "by" eller o == "and" eller o == "or" eller o == "not" eller o == "when" eller o == "then" eller o == "else" eller o == "in" eller o == "like" eller o == "ilike" eller o == "set" eller o == "where" eller o == "on" eller o == "returning" eller o == "select" eller o == "as" eller o == "is" eller o == "between" eller o == "case" eller o == "having"
+}
+
 funksjon _til_dollar(sql: tekst) -> tekst {
     hvis builtin.index_of(sql, "?") < 0 { returner sql }
     la ut: liste_tekst = []
     la n: heltall = 0
-    la i_streng = usann
+    la sitat = ""
+    la ord = ""          # ordet som blir bygd / sist ferdige ord
+    la i_ord = usann
+    la førre = ""        # klasse for førre ikkje-blanke token: "" (start), "w" (ord), "q" (streng) eller teiknet
     la i: heltall = 0
-    mens i < lengde(sql) {
+    la lengd = lengde(sql)
+    mens i < lengd {
         la ch = builtin.slice(sql, i, i + 1)
-        hvis ch == "'" { i_streng = ikkje i_streng }
-        hvis ch == "?" og ikkje i_streng {
-            n = n + 1
-            legg_til(ut, "$" + tekst_fra_heltall(n))
+        la c = builtin.char_code(ch)
+        hvis sitat != "" {
+            i_ord = usann
+            hvis ch == sitat { sitat = "" førre = "q" }
+            legg_til(ut, ch)
+        } ellers hvis ch == "'" eller ch == "\"" {
+            sitat = ch
+            i_ord = usann
+            legg_til(ut, ch)
+        } ellers hvis _ord_teikn(c) {
+            hvis i_ord { ord = ord + builtin.lower(ch) } ellers { ord = builtin.lower(ch) }
+            i_ord = sann
+            førre = "w"
+            legg_til(ut, ch)
+        } ellers hvis ch == "?" {
+            i_ord = usann
+            la neste = ""
+            hvis i + 1 < lengd { neste = builtin.slice(sql, i + 1, i + 2) }
+            la plass = usann
+            hvis neste != "|" og neste != "&" {
+                hvis førre == "" eller førre == "(" eller førre == "[" eller førre == "," eller førre == ";" eller førre == "=" eller førre == "<" eller førre == ">" eller førre == "+" eller førre == "-" eller førre == "*" eller førre == "/" eller førre == "|" eller førre == "?" {
+                    plass = sann
+                } ellers hvis førre == "w" og _plasshaldar_ord(ord) {
+                    plass = sann
+                }
+            }
+            hvis plass {
+                n = n + 1
+                legg_til(ut, "$" + tekst_fra_heltall(n))
+                førre = "q"
+            } ellers {
+                legg_til(ut, ch)
+                førre = "?"
+            }
         } ellers {
             legg_til(ut, ch)
+            i_ord = usann
+            hvis ch != " " og ch != "\t" og ch != "\n" og ch != "\r" { førre = ch }
         }
         i = i + 1
     }

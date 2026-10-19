@@ -19,6 +19,7 @@ bruk std.sha256 som sha
 bruk std.x509 som x509
 bruk std.ed25519 som eddsa
 bruk std.base64 som base64
+bruk std.bytes som bytes
 
 funksjon SUITE_CHACHA20() -> heiltall { returner 4867 }   # 0x1303
 funksjon SUITE_AES128() -> heiltall { returner 4865 }     # 0x1301
@@ -264,7 +265,79 @@ funksjon _tid_ok(info: ordbok, no_iso: tekst) -> boolsk {
     returner sann
 }
 
+# CA-eigenskapar for eit sertifikat (RFC 5280 §4.2.1.3/§4.2.1.9): {"ok", "ca", "pathlen" (-1 = ingen grense),
+# "har_ku", "keycertsign"}. «ok» er usann viss DER ikkje lèt seg lese.
+funksjon _ca_eigenskapar(sertifikat) -> ordbok {
+    la ut = {"ok": usann, "ca": usann, "pathlen": -1, "har_ku": usann, "keycertsign": usann}
+    la data = sertifikat
+    hvis bytes.er_bytes(sertifikat) { data = bytes.til_liste(sertifikat) }
+    la cert = x509._tlv(data, 0, lengde(data))
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 { returner ut }
+    la tbs = x509._tlv(data, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner ut }
+    ut["ok"] = sann
+    la p = tbs["start"]
+    mens p < tbs["end"] {
+        la node = x509._tlv(data, p, tbs["end"])
+        hvis ikkje node["ok"] { returner ut }
+        hvis node["tag"] == 163 {
+            la extseq = x509._tlv(data, node["start"], node["end"])
+            hvis ikkje extseq["ok"] eller extseq["tag"] != 48 { returner ut }
+            la ep = extseq["start"]
+            mens ep < extseq["end"] {
+                la ext = x509._tlv(data, ep, extseq["end"])
+                hvis ikkje ext["ok"] eller ext["tag"] != 48 { returner ut }
+                la oid = x509._tlv(data, ext["start"], ext["end"])
+                hvis ikkje oid["ok"] { returner ut }
+                la value = x509._tlv(data, oid["next"], ext["end"])
+                hvis value["ok"] og value["tag"] == 1 { value = x509._tlv(data, value["next"], ext["end"]) }
+                hvis value["ok"] og value["tag"] == 4 {
+                    la oidhex = x509._oid(data, oid)
+                    hvis oidhex == "551D13" {
+                        # BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }
+                        la bc = x509._tlv(data, value["start"], value["end"])
+                        hvis bc["ok"] og bc["tag"] == 48 {
+                            la q = bc["start"]
+                            la f = x509._tlv(data, q, bc["end"])
+                            hvis f["ok"] og f["tag"] == 1 {
+                                hvis f["end"] - f["start"] == 1 og data[f["start"]] != 0 { ut["ca"] = sann }
+                                q = f["next"]
+                                f = x509._tlv(data, q, bc["end"])
+                            }
+                            hvis f["ok"] og f["tag"] == 2 og f["end"] - f["start"] == 1 {
+                                ut["pathlen"] = data[f["start"]]
+                            }
+                        }
+                    }
+                    hvis oidhex == "551D0F" {
+                        la bs = x509._tlv(data, value["start"], value["end"])
+                        hvis bs["ok"] og bs["tag"] == 3 og bs["end"] - bs["start"] >= 2 {
+                            ut["har_ku"] = sann
+                            hvis (data[bs["start"] + 1] & 4) != 0 { ut["keycertsign"] = sann }
+                        }
+                    }
+                }
+                ep = ext["next"]
+            }
+        }
+        p = node["next"]
+    }
+    returner ut
+}
+
+# Kan «utferdar» signere sertifikat? Krev CA=true, keyCertSign (viss keyUsage finst) og pathLen >=
+# talet mellomsertifikat under utferdaren (mellom). Gir "" ved OK, ellers årsak.
+funksjon _utferdar_feil(utferdar, mellom: heiltall) -> tekst {
+    la e = _ca_eigenskapar(utferdar)
+    hvis ikkje e["ok"] { returner "kunne ikkje lese utferdarsertifikat" }
+    hvis ikkje e["ca"] { returner "utferdaren er ikkje ein CA (basicConstraints CA=true manglar)" }
+    hvis e["har_ku"] og ikkje e["keycertsign"] { returner "utferdaren manglar keyUsage keyCertSign" }
+    hvis e["pathlen"] >= 0 og mellom > e["pathlen"] { returner "sertifikatkjeda bryt pathLen-grensa til utferdaren" }
+    returner ""
+}
+
 # Tillit: kjeda (leaf fyrst) må ende i eit sertifikat frå ankerlista (identisk eller signert av).
+# Kvar utferdar (anker eller mellomsertifikat, ikkje bladet) må vere CA (sjå _utferdar_feil).
 # Gir "" ved suksess, ellers feilmelding.
 funksjon _sjekk_tillit(kjede: liste, ankere: liste, no_iso: tekst) -> tekst {
     hvis lengde(ankere) == 0 { returner "ingen sertifikat i ca_fil" }
@@ -284,6 +357,10 @@ funksjon _sjekk_tillit(kjede: liste, ankere: liste, no_iso: tekst) -> tekst {
         a = 0
         mens a < lengde(ankere) {
             hvis x509.verifiser_signert_av(c, ankere[a]) {
+                la under = i - 1
+                hvis under < 0 { under = 0 }
+                la ca_feil = _utferdar_feil(ankere[a], under)
+                hvis ca_feil != "" { returner "ankersertifikatet i ca_fil kan ikkje utferde sertifikat: " + ca_feil }
                 la ainfo = x509.les_der(ankere[a])
                 hvis ainfo["status"] == "ok" og _tid_ok(ainfo, no_iso) { returner "" }
                 returner "CA-sertifikatet i ca_fil er utgått"
@@ -293,6 +370,8 @@ funksjon _sjekk_tillit(kjede: liste, ankere: liste, no_iso: tekst) -> tekst {
         # Ikkje knytt til ankera: er det signert av neste sertifikat tenaren sende?
         hvis i + 1 >= lengde(kjede) { returner "sertifikatet frå tenaren er ikkje signert av noko sertifikat i ca_fil" }
         hvis ikkje x509.verifiser_signert_av(c, kjede[i + 1]) { returner "sertifikatkjeda frå tenaren er ugyldig" }
+        la mellom_feil = _utferdar_feil(kjede[i + 1], i)
+        hvis mellom_feil != "" { returner "sertifikatkjeda frå tenaren er ugyldig: " + mellom_feil }
         i = i + 1
     }
     returner "sertifikatkjeda frå tenaren er ikkje knytt til ca_fil"

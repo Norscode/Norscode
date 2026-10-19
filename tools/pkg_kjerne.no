@@ -665,7 +665,64 @@ funksjon http_svar_tolk(rå: tekst) -> ordbok_tekst {
     la sp = builtin.split(første, " ")
     hvis lengde(sp) < 2 { returner {"status": 0, "body": "ugyldig HTTP-statuslinje"} }
     la kropp = builtin.slice(rå, he + 4, lengde(rå))
-    returner {"status": heltall_fra_tekst(sp[1]), "body": kropp}
+    la status = heltall_fra_tekst(sp[1])
+    # Transfer-Encoding: chunked -> dekod chunk-straumen. Elles (Content-Length / lukk-til-slutt) er kroppen rå.
+    la hovud = builtin.lower(builtin.slice(rå, 0, he))
+    la linjer = builtin.split(hovud, "\r\n")
+    la chunked = usann
+    la li = 1
+    mens li < lengde(linjer) {
+        la l = tekst(linjer[li])
+        hvis builtin.starts_with(l, "transfer-encoding:") og builtin.contains(l, "chunked") { chunked = sann }
+        li = li + 1
+    }
+    hvis chunked {
+        la d = http_chunked_dekod(kropp)
+        hvis ikkje d["ok"] { returner {"status": 0, "body": "ugyldig chunked-kropp: " + tekst(d["feil"])} }
+        kropp = tekst(d["body"])
+    }
+    returner {"status": status, "body": kropp}
+}
+
+// Hex-tal (chunk-storleik) -> heiltall, -1 ved ugyldig.
+funksjon _hex_tal(s: tekst) -> heiltall {
+    hvis lengde(s) == 0 eller lengde(s) > 12 { returner -1 }
+    la sifre = "0123456789abcdef"
+    la n = 0
+    la i = 0
+    mens i < lengde(s) {
+        la d = builtin.index_of(sifre, builtin.lower(builtin.slice(s, i, i + 1)))
+        hvis d < 0 { returner -1 }
+        n = n * 16 + d
+        i = i + 1
+    }
+    returner n
+}
+
+// Dekod HTTP/1.1 chunked-straum: (hex-storleik [;ext] CRLF data CRLF)* 0 CRLF [trailer] CRLF.
+// Gir {"ok", "body", "feil"}.
+funksjon http_chunked_dekod(rå: tekst) -> ordbok_tekst {
+    la deler: liste_tekst = []
+    la p = 0
+    la n = lengde(rå)
+    mens sann {
+        la rest = builtin.slice(rå, p, n)
+        la e = builtin.index_of(rest, "\r\n")
+        hvis e < 0 { returner {"ok": usann, "body": "", "feil": "manglar chunk-storleik"} }
+        la linje = builtin.slice(rest, 0, e)
+        la sem = builtin.index_of(linje, ";")
+        hvis sem >= 0 { linje = builtin.slice(linje, 0, sem) }
+        la storleik = _hex_tal(builtin.trim(linje))
+        hvis storleik < 0 { returner {"ok": usann, "body": "", "feil": "ugyldig chunk-storleik"} }
+        p = p + e + 2
+        hvis storleik == 0 { bryt }
+        hvis p + storleik + 2 > n { returner {"ok": usann, "body": "", "feil": "avkorta chunk"} }
+        legg_til(deler, builtin.slice(rå, p, p + storleik))
+        hvis builtin.slice(rå, p + storleik, p + storleik + 2) != "\r\n" { returner {"ok": usann, "body": "", "feil": "manglar CRLF etter chunk"} }
+        p = p + storleik + 2
+    }
+    # Valfri trailer fram til tom linje er ignorert (kroppen er alt fullstendig).
+    returner {"ok": sann, "body": builtin.join(deler, ""), "feil": ""}
 }
 
 funksjon sokkel_skriv_alt(h: ordbok_tekst, data: tekst, frist: heiltall) -> bool {
@@ -1385,13 +1442,16 @@ funksjon pkg_installer(prosjekt: tekst, reg: tekst, frossen: bool, oppdater_alt:
         la valg = løys(ind, rotkrav, pref)
         pakker = lock_frå_løysing(ind, valg)
     }
+    # Stage lock-innhaldet; skriv det først etter vellukka installasjon, så ein feil
+    # (nett, sjekksum, utpakking) lèt førre norscode.lock (eller fråvære av fil) stå intakt.
     la lock_ny = lock_serialiser(pakker)
+    la oppsummering = installer_frå_lock(reg, prosjekt, pakker)
     hvis ikkje frossen {
         hvis ikkje fo.fil_finnes(lock_sti(prosjekt)) eller fil_les(lock_sti(prosjekt)) != lock_ny {
             fil_skriv(lock_sti(prosjekt), lock_ny)
         }
     }
-    returner installer_frå_lock(reg, prosjekt, pakker)
+    returner oppsummering
 }
 
 funksjon pkg_add(prosjekt: tekst, reg: tekst, namn: tekst, spec: tekst) -> liste_tekst {
