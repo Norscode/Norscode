@@ -141,13 +141,127 @@ funksjon er_type_token(type)
     returner type == "IDENT" eller type == "TEKST" eller type == "HELTALL" eller type == "BOOL"
 slutt
 
+// ─── F43: annotasjonar ───────────────────────────────────────────────────────
+// `@namn` / `@namn(lit, lit, …)` framfor funksjon eller struktur (og framfor
+// strukturfelt). Argumenta er literalar: tekst, tal, sann/usann, null. Rein
+// metadata (sjå docs/REFLEKSJON.md): parseren legg dei i nøkkelen
+// `annotasjonar` på Funksjon/Struktur/Felt-noden som liste av
+// {"namn": tekst, "argument": [{"type": "tekst|heltall|desimaltall|bool|null", "verdi": …}]}.
+funksjon ann_literal(state)
+    la tok = gjeldende(state)
+    la t = tok["type"]
+    la linje = token_linje(tok)
+    hvis t == "STRING"
+        neste(state)
+        la v = token_verdi(tok)
+        hvis v == "__nclit__empty_" + "text_v1"
+            v = ""
+        slutt
+        returner {"type": "tekst", "verdi": v}
+    slutt
+    hvis t == "SANN"
+        neste(state)
+        returner {"type": "bool", "verdi": sann}
+    slutt
+    hvis t == "USANN"
+        neste(state)
+        returner {"type": "bool", "verdi": usann}
+    slutt
+    hvis t == "NULL"
+        neste(state)
+        returner {"type": "null", "verdi": null}
+    slutt
+    la negativ = usann
+    hvis t == "MINUS"
+        neste(state)
+        negativ = sann
+        tok = gjeldende(state)
+        t = tok["type"]
+    slutt
+    hvis t == "NUMBER"
+        neste(state)
+        la tv = tekst(token_verdi(tok))
+        hvis builtin.starts_with(tv, "0x") eller builtin.starts_with(tv, "0X")
+            parserfeil(state, "annotasjon: heksadesimalt tal er ikkje støtta (linje " + til_tekst(linje) + ")")
+        slutt
+        hvis negativ
+            tv = "-" + tv
+        slutt
+        hvis builtin.contains(tv, ".") eller builtin.contains(tv, "e") eller builtin.contains(tv, "E")
+            returner {"type": "desimaltall", "verdi": tv}
+        slutt
+        returner {"type": "heltall", "verdi": tv}
+    slutt
+    parserfeil(state, "annotasjonsargument må vere ein literal (tekst, tal, sann, usann eller null)")
+    returner null
+slutt
+
+funksjon les_annotasjon(state)
+    la at = forvent(state, "AT", "forventa @")
+    la nt = gjeldende(state)
+    la namn = tekst(token_verdi(nt))
+    la ok = nt["type"] != "STRING" og nt["type"] != "NUMBER" og lengde(namn) > 0
+    hvis ok
+        la c = builtin.char_code(builtin.slice(namn, 0, 1))
+        ok = (c >= 97 og c <= 122) eller (c >= 65 og c <= 90) eller c == 95 eller c >= 128
+    slutt
+    hvis ikkje ok
+        parserfeil(state, "forventa annotasjonsnamn etter @")
+    slutt
+    neste(state)
+    la ann = {"namn": namn, "argument": [], "linje": token_linje(at)}
+    hvis gjeldende(state)["type"] == "LPAREN" og token_linje(gjeldende(state)) == token_linje(nt)
+        neste(state)
+        mens gjeldende(state)["type"] != "RPAREN" og ikkje er_slutt(state)
+            legg_til(ann["argument"], ann_literal(state))
+            hvis gjeldende(state)["type"] == "COMMA"
+                neste(state)
+            ellers
+                bryt
+            slutt
+        slutt
+        forvent(state, "RPAREN", "forventa ) etter annotasjonsargument")
+    slutt
+    returner ann
+slutt
+
+// Festar ventande annotasjonar til deklarasjonen som vart parsa etter dei.
+funksjon ann_fest(state, rot)
+    la v = state["ann_ventar"]
+    hvis v == null eller lengde(v) == 0
+        returner 0
+    slutt
+    la n = state["ann_n"]
+    hvis lengde(rot["barn"]) <= n
+        returner 0
+    slutt
+    la d = rot["barn"][n]
+    hvis d["type"] != "Funksjon" og d["type"] != "Struktur"
+        state["ann_ventar"] = []
+        parserfeil(state, "annotasjonar kan berre stå framfor funksjon eller struktur (fann " + d["type"] + " på linje " + til_tekst(d["linje"]) + ")")
+    slutt
+    d["annotasjonar"] = v
+    state["ann_ventar"] = []
+    returner 0
+slutt
+
 funksjon parse_program(tokens)
     state = ny_state(tokens)
     rot = ny_node("Program", "", 1, 1)
     tests = []
 
+    state["ann_ventar"] = []
+    state["ann_n"] = 0
     mens ikkje er_slutt(state)
+        ann_fest(state, rot)
         type = gjeldende(state)["type"]
+        hvis type == "AT"
+            hvis lengde(state["ann_ventar"]) == 0
+                state["ann_n"] = lengde(rot["barn"])
+            slutt
+            legg_til(state["ann_ventar"], les_annotasjon(state))
+            fortsett
+        slutt
         hvis type == "ASYNC" eller type == "FUNKSJON"
             legg_barn(rot, parse_funksjon(state))
             fortsett
@@ -261,6 +375,10 @@ funksjon parse_program(tokens)
         legg_barn(rot, parse_setning(state))
     slutt
 
+    ann_fest(state, rot)
+    hvis lengde(state["ann_ventar"]) > 0
+        parserfeil(state, "annotasjon utan deklarasjon")
+    slutt
     rot["tests"] = tests
     // R2/F15: semantic.sjekk_konst treng berre gå gjennom AST-en når det finst konst.
     rot["har_konst"] = har_nokkel(state, "har_konst")
@@ -440,6 +558,10 @@ funksjon parse_struktur(state)
         // R3/F28: ein valfri type-annotasjon (`x: heltall`) blir lagra som nøklane
         // typeuttrykk/typetekst på Felt-noden (barna er uendra; runtime er erased).
         // R3/F31: `privat felt: type` — feltet er berre synleg i modulen.
+        felt_ann = []
+        mens gjeldende(state)["type"] == "AT"
+            legg_til(felt_ann, les_annotasjon(state))
+        slutt
         felt_privat = usann
         hvis gjeldende(state)["type"] == "IDENT" og token_verdi(gjeldende(state)) == "privat" og se_frem(state, 1)["type"] == "IDENT"
             neste(state)
@@ -449,6 +571,9 @@ funksjon parse_struktur(state)
         felt_node = ny_node("Felt", token_verdi(felt_tok), token_linje(felt_tok), token_kolonne(felt_tok))
         hvis felt_privat
             felt_node["privat"] = sann
+        slutt
+        hvis lengde(felt_ann) > 0
+            felt_node["annotasjonar"] = felt_ann
         slutt
         legg_barn(node, felt_node)
         hvis gjeldende(state)["type"] == "COLON"
@@ -1109,6 +1234,11 @@ funksjon parse_setning(state)
         returner parse_funksjon(state)
     slutt
 
+    // F45: `gi uttrykk` / `gi frå uttrykk` (kontekstuelt nøkkelord, sjå docs/GENERATORAR.md)
+    hvis type == "IDENT" og er_gi_setning(state)
+        returner parse_gi(state)
+    slutt
+
     hvis type == "IDENT"
         kort_funksjon = usann
         hvis se_frem(state, 1)["type"] == "LPAREN"
@@ -1479,6 +1609,85 @@ funksjon presedens(type)
     returner 0
 slutt
 
+// ─── F45: gi (yield) ──────────────────────────────────────────────────────────
+// `gi` er eit kontekstuelt nøkkelord: berre når det står først i ei setning og
+// det fylgjer eit uttrykk på same linje som ikkje kan lesast som tilordning,
+// kall, indeksering, feltoppslag eller operator (`gi = 1`, `gi(x)`, `gi[0]`,
+// `gi.x`, `gi + 1` er framleis vanlege uttrykk med variabelen gi). `gi (x)` og
+// `gi [1, 2]` (med mellomrom) er yield.
+funksjon gi_startar_uttrykk(t)
+    hvis t == "IDENT" eller t == "NUMBER" eller t == "TALL" eller t == "STRING" eller t == "TEKST_LITERAL"
+        returner sann
+    slutt
+    // `i` er nøkkelordet I, men blir brukt som vanleg variabel; typenøkkelord likeins.
+    hvis t == "I" eller t == "TYPE_TEXT" eller t == "TYPE_INT" eller t == "TYPE_BOOL"
+        returner sann
+    slutt
+    hvis t == "TRUE" eller t == "FALSE" eller t == "SANN" eller t == "USANN" eller t == "NULL" eller t == "LBRACE"
+        returner sann
+    slutt
+    hvis t == "NOT" eller t == "IKKJE" eller t == "IKKE" eller t == "FUNKSJON" eller t == "FUN" eller t == "HVIS" eller t == "AWAIT" eller t == "SKRIV"
+        returner sann
+    slutt
+    returner usann
+slutt
+
+funksjon er_gi_setning(state)
+    tok = gjeldende(state)
+    hvis token_verdi(tok) != "gi"
+        returner usann
+    slutt
+    nt = se_frem(state, 1)
+    hvis token_linje(nt) != token_linje(tok)
+        returner usann
+    slutt
+    hvis gi_startar_uttrykk(nt["type"])
+        returner sann
+    slutt
+    hvis nt["type"] == "LPAREN" eller nt["type"] == "LBRACKET"
+        returner token_kolonne(nt) > token_kolonne(tok) + 2
+    slutt
+    // `gi -1` (mellomrom før minus, ingen etter) er yield av eit negativt uttrykk; `gi - 1` og `gi-1` er subtraksjon.
+    hvis nt["type"] == "MINUS"
+        nn = se_frem(state, 2)
+        hvis token_linje(nn) != token_linje(tok)
+            returner usann
+        slutt
+        returner token_kolonne(nt) > token_kolonne(tok) + 2 og token_kolonne(nn) == token_kolonne(nt) + 1
+    slutt
+    returner usann
+slutt
+
+funksjon parse_gi(state)
+    start = neste(state)
+    deleger = usann
+    nt = gjeldende(state)
+    hvis nt["type"] == "IDENT" og token_verdi(nt) == "frå"
+        n2 = se_frem(state, 1)
+        hvis token_linje(n2) == token_linje(start) og (gi_startar_uttrykk(n2["type"]) eller n2["type"] == "LPAREN" eller n2["type"] == "LBRACKET")
+            neste(state)
+            deleger = sann
+        slutt
+    slutt
+    uttrykk = parse_uttrykk(state)
+    matcher(state, "SEMICOLON")
+    hvis ikkje deleger
+        node = ny_node("Gi", "", token_linje(start), token_kolonne(start))
+        legg_barn(node, uttrykk)
+        returner node
+    slutt
+    // gi frå e  ==  for __gi_L_K i e { gi __gi_L_K }
+    namn = "__gi_" + tekst(token_linje(start)) + "_" + tekst(token_kolonne(start))
+    gi_node = ny_node("Gi", "", token_linje(start), token_kolonne(start))
+    legg_barn(gi_node, ny_node("Ident", namn, token_linje(start), token_kolonne(start)))
+    blokk = ny_node("Blokk", "", token_linje(start), token_kolonne(start))
+    legg_barn(blokk, gi_node)
+    lykkje = ny_node("For", namn, token_linje(start), token_kolonne(start))
+    legg_barn(lykkje, uttrykk)
+    legg_barn(lykkje, blokk)
+    returner lykkje
+slutt
+
 // ─── for i in liste ───────────────────────────────────────────────────────────
 funksjon parse_for(state)
     start = forvent(state, "FOR", "forventet for")
@@ -1534,38 +1743,89 @@ funksjon parse_for(state)
 slutt
 
 // ─── prøv / fang ─────────────────────────────────────────────────────────────
+// R4/F32: ei fang-klausul er (variabel, typar, blokk). `fang (e: A eller B)`
+// gjev to typar; fleire `fang`-klausular på same prøv blir senka til éi
+// fang-alt-klausul med ei kjede av unntak_passar-testar (sjå pf_fang_kjede).
+funksjon parse_fang_klausul(state)
+    k = {}
+    k["namn"] = "feil"
+    k["typar"] = []
+    k["linje"] = token_linje(gjeldende(state))
+    k["kolonne"] = token_kolonne(gjeldende(state))
+    forvent(state, "FANG", "forventet fang")
+    // Valfri fangst-variabel: fang (e) eller fang e
+    har_paren = gjeldende(state)["type"] == "LPAREN"
+    har_namn = usann
+    hvis har_paren
+        neste(state)
+        fang_tok = forvent(state, "IDENT", "forventet variabelnamn i fang")
+        k["namn"] = token_verdi(fang_tok)
+        har_namn = sann
+    ellers hvis gjeldende(state)["type"] == "IDENT"
+        fang_tok = neste(state)
+        k["namn"] = token_verdi(fang_tok)
+        har_namn = sann
+    slutt
+    hvis har_namn og gjeldende(state)["type"] == "COLON"
+        neste(state)
+        type_tok = les_type_token(state)
+        legg_til(k["typar"], token_verdi(type_tok))
+        mens gjeldende(state)["type"] == "ELLER"
+            neste(state)
+            type_tok = les_type_token(state)
+            legg_til(k["typar"], token_verdi(type_tok))
+        slutt
+    slutt
+    hvis har_paren
+        forvent(state, "RPAREN", "forventet ) etter fang-variabel")
+    slutt
+    k["blokk"] = parse_blokk(state)
+    returner k
+slutt
+
 funksjon parse_prøv_fang(state)
     start = forvent(state, "PROV", "forventet prøv")
+    // R4/F33: prøv med r = opne(), s = opne2() { … }
+    ressursar = []
+    hvis gjeldende(state)["type"] == "IDENT" og token_verdi(gjeldende(state)) == "med" og se_frem(state, 1)["type"] == "IDENT" og se_frem(state, 2)["type"] == "ASSIGN"
+        neste(state)
+        mens sann
+            r_tok = forvent(state, "IDENT", "forventet ressursnamn etter prøv med")
+            forvent(state, "ASSIGN", "forventet = etter ressursnamn")
+            r = {}
+            r["namn"] = token_verdi(r_tok)
+            r["uttrykk"] = parse_uttrykk(state)
+            legg_til(ressursar, r)
+            hvis gjeldende(state)["type"] != "COMMA"
+                bryt
+            slutt
+            neste(state)
+        slutt
+    slutt
     prøv_blokk = parse_blokk(state)
+    klausular = []
+    mens gjeldende(state)["type"] == "FANG"
+        legg_til(klausular, parse_fang_klausul(state))
+    slutt
+    har_fang = lengde(klausular) > 0
     fang_namn = "feil"
     fang_type = "*"
-    har_fang = usann
-    hvis gjeldende(state)["type"] == "FANG"
-        neste(state)
-        har_fang = sann
-        // Valfri fangst-variabel: fang (e) eller fang e
-        hvis gjeldende(state)["type"] == "LPAREN"
-            neste(state)
-            fang_tok = forvent(state, "IDENT", "forventet variabelnamn i fang")
-            fang_namn = token_verdi(fang_tok)
-            hvis gjeldende(state)["type"] == "COLON"
-                neste(state)
-                type_tok = les_type_token(state)
-                fang_type = token_verdi(type_tok)
+    fang_blokk = ny_node("Blokk", "", token_linje(start), token_kolonne(start))
+    hvis har_fang
+        hvis lengde(klausular) == 1
+            fang_namn = klausular[0]["namn"]
+            fang_blokk = klausular[0]["blokk"]
+            hvis lengde(klausular[0]["typar"]) > 0
+                fang_type = builtin.join(klausular[0]["typar"], "|")
             slutt
-            forvent(state, "RPAREN", "forventet ) etter fang-variabel")
-        ellers hvis gjeldende(state)["type"] == "IDENT"
-            fang_tok = neste(state)
-            fang_namn = token_verdi(fang_tok)
-            hvis gjeldende(state)["type"] == "COLON"
-                neste(state)
-                type_tok = les_type_token(state)
-                fang_type = token_verdi(type_tok)
+            hvis pf_bruker_felt(fang_blokk, fang_namn)
+                fang_blokk = pf_pakk_blokk(fang_blokk, fang_namn, fang_namn, start)
             slutt
+        ellers
+            state["pf_teljar"] = pf_neste(state)
+            fang_namn = "__fang_" + til_tekst(state["pf_teljar"]) + "__"
+            fang_blokk = pf_fang_kjede(klausular, fang_namn, start)
         slutt
-        fang_blokk = parse_blokk(state)
-    ellers
-        fang_blokk = ny_node("Blokk", "", token_linje(start), token_kolonne(start))
     slutt
 
     har_endeleg = usann
@@ -1575,8 +1835,15 @@ funksjon parse_prøv_fang(state)
         har_endeleg = sann
         endeleg_blokk = parse_blokk(state)
     slutt
-    hvis ikkje har_fang og ikkje har_endeleg
+    hvis lengde(ressursar) == 0 og ikkje har_fang og ikkje har_endeleg
         kast "forventet fang eller endeleg etter prøv-blokk"
+    slutt
+
+    hvis lengde(ressursar) > 0
+        prøv_blokk = pf_ressurs_blokk(state, ressursar, prøv_blokk, start)
+        hvis ikkje har_fang og ikkje har_endeleg
+            returner prøv_blokk
+        slutt
     slutt
 
     node = ny_node("PrøvFang", fang_namn, token_linje(start), token_kolonne(start))
@@ -1587,6 +1854,230 @@ funksjon parse_prøv_fang(state)
     legg_barn(node, fang_blokk)
     legg_barn(node, endeleg_blokk)
     returner node
+slutt
+
+// ─── R4: senking av fleire fang-klausular og prøv med (ressursar) ────────────
+// Begge blir senka i parseren til vanlege noder (PrøvFang/Hvis/Kall/Kast), so
+// typesjekk, namnesjekk, linter og bytekode-emitteren ser berre kjende former,
+// og NCB-en for kode utan desse formene er uendra.
+funksjon pf_neste(state)
+    hvis har_nokkel(state, "pf_teljar")
+        returner state["pf_teljar"] + 1
+    slutt
+    returner 1
+slutt
+
+funksjon pf_id(namn, start)
+    returner ny_node("Ident", namn, token_linje(start), token_kolonne(start))
+slutt
+
+funksjon pf_kall(namn, args, start)
+    kall = ny_node("Kall", "", token_linje(start), token_kolonne(start))
+    legg_barn(kall, pf_id(namn, start))
+    a = ny_node("Argumenter", "", token_linje(start), token_kolonne(start))
+    i = 0
+    mens i < lengde(args)
+        legg_barn(a, args[i])
+        i = i + 1
+    slutt
+    legg_barn(kall, a)
+    returner kall
+slutt
+
+funksjon pf_felt(objekt, felt, start)
+    f = ny_node("Felt", felt, token_linje(start), token_kolonne(start))
+    legg_barn(f, objekt)
+    returner f
+slutt
+
+funksjon pf_metodekall(objekt_namn, metode, start)
+    kall = ny_node("Kall", "", token_linje(start), token_kolonne(start))
+    legg_barn(kall, pf_felt(pf_id(objekt_namn, start), metode, start))
+    legg_barn(kall, ny_node("Argumenter", "", token_linje(start), token_kolonne(start)))
+    returner kall
+slutt
+
+funksjon pf_la(namn, init, start)
+    n = ny_node("La", namn, token_linje(start), token_kolonne(start))
+    legg_barn(n, init)
+    returner n
+slutt
+
+funksjon pf_sett(namn, verdi, start)
+    n = ny_node("Sett", "", token_linje(start), token_kolonne(start))
+    legg_barn(n, pf_id(namn, start))
+    legg_barn(n, verdi)
+    returner n
+slutt
+
+funksjon pf_blokk(start)
+    returner ny_node("Blokk", "", token_linje(start), token_kolonne(start))
+slutt
+
+funksjon pf_kast(verdi, start)
+    n = ny_node("Kast", "", token_linje(start), token_kolonne(start))
+    legg_barn(n, verdi)
+    returner n
+slutt
+
+// Brukar blokka feltet stakk/undertrykte på fangvariabelen? Då pakkar vi
+// unntaket (unntak_pakk) først i blokka, slik at e.stakk / e.undertrykte alltid
+// finst; andre fang-blokker får det rå unntaket som før.
+funksjon pf_bruker_felt(node, namn)
+    hvis builtin.type(node) != "ordbok"
+        returner usann
+    slutt
+    hvis node["type"] == "Felt" og (node["verdi"] == "stakk" eller node["verdi"] == "undertrykte") og lengde(node["barn"]) > 0
+        b0 = node["barn"][0]
+        hvis builtin.type(b0) == "ordbok" og b0["type"] == "Ident" og b0["verdi"] == namn
+            returner sann
+        slutt
+    slutt
+    hvis builtin.type(node["barn"]) != "liste"
+        returner usann
+    slutt
+    i = 0
+    mens i < lengde(node["barn"])
+        hvis pf_bruker_felt(node["barn"][i], namn)
+            returner sann
+        slutt
+        i = i + 1
+    slutt
+    returner usann
+slutt
+
+// Blokk der `namn = unntak_pakk(kjelde)` kjem først, deretter den opphavlege blokka.
+funksjon pf_pakk_blokk(blokk, namn, kjelde, start)
+    ut = pf_blokk(start)
+    args = []
+    legg_til(args, pf_id(kjelde, start))
+    legg_barn(ut, pf_sett(namn, pf_kall("unntak_pakk", args, start), start))
+    legg_barn(ut, blokk)
+    returner ut
+slutt
+
+// Kjede for fleire fang-klausular: første klausul som passar vinn; ingen
+// passar → unntaket blir kasta vidare med det opphavlege stakksporet.
+funksjon pf_fang_kjede(klausular, fv, start)
+    standard = pf_blokk(start)
+    legg_barn(standard, pf_kall("unntak_behald_stakk", [], start))
+    legg_barn(standard, pf_kast(pf_id(fv, start), start))
+    ytre = standard
+    i = lengde(klausular) - 1
+    mens i >= 0
+        k = klausular[i]
+        gren = pf_blokk(start)
+        k_namn = k["namn"]
+        init = pf_id(fv, start)
+        hvis pf_bruker_felt(k["blokk"], k_namn)
+            args0 = []
+            legg_til(args0, pf_id(fv, start))
+            init = pf_kall("unntak_pakk", args0, start)
+        slutt
+        legg_barn(gren, pf_la(k_namn, init, start))
+        legg_barn(gren, k["blokk"])
+        hvis lengde(k["typar"]) == 0
+            // fang-alt: alt etter han er uoppnåeleg
+            ytre = gren
+        ellers
+            args = []
+            legg_til(args, pf_id(fv, start))
+            legg_til(args, ny_node("Tekst", builtin.join(k["typar"], "|"), token_linje(start), token_kolonne(start)))
+            hv = ny_node("Hvis", "", token_linje(start), token_kolonne(start))
+            legg_barn(hv, pf_kall("unntak_passar", args, start))
+            legg_barn(hv, gren)
+            legg_barn(hv, ytre)
+            ytre = pf_blokk(start)
+            legg_barn(ytre, hv)
+        slutt
+        i = i - 1
+    slutt
+    returner ytre
+slutt
+
+// close-stmt: hvis r != null { r.lukk() }
+funksjon pf_lukk_stmt(namn, start)
+    hv = ny_node("Hvis", "", token_linje(start), token_kolonne(start))
+    cond = ny_node("Binop", "NE", token_linje(start), token_kolonne(start))
+    legg_barn(cond, pf_id(namn, start))
+    legg_barn(cond, ny_node("Null", "null", token_linje(start), token_kolonne(start)))
+    legg_barn(hv, cond)
+    b = pf_blokk(start)
+    legg_barn(b, pf_metodekall(namn, "lukk", start))
+    legg_barn(hv, b)
+    returner hv
+slutt
+
+// Senk heile ressurslista rundt kroppen, innanfrå og ut: den siste ressursen
+// blir lukka først. Returnerer ei blokk.
+funksjon pf_ressurs_blokk(state, ressursar, kropp, start)
+    noverande = kropp
+    i = lengde(ressursar) - 1
+    mens i >= 0
+        state["pf_teljar"] = pf_neste(state)
+        n = til_tekst(state["pf_teljar"])
+        r = ressursar[i]
+        uf = "__uf_" + n + "__"
+        uh = "__uh_" + n + "__"
+        up = "__up_" + n + "__"
+        ue = "__ue_" + n + "__"
+        ul = "__ul_" + n + "__"
+        ut = pf_blokk(start)
+        legg_barn(ut, pf_la(r["namn"], r["uttrykk"], start))
+        legg_barn(ut, pf_la(uf, ny_node("Bool", "usann", token_linje(start), token_kolonne(start)), start))
+        legg_barn(ut, pf_la(uh, ny_node("Null", "null", token_linje(start), token_kolonne(start)), start))
+        legg_barn(ut, pf_la(up, ny_node("Null", "null", token_linje(start), token_kolonne(start)), start))
+
+        fb = pf_blokk(start)
+        legg_barn(fb, pf_sett(uh, pf_id(ue, start), start))
+        pargs = []
+        legg_til(pargs, pf_id(ue, start))
+        legg_barn(fb, pf_sett(up, pf_kall("unntak_pakk", pargs, start), start))
+        legg_barn(fb, pf_sett(uf, ny_node("Bool", "sann", token_linje(start), token_kolonne(start)), start))
+
+        // kropp kasta: lukk, og viss lukk óg kastar blir det undertrykt
+        inner_try = ny_node("PrøvFang", ul, token_linje(start), token_kolonne(start))
+        inner_try["catch_type"] = "*"
+        inner_try["has_catch"] = sann
+        inner_try["has_finally"] = usann
+        itb = pf_blokk(start)
+        legg_barn(itb, pf_lukk_stmt(r["namn"], start))
+        icb = pf_blokk(start)
+        largs = []
+        legg_til(largs, pf_felt(pf_id(up, start), "undertrykte", start))
+        legg_til(largs, pf_id(ul, start))
+        legg_barn(icb, pf_kall("legg_til", largs, start))
+        legg_barn(icb, pf_kall("unntak_behald_stakk", [], start))
+        legg_barn(icb, pf_kast(pf_id(up, start), start))
+        legg_barn(inner_try, itb)
+        legg_barn(inner_try, icb)
+        legg_barn(inner_try, pf_blokk(start))
+
+        kasta = pf_blokk(start)
+        legg_barn(kasta, inner_try)
+        legg_barn(kasta, pf_kall("unntak_behald_stakk", [], start))
+        legg_barn(kasta, pf_kast(pf_id(uh, start), start))
+        normal = pf_blokk(start)
+        legg_barn(normal, pf_lukk_stmt(r["namn"], start))
+        eb = pf_blokk(start)
+        hv = ny_node("Hvis", "", token_linje(start), token_kolonne(start))
+        legg_barn(hv, pf_id(uf, start))
+        legg_barn(hv, kasta)
+        legg_barn(hv, normal)
+        legg_barn(eb, hv)
+
+        prov = ny_node("PrøvFang", ue, token_linje(start), token_kolonne(start))
+        prov["catch_type"] = "*"
+        prov["has_catch"] = sann
+        prov["has_finally"] = sann
+        legg_barn(prov, noverande)
+        legg_barn(prov, fb)
+        legg_barn(prov, eb)
+        legg_barn(ut, prov)
+        noverande = ut
+        i = i - 1
+    slutt
+    returner noverande
 slutt
 
 funksjon parse_uttrykk(state)

@@ -1,0 +1,307 @@
+# 5g: pakkehandtering med register (nc pkg). Heile flyten lokalt, utan eksterne tenester:
+#   - semver (^, ~, >=, ranges), konfliktmelding, syklusdeteksjon
+#   - to pakkar med avhengnad (a -> b) publisert til eit filbasert register
+#   - add/install/lock/update/remove, deterministisk norscode.lock
+#   - modulløysing: `bruk a.rot` frå .norscode/pakkar via NORSCODE_PATH (F42)
+#   - sjekksumfeil er HARD feil (diskriminerande: arkivet blir endra i registeret)
+#   - HTTP-register: referansetenaren (tråd) + klient over native sokkel, publisering
+#     med token, 401 utan token
+# Køyrer gjennom KJELDE-nc_main og KJELDE-VM (modulimport-delen).
+
+bruk tools.pkg_kjerne som pk
+bruk selfhost.vm som vm
+bruk selfhost.nc_main som ncm
+bruk std.filops som fo
+bruk std.socket som socket
+bruk std.sha256 som sha
+
+la W = "build/test_pkg_arbeid"
+
+funksjon feilmelding(f) -> tekst {
+    prøv { f() } fang (e) { returner tekst(e) }
+    returner "INGEN_FEIL"
+}
+
+funksjon skriv_pakke(mappe: tekst, namn: tekst, versjon: tekst, avh: tekst, filer: ordbok_tekst) -> heiltall {
+    fo.slett_tre(mappe)
+    fo.lag_katalogar(mappe)
+    la m = "[project]\nname = \"" + namn + "\"\nversion = \"" + versjon + "\"\n\n[dependencies]\n" + avh
+    fil_skriv(mappe + "/norcode.toml", m)
+    la ks = nøkler(filer)
+    la i = 0
+    mens i < lengde(ks) {
+        fo.lag_katalogar(fo.katalog(mappe + "/" + tekst(ks[i])))
+        fil_skriv(mappe + "/" + tekst(ks[i]), tekst(filer[ks[i]]))
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon publiser(reg: tekst, mappe: tekst, namn: tekst, versjon: tekst, avh: tekst, filer: ordbok_tekst) -> ordbok_tekst {
+    skriv_pakke(mappe, namn, versjon, avh, filer)
+    returner pk.pkg_publiser(mappe, reg)
+}
+
+funksjon b_filer(v: heiltall) -> ordbok_tekst {
+    returner {"verktoy.no": "funksjon dobbel(x: heiltall) -> heiltall {\n    returner x * 2 + " + tekst(v) + "\n}\nfunksjon helsing() -> tekst { returner \"hei frå b æøå\" }\n"}
+}
+
+funksjon a_filer() -> ordbok_tekst {
+    returner {"rot.no": "bruk b.verktoy\nfunksjon fra_a(x: heiltall) -> heiltall {\n    returner verktoy.dobbel(x)\n}\n",
+              "sub/hjelp.no": "funksjon hjelp() -> tekst { returner \"hjelp\" }\n"}
+}
+
+funksjon køyr_modul(hovudfil: tekst) -> tekst {
+    la imports = ncm.finn_bruk_imports(fil_les(hovudfil))
+    la ncb_json = ncm.nc_bundle_ncb(hovudfil, "__main__", imports)
+    returner tekst(vm.køyr_ncb(builtin.json_parse_raw(ncb_json)))
+}
+
+// ── HTTP-register: tenaren køyrer i ein tråd ──────────────────────────────
+funksjon server_worker(args: ordbok_tekst) -> tekst {
+    la l: ordbok_tekst = {}
+    l["handle"] = args["listener_handle"]
+    la n = pk.register_betjen(l, args["rot"], heltall_fra_tekst(args["n"]), 20000)
+    returner tekst(n)
+}
+
+funksjon start_server(lh: tekst, rot: tekst, n: heiltall) -> ordbok_tekst {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
+        "fn": "__main__.server_worker",
+        "args": {"listener_handle": lh, "rot": rot, "n": tekst(n)},
+        "name": "register", "stack_bytes": "1048576"})
+}
+
+funksjon vent_server(t: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": "40000"})
+}
+
+funksjon test_semver() -> heiltall {
+    assert(pk.krav_oppfylt("^1.2.3", "1.2.3"))
+    assert(pk.krav_oppfylt("^1.2.3", "1.9.0"))
+    assert(ikkje pk.krav_oppfylt("^1.2.3", "2.0.0"))
+    assert(ikkje pk.krav_oppfylt("^1.2.3", "1.2.2"))
+    assert(pk.krav_oppfylt("^0.2.3", "0.2.9"))
+    assert(ikkje pk.krav_oppfylt("^0.2.3", "0.3.0"))
+    assert(pk.krav_oppfylt("^0.0.3", "0.0.3"))
+    assert(ikkje pk.krav_oppfylt("^0.0.3", "0.0.4"))
+    assert(pk.krav_oppfylt("~1.2.3", "1.2.9"))
+    assert(ikkje pk.krav_oppfylt("~1.2.3", "1.3.0"))
+    assert(pk.krav_oppfylt("~1", "1.9.9"))
+    assert(ikkje pk.krav_oppfylt("~1", "2.0.0"))
+    assert(pk.krav_oppfylt(">=1.0.0, <2.0.0", "1.5.0"))
+    assert(ikkje pk.krav_oppfylt(">=1.0.0, <2.0.0", "2.0.0"))
+    assert(pk.krav_oppfylt(">=1.0.0 <2.0.0", "1.0.0"))
+    assert(pk.krav_oppfylt(">1.0.0", "1.0.1"))
+    assert(ikkje pk.krav_oppfylt(">1.0.0", "1.0.0"))
+    assert(pk.krav_oppfylt("<=1.0.0", "1.0.0"))
+    assert(pk.krav_oppfylt("1.2.3", "1.2.3"))
+    assert(ikkje pk.krav_oppfylt("1.2.3", "1.2.4"))
+    assert(pk.krav_oppfylt("1.2", "1.2.7"))
+    assert(ikkje pk.krav_oppfylt("1.2", "1.3.0"))
+    assert(pk.krav_oppfylt("*", "9.9.9"))
+    # tal samanliknast numerisk, ikkje som tekst
+    assert(pk.krav_oppfylt(">=1.9.0", "1.10.0"))
+    assert(pk.sorterte_versjonar(["1.10.0", "1.2.0", "1.9.0"])[2] == "1.10.0")
+    assert(ikkje pk.krav_gyldig("^x.y"))
+    assert(ikkje pk.ver_gyldig("1.2"))
+    assert(pk.ver_gyldig("0.1.0"))
+    returner 0
+}
+
+funksjon test_arkiv() -> heiltall {
+    la a = pk.arkiv_bygg(["b.no", "a/x.no"], ["hei æøå\nlinje2", ""])
+    la r = pk.arkiv_les(a)
+    assert_eq(r["stiar"][0], "a/x.no")
+    assert_eq(r["innhald"][1], "hei æøå\nlinje2")
+    # deterministisk
+    assert_eq(a, pk.arkiv_bygg(["a/x.no", "b.no"], ["", "hei æøå\nlinje2"]))
+    # stiforfalsking og skadd lengd blir avvist
+    assert(builtin.contains(feilmelding(fun() { pk.arkiv_les("NKA1\nFIL 1 ../ute.no\nx\nSLUTT\n") }), "usikker arkivsti"))
+    assert(builtin.contains(feilmelding(fun() { pk.arkiv_les("NKA1\nFIL 9 a.no\nx\nSLUTT\n") }), "ugyldig arkiv"))
+    assert(builtin.contains(feilmelding(fun() { pk.arkiv_les("junk") }), "ugyldig arkiv"))
+    # store filar (>= 1 000 000 byte, 7 siffer) skal gå gjennom arkiv_les
+    la stor = "x"
+    la dbl = 0
+    mens dbl < 20 { stor = stor + stor
+        dbl = dbl + 1 }
+    la a_stor = pk.arkiv_bygg(["stor.bin"], [stor])
+    assert_eq(lengde(pk.arkiv_les(a_stor)["innhald"][0]), lengde(stor))
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    test_semver()
+    test_arkiv()
+    # nc_main-dispatch: `nc pkg ...` → tools/nc_pkg.no, argumenta via NORSCODE_PKG_ARGV
+    assert_eq(ncm.nc_direkte_verktøysti("pkg"), "tools/nc_pkg.no")
+    assert(ncm.nc_forbered_direkte_miljø("pkg", ["nc", "pkg", "add", "a@^1.0.0", "--frozen"]))
+    assert_eq(miljo_hent("NORSCODE_PKG_ARGV"), "add\na@^1.0.0\n--frozen")
+    miljo_sett("NORSCODE_PKG_ARGV", "")
+    fo.slett_tre(W)
+    fo.lag_katalogar(W)
+    la reg = W + "/register"
+    la app = W + "/app"
+
+    # ── Publiser: b 1.0.0, 1.1.0, 2.0.0 og a 1.0.0 (b ^1.0.0) ───────────────
+    publiser(reg, W + "/src_b", "b", "1.0.0", "", b_filer(0))
+    publiser(reg, W + "/src_b", "b", "1.1.0", "", b_filer(1))
+    publiser(reg, W + "/src_b", "b", "2.0.0", "", b_filer(2))
+    la ra = publiser(reg, W + "/src_a", "a", "1.0.0", "b = \"^1.0.0\"\n", a_filer())
+    assert_eq(ra["sha256"], sha_av(reg + "/arkiv/a-1.0.0.nka"))
+    # uforanderlege utgjevingar
+    assert(builtin.contains(feilmelding(fun() { publiser(reg, W + "/src_b", "b", "1.1.0", "", b_filer(1)) }), "allereie publisert"))
+    # indeksen er deterministisk og søkbar
+    assert(builtin.contains(fil_les(reg + "/indeks.json"), "\"b\": {\"versjonar\": {"))
+    assert_eq(pk.pkg_søk(reg, "")[0], "a 1.0.0")
+    assert_eq(pk.pkg_søk(reg, "")[1], "b 2.0.0")
+    assert_eq(lengde(pk.pkg_søk(reg, "zzz")), 0)
+
+    # ── init + add (transitiv: a → b høgaste ^1 = 1.1.0) ──────────────────────
+    pk.pkg_init(app, "min_app")
+    assert(builtin.contains(feilmelding(fun() { pk.pkg_init(app, "min_app") }), "finst allereie"))
+    fil_skriv(app + "/norcode.toml", fil_les(app + "/norcode.toml") + "\n[registry]\nurl = \"" + reg + "\"\n")
+    la inst = pk.pkg_add(app, reg, "a", "")
+    assert_eq(lengde(inst), 2)
+    assert_eq(inst[0], "a@1.0.0")
+    assert_eq(inst[1], "b@1.1.0")
+    assert(builtin.contains(fil_les(app + "/norcode.toml"), "a = \"^1.0.0\""))
+    assert(fo.fil_finnes(app + "/.norscode/pakkar/a/rot.no"))
+    assert(fo.fil_finnes(app + "/.norscode/pakkar/a/sub/hjelp.no"))
+    assert_eq(fil_les(app + "/.norscode/pakkar/b/verktoy.no"), tekst(b_filer(1)["verktoy.no"]))
+
+    # låsefil: eksakte versjonar + sjekksum, sortert, deterministisk
+    la lock1 = fil_les(app + "/norscode.lock")
+    assert(builtin.index_of(lock1, "namn = \"a\"") < builtin.index_of(lock1, "namn = \"b\""))
+    assert(builtin.contains(lock1, "sha256 = \"" + sha_av(reg + "/arkiv/b-1.1.0.nka") + "\""))
+    assert(builtin.contains(lock1, "krav = [\"b=^1.0.0\"]"))
+    pk.pkg_installer(app, reg, usann, usann, "")
+    assert_eq(fil_les(app + "/norscode.lock"), lock1)
+
+    # ── Modulløysing: bruk a.rot → bruk b.verktoy via NORSCODE_PATH ───────────
+    fil_skriv(app + "/app.no", "bruk a.rot\nbruk b.verktoy\nfunksjon start() -> tekst {\n    returner tekst(rot.fra_a(10)) + \"|\" + verktoy.helsing()\n}\n")
+    miljo_sett("NORSCODE_PATH", app + "/.norscode/pakkar")
+    assert_eq(køyr_modul(app + "/app.no"), "21|hei frå b æøå")
+    miljo_sett("NORSCODE_PATH", "")
+
+    # ── Lock vinn over nyare utgjevingar; update flyttar ───────────────────────
+    publiser(reg, W + "/src_b", "b", "1.2.0", "", b_filer(3))
+    fo.slett_tre(app + "/.norscode")
+    inst = pk.pkg_installer(app, reg, sann, usann, "")
+    assert_eq(inst[1], "b@1.1.0")
+    assert_eq(fil_les(app + "/norscode.lock"), lock1)
+    inst = pk.pkg_installer(app, reg, usann, usann, "b")
+    assert_eq(inst[1], "b@1.2.0")
+    assert(ikkje (fil_les(app + "/norscode.lock") == lock1))
+    assert(builtin.contains(fil_les(app + "/norscode.lock"), "versjon = \"1.2.0\""))
+    assert_eq(fil_les(app + "/.norscode/pakkar/b/verktoy.no"), tekst(b_filer(3)["verktoy.no"]))
+    la lock2 = fil_les(app + "/norscode.lock")
+
+    # ── Sjekksumfeil er HARD feil ───────────────────────────────────────────────
+    la orig = fil_les(reg + "/arkiv/b-1.2.0.nka")
+    fil_skriv(reg + "/arkiv/b-1.2.0.nka", builtin.replace(orig, "returner x * 2 + 3", "returner x * 2 + 9"))
+    fo.slett_tre(app + "/.norscode")
+    la f1 = feilmelding(fun() { pk.pkg_installer(app, reg, usann, usann, "") })
+    assert(builtin.contains(f1, "sjekksumfeil for b@1.2.0"))
+    # verifisering skjer FØR noko blir installert
+    assert(ikkje fo.fil_finnes(app + "/.norscode/pakkar/a/rot.no"))
+    # låsefila er uendra
+    assert_eq(fil_les(app + "/norscode.lock"), lock2)
+    # skadd cache blir ikkje stolt på heller
+    fil_skriv(reg + "/arkiv/b-1.2.0.nka", orig)
+    pk.pkg_installer(app, reg, usann, usann, "")
+    fil_skriv(app + "/.norscode/cache/b-1.2.0.nka", builtin.replace(orig, "returner x", "returner y"))
+    fil_skriv(reg + "/arkiv/b-1.2.0.nka", builtin.replace(orig, "returner x * 2 + 3", "returner x * 2 + 9"))
+    fo.slett_tre(app + "/.norscode/pakkar")
+    assert(builtin.contains(feilmelding(fun() { pk.pkg_installer(app, reg, usann, usann, "") }), "sjekksumfeil"))
+    fil_skriv(reg + "/arkiv/b-1.2.0.nka", orig)
+    pk.pkg_installer(app, reg, usann, usann, "")
+
+    # ── Konflikt: c krev b ^2 medan a krev b ^1 ─────────────────────────────────
+    publiser(reg, W + "/src_c", "c", "1.0.0", "b = \"^2.0.0\"\n", b_filer(0))
+    la mf_før = fil_les(app + "/norcode.toml")
+    la fk = feilmelding(fun() { pk.pkg_add(app, reg, "c", "") })
+    assert(builtin.contains(fk, "versjonskonflikt for «b»"))
+    assert(builtin.contains(fk, "^1.0.0 (frå a@1.0.0)"))
+    assert(builtin.contains(fk, "^2.0.0 (frå c@1.0.0)"))
+    assert(builtin.contains(fk, "tilgjengeleg: 1.0.0, 1.1.0, 1.2.0, 2.0.0"))
+    # manifestet blir rulla tilbake, lockfila er uendra
+    assert_eq(fil_les(app + "/norcode.toml"), mf_før)
+    assert_eq(fil_les(app + "/norscode.lock"), lock2)
+    # ukjend pakke
+    assert(builtin.contains(feilmelding(fun() { pk.pkg_add(app, reg, "finst_ikkje", "") }), "ukjend pakke"))
+
+    # ── Syklus x → y → x ────────────────────────────────────────────────────────
+    publiser(reg, W + "/src_x", "x", "1.0.0", "y = \"^1.0.0\"\n", b_filer(0))
+    publiser(reg, W + "/src_y", "y", "1.0.0", "x = \"^1.0.0\"\n", b_filer(0))
+    assert(builtin.contains(feilmelding(fun() { pk.pkg_add(app, reg, "x", "") }), "syklus i avhengnadar: x -> y -> x"))
+
+    # remove som feilar (ukjend avhengnad finst_ikkje) ruller tilbake manifestet og lèt lockfila stå
+    la mf_rem = fil_les(app + "/norcode.toml")
+    la lock_rem = fil_les(app + "/norscode.lock")
+    la mf_ukjend = pk.manifest_sett_dep(mf_rem, "finst_ikkje", "^1.0.0")
+    fil_skriv(app + "/norcode.toml", mf_ukjend)
+    assert(builtin.contains(feilmelding(fun() { pk.pkg_remove(app, reg, "a") }), "ukjend pakke"))
+    assert_eq(fil_les(app + "/norcode.toml"), mf_ukjend)
+    assert_eq(fil_les(app + "/norscode.lock"), lock_rem)
+    fil_skriv(app + "/norcode.toml", mf_rem)
+
+    # ── remove: b forsvinn saman med a ──────────────────────────────────────────
+    inst = pk.pkg_remove(app, reg, "a")
+    assert_eq(lengde(inst), 0)
+    assert(ikkje fo.fil_finnes(app + "/.norscode/pakkar/a"))
+    assert(ikkje fo.fil_finnes(app + "/.norscode/pakkar/b"))
+    assert(ikkje builtin.contains(fil_les(app + "/norcode.toml"), "a = "))
+    assert(builtin.contains(fil_les(app + "/norscode.lock"), "lock_versjon = 1"))
+    assert(ikkje builtin.contains(fil_les(app + "/norscode.lock"), "[[pakke]]"))
+
+    # ── Eksakt versjon via add namn@versjon ─────────────────────────────────────
+    inst = pk.pkg_add(app, reg, "b", "1.0.0")
+    assert_eq(inst[0], "b@1.0.0")
+    assert(builtin.contains(fil_les(app + "/norcode.toml"), "b = \"1.0.0\""))
+
+    # ── HTTP-register: tråd-tenar + klient over sokkel ──────────────────────────
+    la hreg_rot = W + "/hreg"
+    fo.lag_katalogar(hreg_rot)
+    miljo_sett("NORSCODE_PKG_REGISTER_TOKEN", "hemmeleg")
+    la l = socket.native_lytt("127.0.0.1", 0, 16)
+    assert_eq(tekst(l["status"]), "listening")
+    la url = "http://127.0.0.1:" + tekst(l["port"])
+    # førespurnader: PUT utan token (401), PUT m/token (201), GET indeks, GET arkiv ×2 (b + d)
+    la t = start_server(l["handle"], hreg_rot, 6)
+    skriv_pakke(W + "/src_d", "d", "0.3.0", "", b_filer(5))
+    la utan = http_førespurnad_test(url + "/arkiv/d/0.3.0", pk.pakke_arkiv_frå_katalog(W + "/src_d"), "")
+    assert_eq(utan, 401)
+    miljo_sett("NORSCODE_PKG_TOKEN", "hemmeleg")
+    la pub = pk.pkg_publiser(W + "/src_d", url)
+    assert_eq(tekst(pub["namn"]), "d")
+    assert_eq(tekst(pub["sha256"]), sha_av(hreg_rot + "/arkiv/d-0.3.0.nka"))
+    la sok = pk.pkg_søk(url, "d")
+    assert_eq(sok[0], "d 0.3.0")
+    la happ = W + "/happ"
+    pk.pkg_init(happ, "http_app")
+    fil_skriv(happ + "/norcode.toml", pk.manifest_sett_dep(fil_les(happ + "/norcode.toml"), "d", "^0.3.0"))
+    # install: indeks (1) + arkiv d (1) = 2 førespurnader til
+    la h_inst = pk.pkg_installer(happ, url, usann, usann, "")
+    assert_eq(h_inst[0], "d@0.3.0")
+    assert_eq(fil_les(happ + "/.norscode/pakkar/d/verktoy.no"), tekst(b_filer(5)["verktoy.no"]))
+    # 404 gir tydeleg feil (sjette førespurnad)
+    assert(builtin.contains(feilmelding(fun() { pk.reg_les(url, "arkiv/finst_ikkje.nka") }), "HTTP 404"))
+    la ferdig = vent_server(t)
+    assert_eq(tekst(ferdig["value"]), "6")
+    socket.native_lukk(l)
+    miljo_sett("NORSCODE_PKG_TOKEN", "")
+    miljo_sett("NORSCODE_PKG_REGISTER_TOKEN", "")
+
+    skriv("test_pkg_register OK\n")
+    returner 0
+}
+
+funksjon sha_av(sti: tekst) -> tekst {
+    returner sha.hash(fil_les(sti))
+}
+
+funksjon http_førespurnad_test(url: tekst, kropp: tekst, token: tekst) -> heiltall {
+    returner pk.http_førespurnad("PUT", url, {}, kropp)["status"]
+}

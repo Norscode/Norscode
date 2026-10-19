@@ -321,6 +321,34 @@ funksjon vm_har_struktur_djup(v, djupn: heiltall) -> boolsk {
     returner usann
 }
 
+// Som vm_har_struktur_djup, men med node-budsjett (kost[0]) og djupn 100, slik at sirkulære grafar med
+// stor forgreining ikkje kan eksplodere. Over budsjettet: svar usann (verts-== som før F22).
+funksjon vm_har_struktur_lim(v, djupn: heiltall, kost: liste) -> boolsk {
+    hvis djupn > 100 { returner usann }
+    kost[0] = kost[0] + 1
+    hvis kost[0] > 50000 { returner usann }
+    la t = builtin.type(v)
+    hvis t == "ordbok" {
+        hvis vm_map_har_nokkel(v, "__lambda__") eller vm_map_har_nokkel(v, "__generator__") { returner usann }
+        hvis vm_map_har_nokkel(v, "__struktur__") { returner sann }
+        la nk = nøkler(v)
+        la i: heiltall = 0
+        mens i < lengde(nk) {
+            hvis vm_har_struktur_lim(v[nk[i]], djupn + 1, kost) { returner sann }
+            i = i + 1
+        }
+        returner usann
+    }
+    hvis t == "liste" {
+        la j: heiltall = 0
+        mens j < lengde(v) {
+            hvis vm_har_struktur_lim(v[j], djupn + 1, kost) { returner sann }
+            j = j + 1
+        }
+    }
+    returner usann
+}
+
 // Kopi av v utan strukturmerke (for json). Berre kalla når vm_har_struktur_djup
 // har funne ein struktur; elles blir originalen serialisert direkte.
 funksjon vm_utan_strukturmerke(v, djupn: heiltall) {
@@ -360,6 +388,8 @@ funksjon vm_json_utan_merke(v) -> tekst {
 // konstruktøren hans listar i "interfaces". Eit ukvalifisert namn (utan ".")
 // blir samanlikna med det korte typenamnet.
 funksjon vm_er_instans(functions, v, mål: tekst) -> boolsk {
+    // R4: rota Unntak og dei innebygde unntakstypane (TypeFeil, IndeksFeil …).
+    hvis builtin.index_of(mål, ".") < 0 og (mål == "Unntak" eller vm_unntak_forelder(mål) != "") { returner vm_unntak_passar_ett(functions, mål, v) }
     hvis ikkje vm_er_struktur(v) { returner usann }
     la tagg = tekst(v["__struktur__"])
     hvis tagg == mål { returner sann }
@@ -376,11 +406,448 @@ funksjon vm_er_instans(functions, v, mål: tekst) -> boolsk {
     returner usann
 }
 
+// ─── F43: refleksjon og annotasjonar ─────────────────────────────────────────
+// typar_av(x), type_info(T), funksjon_info(f), finn_med_annotasjon(namn),
+// hent_felt(obj, felt) og sett_felt(obj, felt, v). Metadataen kjem frå NCB:
+// functions[...]["types"] (R3), ["annotasjonar"] på funksjon/struktur og
+// ["felt_annotasjonar"] på strukturkonstruktøren (F43). Sjå docs/REFLEKSJON.md.
+// Rein lesing av metadata; annotasjonar endrar aldri køyretida av seg sjølv.
+
+funksjon vm_refl_ann_kopi(anns) {
+    la ut = []
+    hvis anns == null { returner ut }
+    la i: heiltall = 0
+    mens i < lengde(anns) {
+        la a = anns[i]
+        la argument = []
+        la j: heiltall = 0
+        mens j < lengde(a["args"]) {
+            legg_til(argument, a["args"][j])
+            j = j + 1
+        }
+        legg_til(ut, {"namn": a["name"], "argument": argument})
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_refl_er_fn(nøkkel: tekst, def) -> boolsk {
+    hvis builtin.starts_with(nøkkel, "__vm_") eller builtin.starts_with(nøkkel, "__ncb_") { returner usann }
+    hvis builtin.type(def) != "ordbok" { returner usann }
+    hvis ikkje vm_map_har_nokkel(def, "code") eller ikkje vm_map_har_nokkel(def, "name") { returner usann }
+    hvis builtin.starts_with(tekst(def["name"]), "__") { returner usann }
+    returner sann
+}
+
+funksjon vm_refl_er_struktur_def(def) -> boolsk {
+    hvis builtin.type(def) != "ordbok" { returner usann }
+    hvis ikkje vm_map_har_nokkel(def, "struct") { returner usann }
+    returner def["struct"] == sann
+}
+
+// Sorterte nøklar til alle funksjonar/konstruktørar (deterministisk rekkjefølgje).
+funksjon vm_refl_nøklar(functions) {
+    la ut = []
+    la nk = nøkler(functions)
+    la i: heiltall = 0
+    mens i < lengde(nk) {
+        la k = tekst(nk[i])
+        hvis vm_refl_er_fn(k, functions[k]) {
+            la p: heiltall = lengde(ut)
+            legg_til(ut, k)
+            mens p > 0 og ut[p - 1] > k {
+                ut[p] = ut[p - 1]
+                p = p - 1
+            }
+            ut[p] = k
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Løys eit namn (fullt «modul.namn», «namn» eller «Type.metode») til ein nøkkel.
+// krev_struktur: berre strukturkonstruktørar. Eintydig treff, elles __main__ først.
+funksjon vm_refl_løys(functions, namn: tekst, krev_struktur: boolsk) -> tekst {
+    la alle = vm_refl_nøklar(functions)
+    la funne = []
+    la i: heiltall = 0
+    mens i < lengde(alle) {
+        la k = tekst(alle[i])
+        la ok = usann
+        hvis k == namn { ok = sann }
+        hvis ikkje ok og builtin.ends_with(k, "." + namn) { ok = sann }
+        hvis ok og krev_struktur og ikkje vm_refl_er_struktur_def(functions[k]) { ok = usann }
+        hvis ok og ikkje krev_struktur og vm_refl_er_struktur_def(functions[k]) { ok = usann }
+        hvis ok {
+            hvis k == namn { returner k }
+            legg_til(funne, k)
+        }
+        i = i + 1
+    }
+    hvis lengde(funne) == 1 { returner tekst(funne[0]) }
+    hvis lengde(funne) > 1 {
+        i = 0
+        mens i < lengde(funne) {
+            hvis builtin.starts_with(tekst(funne[i]), "__main__.") { returner tekst(funne[i]) }
+            i = i + 1
+        }
+        kast "RefleksjonFeil: tvitydig namn " + namn + " (bruk modul.namn)"
+    }
+    hvis krev_struktur { kast "RefleksjonFeil: ukjend struktur " + namn }
+    kast "RefleksjonFeil: ukjend funksjon " + namn
+}
+
+funksjon vm_refl_param_info(def) {
+    la ut = []
+    la params = def["params"]
+    la typa = null
+    hvis vm_map_har_nokkel(def, "types") { typa = def["types"] }
+    la i: heiltall = 0
+    mens i < lengde(params) {
+        la p = {"namn": tekst(params[i]), "type": null, "har_standard": usann, "vararg": usann}
+        hvis typa != null og vm_map_har_nokkel(typa, "params") og i < lengde(typa["params"]) {
+            la tp = typa["params"][i]
+            p["type"] = tp["type"]
+            p["har_standard"] = tp["has_default"]
+            p["vararg"] = tp["vararg"]
+        }
+        legg_til(ut, p)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_refl_funksjon_info(functions, nøkkel: tekst) {
+    la def = functions[nøkkel]
+    la info = {"namn": tekst(def["name"]), "fullt_namn": nøkkel, "modul": tekst(def["module"]), "parametrar": vm_refl_param_info(def), "returtype": null, "er_async": usann, "type_parametrar": [], "annotasjonar": []}
+    hvis vm_map_har_nokkel(def, "is_async") og def["is_async"] == sann { info["er_async"] = sann }
+    hvis vm_map_har_nokkel(def, "types") {
+        la t = def["types"]
+        hvis vm_map_har_nokkel(t, "returns") { info["returtype"] = t["returns"] }
+        hvis vm_map_har_nokkel(t, "type_params") {
+            la tp = []
+            la i: heiltall = 0
+            mens i < lengde(t["type_params"]) {
+                legg_til(tp, t["type_params"][i]["name"])
+                i = i + 1
+            }
+            info["type_parametrar"] = tp
+        }
+    }
+    hvis vm_map_har_nokkel(def, "annotasjonar") { info["annotasjonar"] = vm_refl_ann_kopi(def["annotasjonar"]) }
+    returner info
+}
+
+// funksjon_info(f): f er funksjonsnamn (tekst) eller ein closure.
+funksjon vm_refl_funksjon_info_av(functions, f) {
+    la namn = ""
+    hvis builtin.type(f) == "ordbok" og vm_map_har_nokkel(f, "__lambda__") {
+        namn = tekst(f["__lambda__"])
+        hvis vm_map_har_nokkel(functions, namn) {
+            la lam = functions[namn]
+            la info = vm_refl_funksjon_info(functions, namn)
+            info["namn"] = "<lambda>"
+            returner info
+        }
+        kast "RefleksjonFeil: ukjend lambda " + namn
+    }
+    hvis builtin.type(f) != "tekst" { kast "RefleksjonFeil: funksjon_info krev eit funksjonsnamn eller ein closure" }
+    returner vm_refl_funksjon_info(functions, vm_refl_løys(functions, tekst(f), usann))
+}
+
+funksjon vm_refl_type_info(functions, nøkkel: tekst) {
+    la def = functions[nøkkel]
+    la typa = null
+    hvis vm_map_har_nokkel(def, "types") { typa = def["types"] }
+    la fa = {}
+    hvis vm_map_har_nokkel(def, "felt_annotasjonar") { fa = def["felt_annotasjonar"] }
+    // Standardverdiar: konstruktøren utan argument fyller berre felt med standard.
+    la felt_namn = []
+    la pi: heiltall = 0
+    mens pi < lengde(def["params"]) {
+        hvis tekst(def["params"][pi]) != "__antal__" { legg_til(felt_namn, tekst(def["params"][pi])) }
+        pi = pi + 1
+    }
+    la kall_args = [nøkkel]
+    pi = 0
+    mens pi < lengde(felt_namn) {
+        legg_til(kall_args, null)
+        pi = pi + 1
+    }
+    legg_til(kall_args, 0)
+    la inst = null
+    prøv {
+        inst = kall_innebygd_web_og_ncb("builtin.ncb_call_fn", kall_args, functions)
+    } fang (e) {
+        inst = null
+    }
+    la felt = []
+    pi = 0
+    mens pi < lengde(felt_namn) {
+        la fnamn = felt_namn[pi]
+        la f = {"namn": fnamn, "type": null, "har_standard": usann, "standard": null, "annotasjonar": []}
+        hvis typa != null og vm_map_har_nokkel(typa, "fields") og pi < lengde(typa["fields"]) {
+            f["type"] = typa["fields"][pi]["type"]
+            f["har_standard"] = typa["fields"][pi]["has_default"]
+        }
+        hvis inst != null og builtin.type(inst) == "ordbok" og vm_map_har_nokkel(inst, fnamn) {
+            f["standard"] = inst[fnamn]
+            hvis typa == null eller ikkje vm_map_har_nokkel(typa, "fields") { f["har_standard"] = f["standard"] != null }
+        }
+        hvis vm_map_har_nokkel(fa, fnamn) { f["annotasjonar"] = vm_refl_ann_kopi(fa[fnamn]) }
+        legg_til(felt, f)
+        pi = pi + 1
+    }
+    la metodar = []
+    la alle = vm_refl_nøklar(functions)
+    la prefiks = nøkkel + "."
+    pi = 0
+    mens pi < lengde(alle) {
+        la k = tekst(alle[pi])
+        hvis builtin.starts_with(k, prefiks) {
+            la rest = builtin.slice(k, lengde(prefiks), lengde(k))
+            hvis builtin.index_of(rest, ".") < 0 { legg_til(metodar, rest) }
+        }
+        pi = pi + 1
+    }
+    la gsnitt = []
+    hvis vm_map_har_nokkel(def, "interfaces") {
+        pi = 0
+        mens pi < lengde(def["interfaces"]) {
+            legg_til(gsnitt, tekst(def["interfaces"][pi]))
+            pi = pi + 1
+        }
+    }
+    la info = {"namn": tekst(def["name"]), "fullt_namn": nøkkel, "modul": tekst(def["module"]), "struktur": sann, "felt": felt, "metodar": metodar, "grensesnitt": gsnitt, "type_parametrar": [], "annotasjonar": []}
+    hvis typa != null og vm_map_har_nokkel(typa, "type_params") {
+        la tp = []
+        pi = 0
+        mens pi < lengde(typa["type_params"]) {
+            legg_til(tp, typa["type_params"][pi]["name"])
+            pi = pi + 1
+        }
+        info["type_parametrar"] = tp
+    }
+    hvis vm_map_har_nokkel(def, "annotasjonar") { info["annotasjonar"] = vm_refl_ann_kopi(def["annotasjonar"]) }
+    returner info
+}
+
+// typar_av(x): typeinfo for verdien x (struktur-instans), elles minimal info.
+funksjon vm_refl_typar_av(functions, x) {
+    hvis vm_er_struktur(x) {
+        la nk = tekst(x["__struktur__"])
+        hvis vm_map_har_nokkel(functions, nk) { returner vm_refl_type_info(functions, nk) }
+    }
+    la tn = vm_verdi_typenamn(x)
+    returner {"namn": tn, "fullt_namn": tn, "modul": null, "struktur": usann, "felt": [], "metodar": [], "grensesnitt": [], "type_parametrar": [], "annotasjonar": []}
+}
+
+// type_info(T): T er ein strukturnamn (tekst) eller ein instans.
+funksjon vm_refl_type_info_av(functions, t) {
+    hvis builtin.type(t) == "ordbok" { returner vm_refl_typar_av(functions, t) }
+    hvis builtin.type(t) != "tekst" { kast "RefleksjonFeil: type_info krev eit strukturnamn" }
+    returner vm_refl_type_info(functions, vm_refl_løys(functions, tekst(t), sann))
+}
+
+funksjon vm_refl_treff(art: tekst, namn: tekst, fullt: tekst, modul: tekst, alle_ann, ann) {
+    returner {"art": art, "namn": namn, "fullt_namn": fullt, "modul": modul, "annotasjon": ann, "annotasjonar": alle_ann}
+}
+
+// finn_med_annotasjon("rute"): ein oppføring per (deklarasjon, treffande annotasjon),
+// sortert på fullt namn. art er funksjon, metode, struktur eller felt.
+funksjon vm_refl_finn(functions, ann_namn: tekst) {
+    hvis builtin.starts_with(ann_namn, "@") { ann_namn = builtin.slice(ann_namn, 1, lengde(ann_namn)) }
+    la ut = []
+    la alle = vm_refl_nøklar(functions)
+    la i: heiltall = 0
+    mens i < lengde(alle) {
+        la k = tekst(alle[i])
+        la def = functions[k]
+        la er_struktur = vm_refl_er_struktur_def(def)
+        hvis vm_map_har_nokkel(def, "annotasjonar") {
+            la anns = vm_refl_ann_kopi(def["annotasjonar"])
+            la art = "funksjon"
+            hvis er_struktur { art = "struktur" }
+            hvis ikkje er_struktur og builtin.index_of(tekst(def["name"]), ".") >= 0 { art = "metode" }
+            la j: heiltall = 0
+            mens j < lengde(anns) {
+                hvis anns[j]["namn"] == ann_namn { legg_til(ut, vm_refl_treff(art, tekst(def["name"]), k, tekst(def["module"]), anns, anns[j])) }
+                j = j + 1
+            }
+        }
+        hvis er_struktur og vm_map_har_nokkel(def, "felt_annotasjonar") {
+            la fa = def["felt_annotasjonar"]
+            la fnk = nøkler(fa)
+            la j: heiltall = 0
+            mens j < lengde(fnk) {
+                la fanns = vm_refl_ann_kopi(fa[fnk[j]])
+                la m: heiltall = 0
+                mens m < lengde(fanns) {
+                    hvis fanns[m]["namn"] == ann_namn {
+                        la tr = vm_refl_treff("felt", tekst(fnk[j]), k + "." + tekst(fnk[j]), tekst(def["module"]), fanns, fanns[m])
+                        tr["struktur"] = k
+                        legg_til(ut, tr)
+                    }
+                    m = m + 1
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_refl_hent_felt(obj, felt: tekst) {
+    hvis builtin.type(obj) != "ordbok" { kast "RefleksjonFeil: hent_felt krev ei struktur eller ordbok, fekk " + vm_verdi_typenamn(obj) }
+    hvis vm_er_strukturmerke(felt) { kast "RefleksjonFeil: " + felt + " er ikkje eit felt" }
+    hvis vm_map_har_nokkel(obj, felt) { returner obj[felt] }
+    hvis vm_er_struktur(obj) { kast "RefleksjonFeil: " + tekst(obj["__type__"]) + " har ikkje feltet " + felt }
+    returner null
+}
+
+funksjon vm_refl_sett_felt(obj, felt: tekst, verdi) {
+    hvis builtin.type(obj) != "ordbok" { kast "RefleksjonFeil: sett_felt krev ei struktur eller ordbok, fekk " + vm_verdi_typenamn(obj) }
+    hvis vm_er_strukturmerke(felt) { kast "RefleksjonFeil: " + felt + " er ikkje eit felt" }
+    hvis vm_er_struktur(obj) og ikkje vm_map_har_nokkel(obj, felt) { kast "RefleksjonFeil: " + tekst(obj["__type__"]) + " har ikkje feltet " + felt }
+    obj[felt] = verdi
+    returner obj
+}
+
 // Kort typenamn for meldingar: strukturnamnet for ein struktur, elles
 // runtime-typen.
 funksjon vm_verdi_typenamn(v) -> tekst {
     hvis vm_er_struktur(v) { returner tekst(v["__type__"]) }
     returner vm_type_name(v)
+}
+
+// ─── R4/F22: automatisk til_tekst og strukturell likskap ────────────────────
+// tekst(s)/skriv(s)/«"a" + s» på ein struktur gjev «Namn(felt=verdi, …)» utan at
+// brukaren definerer noko; ein metode «modul.Namn.til_tekst» vinn. Lister og
+// ordbøker som inneheld ein struktur blir viste rekursivt. Syklusvern: ei
+// ordbok som alt blir vist lenger opp får eit kortvarig «__vis__»-merke
+// (fjerna att etterpå), og ein syklisk struktur blir vist som «Namn(...)».
+// Containarar utan strukturar går uendra til verts-tekst().
+funksjon vm_tekst_av(functions, v) {
+    hvis vm_spesial_aktiv == 1 { v = vm_tin(v, 0) }
+    la t = builtin.type(v)
+    hvis t != "ordbok" og t != "liste" { returner tekst(v) }
+    hvis ikkje vm_har_struktur_djup(v, 0) { returner tekst(v) }
+    returner vm_vis_verdi(functions, v, 0)
+}
+
+funksjon vm_vis_verdi(functions, v, djupn: heiltall) {
+    hvis djupn > 60 { returner "..." }
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la lp = []
+        la li: heiltall = 0
+        mens li < lengde(v) {
+            legg_til(lp, vm_vis_verdi(functions, v[li], djupn + 1))
+            li = li + 1
+        }
+        returner "[" + builtin.join(lp, ", ") + "]"
+    }
+    hvis t != "ordbok" { returner tekst(v) }
+    la er_str = vm_er_struktur(v)
+    la namn = ""
+    hvis er_str {
+        namn = tekst(v["__type__"])
+        la hook = tekst(v["__struktur__"]) + ".til_tekst"
+        hvis vm_map_har_nokkel(functions, hook) {
+            functions["__vm_pending_arg_heap_ids__"] = []
+            la hr = køyr_funksjon(hook, [v], functions, lengde(functions["__vm_active_frames__"]))
+            hvis builtin.type(hr) == "tekst" { returner hr }
+            returner tekst(hr)
+        }
+    }
+    hvis vm_map_har_nokkel(v, "__vis__") {
+        hvis er_str { returner namn + "(...)" }
+        returner "{...}"
+    }
+    la nk = nøkler(v)
+    la dp = []
+    la di: heiltall = 0
+    v["__vis__"] = 1
+    mens di < lengde(nk) {
+        la k = nk[di]
+        hvis ikkje (er_str og vm_er_strukturmerke(k)) {
+            hvis er_str { legg_til(dp, tekst(k) + "=" + vm_vis_verdi(functions, v[k], djupn + 1)) }
+            ellers { legg_til(dp, tekst(k) + ": " + vm_vis_verdi(functions, v[k], djupn + 1)) }
+        }
+        di = di + 1
+    }
+    builtin.fjern_nokkel(v, "__vis__")
+    hvis er_str { returner namn + "(" + builtin.join(dp, ", ") + ")" }
+    returner "{" + builtin.join(dp, ", ") + "}"
+}
+
+// ==/!= med strukturell likskap. Strukturar: same __struktur__ og like felt
+// (djupt); ein metode «modul.Namn.er_lik(self, andre)» vinn. Lister/ordbøker
+// som inneheld strukturar blir samanlikna element for element; alt anna går til
+// verts-== som før.
+funksjon vm_lik(functions, a, b) -> boolsk {
+    la ta = builtin.type(a)
+    hvis ta != "ordbok" og ta != "liste" { returner a == b }
+    // Rimelege utgangar før noko skanning: container mot ikkje-container (t.d. `x != null`) er aldri lik, og
+    // lambdaer/generatorar (fangar heile miljøet, ofte sirkulært) går rett til verts-==.
+    la tb = builtin.type(b)
+    hvis tb != "ordbok" og tb != "liste" { returner usann }
+    hvis ta == "ordbok" og (vm_map_har_nokkel(a, "__lambda__") eller vm_map_har_nokkel(a, "__generator__")) { returner a == b }
+    hvis vm_spesial_aktiv == 1 {
+        // F46: frosne samlingar er like når innhaldet er likt.
+        a = vm_tin(a, 0)
+        b = vm_tin(b, 0)
+    }
+    hvis ikkje vm_har_struktur_lim(a, 0, [0]) { returner a == b }
+    returner vm_lik_djup(functions, a, b, 0)
+}
+
+funksjon vm_lik_djup(functions, a, b, djupn: heiltall) -> boolsk {
+    hvis djupn > 100 {
+        // Ikkje svar «lik» utan å ha undersøkt resten; kallaren kastar ein fangbar SamanlikningsFeil.
+        functions["__vm_lik_for_djup__"] = "sann"
+        returner usann
+    }
+    la ta = builtin.type(a)
+    la tb = builtin.type(b)
+    hvis ta == "liste" {
+        hvis tb != "liste" eller lengde(a) != lengde(b) { returner usann }
+        la i: heiltall = 0
+        mens i < lengde(a) {
+            hvis ikkje vm_lik_djup(functions, a[i], b[i], djupn + 1) { returner usann }
+            i = i + 1
+        }
+        returner sann
+    }
+    hvis ta != "ordbok" { returner a == b }
+    hvis tb != "ordbok" { returner usann }
+    la sa = vm_er_struktur(a)
+    la sb = vm_er_struktur(b)
+    hvis sa != sb { returner usann }
+    la ka = nøkler(a)
+    hvis sa {
+        hvis tekst(a["__struktur__"]) != tekst(b["__struktur__"]) { returner usann }
+        la hook = tekst(a["__struktur__"]) + ".er_lik"
+        hvis vm_map_har_nokkel(functions, hook) {
+            functions["__vm_pending_arg_heap_ids__"] = []
+            la hr = køyr_funksjon(hook, [a, b], functions, lengde(functions["__vm_active_frames__"]))
+            returner hr == sann
+        }
+        ka = vm_struktur_nøkler(a)
+        hvis lengde(ka) != lengde(vm_struktur_nøkler(b)) { returner usann }
+    } ellers {
+        hvis lengde(ka) != lengde(nøkler(b)) { returner usann }
+    }
+    la j: heiltall = 0
+    mens j < lengde(ka) {
+        la k = ka[j]
+        hvis ikkje vm_map_har_nokkel(b, k) { returner usann }
+        hvis ikkje vm_lik_djup(functions, a[k], b[k], djupn + 1) { returner usann }
+        j = j + 1
+    }
+    returner sann
 }
 
 // R2/F08: runtime-typane som aritmetikken godtek som tal.
@@ -410,12 +877,14 @@ funksjon vm_metode_løys(functions, mott, metode: tekst) {
     }
     la t = builtin.type(mott)
     hvis t == "ordbok" {
-        hvis vm_map_har_nokkel(mott, "__struktur__") {
-            la fn_namn = tekst(mott["__struktur__"]) + "." + metode
+        // F46: ei frosen struktur får metodane til strukturen; self er framleis den frosne boksen.
+        la mott_u = vm_frosen_utpakk(mott)
+        hvis vm_map_har_nokkel(mott_u, "__struktur__") {
+            la fn_namn = tekst(mott_u["__struktur__"]) + "." + metode
             hvis vm_map_har_nokkel(functions, fn_namn) { returner ["fn", fn_namn] }
         }
-        hvis vm_map_har_nokkel(mott, metode) {
-            la felt = mott[metode]
+        hvis vm_map_har_nokkel(mott_u, metode) {
+            la felt = mott_u[metode]
             hvis builtin.type(felt) == "ordbok" og vm_map_har_nokkel(felt, "__lambda__") { returner ["closure", felt] }
         }
     }
@@ -439,13 +908,13 @@ funksjon vm_exception_type(verdi) -> tekst {
     returner vm_type_name(verdi)
 }
 
-funksjon vm_handler_match(handler, verdi) -> boolsk {
+funksjon vm_handler_match(functions, handler, verdi) -> boolsk {
     la expected = handler["catch_type"]
     hvis expected == "" eller expected == "*" eller expected == "alle" { returner sann }
-    hvis expected == vm_exception_type(verdi) { returner sann }
-    // Ein struktur med eit eige type-felt kan fangast på begge namna.
-    hvis builtin.type(verdi) == "ordbok" og vm_map_har_nokkel(verdi, "type") og expected == tekst(verdi["type"]) { returner sann }
-    returner expected == "tekst" og builtin.type(verdi) == "tekst"
+    // R4/F32: «A|B» er multi-catch (fang (e: A eller B)); første treff vinn.
+    hvis builtin.index_of(expected, "|") >= 0 { returner vm_unntak_passar(functions, expected, verdi) }
+    hvis vm_unntak_passar_ett(functions, expected, verdi) { returner sann }
+    returner usann
 }
 
 // R1/F11: tekstform for eit UFANGA unntak, «Type: melding». Tekst-unntak er
@@ -463,6 +932,8 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
     la t = builtin.type(verdi)
     hvis t == "tekst" { returner verdi }
     hvis t != "ordbok" { returner vm_type_name(verdi) + ": " + tekst(verdi) }
+    // R4: pakka tekst-unntak (unntak_pakk) skriv originalteksten.
+    hvis vm_map_har_nokkel(verdi, "stakk") og vm_map_har_nokkel(verdi, "undertrykte") og vm_map_har_nokkel(verdi, "tekst") { returner tekst(verdi["tekst"]) }
     la type_namn = "Feil"
     hvis vm_map_har_nokkel(verdi, "__type__") eller vm_map_har_nokkel(verdi, "type") {
         type_namn = vm_exception_type(verdi)
@@ -481,7 +952,7 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
         la ni: heiltall = 0
         mens ni < lengde(nk) {
             la k = tekst(nk[ni])
-            hvis k != "__type__" og k != "__struktur__" og k != "type" og k != "årsak" og k != "cause" {
+            hvis k != "__type__" og k != "__struktur__" og k != "type" og k != "årsak" og k != "cause" og k != "stakk" og k != "undertrykte" {
                 legg_til(delar, k + "=" + tekst(verdi[k]))
             }
             ni = ni + 1
@@ -502,7 +973,34 @@ funksjon vm_ufanga_tekst_djup(verdi, djupn: heiltall) -> tekst {
 // på det (stdout og stderr blir lesne saman). Brukt av vertsprogramma
 // (nc_main, vm_executor). Utan /dev/stderr fell vi attende til stdout.
 funksjon vm_skriv_ufanga(verdi) -> heiltall {
-    la linje = "ERROR: " + vm_ufanga_tekst(verdi) + "\n"
+    returner vm_skriv_ufanga_med(verdi, "")
+}
+
+// R4/F34: som vm_skriv_ufanga, men skriv òg stakksporet («    ved f (fil:linje)»)
+// når functions-kartet til NCB-en som kasta har eit spor for akkurat dette
+// unntaket. Verten sender ncb["functions"].
+funksjon vm_skriv_ufanga_ncb(verdi, functions) -> heiltall {
+    returner vm_skriv_ufanga_med(verdi, vm_ufanga_spor(verdi, functions))
+}
+
+// Stakksporet (eller "") som hører til det ufanga unntaket `verdi`.
+funksjon vm_ufanga_spor(verdi, functions) -> tekst {
+    hvis functions != null og builtin.type(functions) == "ordbok" og vm_map_har_nokkel(functions, "__vm_stakk__") {
+        la sv = functions["__vm_stakk_verdi__"]
+        hvis builtin.type(verdi) == "ordbok" eller (builtin.type(verdi) == "tekst" og builtin.type(sv) == "tekst" og sv == verdi) {
+            returner vm_stakk_tekst(functions["__vm_stakk__"])
+        }
+    }
+    returner ""
+}
+
+// Heile rapporten som blir skriven til stderr for eit ufanga unntak.
+funksjon vm_ufanga_rapport(verdi, functions) -> tekst {
+    returner "ERROR: " + vm_ufanga_tekst(verdi) + "\n" + vm_ufanga_spor(verdi, functions)
+}
+
+funksjon vm_skriv_ufanga_med(verdi, spor: tekst) -> heiltall {
+    la linje = "ERROR: " + vm_ufanga_tekst(verdi) + "\n" + spor
     la skrive = usann
     prøv {
         hvis fil_finnes("/dev/stderr") {
@@ -516,10 +1014,162 @@ funksjon vm_skriv_ufanga(verdi) -> heiltall {
     returner 1
 }
 
-funksjon vm_find_handler(try_stack, verdi) -> heiltall {
+// ─── R4: unntakshierarki, pakking og stakkspor ───────────────────────────────
+// Unntaksverdiar er uendra (tekst «Type: melding», ordbok med type-felt eller
+// struktur-instans). Rota «Unntak» fangar alt; dei innebygde typane har fast
+// forelder-kart (sjå docs/UNNTAK.md). Brukartypar høyrer til rota og til kvart
+// grensesnitt strukturen implementerer (fang (e: Grensesnitt)).
+funksjon vm_unntak_forelder(t: tekst) -> tekst {
+    hvis t == "DivisjonMedNull" eller t == "ModuloMedNull" eller t == "ValideringsFeil" { returner "VerdiFeil" }
+    hvis t == "HostTypeFeil" eller t == "HostHandleFeil" eller t == "HostMetodeFeil" { returner "HostFeil" }
+    hvis t == "TimeoutFeil" eller t == "AvbruttFeil" { returner "FutureFeil" }
+    hvis t == "TypeFeil" eller t == "VerdiFeil" eller t == "IndeksFeil" eller t == "ArgumentFeil" eller t == "MetodeFeil" { returner "Unntak" }
+    hvis t == "FilFeil" eller t == "HostFeil" eller t == "FutureFeil" eller t == "FrosenFeil" eller t == "GeneratorFeil" { returner "Unntak" }
+    returner ""
+}
+
+// Er `alt` (eitt typenamn utan «|») ein type unntaket `verdi` tilfredsstiller?
+funksjon vm_unntak_passar_ett(functions, alt: tekst, verdi) -> boolsk {
+    hvis alt == "" eller alt == "*" eller alt == "alle" eller alt == "Unntak" { returner sann }
+    // Modulkvalifisert namn = struktur eller grensesnitt (løyst ved kompilering).
+    hvis builtin.index_of(alt, ".") >= 0 { returner vm_er_instans(functions, verdi, alt) }
+    la t = vm_exception_type(verdi)
+    hvis alt == t { returner sann }
+    // Ein struktur med eit eige type-felt kan fangast på begge namna.
+    hvis builtin.type(verdi) == "ordbok" og vm_map_har_nokkel(verdi, "type") og alt == tekst(verdi["type"]) { returner sann }
+    hvis alt == "tekst" og builtin.type(verdi) == "tekst" { returner sann }
+    la p = vm_unntak_forelder(t)
+    la n: heiltall = 0
+    mens p != "" og n < 8 {
+        hvis p == alt { returner sann }
+        p = vm_unntak_forelder(p)
+        n = n + 1
+    }
+    returner usann
+}
+
+// «A|B|C»: sant viss minst éin av typane passar.
+funksjon vm_unntak_passar(functions, typar: tekst, verdi) -> boolsk {
+    la delar = builtin.split(typar, "|")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        hvis vm_unntak_passar_ett(functions, tekst(delar[i]), verdi) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Filnamn for ein modul: «selfhost.vm» → «selfhost/vm.no». Hovudmodulen har
+// ikkje noko filnamn i NCB-en; verten kan setje functions["__vm_hovudfil__"].
+funksjon vm_modul_fil(functions, modul: tekst) -> tekst {
+    hvis modul == "__main__" {
+        hvis vm_map_har_nokkel(functions, "__vm_hovudfil__") { returner tekst(functions["__vm_hovudfil__"]) }
+        returner "__main__"
+    }
+    returner builtin.join(builtin.split(modul, "."), "/") + ".no"
+}
+
+// Stakkspor (innerste ramma først) frå dei aktive rammene: liste av
+// {funksjon, fil, linje}. Blir berre bygd ved kast. Ei ramme som ventar på eit
+// kall (state «waiting») har ip peikande rett etter CALL-instruksjonen.
+funksjon vm_bygg_stakk(functions, rammer) {
+    la ut = []
+    la i: heiltall = lengde(rammer) - 1
+    mens i >= 0 og lengde(ut) < 64 {
+        la r = rammer[i]
+        la namn = tekst(r["namn"])
+        la ip: heiltall = r["ip"]
+        hvis r["state"] == "waiting" { ip = ip - 1 }
+        la linje: heiltall = 0
+        la modul = "__main__"
+        la kort = namn
+        hvis vm_map_har_nokkel(functions, namn) {
+            la def = functions[namn]
+            hvis builtin.type(def) == "ordbok" {
+                hvis vm_map_har_nokkel(def, "module") { modul = tekst(def["module"]) }
+                hvis vm_map_har_nokkel(def, "source_lines") og ip >= 0 og ip < lengde(def["source_lines"]) {
+                    linje = def["source_lines"][ip]
+                }
+            }
+        }
+        hvis builtin.starts_with(namn, modul + ".") { kort = builtin.slice(namn, lengde(modul) + 1, lengde(namn)) }
+        la post = {}
+        post["funksjon"] = kort
+        post["fil"] = vm_modul_fil(functions, modul)
+        post["linje"] = linje
+        legg_til(ut, post)
+        i = i - 1
+    }
+    returner ut
+}
+
+// Kallt av THROW: byggjer og lagrar sporet, med mindre ein rethrow ber om å
+// behalde det førre (unntak_behald_stakk()).
+funksjon vm_registrer_kast(functions, rammer, verdi) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_behald_stakk__") og functions["__vm_behald_stakk__"] == "sann" {
+        functions["__vm_behald_stakk__"] = ""
+        returner 0
+    }
+    functions["__vm_stakk__"] = vm_bygg_stakk(functions, rammer)
+    functions["__vm_stakk_verdi__"] = verdi
+    returner 0
+}
+
+// unntak_pakk(e): unntaket som ordbok med stakk og undertrykte. Eit unntak som
+// alt er pakka kjem uendra attende. Tekst-unntak «Type: melding» får type og
+// melding utpakka (og «tekst» = originalen); ordbok/struktur blir kopiert.
+funksjon vm_unntak_pakk(functions, v) {
+    hvis builtin.type(v) == "ordbok" og vm_map_har_nokkel(v, "stakk") og vm_map_har_nokkel(v, "undertrykte") { returner v }
+    la stakk = []
+    hvis vm_map_har_nokkel(functions, "__vm_stakk__") {
+        la sv = functions["__vm_stakk_verdi__"]
+        hvis builtin.type(v) != "tekst" eller (builtin.type(sv) == "tekst" og sv == v) { stakk = functions["__vm_stakk__"] }
+    }
+    la ut = {}
+    hvis builtin.type(v) == "ordbok" {
+        la nk = nøkler(v)
+        la i: heiltall = 0
+        mens i < lengde(nk) {
+            ut[nk[i]] = v[nk[i]]
+            i = i + 1
+        }
+    } ellers {
+        ut["type"] = vm_exception_type(v)
+        hvis builtin.type(v) == "tekst" {
+            ut["tekst"] = v
+            la colon = builtin.index_of(v, ":")
+            hvis colon > 0 {
+                la rest = builtin.slice(v, colon + 1, lengde(v))
+                hvis builtin.starts_with(rest, " ") { rest = builtin.slice(rest, 1, lengde(rest)) }
+                ut["melding"] = rest
+            } ellers {
+                ut["melding"] = v
+            }
+        } ellers {
+            ut["melding"] = tekst(v)
+        }
+    }
+    ut["stakk"] = stakk
+    ut["undertrykte"] = []
+    returner ut
+}
+
+// Lesbart stakkspor, ei linje per ramme.
+funksjon vm_stakk_tekst(stakk) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(stakk) {
+        la p = stakk[i]
+        ut = ut + "    ved " + tekst(p["funksjon"]) + " (" + tekst(p["fil"]) + ":" + tekst(p["linje"]) + ")\n"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_find_handler(functions, try_stack, verdi) -> heiltall {
     la i: heiltall = lengde(try_stack) - 1
     mens i >= 0 {
-        hvis vm_handler_match(try_stack[i], verdi) { returner i }
+        hvis vm_handler_match(functions, try_stack[i], verdi) { returner i }
         i = i - 1
     }
     returner -1
@@ -545,7 +1195,7 @@ funksjon vm_unwind_continuations(functions, continuations, current_frame, meldin
         la forelder = continuations[lengde(continuations) - 1]
         fjern_siste(continuations)
         la forelder_try = forelder["try_stack"]
-        la handler_index = vm_find_handler(forelder_try, melding)
+        la handler_index = vm_find_handler(functions, forelder_try, melding)
         la forelder_cleanup = forelder["cleanup_stack"]
         hvis lengde(forelder_cleanup) > 0 {
             la cleanup = forelder_cleanup[lengde(forelder_cleanup) - 1]
@@ -626,6 +1276,8 @@ la vm_green_trådar: ordbok = {}         // handle → trådpost
 la vm_green_rekkje: liste = []          // handle-ar som kan få slice (state running)
 la vm_green_pools: ordbok = {}          // pool-handle → pool
 la vm_green_cur_t: ordbok = {}          // trådposten til sliceen som køyrer no
+la vm_green_koop_aktive: heiltall = 0   // F36: levande kooperative asynk-oppgåver (ikkje preemptert)
+la vm_spesial_aktiv: heiltall = 0       // F45/F46: 1 etter fyrste generator/frys (slår på ekstra sjekkar)
 
 // Grøn-tilstanden som inngangs- og instruksjonsløkka les, ligg i functions-kartet
 // (parameter), ikkje i modulglobalar: ein frosen C-æra-vert (macOS-/Windows-seeden)
@@ -1111,6 +1763,14 @@ funksjon vm_profiler_sample(functions, ramme, fn_namn: tekst, ip: heiltall, opco
     la sample = {"timestamp_ms": builtin.tid_ms(), "function": fn_namn, "ip": ip, "opcode": opcode, "line": source["line"], "column": source["column"], "depth": lengde(frames), "stack": stack}
     legg_til(functions["__vm_profile_samples__"], sample)
     returner sann
+}
+
+// F44: dekningsteljar. kart[fn] er eit kart ip → "1"; linjene blir slått opp
+// frå source_lines først når rapporten blir bygd (nc coverage).
+funksjon vm_dekning_merk(kart, fn_namn: tekst, ip: heiltall) -> heiltall {
+    hvis ikkje vm_map_har_nokkel(kart, fn_namn) { kart[fn_namn] = {} }
+    kart[fn_namn][tekst_fra_heltall(ip)] = "1"
+    returner 0
 }
 
 funksjon vm_profiler_reset(functions) -> boolsk {
@@ -1602,7 +2262,7 @@ funksjon vm_security_enforce_c(functions, namn: tekst, args, cap: tekst, fast: b
             la request = args[0]
             hvis vm_map_har_nokkel(request, "operation") {
                 la operation = tekst(request["operation"])
-                hvis operation == "listen" eller operation == "connect" eller operation == "tls_listen" eller operation == "tls_connect" {
+                hvis operation == "listen" eller operation == "connect" eller operation == "tls_listen" eller operation == "tls_connect" eller operation == "udp_listen" eller operation == "udp_connect" eller operation == "iocp_listen" eller operation == "iocp_connect" {
                     krev_scope = sann
                     hvis vm_map_har_nokkel(request, "host") { host = tekst(request["host"]) }
                 }
@@ -2570,11 +3230,12 @@ funksjon vm_future(status: tekst, verdi) {
 funksjon vm_await_value(verdi) {
     hvis verdi != null og vm_map_har_nokkel(verdi, "__future__") {
         la status = tekst(verdi["status"])
+        // «Type: melding» (med kolon) gjer at fang (e: TimeoutFeil / AvbruttFeil / FutureFeil) matchar.
         hvis status == "timeout" {
-            kast "TimeoutFeil"
+            kast "TimeoutFeil: tidsavbrot"
         }
         hvis status == "kansellert" {
-            kast "AvbruttFeil"
+            kast "AvbruttFeil: oppgåva er kansellert"
         }
         hvis status == "feil" eller status == "avvist" {
             hvis vm_map_har_nokkel(verdi, "feil") og tekst(verdi["feil"]) != "" {
@@ -2583,6 +3244,10 @@ funksjon vm_await_value(verdi) {
             kast "FutureFeil"
         }
         hvis status == "ferdig" eller status == "fullfort" eller status == "fullført" {
+            // F36: ei oppgåve som returnerte ei anna future (`returner f()`) flatar ut.
+            hvis vm_map_har_nokkel(verdi, "__task__") og builtin.type(verdi["verdi"]) == "ordbok" og vm_map_har_nokkel(verdi["verdi"], "__future__") {
+                returner vm_await_value(verdi["verdi"])
+            }
             returner verdi["verdi"]
         }
         hvis status == "ventende" eller status == "kjorer" eller status == "kjører" {
@@ -2597,6 +3262,10 @@ funksjon vm_future_ventar(verdi) -> boolsk {
     hvis builtin.type(verdi) != "ordbok" { returner usann }
     hvis ikkje vm_map_har_nokkel(verdi, "__future__") { returner usann }
     la status = tekst(verdi["status"])
+    hvis status == "ferdig" og vm_map_har_nokkel(verdi, "__task__") {
+        // F36: `returner f()` i ein asynk funksjon gjev ei future som verdi; vent flatar ut.
+        returner vm_future_ventar(verdi["verdi"])
+    }
     returner status == "ventende" eller status == "kjorer" eller status == "kjører"
 }
 
@@ -2624,6 +3293,7 @@ funksjon vm_await_hovudtråd(functions, fut) -> ordbok {
             returner r
         }
     }
+    vm_future_gjenopprett_stakk(functions, fut)
     prøv {
         r["verdi"] = vm_await_value(fut)
         r["ok"] = "sann"
@@ -3302,6 +3972,13 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         namn = builtin.slice(namn, 8, lengde(namn))
     slutt
 
+    // F45/F46: generatorar og frosne samlingar (berre aktivt etter fyrste bruk).
+    hvis vm_spesial_aktiv == 1 {
+        hvis namn == "builtin.lengde" og lengde(args) > 0 og vm_er_generator(args[0]) { returner vm_gen_lengde(active_functions, args[0]) }
+        hvis (namn == "builtin.type" eller namn == "builtin.type_av") og lengde(args) > 0 og vm_er_generator(args[0]) { returner "generator" }
+        args = vm_frosen_args(namn, args)
+    }
+
     // Reine, capability-frie intrinsics ligg i den varme compilerløypa.
     // Handter dei før metrikk-/security-dispatchen: den gamle lineære
     // dispatchen gjorde kvart lexer-teikn til hundrevis av VM-greiner.
@@ -3434,7 +4111,7 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
 
     // builtin.skriv
     hvis namn == "builtin.skriv" {
-        la s: tekst = tekst(args[0])
+        la s: tekst = vm_tekst_av(active_functions, args[0])
         skriv(s)
         returner 0
     }
@@ -3514,7 +4191,7 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         // Dette er språkets tekstkonvertering, ikkje JSON-serialisering.
         // Den tidlegare JSON-rundturen trefte dessutan ein historisk native
         // dispatch-tabell når pure VM køyrde inne i Linux AOT.
-        returner tekst(args[0])
+        returner vm_tekst_av(active_functions, args[0])
     }
 
     // builtin.tekst_fra_heltall
@@ -3937,6 +4614,13 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
         hvis sync_op == "cancel" og builtin.starts_with(sync_h, "green-thread:") {
             returner vm_green_cancel(sync_h)
         }
+        // F35: avbrot (AvbruttFeil ved neste blokkerande operasjon).
+        hvis sync_op == "interrupt" og builtin.starts_with(sync_h, "green-thread:") {
+            returner vm_green_avbryt_tråd(sync_h)
+        }
+        hvis sync_op == "interrupted" og vm_green_på_i(active_functions) {
+            returner vm_green_avbrote_svar(sync_h)
+        }
         hvis vm_green_på_i(active_functions) og (sync_op == "mutex_lock" eller sync_op == "condition_wait") {
             returner vm_green_sync(args[0], sync_op)
         }
@@ -4065,7 +4749,7 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
 
     // builtin.til_tekst
     hvis namn == "builtin.til_tekst" {
-        returner tekst(args[0])
+        returner vm_tekst_av(active_functions, args[0])
     }
 
     // builtin.slice
@@ -4074,12 +4758,32 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     }
 
     hvis namn == "builtin.await_value" {
+        // F35/F36: ei avbroten oppgåve/tråd får AvbruttFeil i staden for å vente;
+        // ei feila future gjenopprettar stakksporet frå oppgåva.
+        hvis vm_green_på_i(active_functions) og vm_future_ventar(args[0]) og vm_green_avbrutt_no() {
+            vm_green_avbrot_kast("vent")
+        }
+        vm_future_gjenopprett_stakk(active_functions, args[0])
         returner vm_await_value(args[0])
+    }
+    // F36: vent(f, timeout_ms) som kallform (ei brukarfunksjon `vent` vinn over denne).
+    hvis (namn == "vent" eller namn == "builtin.vent") og lengde(args) == 2 {
+        returner vm_vent_med_frist(active_functions, args[0], vm_green_til_heiltal(args[1], 0))
+    }
+    // F35: unntak_sett_stakk(e, stakk): neste kast av e beheld det oppgitte stakksporet.
+    hvis namn == "builtin.unntak_sett_stakk" {
+        hvis lengde(args) != 2 { kast "ArgumentFeil: unntak_sett_stakk tek to argument" }
+        active_functions["__vm_stakk__"] = args[1]
+        active_functions["__vm_stakk_verdi__"] = args[0]
+        active_functions["__vm_behald_stakk__"] = "sann"
+        returner null
     }
     hvis namn == "builtin.vent.timeout" eller namn == "vent.timeout" {
         returner vm_future("timeout", args[0])
     }
     hvis namn == "builtin.vent.kanseller" eller namn == "vent.kanseller" {
+        // F36: kanselleringa når oppgåva bak future-en (om han har ei).
+        vm_async_kanseller(args[0])
         returner vm_future("kansellert", args[0])
     }
     hvis namn == "builtin.vent.er_timeoutet" eller namn == "vent.er_timeoutet" {
@@ -4608,11 +5312,38 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     // heuristikken her (ukjent kall med stor forbokstav → ordbok med __type__)
     // er fjerna: ein skrivefeil som Pnukt() er ein kompileringsfeil.
 
+    // F43: refleksjon (sjå vm_refl_* og docs/REFLEKSJON.md).
+    hvis namn == "builtin.typar_av" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: typar_av tek eitt argument" }
+        returner vm_refl_typar_av(active_functions, args[0])
+    }
+    hvis namn == "builtin.type_info" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: type_info tek eitt argument" }
+        returner vm_refl_type_info_av(active_functions, args[0])
+    }
+    hvis namn == "builtin.funksjon_info" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: funksjon_info tek eitt argument" }
+        returner vm_refl_funksjon_info_av(active_functions, args[0])
+    }
+    hvis namn == "builtin.finn_med_annotasjon" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: finn_med_annotasjon tek eitt argument" }
+        returner vm_refl_finn(active_functions, tekst(args[0]))
+    }
+    hvis namn == "builtin.hent_felt" {
+        hvis lengde(args) != 2 { kast "ArgumentFeil: hent_felt tek to argument" }
+        returner vm_refl_hent_felt(args[0], tekst(args[1]))
+    }
+    hvis namn == "builtin.sett_felt" {
+        hvis lengde(args) != 3 { kast "ArgumentFeil: sett_felt tek tre argument" }
+        returner vm_refl_sett_felt(args[0], tekst(args[1]), args[2])
+    }
     // R2/F21: typenamn(v) — strukturnamnet (kort) for ein struktur-instans,
     // elles runtime-typen som type(v) gjev.
     hvis namn == "builtin.typenamn" {
         hvis lengde(args) != 1 { kast "ArgumentFeil: typenamn tek eitt argument" }
         hvis vm_er_struktur(args[0]) { returner tekst(args[0]["__type__"]) }
+        // R4: pakka unntak (unntak_pakk) har unntakstypen som typenamn.
+        hvis builtin.type(args[0]) == "ordbok" og vm_map_har_nokkel(args[0], "stakk") og vm_map_har_nokkel(args[0], "undertrykte") { returner vm_exception_type(args[0]) }
         returner builtin.type(args[0])
     }
     // R2/F21: er_instans(v, "modul.Type") — kompilatoren løyser Type (struktur
@@ -4620,6 +5351,50 @@ funksjon kall_innebygd_f(namn: tekst, args: liste<tekst>, active_functions: ordb
     hvis namn == "builtin.er_instans" {
         hvis lengde(args) != 2 { kast "ArgumentFeil: er_instans tek to argument" }
         returner vm_er_instans(active_functions, args[0], tekst(args[1]))
+    }
+    // F46: frys(x) / er_frosen(x) / tin(x)
+    hvis namn == "builtin.frys" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: frys tek eitt argument" }
+        returner vm_frys(args[0], 0)
+    }
+    hvis namn == "builtin.er_frosen" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: er_frosen tek eitt argument" }
+        returner vm_er_frosen(args[0])
+    }
+    hvis namn == "builtin.tin" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: tin tek eitt argument" }
+        returner vm_tin(args[0], 0)
+    }
+    // F45: neste(gen) / gen.neste() / gen.ferdig()
+    hvis namn == "builtin.gen_neste" {
+        hvis lengde(args) != 1 eller ikkje vm_er_generator(args[0]) { kast "TypeFeil: neste() krev ein generator" }
+        returner vm_gen_neste(active_functions, args[0])
+    }
+    hvis namn == "builtin.gen_ferdig" {
+        hvis lengde(args) != 1 eller ikkje vm_er_generator(args[0]) { kast "TypeFeil: ferdig() krev ein generator" }
+        returner vm_gen_ferdig(active_functions, args[0])
+    }
+    // R4/F32: unntak_passar(e, "A|B") — passar unntaket ein av typane (rota
+    // Unntak, innebygde undertypar, brukartypar, modulkvalifiserte grensesnitt)?
+    hvis namn == "builtin.unntak_passar" {
+        hvis lengde(args) != 2 { kast "ArgumentFeil: unntak_passar tek to argument" }
+        returner vm_unntak_passar(active_functions, tekst(args[1]), args[0])
+    }
+    // unntak_pakk(e): unntaket med e.stakk (liste av {funksjon, fil, linje}) og
+    // e.undertrykte (liste). Sjå docs/UNNTAK.md.
+    hvis namn == "builtin.unntak_pakk" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: unntak_pakk tek eitt argument" }
+        returner vm_unntak_pakk(active_functions, args[0])
+    }
+    // unntak_behald_stakk(): neste kast (rethrow) beheld stakksporet til førre kast.
+    hvis namn == "builtin.unntak_behald_stakk" {
+        active_functions["__vm_behald_stakk__"] = "sann"
+        returner null
+    }
+    // unntak_type(e): unntakstypen som tekst (same namn som fang (e: Type) matchar).
+    hvis namn == "builtin.unntak_type" {
+        hvis lengde(args) != 1 { kast "ArgumentFeil: unntak_type tek eitt argument" }
+        returner vm_exception_type(args[0])
     }
 
     // R2/F20: metodekall utanom CALL-opkoden (CALL-armen i køyr_funksjon
@@ -4699,6 +5474,257 @@ funksjon vm_map_get(obj, nokkel)
     slutt
     returner 0
 slutt
+
+// ─── F45 generatorar og F46 frosne samlingar ─────────────────────────────────
+// Sjå docs/GENERATORAR.md og docs/FROSNE_SAMLINGAR.md.
+//
+// Generator: ein funksjon med `gi` har "generator": true i NCB. Eit kall gjev ei
+// ordbok {"__generator__": fn, args, state, resume, ...} utan å køyre kroppen.
+// Kroppen køyrer i ein nøsta køyr_funksjon-aktivering som parkerer rammen ved
+// GI (same resume-mekanisme som await/grøne trådar) og blir teken opp att av
+// neste kall. `for x i gen()` går via lengde()/INDEX_GET på generatoren
+// (lengde = 0 eller «stor» etter om eit nytt element finst; INDEX_GET gjev
+// neste element) slik at for-bytekoden er uendra og framleis lat.
+//
+// Frosen samling: ordbok {"__frosen__": djup kopi}. Alle element som er
+// samlingar er sjølve frosne. Lesing går gjennom utpakking (INDEX_GET,
+// LOAD_FIELD, innebygde); skriving (INDEX_SET, STORE_FIELD, mutasjons-builtins)
+// kastar FrosenFeil.
+funksjon vm_er_generator(v) -> boolsk {
+    hvis builtin.type(v) != "ordbok" { returner usann }
+    returner vm_map_har_nokkel(v, "__generator__")
+}
+
+funksjon vm_er_frosen_boks(v) -> boolsk {
+    hvis builtin.type(v) != "ordbok" { returner usann }
+    // Berre ei innpakking frå vm_frys: to nøklar, og merket __frosen_vm__ (ikkje ein vanleg ordbok med nøkkelen __frosen__).
+    hvis ikkje vm_map_har_nokkel(v, "__frosen__") eller ikkje vm_map_har_nokkel(v, "__frosen_vm__") { returner usann }
+    returner tekst(v["__frosen_vm__"]) == "1"
+}
+
+funksjon vm_frosen_utpakk(v) {
+    hvis vm_er_frosen_boks(v) { returner v["__frosen__"] }
+    returner v
+}
+
+funksjon vm_frys(v, djupn: heiltall) {
+    hvis djupn > 200 { kast "VerdiFeil: frys: for djup eller syklisk struktur" }
+    vm_spesial_aktiv = 1
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la ny_l = []
+        la i: heiltall = 0
+        mens i < lengde(v) {
+            legg_til(ny_l, vm_frys(v[i], djupn + 1))
+            i = i + 1
+        }
+        la boks_l = {}
+        boks_l["__frosen__"] = ny_l
+        boks_l["__frosen_vm__"] = "1"
+        returner boks_l
+    }
+    hvis t == "ordbok" {
+        hvis vm_er_frosen_boks(v) eller vm_map_har_nokkel(v, "__generator__") eller vm_map_har_nokkel(v, "__lambda__") { returner v }
+        la ny_o = {}
+        la nk = nøkler(v)
+        la j: heiltall = 0
+        mens j < lengde(nk) {
+            ny_o[nk[j]] = vm_frys(v[nk[j]], djupn + 1)
+            j = j + 1
+        }
+        // Strukturmerka kan vere gøymde for nøkler() (sjå vm_struktur_nøkler).
+        hvis vm_map_har_nokkel(v, "__struktur__") { ny_o["__struktur__"] = v["__struktur__"] }
+        hvis vm_map_har_nokkel(v, "__type__") { ny_o["__type__"] = v["__type__"] }
+        la boks_o = {}
+        boks_o["__frosen__"] = ny_o
+        boks_o["__frosen_vm__"] = "1"
+        returner boks_o
+    }
+    returner v
+}
+
+// Djup mutabel kopi (utan frosne bokser).
+funksjon vm_tin(v, djupn: heiltall) {
+    hvis djupn > 200 { kast "VerdiFeil: tin: for djup eller syklisk struktur" }
+    la t = builtin.type(v)
+    hvis t == "liste" {
+        la ny_l = []
+        la i: heiltall = 0
+        mens i < lengde(v) {
+            legg_til(ny_l, vm_tin(v[i], djupn + 1))
+            i = i + 1
+        }
+        returner ny_l
+    }
+    hvis t == "ordbok" {
+        hvis vm_er_frosen_boks(v) { returner vm_tin(v["__frosen__"], djupn + 1) }
+        hvis vm_map_har_nokkel(v, "__generator__") eller vm_map_har_nokkel(v, "__lambda__") { returner v }
+        la ny_o = {}
+        la nk = nøkler(v)
+        la j: heiltall = 0
+        mens j < lengde(nk) {
+            ny_o[nk[j]] = vm_tin(v[nk[j]], djupn + 1)
+            j = j + 1
+        }
+        hvis vm_map_har_nokkel(v, "__struktur__") { ny_o["__struktur__"] = v["__struktur__"] }
+        hvis vm_map_har_nokkel(v, "__type__") { ny_o["__type__"] = v["__type__"] }
+        returner ny_o
+    }
+    returner v
+}
+
+// Uforanderlege (og dermed trygt delbare) verdiar: skalarar og frosne samlingar.
+funksjon vm_er_frosen(v) -> boolsk {
+    la t = builtin.type(v)
+    hvis t == "liste" { returner usann }
+    hvis t == "ordbok" {
+        hvis vm_er_frosen_boks(v) { returner sann }
+        hvis vm_map_har_nokkel(v, "__generator__") { returner usann }
+        returner usann
+    }
+    returner sann
+}
+
+funksjon vm_er_mutator(namn: tekst) -> boolsk {
+    la k = namn
+    hvis builtin.starts_with(k, "builtin.") { k = builtin.slice(k, 8, lengde(k)) }
+    hvis k == "legg_til" eller k == "pop_siste" eller k == "fjern_siste" eller k == "fjern" eller k == "fjern_indeks" eller k == "sett_inn" eller k == "fjern_nokkel" eller k == "fjern_nøkkel" eller k == "sett_felt" { returner sann }
+    hvis builtin.starts_with(k, "liste.") {
+        la m = builtin.slice(k, 6, lengde(k))
+        returner builtin.starts_with(m, "fjern") eller builtin.starts_with(m, "sett_inn") eller builtin.starts_with(m, "omvendt") eller builtin.starts_with(m, "legg") eller builtin.starts_with(m, "sorter") eller builtin.starts_with(m, "tom")
+    }
+    returner usann
+}
+
+funksjon vm_djup_utpakk_namn(namn: tekst) -> boolsk {
+    returner namn == "builtin.tekst" eller namn == "builtin.skriv" eller namn == "builtin.json_stringify" eller namn == "builtin.print" eller namn == "builtin.tekst_av"
+}
+
+// Førebu argument til ein innebygd: frosne bokser blir pakka ut (grunt, djupt
+// for tekst-/utskriftsfunksjonar). Mutasjon av ei frosen samling kastar.
+funksjon vm_frosen_args(namn: tekst, args) {
+    hvis namn == "builtin.frys" eller namn == "builtin.er_frosen" eller namn == "builtin.tin" eller namn == "builtin.gen_neste" eller namn == "builtin.gen_ferdig" { returner args }
+    la har = usann
+    la i: heiltall = 0
+    mens i < lengde(args) {
+        hvis vm_er_frosen_boks(args[i]) { har = sann }
+        i = i + 1
+    }
+    hvis ikkje har { returner args }
+    hvis vm_er_mutator(namn) {
+        hvis lengde(args) > 0 og vm_er_frosen_boks(args[0]) {
+            kast "FrosenFeil: kan ikkje endre ei frosen samling (" + namn + ")"
+        }
+        returner args
+    }
+    la djup = vm_djup_utpakk_namn(namn)
+    la ny = []
+    la j: heiltall = 0
+    mens j < lengde(args) {
+        hvis djup { legg_til(ny, vm_tin(args[j], 0)) } ellers { legg_til(ny, vm_frosen_utpakk(args[j])) }
+        j = j + 1
+    }
+    returner ny
+}
+
+funksjon vm_gen_ny(fn_namn: tekst, args) {
+    vm_spesial_aktiv = 1
+    la g = {}
+    g["__generator__"] = fn_namn
+    la a = []
+    la i: heiltall = 0
+    mens i < lengde(args) {
+        legg_til(a, args[i])
+        i = i + 1
+    }
+    g["args"] = a
+    g["state"] = "ny"
+    g["resume"] = {}
+    g["har_fram"] = 0
+    g["fram"] = null
+    returner g
+}
+
+// Køyr generatoren til neste gi (eller slutt). Gjev [ferdig, verdi].
+funksjon vm_gen_steg(functions, g) {
+    la st = g["state"]
+    hvis st == "ferdig" { returner [1, null] }
+    hvis st == "køyrer" { kast "GeneratorFeil: generatoren køyrer allereie (neste() på seg sjølv)" }
+    g["state"] = "køyrer"
+    la aktive = functions["__vm_active_frames__"]
+    la for_n = lengde(aktive)
+    la gammal = functions["__vm_debug_resume_state__"]
+    la v = 0
+    prøv {
+        hvis st == "ny" {
+            functions["__vm_debug_resume_state__"] = {"active": "usann", "reason": ""}
+            functions["__gen_start__"] = "1"
+            v = køyr_funksjon(tekst(g["__generator__"]), g["args"], functions, 1)
+        } ellers {
+            la rs = g["resume"]
+            legg_til(aktive, rs["frame"])
+            functions["__vm_debug_resume_state__"] = rs
+            v = køyr_funksjon(tekst(rs["fn_namn"]), [], functions, 1)
+        }
+    } fang (e) {
+        functions["__gen_start__"] = "0"
+        g["state"] = "ferdig"
+        g["resume"] = {}
+        la aktive2 = functions["__vm_active_frames__"]
+        mens lengde(aktive2) > for_n { fjern_siste(aktive2) }
+        functions["__vm_debug_resume_state__"] = gammal
+        kast e
+    }
+    la slot = functions["__vm_debug_resume_state__"]
+    functions["__vm_debug_resume_state__"] = gammal
+    hvis builtin.type(slot) == "ordbok" og vm_map_har_nokkel(slot, "active") og slot["active"] == "sann" {
+        hvis vm_map_har_nokkel(slot, "reason") og slot["reason"] == "gen" {
+            g["resume"] = slot
+            g["state"] = "ventar"
+            returner [0, v]
+        }
+        g["state"] = "ferdig"
+        g["resume"] = {}
+        kast "GeneratorFeil: await/suspensjon inne i ein generator er ikkje støtta"
+    }
+    g["state"] = "ferdig"
+    g["resume"] = {}
+    returner [1, null]
+}
+
+// Sørg for at neste element ligg i g["fram"]; 1 viss det finst eit.
+funksjon vm_gen_fyll(functions, g) -> heiltall {
+    hvis g["har_fram"] == 1 { returner 1 }
+    la r = vm_gen_steg(functions, g)
+    hvis r[0] == 1 { returner 0 }
+    g["fram"] = r[1]
+    g["har_fram"] = 1
+    returner 1
+}
+
+// neste(gen): neste verdi, eller ingenting når generatoren er ferdig.
+funksjon vm_gen_neste(functions, g) {
+    hvis g["har_fram"] == 1 {
+        la v = g["fram"]
+        g["fram"] = null
+        g["har_fram"] = 0
+        returner v
+    }
+    la r = vm_gen_steg(functions, g)
+    hvis r[0] == 1 { returner null }
+    returner r[1]
+}
+
+// gen_ferdig(gen): sant når generatoren ikkje har fleire element.
+funksjon vm_gen_ferdig(functions, g) -> boolsk {
+    returner vm_gen_fyll(functions, g) == 0
+}
+
+// lengde(gen) for for-lykkja: 0 når ferdig, elles ei stor verdi (idx < lengde).
+funksjon vm_gen_lengde(functions, g) -> heiltall {
+    hvis vm_gen_fyll(functions, g) == 1 { returner 1000000000000 }
+    returner 0
+}
 
 // ─── Hovud-VM-løkke ──────────────────────────────────────────────────────────
 // finn_funksjon: fuzzy function lookup (same logikk som nc_vm.c fn_find)
@@ -4870,7 +5896,7 @@ funksjon vm_opcode_operandar(op: tekst) -> liste_heiltall {
     hvis op == "BUILD_LIST" eller op == "BUILD_MAP" { returner [1, 1] }
     hvis op == "TRY_BEGIN" { returner [1, 2] }
     hvis op == "FINALLY_END" { returner [3, 3] }
-    hvis op == "POP" eller op == "DUP" eller op == "SWAP" eller op == "OVER" eller op == "BINARY_ADD" eller op == "BINARY_SUB" eller op == "BINARY_MUL" eller op == "BINARY_DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" eller op == "UNARY_NEG" eller op == "UNARY_NOT" eller op == "UNARY_BNOT" eller op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_GT" eller op == "COMPARE_LE" eller op == "COMPARE_GE" eller op == "INDEX_GET" eller op == "INDEX_SET" eller op == "RETURN" eller op == "TRY_END" eller op == "THROW" eller op == "LOAD_EXCEPTION" eller op == "LOAD_PENDING" eller op == "CLEAR_PENDING" eller op == "PRINT" eller op == "HALT" { returner [0, 0] }
+    hvis op == "POP" eller op == "DUP" eller op == "SWAP" eller op == "OVER" eller op == "BINARY_ADD" eller op == "BINARY_SUB" eller op == "BINARY_MUL" eller op == "BINARY_DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" eller op == "UNARY_NEG" eller op == "UNARY_NOT" eller op == "UNARY_BNOT" eller op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_GT" eller op == "COMPARE_LE" eller op == "COMPARE_GE" eller op == "INDEX_GET" eller op == "INDEX_SET" eller op == "RETURN" eller op == "TRY_END" eller op == "THROW" eller op == "LOAD_EXCEPTION" eller op == "LOAD_PENDING" eller op == "CLEAR_PENDING" eller op == "PRINT" eller op == "HALT" eller op == "GI" { returner [0, 0] }
     returner [-1, -1]
 }
 
@@ -5445,6 +6471,10 @@ funksjon vm_green_ny(functions, fn_løyst: tekst, fn_args, id: tekst, nr: heilta
     t["pool_fn"] = ""
     t["pool_slot"] = 0
     t["daemon"] = 0      // R1/F12: 1 = blir ikkje joina ved programslutt
+    t["koop"] = 0        // F36: 1 = asynk-oppgåve, aldri preemptert (gjev berre frå seg ved vent/sov)
+    t["avbryt"] = 0      // F35: avbrotsflagg (AvbruttFeil ved neste blokkerande operasjon)
+    t["arglist"] = 0     // F36: liste med posisjonsargument (0 = bruk args som eitt ordbok-argument)
+    t["future"] = 0      // F36: future-ordboka som blir fullført når oppgåva er ferdig
     vm_green_trådar[id] = t
     vm_green_aktive = vm_green_aktive + 1
     functions["__vm_green_på__"] = "1"
@@ -5460,6 +6490,11 @@ funksjon vm_green_er_ferdig(t) -> boolsk {
 funksjon vm_green_ferdig(t) -> heiltall {
     vm_green_aktive = vm_green_aktive - 1
     hvis vm_green_aktive < 0 { vm_green_aktive = 0 }
+    hvis t["koop"] == 1 {
+        t["koop"] = 2   // berre éin gong
+        vm_green_koop_aktive = vm_green_koop_aktive - 1
+        hvis vm_green_koop_aktive < 0 { vm_green_koop_aktive = 0 }
+    }
     la gfn = t["functions"]
     hvis vm_green_aktive > 0 { gfn["__vm_green_på__"] = "1" } ellers { gfn["__vm_green_på__"] = "0" }
     t["frames"] = []
@@ -5526,6 +6561,7 @@ funksjon vm_green_slice(t) -> heiltall {
     vm_green_cur_t = t
     vm_green_i_slice = 1
     vm_green_budsjett = vm_green_kvantum
+    hvis t["koop"] == 1 { vm_green_budsjett = 1000000000 }   // F36: kooperativ, ingen preemption
     vm_green_yielded = 0
     vm_green_yield_ok = 0
     t["venter"] = 0
@@ -5537,7 +6573,11 @@ funksjon vm_green_slice(t) -> heiltall {
         functions["__vm_green_start__"] = "1"
         hvis t["starta"] == 0 {
             t["starta"] = 1
-            v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
+            hvis builtin.type(t["arglist"]) == "liste" {
+                v = køyr_funksjon(tekst(t["fn"]), t["arglist"], functions, 1)
+            } ellers {
+                v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
+            }
         } ellers {
             v = køyr_funksjon(tekst(t["resume"]["fn_namn"]), [], functions, 1)
         }
@@ -5557,6 +6597,12 @@ funksjon vm_green_slice(t) -> heiltall {
     } fang (e) {
         t["state"] = "error"
         t["error"] = tekst(e)
+        t["error_raw"] = e
+        // F35/F36: stakksporet til unntaket følgjer med til join/vent (R4/F34).
+        hvis vm_map_har_nokkel(functions, "__vm_stakk__") {
+            t["stakk"] = functions["__vm_stakk__"]
+            t["stakk_verdi"] = functions["__vm_stakk_verdi__"]
+        }
         ferdig = 1
     }
     functions["__vm_green_start__"] = "0"
@@ -5571,7 +6617,10 @@ funksjon vm_green_slice(t) -> heiltall {
     vm_green_i_slice = 0
     vm_green_yield_ok = 0
     vm_green_yielded = 0
-    hvis ferdig == 1 { vm_green_ferdig(t) }
+    hvis ferdig == 1 {
+        vm_green_ferdig(t)
+        hvis builtin.type(t["future"]) == "ordbok" { vm_async_fullfor(t) }
+    }
     returner arbeid
 }
 
@@ -5668,7 +6717,7 @@ funksjon vm_green_runde() -> heiltall {
                 la sov_til = t["sov_til"]
                 hvis sov_til > 0 {
                     hvis no_ms < 0 { no_ms = builtin.tid_ms() }
-                    hvis no_ms < sov_til { kan = 0 }
+                    hvis no_ms < sov_til og t["avbryt"] == 0 { kan = 0 }
                 }
                 hvis kan == 1 {
                     arbeid = arbeid + vm_green_slice(t)
@@ -5782,6 +6831,7 @@ funksjon vm_green_join(req, h: tekst) {
     la timeout = vm_green_felt_heiltal(req, "timeout_ms", -1)
     hvis ikkje vm_green_er_ferdig(t) og timeout != 0 {
         hvis kan_yield == 1 {
+            hvis vm_green_avbrutt_no() { vm_green_avbrot_kast("join") }
             hvis vm_green_vent(timeout, "join") == 1 { returner vm_green_join_resultat(t, "timeout") }
         } ellers hvis vm_green_i_slice == 0 {
             la frist: heiltall = -2
@@ -5890,6 +6940,12 @@ funksjon vm_green_sync(req, op: tekst) {
                 vd["signal"] = 1
                 vd["fase"] = 2
                 meg["vent_frist"] = -1
+            } ellers hvis vm_green_avbrutt_no() {
+                // F35: avbrot under venting. Mutex blir teken att (fase 2) FØR
+                // AvbruttFeil blir kasta (samtid._vent), som Java.
+                vd["fase"] = 2
+                vd["avbrote"] = 1
+                meg["vent_frist"] = -1
             } ellers hvis vm_green_vent(tm, "condition") == 1 {
                 vd["fase"] = 2
             }
@@ -5898,7 +6954,12 @@ funksjon vm_green_sync(req, op: tekst) {
             vm_green_vent(-1, "condition-mutex")
         }
         la sig = vd["signal"]
+        la avb = vm_map_har_nokkel(vd, "avbrote")
         vm_green_vent_ferdig()
+        hvis avb {
+            meg["avbryt"] = 0
+            returner vm_green_sync_svar("interrupted")
+        }
         hvis sig == 1 { returner vm_green_sync_svar("ready") }
         returner vm_green_sync_svar("timeout")
     }
@@ -5974,6 +7035,7 @@ funksjon vm_green_sov(ms: heiltall) -> heiltall {
     la kan_yield = vm_green_ta_yield()
     hvis ms <= 0 { returner 0 }
     hvis kan_yield == 1 {
+        hvis vm_green_avbrutt_no() { vm_green_avbrot_kast("sov") }
         la meg = vm_green_cur_t
         la frist = meg["vent_frist"]
         hvis frist == -1 {
@@ -6002,6 +7064,177 @@ funksjon vm_green_sov(ms: heiltall) -> heiltall {
         no = builtin.tid_ms()
     }
     returner 0
+}
+
+// ─── F35: avbrot (AvbruttFeil ved blokkerande operasjonar) ─────────────────
+// Eit avbrotsflagg (t["avbryt"]) blir sett av tråd.avbryt()/oppgåve-kansellering og
+// sjekka av sov, join, condition_wait (kanal-/lås-/semafor-venting) og vent på ein
+// ventande future i den grøne tråden. Flagget blir nullstilt når AvbruttFeil blir
+// kasta (som Thread.interrupted()). Ein tråd som ikkje blokkerer ser flagget først
+// ved neste blokkerande operasjon (eller via avbrote()).
+
+funksjon vm_green_avbrutt_no() -> boolsk {
+    hvis vm_green_i_slice != 1 { returner usann }
+    hvis ikkje vm_map_har_nokkel(vm_green_cur_t, "id") { returner usann }
+    returner vm_green_cur_t["avbryt"] == 1
+}
+
+funksjon vm_green_avbrot_kast(grunn: tekst) -> heiltall {
+    vm_green_cur_t["avbryt"] = 0
+    vm_green_vent_ferdig()
+    kast "AvbruttFeil: avbrote under " + grunn
+    returner 0
+}
+
+funksjon vm_green_avbryt_tråd(h: tekst) {
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) {
+        returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": h, "thread_id": "",
+                  "value": "", "error": "invalid handle"}
+    }
+    la t = vm_green_trådar[h]
+    hvis ikkje vm_green_er_ferdig(t) { t["avbryt"] = 1 }
+    returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h,
+              "thread_id": tekst_fra_heltall(t["gid"]), "value": "", "error": ""}
+}
+
+// "interrupted": handle tom = tråden som køyrer no (hovudtråden er aldri avbroten).
+funksjon vm_green_avbrote_svar(h: tekst) {
+    la verdi = "0"
+    hvis h == "" {
+        hvis vm_green_avbrutt_no() { verdi = "1" }
+    } ellers hvis vm_map_har_nokkel(vm_green_trådar, h) {
+        hvis vm_green_trådar[h]["avbryt"] == 1 { verdi = "1" }
+    }
+    returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h, "thread_id": "",
+              "value": verdi, "error": ""}
+}
+
+// ─── F36: ekte asynk (oppgåver som grøne trådar, kooperativ planleggjar) ────
+// Eit kall til ein `asynk funksjon` i programkøyring (køyr_ncb) startar ei OPPGÅVE:
+// ein kooperativ grøn tråd (aldri preemptert) med eigen rammeliste, og returnerer
+// ei future-ordbok {__future__, status: ventende, __task__: <tråd-handle>}. Kroppen
+// startar ikkje før kallaren gjev frå seg kontrollen (vent på ei ventande future,
+// sov/sov_asynk, thread_join, programslutt). `vent` i hovudtråden driv
+// planleggaren (vm_await_hovudtråd); `vent` i ei oppgåve parkerer oppgåva (same
+// suspender som await-resume) og lèt andre køyre. Innbyggings-API-et
+// (køyr_funksjon utan __vm_program__) beheld synkron kjøring av asynk-funksjonar.
+
+funksjon vm_def_er_asynk(def) -> boolsk {
+    hvis builtin.type(def) != "ordbok" { returner usann }
+    hvis ikkje vm_map_har_nokkel(def, "is_async") { returner usann }
+    la a = def["is_async"]
+    returner a == sann eller tekst(a) == "sann" eller tekst(a) == "true"
+}
+
+funksjon vm_async_start(functions, fn_løyst: tekst, argv) {
+    la nr = vm_green_ny_nr()
+    la id = "green-thread:" + tekst_fra_heltall(nr)
+    la t = vm_green_ny(functions, fn_løyst, {}, id, nr)
+    t["state"] = "running"
+    t["koop"] = 1
+    vm_green_koop_aktive = vm_green_koop_aktive + 1
+    la kopi: liste = []
+    la i: heiltall = 0
+    mens i < lengde(argv) {
+        legg_til(kopi, argv[i])
+        i = i + 1
+    }
+    t["arglist"] = kopi
+    la fut = vm_future("ventende", "")
+    fut["__task__"] = id
+    t["future"] = fut
+    legg_til(vm_green_rekkje, id)
+    returner fut
+}
+
+// Oppgåva er ferdig (kalla frå vm_green_slice / kansellering): fullfør future-en.
+funksjon vm_async_fullfor(t) -> heiltall {
+    la fut = t["future"]
+    hvis t["state"] == "finished" {
+        fut["verdi"] = t["value"]
+        fut["status"] = "ferdig"
+    } ellers hvis t["state"] == "cancelled" {
+        fut["status"] = "kansellert"
+    } ellers {
+        la e = t["error_raw"]
+        hvis vm_exception_type(e) == "AvbruttFeil" {
+            fut["status"] = "kansellert"
+        } ellers {
+            fut["feil"] = e
+            fut["status"] = "feil"
+            hvis vm_map_har_nokkel(t, "stakk") {
+                fut["stakk"] = t["stakk"]
+                fut["stakk_verdi"] = t["stakk_verdi"]
+            }
+        }
+    }
+    hvis vm_map_har_nokkel(vm_green_trådar, t["id"]) { fjern_nokkel(vm_green_trådar, t["id"]) }
+    returner 0
+}
+
+// Be om kansellering av oppgåva bak ei future. Ikkje starta: ferdig med ein gong.
+// Elles AvbruttFeil ved oppgåva sitt neste ventepunkt (sov/vent/kanal/lås).
+// Returnerer 1 når future-en høyrde til ei levande oppgåve.
+funksjon vm_async_kanseller(fut) -> heiltall {
+    hvis builtin.type(fut) != "ordbok" { returner 0 }
+    hvis ikkje vm_map_har_nokkel(fut, "__task__") { returner 0 }
+    la h = tekst(fut["__task__"])
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) { returner 0 }
+    la t = vm_green_trådar[h]
+    hvis vm_green_er_ferdig(t) { returner 0 }
+    hvis t["starta"] == 0 {
+        t["state"] = "cancelled"
+        t["error"] = "AvbruttFeil"
+        vm_green_ferdig(t)
+        vm_async_fullfor(t)
+        returner 1
+    }
+    t["avbryt"] = 1
+    returner 1
+}
+
+// Gjenoppretter stakksporet frå ei feila future før unntaket blir kasta på nytt.
+funksjon vm_future_gjenopprett_stakk(functions, fut) -> heiltall {
+    hvis builtin.type(fut) != "ordbok" { returner 0 }
+    hvis ikkje vm_map_har_nokkel(fut, "stakk") { returner 0 }
+    hvis tekst(fut["status"]) != "feil" { returner 0 }
+    functions["__vm_stakk__"] = fut["stakk"]
+    functions["__vm_stakk_verdi__"] = fut["stakk_verdi"]
+    functions["__vm_behald_stakk__"] = "sann"
+    returner 0
+}
+
+// F36: vent(f, timeout_ms) — vent på ei future i høgst timeout_ms, ellers blir oppgåva
+// avbroten og TimeoutFeil kasta. Hovudtråden driv planleggaren medan han ventar;
+// ei oppgåve parkerer seg (same mekanikk som thread_join med frist).
+funksjon vm_vent_med_frist(functions, fut, timeout_ms: heiltall) {
+    la kan_yield = vm_green_ta_yield()
+    hvis ikkje vm_future_ventar(fut) {
+        hvis kan_yield == 1 { vm_green_vent_ferdig() }
+        vm_future_gjenopprett_stakk(functions, fut)
+        returner vm_await_value(fut)
+    }
+    hvis kan_yield == 1 {
+        hvis vm_green_avbrutt_no() { vm_green_avbrot_kast("vent") }
+        hvis vm_green_vent(timeout_ms, "vent") == 1 {
+            vm_async_kanseller(fut)
+            kast "TimeoutFeil: oppgåva vart ikkje ferdig innan " + tekst_fra_heltall(timeout_ms) + " ms"
+        }
+        // vm_green_vent kastar GreenVenter til fristen er ute eller futuren er ferdig;
+        // ferdig future blir fanga av sjekken øvst ved neste forsøk.
+    }
+    hvis vm_green_på_i(functions) og vm_green_i_slice == 0 {
+        la frist = builtin.tid_ms() + timeout_ms
+        mens vm_future_ventar(fut) og builtin.tid_ms() < frist {
+            vm_green_hovud_steg()
+        }
+    }
+    hvis vm_future_ventar(fut) {
+        vm_async_kanseller(fut)
+        kast "TimeoutFeil: oppgåva vart ikkje ferdig innan " + tekst_fra_heltall(timeout_ms) + " ms"
+    }
+    vm_future_gjenopprett_stakk(functions, fut)
+    returner vm_await_value(fut)
 }
 
 // ─── builtin.thread_pool (norscode-native-thread-pool-v1, C-kontrakten spegla) ─
@@ -6270,6 +7503,8 @@ funksjon køyr_funksjon(
         functions["__vm_green_start__"] = "0"
     }
     la green_på = vm_green_på_i(functions)
+    // F36: asynk-funksjonar blir oppgåver berre i programkøyring (køyr_ncb).
+    la asynk_modus = vm_map_har_nokkel(functions, "__vm_program__")
     la trace_raw = miljo_hent("NORSCODE_VM_TRACE")
     hvis trace_raw != "" og heltall_fra_tekst(trace_raw) == 1 { skriv("ENTER " + fn_namn + "\n") }
     la trace_frames_raw = miljo_hent("NORSCODE_VM_TRACE_FRAMES")
@@ -6283,6 +7518,14 @@ funksjon køyr_funksjon(
     // instruksjon. Sjå vm_metric_add_i for kvifor dette er viktig.
     la vm_metrics_kart = functions["__vm_metrics__"]
     la vm_debug_kart = functions["__vm_debug__"]
+    // F44: linjedekning. Av som standard (ingen nøkkel) — då kostar han éin boolsk
+    // test per instruksjon i standardmodus og ingenting i fast-modus.
+    la vm_dekn_kart = {}
+    la vm_dekn_på: boolsk = usann
+    hvis ikkje fast_mode og vm_map_har_nokkel(functions, "__vm_dekning__") {
+        vm_dekn_kart = functions["__vm_dekning__"]
+        vm_dekn_på = sann
+    }
     la vm_heap = functions["__vm_runtime_heap__"]
     la vm_sample_intervall: heiltall = heltall_fra_tekst(functions["__vm_sample_interval__"])
     la vm_trace_events = functions["__vm_trace_events__"]
@@ -6347,6 +7590,15 @@ funksjon køyr_funksjon(
     }
 
     la fn_def = vm_def_hent(vm_def_cache, functions, fn_namn)
+    // F45: kall på ein generator-funksjon (utanfor CALL-bytekoden) gjev generatoren;
+    // kroppen startar først ved neste() (vm_gen_steg set __gen_start__).
+    hvis ikkje resuming og vm_map_har_nokkel(fn_def, "generator") {
+        hvis vm_map_har_nokkel(functions, "__gen_start__") og functions["__gen_start__"] == "1" {
+            functions["__gen_start__"] = "0"
+        } ellers {
+            returner vm_gen_ny(fn_namn, arg_verdiar)
+        }
+    }
     // usann når ei continuation-ramme er teken attende (RETURN/unwind): då er
     // fn_def framleis callee sin, og LOAD/STORE_GLOBAL hentar kallaren sin
     // definisjon (modulen) frå fn_namn før bruk.
@@ -6430,7 +7682,8 @@ funksjon køyr_funksjon(
                 vm_green_tikk = vm_green_tikk + 1
                 hvis vm_green_tikk >= vm_green_kvantum {
                     vm_green_tikk = 0
-                    vm_green_runde()
+                    // F36: kooperative asynk-oppgåver køyrer berre når hovudkoden ventar.
+                    hvis vm_green_aktive > vm_green_koop_aktive { vm_green_runde() }
                     // Spor D: kallet kan ha bytt VM-tilstanden (t.d. runtime-reset eller
                     // debug-abort); les dei hoista verdiane på nytt.
                     aktive_rammer = functions["__vm_active_frames__"]
@@ -6472,6 +7725,7 @@ funksjon køyr_funksjon(
             hvis vm_debug_kart["enabled"] == "sann" {
                 debug_hit = vm_debug_check(functions, ramme, fn_namn, ip, op)
             }
+            hvis vm_dekn_på { vm_dekning_merk(vm_dekn_kart, fn_namn, ip) }
         }
         hvis debug_hit og vm_debug_state(functions)["suspend_on_hit"] == "sann" {
             ramme["state"] = "paused"
@@ -6634,7 +7888,7 @@ funksjon køyr_funksjon(
             hvis (add_ta == add_tb og (add_ta == "heltall" eller add_ta == "tekst" eller add_ta == "desimaltall")) eller (vm_er_taltype(add_ta) og vm_er_taltype(add_tb)) {
                 stack_push(ramme, a + b)
             } ellers hvis add_ta == "tekst" eller add_tb == "tekst" {
-                stack_push(ramme, tekst(a) + tekst(b))
+                stack_push(ramme, vm_tekst_av(functions, a) + vm_tekst_av(functions, b))
             } ellers {
                 stack_push(ramme, vm_aritmetikk_feil("+", a, b))
                 tvungen_op = "THROW"
@@ -6779,7 +8033,18 @@ funksjon køyr_funksjon(
         hvis op == "COMPARE_EQ" {
             la b = stack_pop(ramme)
             la a = stack_pop(ramme)
-            stack_push(ramme, a == b)
+            // R4/F22: strukturell likskap berre for ordbøker/lister (resten rett til verten).
+            la ceq_t = builtin.type(a)
+            hvis ceq_t == "ordbok" eller ceq_t == "liste" {
+                la ceq_r = vm_lik(functions, a, b)
+                hvis vm_map_har_nokkel(functions, "__vm_lik_for_djup__") {
+                    fjern_nokkel(functions, "__vm_lik_for_djup__")
+                    stack_push(ramme, "SamanlikningsFeil: strukturen er djupare enn 100 nivå eller har ein syklus; kan ikkje avgjere likskap")
+                    tvungen_op = "THROW"
+                    fortsett
+                }
+                stack_push(ramme, ceq_r)
+            } ellers { stack_push(ramme, a == b) }
             ip = ip + 1
             fortsett
         }
@@ -6787,7 +8052,17 @@ funksjon køyr_funksjon(
         hvis op == "COMPARE_NE" {
             la b = stack_pop(ramme)
             la a = stack_pop(ramme)
-            stack_push(ramme, a != b)
+            la cne_t = builtin.type(a)
+            hvis cne_t == "ordbok" eller cne_t == "liste" {
+                la cne_r = vm_lik(functions, a, b)
+                hvis vm_map_har_nokkel(functions, "__vm_lik_for_djup__") {
+                    fjern_nokkel(functions, "__vm_lik_for_djup__")
+                    stack_push(ramme, "SamanlikningsFeil: strukturen er djupare enn 100 nivå eller har ein syklus; kan ikkje avgjere likskap")
+                    tvungen_op = "THROW"
+                    fortsett
+                }
+                stack_push(ramme, ikkje cne_r)
+            } ellers { stack_push(ramme, a != b) }
             ip = ip + 1
             fortsett
         }
@@ -6920,6 +8195,32 @@ funksjon køyr_funksjon(
         hvis op == "INDEX_GET" {
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 {
+                hvis vm_er_generator(obj) {
+                    // F45: for-lykkje over generator — hent neste element (indeksen er lykkjeteljaren).
+                    la gen_el = 0
+                    la gen_feil = 0
+                    la gen_feila = usann
+                    prøv {
+                        gen_el = vm_gen_neste(functions, obj)
+                    } fang (gen_exc) {
+                        gen_feil = gen_exc
+                        gen_feila = sann
+                    }
+                    aktive_rammer = functions["__vm_active_frames__"]
+                    vm_metrics_kart = functions["__vm_metrics__"]
+                    vm_globale_ok = usann
+                    hvis gen_feila {
+                        stack_push(ramme, gen_feil)
+                        tvungen_op = "THROW"
+                        fortsett
+                    }
+                    stack_push(ramme, gen_el)
+                    ip = ip + 1
+                    fortsett
+                }
+                hvis vm_er_frosen_boks(obj) { obj = obj["__frosen__"] }
+            }
             hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
                 hvis indeks < 0 eller indeks >= lengde(obj) {
                     stack_push(ramme, "IndeksFeil: indeks " + tekst(indeks) +
@@ -6950,6 +8251,11 @@ funksjon køyr_funksjon(
             la verdi = stack_pop(ramme)
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 og vm_er_frosen_boks(obj) {
+                stack_push(ramme, "FrosenFeil: kan ikkje endre ei frosen samling (indekstilordning)")
+                tvungen_op = "THROW"
+                fortsett
+            }
             hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
                 hvis indeks < 0 eller indeks >= lengde(obj) {
                     stack_push(ramme, "IndeksFeil: indeks " + tekst(indeks) +
@@ -6970,6 +8276,7 @@ funksjon køyr_funksjon(
         // ── Felt-aksess (struktur) ───────────────────────────────────────
         hvis op == "LOAD_FIELD" {
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 { obj = vm_frosen_utpakk(obj) }
             la felt: tekst = instr[1]
             la felt_verdi = vm_sikker_get(obj, felt)
             la felt_heap_id = vm_heap_track_f(fast_mode, vm_heap, felt_verdi)
@@ -6982,6 +8289,11 @@ funksjon køyr_funksjon(
         hvis op == "STORE_FIELD" {
             la verdi = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            hvis vm_spesial_aktiv == 1 og vm_er_frosen_boks(obj) {
+                stack_push(ramme, "FrosenFeil: kan ikkje endre feltet " + tekst(instr[1]) + " i ei frosen samling")
+                tvungen_op = "THROW"
+                fortsett
+            }
             la felt: tekst = instr[1]
             obj[felt] = verdi
             ip = ip + 1
@@ -7083,6 +8395,21 @@ funksjon køyr_funksjon(
             // [mottakar, metodenamn, args…]. Eksakt oppslag (vm_metode_løys):
             // strukturmetoden får [mottakar, args…], ein closure i feltet får
             // [args…]; elles ein fangbar MetodeFeil via THROW-maskineriet.
+            hvis op == "CALL" og mål_namn == "builtin.kall_metode" og lengde(call_args) >= 2 og vm_spesial_aktiv == 1 og vm_er_generator(call_args[0]) {
+                // F45: gen.neste() / gen.ferdig() går til dei innebygde.
+                la gm = tekst(call_args[1])
+                la gm_obj = call_args[0]
+                vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                hvis gm == "neste" eller gm == "ferdig" {
+                    mål_namn = "builtin.gen_" + gm
+                    call_args = [gm_obj]
+                    call_heap_ids = []
+                } ellers {
+                    stack_push(ramme, "MetodeFeil: generator har ingen metode " + gm + "()")
+                    tvungen_op = "THROW"
+                    fortsett
+                }
+            }
             hvis op == "CALL" og mål_namn == "builtin.kall_metode" og lengde(call_args) >= 2 {
                 la m_løys = vm_metode_løys(functions, call_args[0], tekst(call_args[1]))
                 hvis m_løys[0] == "feil" {
@@ -7197,12 +8524,33 @@ funksjon køyr_funksjon(
                     tvungen_op = "THROW"
                     fortsett
                 }
+                // F45: kall på ein generator-funksjon gjev generatoren utan å køyre kroppen.
+                hvis vm_map_har_nokkel(kall_def, "generator") {
+                    la gen_obj = vm_gen_ny(løyst_namn, call_args)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                    stack_push(ramme, gen_obj)
+                    ip = ip + 1
+                    fortsett
+                }
+            }
+
+            // F36: kall til ein asynk funksjon startar ei oppgåve og gjev ei future.
+            hvis asynk_modus og løyst_namn != "" {
+                la asynk_def = vm_def_hent(vm_def_cache, functions, løyst_namn)
+                hvis vm_def_er_asynk(asynk_def) {
+                    la asynk_fut = vm_async_start(functions, løyst_namn, call_args)
+                    green_på = vm_green_på_i(functions)
+                    stack_push(ramme, asynk_fut)
+                    vm_arg_liste_frigje_p(vm_arg_pool, call_args, fast_mode)
+                    ip = ip + 1
+                    fortsett
+                }
             }
 
             hvis løyst_namn != "" {
                 la jit_used = usann
                 la jit_value = 0
-                hvis ikkje fast_mode {
+                hvis ikkje fast_mode og ikkje vm_dekn_på {
                     hvis ikkje vm_jit_ok {
                         vm_jit_tillatt = runtime_security.har(functions["__vm_security_policy__"], "jit.execute")
                         vm_jit_caps = functions["__vm_function_caps__"]
@@ -7223,6 +8571,7 @@ funksjon køyr_funksjon(
                     fortsett
                 }
             }
+
 
             // Tail-call trampoline: CALL rett før RETURN treng ikkje ei ny
             // vertsramme når ingen lokal try-handler skal overleve kallet.
@@ -7544,6 +8893,8 @@ funksjon køyr_funksjon(
             }
 
             hvis call_failed {
+                // R4/F34: stakksporet blir bygd før dei nøsta rammene blir fjerna.
+                vm_registrer_kast(functions, aktive_rammer, call_error)
                 // Vanleg unnatak (ikkje GreenVenter) frå eit kall i ytste slice:
                 // ei eventuell venting i tråden er over.
                 hvis er_green_slice { vm_green_vent_rydd() }
@@ -7556,7 +8907,7 @@ funksjon køyr_funksjon(
                 }
                 vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
 
-                la call_handler_index = vm_find_handler(try_stack, call_error)
+                la call_handler_index = vm_find_handler(functions, try_stack, call_error)
                 la call_cleanup_stack = ramme["cleanup_stack"]
                 hvis lengde(call_cleanup_stack) > 0 {
                     la call_cleanup = call_cleanup_stack[lengde(call_cleanup_stack) - 1]
@@ -7610,6 +8961,27 @@ funksjon køyr_funksjon(
             vm_gc_safe_point_f(fast_mode, functions, vm_metrics_kart, vm_heap, usann)
             ip = ip + 1
             fortsett
+        }
+
+        // ── F45: gi (generator-yield) ─────────────────────────────────────
+        // Poppar verdien, parkerer rammen i resume-slotten (reason «gen») og
+        // returnerer verdien til vm_gen_steg. Rammen blir teken opp att av neste kall.
+        hvis op == "GI" {
+            la gi_verdi = stack_pop(ramme)
+            ramme["state"] = "waiting"
+            ramme["ip"] = ip + 1
+            la gi_state: ordbok_tekst = {}
+            gi_state["active"] = "sann"
+            gi_state["reason"] = "gen"
+            gi_state["fn_namn"] = fn_namn
+            gi_state["ip"] = ip + 1
+            gi_state["frame"] = ramme
+            gi_state["continuations"] = continuations
+            gi_state["tail_chain_count"] = tail_chain_count
+            gi_state["function_start_ms"] = function_start_ms
+            functions["__vm_debug_resume_state__"] = gi_state
+            fjern_siste(aktive_rammer)
+            returner gi_verdi
         }
 
         // ── Retur ────────────────────────────────────────────────────────
@@ -7734,8 +9106,9 @@ funksjon køyr_funksjon(
             vm_metric_inc_f(fast_mode, vm_metrics_kart, "throws")
             la unntak_melding = stack_pop(ramme)
             ramme["last_exception"] = unntak_melding
+            vm_registrer_kast(functions, aktive_rammer, unntak_melding)
 
-            la lokal_handler_index = vm_find_handler(try_stack, unntak_melding)
+            la lokal_handler_index = vm_find_handler(functions, try_stack, unntak_melding)
             hvis lokal_handler_index >= 0 { vm_prune_handlers(try_stack, lokal_handler_index) }
 
             la cleanup_stack = ramme["cleanup_stack"]
@@ -7763,7 +9136,7 @@ funksjon køyr_funksjon(
                     la forelder = continuations[lengde(continuations) - 1]
                     fjern_siste(continuations)
                     la forelder_try = forelder["try_stack"]
-                    la forelder_handler_index = vm_find_handler(forelder_try, unntak_melding)
+                    la forelder_handler_index = vm_find_handler(functions, forelder_try, unntak_melding)
                     la forelder_cleanup = forelder["cleanup_stack"]
                     hvis lengde(forelder_cleanup) > 0 {
                         la cleanup = forelder_cleanup[lengde(forelder_cleanup) - 1]
@@ -7856,7 +9229,7 @@ funksjon køyr_funksjon(
 
         hvis op == "PRINT" {
             la v = stack_pop(ramme)
-            skriv(tekst(v))
+            skriv(vm_tekst_av(functions, v))
             ip = ip + 1
             fortsett
         }
@@ -8022,6 +9395,16 @@ funksjon køyr_ncb(ncb: ordbok<tekst, tekst>) -> heltall {
     vm_gc_finish(functions)
     skriv("[vm] entry returned\n")
     returner resultat
+}
+
+// F44: som køyr_ncb, men med linjedekning på (tvinga standardmodus utan JIT).
+// Returnerer {"resultat": ..., "dekning": {fn: {ip: "1"}}, "functions": ncb["functions"]}.
+// Vanleg køyr_ncb er uendra; dekninga er av med mindre denne inngangen blir brukt.
+funksjon køyr_ncb_dekning(ncb: ordbok<tekst, tekst>) {
+    la functions = ncb["functions"]
+    functions["__vm_dekning__"] = {}
+    la resultat = køyr_ncb(ncb)
+    returner {"resultat": resultat, "dekning": functions["__vm_dekning__"]}
 }
 
 // ─── Test-inngangspunkt ───────────────────────────────────────────────────────
