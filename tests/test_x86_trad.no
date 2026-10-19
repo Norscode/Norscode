@@ -1,0 +1,126 @@
+// F37 grøne trådar i AOT (x86-64): fiksturar bygde med codegen-ELF-en og køyrde på Linux x86-64.
+//   • aot_x86_trad_basis   spawn/join/argument/returverdi, unntak i tråd, ukjend fn, kooperativ
+//                          vent.sov, join-timeout, djup rekursjon i eigen stakk, 10 trådar (exit 42).
+//   • aot_x86_trad_gc      4 trådar + hovudtråd allokerer og gjev frå seg kontrollen medan GC køyrer;
+//                          ALLE trådstakkar må vere GC-røter. Bygd både utan GC (bump) og med
+//                          NORSCODE_GC_ALLOC=1 — den siste feilar utan skann av suspenderte stakkar.
+//   • aot_x86_trad_sync    mutex/condition (thread_sync), std.samtid tråd_start/join, std.kanal
+//                          mellom trådar, stakkoverflyt i tråd gjev status error.
+//   • basis og sync òg bygde for norscodeos-x86_64 (ingen GC-modus der) og køyrde under Linux.
+// Codegen-ELF: NC_NOS_CODEGEN, elles bootstrap/native_codegen_x86_64.elf. Er han eldre enn F37
+// (ingen green_switch-atom), feilar testen med vilje: installer ny ELF (sjå docs/AOT_TRADAR.md).
+// Berre Linux x86-64-vert (elles hoppa over).
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = ""
+    la maskin = ""
+    prøv {
+        la info = builtin.system_info()
+        system = tekst(info["system"])
+        maskin = tekst(info["machine"])
+    } fang (e) {}
+    returner system == "Linux" og (maskin == "x86_64" eller maskin == "amd64")
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la m: ordbok_tekst = {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la nokkel = nøkler(miljø)
+    la i: heiltall = 0
+    mens i < lengde(nokkel) { m[nokkel[i]] = miljø[nokkel[i]]  i = i + 1 }
+    returner prosess.køyr(executable, argv, root, m, timeout_ms)
+}
+
+funksjon krev_exit(resultat: ordbok_tekst, kode: heiltall) -> heiltall {
+    hvis tekst(resultat["status"]) != "ferdig" eller heltall_fra_tekst(tekst(resultat["exit_code"])) != kode {
+        prosess.skriv_resultat(resultat)
+        assert_eq(tekst(resultat["status"]) + "/" + tekst(resultat["exit_code"]), "ferdig/" + tekst_fra_heltall(kode))
+    }
+    returner 0
+}
+
+funksjon inneheld(b: liste, sek: liste_heiltall) -> boolsk {
+    la n = lengde(sek)
+    la i: heiltall = 0
+    la slutt = lengde(b) - n
+    mens i <= slutt {
+        hvis b[i] == sek[0] {
+            la lik = sann
+            la k: heiltall = 1
+            mens k < n { hvis b[i + k] != sek[k] { lik = usann  k = n }  k = k + 1 }
+            hvis lik { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon bygg_elf(runtime_sti: tekst, cg: tekst, root: tekst, fiksstur: tekst, mal: tekst, merke: tekst, miljo: ordbok_tekst) -> ordbok_tekst {
+    la ncb = "/tmp/norscode_x86_trad_" + merke + ".ncb.json"
+    krev_exit(køyr(runtime_sti, ["bundle", "--output", ncb, root + "/tests/fixtures/" + fiksstur], root, {}, 300000), 0)
+    la elf = "/tmp/norscode_x86_trad_" + merke + ".elf"
+    la m: ordbok_tekst = {"NC_TARGET": mal, "NC_INPUT": ncb, "NC_OUTPUT": elf, "NORSCODE_GC_ALLOC": ""}
+    la nokkel = nøkler(miljo)
+    la i: heiltall = 0
+    mens i < lengde(nokkel) { m[nokkel[i]] = miljo[nokkel[i]]  i = i + 1 }
+    la r = køyr(cg, [], root, m, 600000)
+    filops.slett_fil(ncb)
+    r["elf"] = elf
+    returner r
+}
+
+funksjon kjor_fikstur(rt: tekst, cg: tekst, root: tekst, fiksstur: tekst, venta_tekst: tekst, mal: tekst, miljo: ordbok_tekst) -> heiltall {
+    la merke = builtin.random_hex(8)
+    la b = bygg_elf(rt, cg, root, fiksstur, mal, merke, miljo)
+    krev_exit(b, 0)
+    assert(builtin.fil_sett_kjorbar(tekst(b["elf"])))
+    // norscodeos-x86_64-ELF-en brukar berre Linux-ABI-delmengda: han køyrer òg på Linux (futex/clone
+    // er -ENOSYS), so mmap/munmap/nanosleep-vegen til dei grøne trådane blir køyrt her.
+    la r = køyr(tekst(b["elf"]), [], root, {}, 120000)
+    krev_exit(r, 42)
+    assert(builtin.contains(tekst(r["stdout"]), venta_tekst))
+    filops.slett_fil(tekst(b["elf"]))
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje vert_linux_x86_64() {
+        skriv("test_x86_trad: hoppa over (ikkje Linux x86-64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la cg = miljo_hent("NC_NOS_CODEGEN")
+    hvis cg == "" { cg = root + "/bootstrap/native_codegen_x86_64.elf" }
+    la rt = runtime(root)
+    la utan_gc: ordbok_tekst = {}
+    la med_gc: ordbok_tekst = {"NORSCODE_GC_ALLOC": "1"}
+
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_basis.no", "aot_x86_trad_basis OK", "linux-x86_64", utan_gc)
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_gc.no", "aot_x86_trad_gc OK", "linux-x86_64", utan_gc)
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_gc.no", "aot_x86_trad_gc OK", "linux-x86_64", med_gc)
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_sync.no", "aot_x86_trad_sync OK", "linux-x86_64", utan_gc)
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_basis.no", "aot_x86_trad_basis OK", "norscodeos-x86_64", utan_gc)
+    kjor_fikstur(rt, cg, root, "aot_x86_trad_sync.no", "aot_x86_trad_sync OK", "norscodeos-x86_64", utan_gc)
+    skriv("test_x86_trad OK\n")
+    returner 0
+}

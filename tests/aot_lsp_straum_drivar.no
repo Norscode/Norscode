@@ -1,0 +1,157 @@
+// Interaktiv test-driver for den strøymande språktenaren (linux-x86_64 AOT).
+//
+// Startar tenaren som barneprosess med to røyr (stdin/stdout) og snakkar
+// Content-Length-ramma JSON-RPC MED stdin ope heile vegen: kvart svar må kome
+// FØR neste melding blir send. Ein batch-tenar (les til EOF) hengjer seg og
+// driveren feilar på tidsgrensa — testen diskriminerer dermed strøymingi.
+//
+// Ikkje ein `nc test`-test (treng fd_les/prosess_start frå AOT, ikkje VM):
+//   ./bin/nc bygg-native --target linux-x86_64 selfhost/lsp/straum.no build/rclsp/straum.elf
+//   ./bin/nc bygg-native --target linux-x86_64 tests/aot_lsp_straum_drivar.no build/rclsp/drivar.elf
+//   docker run --rm --platform linux/amd64 -v $PWD/build/rclsp:/w nc-x86tools /w/drivar.elf /w/straum.elf
+// (første argument = stien til tenaren; vert lese frå miljøvariabelen LSP_SERVER,
+//  standard /w/straum.elf).
+
+bruk selfhost.lsp.straum som s
+
+la FEIL = 0
+
+funksjon krev(ok: boolsk, namn: tekst, detalj: tekst) {
+    hvis ok {
+        skriv("OK   " + namn + "\n")
+    } ellers {
+        FEIL = FEIL + 1
+        skriv("FEIL " + namn + ": " + detalj + "\n")
+    }
+}
+
+// ── røyr og prosess ──────────────────────────────────────────────────────────
+
+funksjon mmap_buf() -> heiltall {
+    returner builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+}
+
+funksjon lag_royr(buf: heiltall) {
+    la r = builtin.sys6(293, buf, 0, 0, 0, 0, 0)
+    hvis r < 0 { kast "pipe2 feila" }
+    la v = builtin.raw_load64(buf)
+    returner [v & 4294967295, (v >> 32) & 4294967295]
+}
+
+funksjon sov_ms(buf: heiltall, ms: heiltall) {
+    builtin.raw_store64(buf + 1024, 0)
+    builtin.raw_store64(buf + 1032, ms * 1000000)
+    builtin.sys6(35, buf + 1024, 0, 0, 0, 0, 0)
+}
+
+// ── ramming ──────────────────────────────────────────────────────────────────
+
+funksjon send(fd: heiltall, json: tekst) {
+    fd_skriv(fd, "Content-Length: " + tekst(lengde(json)) + "\r\n\r\n" + json)
+}
+
+// Les éi ramma melding frå fd (ikkje-blokkerande) innan frist_ms. null ved tidsavbrot.
+la LESEBUF = ""
+
+funksjon les_ramme(buf: heiltall, fd: heiltall, frist_ms: heiltall) {
+    la slutt = builtin.now_ms() + frist_ms
+    mens builtin.now_ms() < slutt {
+        la r = s.lsp_pakk_ut(LESEBUF)
+        hvis finnes_nøkkel(r, "body") {
+            LESEBUF = r["rest"]
+            returner r["body"]
+        }
+        la bit = fd_les(fd, 32768)
+        hvis bit == "" {
+            sov_ms(buf, 5)
+        } ellers {
+            LESEBUF = LESEBUF + bit
+        }
+    }
+    returner null
+}
+
+funksjon json_str(s2: tekst) -> tekst {
+    returner s.lsp_js_tekst(s2)
+}
+
+funksjon start() -> heiltall {
+    la tenar = miljo_hent("LSP_SERVER")
+    hvis tenar == "" { tenar = "/w/straum.elf" }
+    la buf = mmap_buf()
+    la a = lag_royr(buf)
+    la b = lag_royr(buf)
+    // a: driver → tenar (stdin), b: tenar → driver (stdout)
+    la pid = prosess_start(tenar, [a[0], b[1], 2])
+    krev(pid > 0, "start tenar", "pid=" + tekst(pid))
+    builtin.sys6(3, a[0], 0, 0, 0, 0, 0)
+    builtin.sys6(3, b[1], 0, 0, 0, 0, 0)
+    builtin.sys6(72, b[0], 4, 2048, 0, 0, 0)
+    la inn = a[1]
+    la ut = b[0]
+
+    // 1) initialize — svaret må kome medan stdin framleis er ope.
+    send(inn, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":null}}")
+    la r1 = les_ramme(buf, ut, 15000)
+    krev(r1 != null, "initialize svar før neste melding (strøyming)", "tidsavbrot")
+    hvis r1 != null {
+        krev(builtin.contains(r1, "\"id\":1") og builtin.contains(r1, "hoverProvider") og builtin.contains(r1, "\"change\":2"), "initialize capabilities", r1)
+    }
+    send(inn, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+    // 2) didOpen med typefeil → diagnostikk FØR neste melding.
+    la src = "// Legg saman.\nfunksjon pluss(a: heltall, b: heltall) -> heltall {\n    returner a + b\n}\nfunksjon start() {\n    la x: heltall = pluss(1, \"to\")\n}\n"
+    send(inn, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\",\"languageId\":\"norscode\",\"version\":1,\"text\":" + json_str(src) + "}}}")
+    la r2 = les_ramme(buf, ut, 30000)
+    krev(r2 != null, "publishDiagnostics etter didOpen (strøyming)", "tidsavbrot")
+    hvis r2 != null {
+        krev(builtin.contains(r2, "publishDiagnostics") og builtin.contains(r2, "\"code\":\"type-error\"") og builtin.contains(r2, "\"severity\":1") og builtin.contains(r2, "\"line\":5"), "diagnostikk: typefeil på linje 5", r2)
+    }
+
+    // 3) hover
+    send(inn, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\"},\"position\":{\"line\":5,\"character\":22}}}")
+    la r3 = les_ramme(buf, ut, 15000)
+    krev(r3 != null og builtin.contains(r3, "funksjon pluss(a: heltall, b: heltall) -> heltall") og builtin.contains(r3, "Legg saman."), "hover: signatur + dokkommentar", tekst(r3))
+
+    // 4) definition
+    send(inn, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\"},\"position\":{\"line\":5,\"character\":22}}}")
+    la r4 = les_ramme(buf, ut, 15000)
+    krev(r4 != null og builtin.contains(r4, "\"uri\":\"file:///t/a.no\"") og builtin.contains(r4, "\"start\":{\"line\":1,\"character\":9}"), "definition: pluss på linje 1", tekst(r4))
+
+    // 5) completion med prefiks
+    send(inn, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\"},\"position\":{\"line\":5,\"character\":21}}}")
+    la r5 = les_ramme(buf, ut, 15000)
+    krev(r5 != null og builtin.contains(r5, "\"label\":\"pluss\"") og ikkje builtin.contains(r5, "\"label\":\"returner\""), "completion: prefiks «p» gjev pluss, ikkje returner", tekst(r5))
+
+    // 6) inkrementell endring som fiksar feilen: "to" → 2 (linje 5, teikn 29..33)
+    send(inn, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\",\"version\":2},\"contentChanges\":[{\"range\":{\"start\":{\"line\":5,\"character\":29},\"end\":{\"line\":5,\"character\":33}},\"text\":\"2\"}]}}")
+    la r6 = les_ramme(buf, ut, 30000)
+    krev(r6 != null og builtin.contains(r6, "publishDiagnostics") og ikkje builtin.contains(r6, "type-error") og builtin.contains(r6, "\"version\":2"), "inkrementell didChange fjernar typefeilen", tekst(r6))
+
+    // 7) syntaksfeil
+    send(inn, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file:///t/a.no\",\"version\":3},\"contentChanges\":[{\"text\":\"funksjon (\\n\"}]}}")
+    la r7 = les_ramme(buf, ut, 30000)
+    krev(r7 != null og builtin.contains(r7, "syntax-error") og builtin.contains(r7, "\"severity\":1"), "syntaksfeil gjev syntax-error", tekst(r7))
+
+    // 8) shutdown + exit
+    send(inn, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\"}")
+    la r8 = les_ramme(buf, ut, 15000)
+    krev(r8 != null og builtin.contains(r8, "\"id\":9") og builtin.contains(r8, "\"result\":null"), "shutdown svarar null", tekst(r8))
+    send(inn, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+    la ferdig = usann
+    la status = -1
+    la t0 = builtin.now_ms()
+    mens ikkje ferdig og builtin.now_ms() < t0 + 15000 {
+        la w = prosess_vent_ikkje_blokkerande(pid)
+        hvis w["ferdig"] { ferdig = sann  status = w["status"] } ellers { sov_ms(buf, 10) }
+    }
+    krev(ferdig og status == 0, "exit etter shutdown gjev kode 0", "ferdig=" + tekst(ferdig) + " status=" + tekst(status))
+    hvis ikkje ferdig { prosess_drep(pid) }
+
+    hvis FEIL == 0 {
+        skriv("AOT-LSP-DRIVAR OK\n")
+        returner 0
+    }
+    skriv("AOT-LSP-DRIVAR FEILA: " + tekst(FEIL) + "\n")
+    returner 1
+}
