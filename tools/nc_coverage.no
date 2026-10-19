@@ -1,0 +1,349 @@
+// tools/nc_coverage.no — `nc coverage <testfil|mappe> [--alle] [--ut rapport.json]` (F44).
+//
+// Køyrer eit Norscode-program (typisk ein testfil) i VM-en med linjedekning på og
+// skriv ein rapport per kjeldefil: dekte/køyrbare linjer, prosent og manglande linjer.
+// Dekninga er ein eksekveringsteljar i selfhost/vm.no (`køyr_ncb_dekning`) som er AV
+// som standard: vanleg køyring har ingen `__vm_dekning__`-nøkkel og får uendra
+// åtferd/NCB. Teljaren verkar berre i standardmodus (ikkje NORSCODE_VM_FAST=1),
+// utan JIT; verktøyet slår difor av fast-modus for målprogrammet.
+//
+// Argument kjem frå NC_VERKTOY_ARGV (linjeskilde liste) eller NC_DEKN_ARGV.
+// Mappe: kvar `test_*.no` blir køyrt i eigen barneprosess (`bin/nc run` på dette
+// verktøyet i enkeltmodus, NC_DEKN_EIN=1), og rapportane blir slått saman.
+
+bruk selfhost.kompiler som kompiler
+bruk selfhost.vm som vm
+bruk std.runtime_filesystem som native_fs
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon args() -> liste_tekst {
+    la rå = env("NC_VERKTOY_ARGV")
+    la ut: liste_tekst = []
+    hvis rå == "" { returner ut }
+    la delar = builtin.split(rå, "\n")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis delar[i] != "" { legg_til(ut, delar[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Kjerne: bygg dekningsdata frå ein køyring ────────────────────────────────────
+
+funksjon er_kodefunksjon(def) -> bool {
+    hvis builtin.type(def) != "ordbok" { returner usann }
+    hvis ikkje finnes_nøkkel(def, "code") { returner usann }
+    returner finnes_nøkkel(def, "source_lines")
+}
+
+funksjon legg_linje(kart, modul: tekst, linje: heiltall) -> heiltall {
+    hvis ikkje finnes_nøkkel(kart, modul) { kart[modul] = {} }
+    kart[modul][tekst_fra_heltall(linje)] = "1"
+    returner 0
+}
+
+// → {"kjorbare": {modul: {linje: "1"}}, "dekte": {modul: {linje: "1"}}}
+funksjon samle(functions, dekning) {
+    la kjorbare = {}
+    la dekte = {}
+    la namn = nøkler(functions)
+    la i = 0
+    mens i < lengde(namn) {
+        la fn = tekst(namn[i])
+        la def = functions[fn]
+        hvis er_kodefunksjon(def) {
+            la modul = tekst(def["module"])
+            la lines = def["source_lines"]
+            la treff = {}
+            hvis finnes_nøkkel(dekning, fn) { treff = dekning[fn] }
+            la ip = 0
+            mens ip < lengde(lines) {
+                la l = lines[ip]
+                hvis l > 0 {
+                    legg_linje(kjorbare, modul, l)
+                    hvis finnes_nøkkel(treff, tekst_fra_heltall(ip)) { legg_linje(dekte, modul, l) }
+                }
+                ip = ip + 1
+            }
+        }
+        i = i + 1
+    }
+    returner {"kjorbare": kjorbare, "dekte": dekte}
+}
+
+// Slå saman to samlingar (union av linjer).
+funksjon slå_saman(a, b) {
+    la ut = {"kjorbare": {}, "dekte": {}}
+    la delar = ["kjorbare", "dekte"]
+    la d = 0
+    mens d < 2 {
+        la kilder = [a[delar[d]], b[delar[d]]]
+        la k = 0
+        mens k < 2 {
+            la modular = nøkler(kilder[k])
+            la m = 0
+            mens m < lengde(modular) {
+                la mod = tekst(modular[m])
+                la ls = nøkler(kilder[k][mod])
+                la li = 0
+                mens li < lengde(ls) {
+                    legg_linje(ut[delar[d]], mod, heltall_fra_tekst(tekst(ls[li])))
+                    li = li + 1
+                }
+                m = m + 1
+            }
+            k = k + 1
+        }
+        d = d + 1
+    }
+    returner ut
+}
+
+// Modul → kjeldefil. __main__ er hovudfila; elles std.x → std/x.no relativt rot.
+funksjon modul_fil(modul: tekst, hovudfil: tekst, root: tekst) -> tekst {
+    hvis modul == "__main__" { returner hovudfil }
+    hvis builtin.starts_with(modul, "fil:") { returner builtin.slice(modul, 4, lengde(modul)) }
+    la rel = builtin.replace(modul, ".", "/") + ".no"
+    hvis builtin.fil_finnes(root + "/" + rel) { returner rel }
+    returner ""
+}
+
+// Standard: berre brukarkode (hovudfil + modular utanfor std/selfhost). --alle tar alt.
+funksjon med_i_rapport(modul: tekst, alle: bool) -> bool {
+    hvis alle { returner sann }
+    hvis modul == "__main__" eller builtin.starts_with(modul, "fil:") { returner sann }
+    hvis builtin.starts_with(modul, "std.") eller builtin.starts_with(modul, "selfhost.") { returner usann }
+    hvis builtin.starts_with(modul, "tools.") eller modul == "builtin" { returner usann }
+    returner sann
+}
+
+funksjon sorterte_tal(kart) -> liste {
+    la ut = []
+    la ks = nøkler(kart)
+    la i = 0
+    mens i < lengde(ks) {
+        legg_til(ut, heltall_fra_tekst(tekst(ks[i])))
+        i = i + 1
+    }
+    la a = 0
+    mens a < lengde(ut) {
+        la b = a + 1
+        mens b < lengde(ut) {
+            hvis ut[b] < ut[a] {
+                la t = ut[a]
+                ut[a] = ut[b]
+                ut[b] = t
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    returner ut
+}
+
+// Komprimer manglande linjer til «3-5, 9».
+funksjon område_tekst(linjer: liste) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la start = linjer[i]
+        la slutt = start
+        mens i + 1 < lengde(linjer) og linjer[i + 1] == slutt + 1 {
+            slutt = linjer[i + 1]
+            i = i + 1
+        }
+        hvis ut != "" { ut = ut + ", " }
+        hvis start == slutt { ut = ut + tekst_fra_heltall(start) }
+        ellers { ut = ut + tekst_fra_heltall(start) + "-" + tekst_fra_heltall(slutt) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// → liste av {"modul","fil","dekte","kjorbare","prosent","manglar"} + totalar i siste ledd.
+funksjon rapport_rader(samla, hovudfil: tekst, root: tekst, alle: bool) -> liste {
+    la rader = []
+    la modular = nøkler(samla["kjorbare"])
+    la m = 0
+    mens m < lengde(modular) {
+        la mod = tekst(modular[m])
+        hvis med_i_rapport(mod, alle) {
+            la kjor = sorterte_tal(samla["kjorbare"][mod])
+            la dekt = {}
+            hvis finnes_nøkkel(samla["dekte"], mod) { dekt = samla["dekte"][mod] }
+            la manglar = []
+            la di = 0
+            mens di < lengde(kjor) {
+                hvis ikkje finnes_nøkkel(dekt, tekst_fra_heltall(kjor[di])) { legg_til(manglar, kjor[di]) }
+                di = di + 1
+            }
+            la n_kjor = lengde(kjor)
+            la n_dekt = n_kjor - lengde(manglar)
+            la prosent = 100
+            hvis n_kjor > 0 { prosent = (n_dekt * 1000 / n_kjor + 5) / 10 }
+            legg_til(rader, {
+                "modul": mod,
+                "fil": modul_fil(mod, hovudfil, root),
+                "dekte": n_dekt,
+                "kjorbare": n_kjor,
+                "prosent": prosent,
+                "manglar": område_tekst(manglar)
+            })
+        }
+        m = m + 1
+    }
+    returner rader
+}
+
+funksjon formater_rapport(rader: liste) -> tekst {
+    la ut = "Linjedekning\n"
+    la sum_d = 0
+    la sum_k = 0
+    la i = 0
+    mens i < lengde(rader) {
+        la r = rader[i]
+        la namn = tekst(r["fil"])
+        hvis namn == "" { namn = tekst(r["modul"]) }
+        ut = ut + "  " + namn + "  " + tekst_fra_heltall(r["dekte"]) + "/" + tekst_fra_heltall(r["kjorbare"]) +
+            "  " + tekst_fra_heltall(r["prosent"]) + " %"
+        hvis tekst(r["manglar"]) != "" { ut = ut + "  manglar: " + tekst(r["manglar"]) }
+        ut = ut + "\n"
+        sum_d = sum_d + r["dekte"]
+        sum_k = sum_k + r["kjorbare"]
+        i = i + 1
+    }
+    la total = 100
+    hvis sum_k > 0 { total = (sum_d * 1000 / sum_k + 5) / 10 }
+    ut = ut + "Totalt: " + tekst_fra_heltall(sum_d) + "/" + tekst_fra_heltall(sum_k) + " linjer (" + tekst_fra_heltall(total) + " %)\n"
+    returner ut
+}
+
+// ── Køyring av éi fil i prosessen ───────────────────────────────────────────────
+
+funksjon køyr_ei_fil(fil: tekst) {
+    la kjelde = builtin.fil_les(fil)
+    la ncb = builtin.json_parse_raw(kompiler.kompiler_fil(kjelde, "__main__"))
+    // Dekninga krev standardmodus: ingen fast-modus, og ingen JIT (VM-en hoppar over
+    // JIT når teljaren er på).
+    miljo_sett("NORSCODE_VM_FAST", "0")
+    la res = vm.køyr_ncb_dekning(ncb)
+    returner navngi_hovudmodul(samle(ncb["functions"], res["dekning"]), fil)
+}
+
+// Fleire filer har alle modulnamnet __main__; gje dei fil-namn («fil:sti») før samanslåing.
+funksjon navngi_hovudmodul(d, fil: tekst) {
+    la ut = {"kjorbare": {}, "dekte": {}}
+    la delar = ["kjorbare", "dekte"]
+    la k = 0
+    mens k < 2 {
+        la modular = nøkler(d[delar[k]])
+        la m = 0
+        mens m < lengde(modular) {
+            la mod = tekst(modular[m])
+            la nytt = mod
+            hvis mod == "__main__" { nytt = "fil:" + fil }
+            ut[delar[k]][nytt] = d[delar[k]][mod]
+            m = m + 1
+        }
+        k = k + 1
+    }
+    returner ut
+}
+
+// ── Mappe/fleire filer: barneprosess per fil ───────────────────────────────────
+
+funksjon test_filer(sti: tekst, root: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis builtin.ends_with(sti, ".no") {
+        legg_til(ut, sti)
+        returner ut
+    }
+    la rel = sti
+    hvis builtin.starts_with(rel, root + "/") { rel = builtin.slice(rel, lengde(root) + 1, lengde(rel)) }
+    la walk = native_fs.native_walk_files_med_suffiks(root, rel, ".no")
+    hvis walk["status"] != "ok" { returner ut }
+    la filer = builtin.split(walk["data"], "\n")
+    la i = 0
+    mens i < lengde(filer) {
+        la f = builtin.trim(filer[i])
+        hvis f != "" og builtin.starts_with(builtin.split(f, "/")[lengde(builtin.split(f, "/")) - 1], "test_") {
+            legg_til(ut, f)
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon køyr_barn(fil: tekst, root: tekst, ut_sti: tekst) -> bool {
+    la m = {"NC_DEKN_EIN": "1", "NC_DEKN_FIL": fil, "NC_DEKN_UT": ut_sti,
+            "NORSCODE_ROOT": root, "NC_VERKTOY_ARGV": ""}
+    la argv = ["run", root + "/tools/nc_coverage.no"]
+    // Før seeden har fått køyr_ncb_dekning (reseed) kan barnet gå via kjelde-kjeda:
+    // NC_DEKN_BARN_MODUS=test køyrer verktøyet under `nc test`, som kompilerer vm.no frå kjelde.
+    hvis env("NC_DEKN_BARN_MODUS") == "test" {
+        argv = ["test", "tools/nc_coverage.no"]
+        m["NC_TEST_FILE"] = "tools/nc_coverage.no"
+        m["NORSCODE_VM_HOSTED"] = "0"
+        m["NC_SLOW_TESTS"] = "1"
+        m["TEST_TIMEOUT"] = "900"
+    }
+    la r = prosess.køyr_liste(root + "/bin/nc", argv, root, m, 900000)
+    returner r[0] == "0" og builtin.fil_finnes(ut_sti)
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    hvis env("NC_DEKN_EIN") == "1" {
+        // Enkeltmodus (barn): skriv samla dekning som JSON.
+        la d = køyr_ei_fil(env("NC_DEKN_FIL"))
+        builtin.fil_skriv(env("NC_DEKN_UT"), builtin.json_stringify(d))
+        returner 0
+    }
+    la a = args()
+    la alle = usann
+    la ut_json = ""
+    la mål = ""
+    la i = 0
+    mens i < lengde(a) {
+        hvis a[i] == "--alle" { alle = sann }
+        ellers hvis a[i] == "--ut" og i + 1 < lengde(a) { ut_json = a[i + 1]  i = i + 1 }
+        ellers { mål = a[i] }
+        i = i + 1
+    }
+    hvis mål == "" {
+        skriv("bruk: nc coverage <testfil.no|mappe> [--alle] [--ut rapport.json]\n")
+        returner 2
+    }
+    la filer = test_filer(mål, root)
+    hvis lengde(filer) == 0 {
+        skriv("nc coverage: ingen testfiler under " + mål + "\n")
+        returner 2
+    }
+    la samla = {"kjorbare": {}, "dekte": {}}
+    la hovud = filer[0]
+    la feil = 0
+    la fi = 0
+    mens fi < lengde(filer) {
+        la tmp = "/tmp/nc_dekning_" + tekst_fra_heltall(fi) + "_" + tekst_fra_heltall(builtin.tid_ms()) + ".json"
+        hvis køyr_barn(filer[fi], root, tmp) {
+            samla = slå_saman(samla, builtin.json_parse_raw(builtin.fil_les(tmp)))
+        } ellers {
+            skriv("nc coverage: køyring feila for " + filer[fi] + "\n")
+            feil = feil + 1
+        }
+        prøv { builtin.fil_slett(tmp) } fang (e) { }
+        fi = fi + 1
+    }
+    la rader = rapport_rader(samla, hovud, root, alle)
+    skriv(formater_rapport(rader))
+    hvis ut_json != "" { builtin.fil_skriv(ut_json, builtin.json_stringify(rader)) }
+    hvis feil > 0 { returner 1 }
+    returner 0
+}
