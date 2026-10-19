@@ -1,0 +1,333 @@
+# saslprep.no - SASLprep (RFC 4013) for SCRAM-passord, same oppførsel som Postgres sin pg_saslprep.
+#
+#   bruk std.saslprep som sp
+#   sp.saslprep("blåbær")      # -> normalisert passord (bytestreng, UTF-8)
+#
+# Rekkjefølgje (som pg_saslprep): ugyldig UTF-8 -> rått passord. Reint utskrivbart ASCII -> uendra.
+# Elles: mapping (ikkje-ASCII mellomrom -> U+0020, «mapped to nothing» fjerna), NFKC, kontroll av
+# forbodne teikn og toveis-tekst (RFC 3454 tabell C.*, bidi). Ved forbode teikn eller bidi-brot
+# (SASLprep-feil) blir det RÅE passordet brukt, som libpq og tenaren gjer.
+#
+# NFKC er ei AVGRENSA delmengd: kompatibilitetsdekomponering av fullbreidd-ASCII, ligaturar (ff, fi,
+# fl, ffi, ffl, st), hevd/senka siffer, ª º µ, ¼ ½ ¾, ™ № ℃ ℉, sirkla siffer og mellomrom+aksent
+# (¨ ¯ ´ ¸), og kanonisk komposisjon av dei vanlege latinske bokstavane (grunnteikn + gravis, akutt,
+# sirkumfleks, tilde, tremma, ring, cedille, karon, makron, ogonek, prikk, breve, dobbel akutt).
+# Dekomponert inndata (a + U+030A) blir dermed samansett til å; æ, ø, Æ, Ø og ß har ingen dekomponering.
+# Ikkje med: Table A.1 (ikkje-tildelte teikn i Unicode 3.2), Hangul-komposisjon, kanonisk
+# omordning av fleire kombinerande teikn, full LCat-tabell i bidi-sjekken (ASCII-bokstavar og
+# teikn utanfor RandAL-områda blir rekna som LCat).
+
+# ── UTF-8 ───────────────────────────────────────────────────────────────────
+# Bytes i ein bytestreng (teikn over 255 blir UTF-8-kodar, som std.pg._utf8).
+funksjon _bytes(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis c < 256 {
+            legg_til(ut, c)
+        } ellers hvis c < 2048 {
+            legg_til(ut, 192 + (c / 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers hvis c < 65536 {
+            legg_til(ut, 224 + (c / 4096))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers {
+            legg_til(ut, 240 + (c / 262144))
+            legg_til(ut, 128 + ((c / 4096) % 64))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Streng UTF-8-dekoding til kodepunkt; gir {ok, cp}.
+funksjon _dekod(b: liste_heiltall) -> ordbok {
+    la cp: liste_heiltall = []
+    la i: heiltall = 0
+    la n = lengde(b)
+    mens i < n {
+        la x = b[i]
+        hvis x < 128 {
+            legg_til(cp, x)
+            i = i + 1
+        } ellers hvis x >= 194 og x <= 223 {
+            hvis i + 1 >= n eller (b[i + 1] & 192) != 128 { returner {"ok": usann, "cp": []} }
+            legg_til(cp, ((x & 31) << 6) | (b[i + 1] & 63))
+            i = i + 2
+        } ellers hvis x >= 224 og x <= 239 {
+            hvis i + 2 >= n eller (b[i + 1] & 192) != 128 eller (b[i + 2] & 192) != 128 { returner {"ok": usann, "cp": []} }
+            la v = ((x & 15) << 12) | ((b[i + 1] & 63) << 6) | (b[i + 2] & 63)
+            hvis v < 2048 eller (v >= 55296 og v <= 57343) { returner {"ok": usann, "cp": []} }
+            legg_til(cp, v)
+            i = i + 3
+        } ellers hvis x >= 240 og x <= 244 {
+            hvis i + 3 >= n eller (b[i + 1] & 192) != 128 eller (b[i + 2] & 192) != 128 eller (b[i + 3] & 192) != 128 { returner {"ok": usann, "cp": []} }
+            la v = ((x & 7) << 18) | ((b[i + 1] & 63) << 12) | ((b[i + 2] & 63) << 6) | (b[i + 3] & 63)
+            hvis v < 65536 eller v > 1114111 { returner {"ok": usann, "cp": []} }
+            legg_til(cp, v)
+            i = i + 4
+        } ellers {
+            returner {"ok": usann, "cp": []}
+        }
+    }
+    returner {"ok": sann, "cp": cp}
+}
+
+# Kodepunkt -> bytestreng (UTF-8, eitt teikn per byte).
+funksjon _kod(cp: liste_heiltall) -> tekst {
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(cp) {
+        la c = cp[i]
+        hvis c < 128 {
+            legg_til(ut, builtin.chr(c))
+        } ellers hvis c < 2048 {
+            legg_til(ut, builtin.chr(192 + (c / 64)))
+            legg_til(ut, builtin.chr(128 + (c % 64)))
+        } ellers hvis c < 65536 {
+            legg_til(ut, builtin.chr(224 + (c / 4096)))
+            legg_til(ut, builtin.chr(128 + ((c / 64) % 64)))
+            legg_til(ut, builtin.chr(128 + (c % 64)))
+        } ellers {
+            legg_til(ut, builtin.chr(240 + (c / 262144)))
+            legg_til(ut, builtin.chr(128 + ((c / 4096) % 64)))
+            legg_til(ut, builtin.chr(128 + ((c / 64) % 64)))
+            legg_til(ut, builtin.chr(128 + (c % 64)))
+        }
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# ── Områdetabellar (flate lister: lo, hi, lo, hi, ...) ──────────────────────
+funksjon _i_tabell(c: heiltall, t: liste_heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i + 1 < lengde(t) {
+        hvis c >= t[i] og c <= t[i + 1] { returner sann }
+        i = i + 2
+    }
+    returner usann
+}
+
+# RFC 3454 C.1.2 (ikkje-ASCII mellomrom)
+funksjon _T_MELLOMROM() -> liste_heiltall {
+    returner [160, 160, 5760, 5760, 8192, 8203, 8239, 8239, 8287, 8287, 12288, 12288]
+}
+# RFC 3454 B.1 (mapped to nothing)
+funksjon _T_INGENTING() -> liste_heiltall {
+    returner [173, 173, 847, 847, 6150, 6150, 6155, 6157, 8203, 8205, 8288, 8288, 65024, 65039, 65279, 65279]
+}
+# Forbodne (RFC 4013 §2.3): C.2.1, C.2.2, C.3, C.4, C.5, C.6, C.7, C.8, C.9
+funksjon _T_FORBODE() -> liste_heiltall {
+    returner [0, 31, 127, 159, 1757, 1757, 1807, 1807, 6158, 6158, 8204, 8205, 8232, 8233, 8288, 8291, 8298, 8303,
+              65279, 65279, 65529, 65532, 119155, 119162,
+              57344, 63743, 983040, 1048573, 1048576, 1114109,
+              64976, 65007, 65534, 65535, 131070, 131071, 196606, 196607, 262142, 262143, 327678, 327679,
+              393214, 393215, 458750, 458751, 524286, 524287, 589822, 589823, 655358, 655359, 720894, 720895,
+              786430, 786431, 851966, 851967, 917502, 917503, 983038, 983039, 1048574, 1048575, 1114110, 1114111,
+              55296, 57343, 65529, 65533, 12272, 12283, 832, 833, 8206, 8207, 8234, 8238,
+              917505, 917505, 917536, 917631]
+}
+# RandALCat (RFC 3454 D.1), avrunda til dei vanlege hebraiske og arabiske blokkene
+funksjon _T_RANDAL() -> liste_heiltall {
+    returner [1470, 1470, 1472, 1472, 1475, 1475, 1488, 1514, 1520, 1524, 1563, 1563, 1567, 1567, 1569, 1594,
+              1600, 1610, 1645, 1647, 1649, 1749, 1757, 1757, 1765, 1766, 1786, 1790, 1792, 1805, 1807, 1807,
+              1808, 1808, 1810, 1836, 1920, 1957, 1969, 1969, 8207, 8207, 64285, 64285, 64287, 64296, 64298, 64310,
+              64312, 64316, 64318, 64318, 64320, 64321, 64323, 64324, 64326, 64449, 64467, 64829, 64848, 64911,
+              64914, 64967, 65008, 65020, 65136, 65140, 65142, 65276]
+}
+
+# ── NFKC-delmengd ───────────────────────────────────────────────────────────
+# Kompatibilitetsdekomponering av eitt kodepunkt (gir [] når det ikkje finst).
+funksjon _kompat(c: heiltall) -> liste_heiltall {
+    hvis c >= 65281 og c <= 65374 { returner [c - 65248] }
+    hvis c >= 9312 og c <= 9320 { returner [c - 9312 + 49] }
+    hvis c >= 8320 og c <= 8329 { returner [c - 8320 + 48] }
+    hvis c >= 8308 og c <= 8313 { returner [c - 8308 + 52] }
+    hvis c == 8304 { returner [48] }
+    hvis c == 8305 { returner [105] }
+    hvis c == 8319 { returner [110] }
+    hvis c == 170 { returner [97] }
+    hvis c == 186 { returner [111] }
+    hvis c == 178 { returner [50] }
+    hvis c == 179 { returner [51] }
+    hvis c == 185 { returner [49] }
+    hvis c == 181 { returner [956] }
+    hvis c == 188 { returner [49, 8260, 52] }
+    hvis c == 189 { returner [49, 8260, 50] }
+    hvis c == 190 { returner [51, 8260, 52] }
+    hvis c == 383 { returner [115] }
+    hvis c == 8230 { returner [46, 46, 46] }
+    hvis c == 8482 { returner [84, 77] }
+    hvis c == 8470 { returner [78, 111] }
+    hvis c == 8451 { returner [176, 67] }
+    hvis c == 8457 { returner [176, 70] }
+    hvis c == 168 { returner [32, 776] }
+    hvis c == 175 { returner [32, 772] }
+    hvis c == 180 { returner [32, 769] }
+    hvis c == 184 { returner [32, 807] }
+    hvis c == 64256 { returner [102, 102] }
+    hvis c == 64257 { returner [102, 105] }
+    hvis c == 64258 { returner [102, 108] }
+    hvis c == 64259 { returner [102, 102, 105] }
+    hvis c == 64260 { returner [102, 102, 108] }
+    hvis c == 64261 { returner [115, 116] }
+    hvis c == 64262 { returner [115, 116] }
+    returner []
+}
+
+# Kanonisk komposisjon: tripler (grunnteikn, kombinerande teikn, resultat).
+funksjon _KOMP() -> liste_heiltall {
+    la t: liste_heiltall = []
+    # Latin-1: (grunn, kombinerande, samansett) for store bokstavar; små bokstavar er +32 på alle tre
+    la stor = [
+        65, 768, 192,  65, 769, 193,  65, 770, 194,  65, 771, 195,  65, 776, 196,  65, 778, 197,
+        67, 807, 199,  69, 768, 200,  69, 769, 201,  69, 770, 202,  69, 776, 203,
+        73, 768, 204,  73, 769, 205,  73, 770, 206,  73, 776, 207,  78, 771, 209,
+        79, 768, 210,  79, 769, 211,  79, 770, 212,  79, 771, 213,  79, 776, 214,
+        85, 768, 217,  85, 769, 218,  85, 770, 219,  85, 776, 220,  89, 769, 221]
+    la i: heiltall = 0
+    mens i < lengde(stor) {
+        legg_til(t, stor[i])
+        legg_til(t, stor[i + 1])
+        legg_til(t, stor[i + 2])
+        legg_til(t, stor[i] + 32)
+        legg_til(t, stor[i + 1])
+        legg_til(t, stor[i + 2] + 32)
+        i = i + 3
+    }
+    # ÿ
+    legg_til(t, 121) legg_til(t, 776) legg_til(t, 255)
+    # Latin Extended-A og -B (store; liten form er +1 i dei fleste par)
+    la ea = [
+        65, 772, 256,  65, 774, 258,  65, 808, 260,  67, 769, 262,  67, 780, 268,  68, 780, 270,
+        69, 772, 274,  69, 808, 280,  69, 780, 282,  71, 774, 286,  73, 772, 298,
+        78, 769, 323,  78, 780, 327,  79, 772, 332,  79, 779, 336,  82, 780, 344,
+        83, 769, 346,  83, 807, 350,  83, 780, 352,  84, 780, 356,  85, 772, 362,  85, 778, 366,  85, 779, 368,
+        90, 769, 377,  90, 775, 379,  90, 780, 381]
+    i = 0
+    mens i < lengde(ea) {
+        legg_til(t, ea[i])
+        legg_til(t, ea[i + 1])
+        legg_til(t, ea[i + 2])
+        legg_til(t, ea[i] + 32)
+        legg_til(t, ea[i + 1])
+        legg_til(t, ea[i + 2] + 1)
+        i = i + 3
+    }
+    # İ (I med prikk) har ingen liten partner i same par
+    legg_til(t, 73) legg_til(t, 775) legg_til(t, 304)
+    returner t
+}
+
+funksjon _komponer(a: heiltall, b: heiltall, tabell: liste_heiltall) -> heiltall {
+    hvis b < 768 eller b > 880 { returner 0 }
+    la i: heiltall = 0
+    mens i + 2 < lengde(tabell) {
+        hvis tabell[i] == a og tabell[i + 1] == b { returner tabell[i + 2] }
+        i = i + 3
+    }
+    returner 0
+}
+
+funksjon _nfkc(cp: liste_heiltall) -> liste_heiltall {
+    la dekomp: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(cp) {
+        la d = _kompat(cp[i])
+        hvis lengde(d) > 0 {
+            la j: heiltall = 0
+            mens j < lengde(d) { legg_til(dekomp, d[j]) j = j + 1 }
+        } ellers {
+            legg_til(dekomp, cp[i])
+        }
+        i = i + 1
+    }
+    la tabell = _KOMP()
+    la ut: liste_heiltall = []
+    i = 0
+    mens i < lengde(dekomp) {
+        la c = dekomp[i]
+        hvis lengde(ut) > 0 {
+            la k = _komponer(ut[lengde(ut) - 1], c, tabell)
+            hvis k != 0 {
+                ut[lengde(ut) - 1] = k
+                i = i + 1
+                fortsett
+            }
+        }
+        legg_til(ut, c)
+        i = i + 1
+    }
+    returner ut
+}
+
+# ── Hovudfunksjonar ─────────────────────────────────────────────────────────
+funksjon _utskrivbar_ascii(b: liste_heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(b) {
+        hvis b[i] < 32 eller b[i] > 126 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# Strikt SASLprep: {ok, verdi, grunn}. ok=usann ved ugyldig UTF-8, forbode teikn eller bidi-brot.
+funksjon saslprep_strikt(passord: tekst) -> ordbok {
+    la b = _bytes(passord)
+    hvis _utskrivbar_ascii(b) { returner {"ok": sann, "verdi": passord, "grunn": ""} }
+    la d = _dekod(b)
+    hvis ikkje d["ok"] { returner {"ok": usann, "verdi": passord, "grunn": "ugyldig UTF-8"} }
+    # 1. mapping
+    la mapp: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(d["cp"]) {
+        la c = d["cp"][i]
+        hvis _i_tabell(c, _T_MELLOMROM()) {
+            legg_til(mapp, 32)
+        } ellers hvis ikkje _i_tabell(c, _T_INGENTING()) {
+            legg_til(mapp, c)
+        }
+        i = i + 1
+    }
+    # 2. normalisering
+    la norm = _nfkc(mapp)
+    # 3. forbodne teikn
+    i = 0
+    mens i < lengde(norm) {
+        hvis _i_tabell(norm[i], _T_FORBODE()) { returner {"ok": usann, "verdi": passord, "grunn": "forbode teikn U+" + tekst(norm[i])} }
+        i = i + 1
+    }
+    # 4. toveis-tekst: RandAL-teikn krev at strengen ikkje har LCat og at første og siste er RandAL
+    la har_randal = usann
+    la har_lcat = usann
+    i = 0
+    mens i < lengde(norm) {
+        la c = norm[i]
+        hvis _i_tabell(c, _T_RANDAL()) {
+            har_randal = sann
+        } ellers hvis (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller (c >= 192 og c != 215 og c != 247 og c < 1424) eller (c >= 8448 og c < 64285) {
+            har_lcat = sann
+        }
+        i = i + 1
+    }
+    hvis har_randal {
+        hvis har_lcat { returner {"ok": usann, "verdi": passord, "grunn": "bidi: blanding av høgre-til-venstre og venstre-til-høgre"} }
+        hvis ikkje _i_tabell(norm[0], _T_RANDAL()) eller ikkje _i_tabell(norm[lengde(norm) - 1], _T_RANDAL()) {
+            returner {"ok": usann, "verdi": passord, "grunn": "bidi: første og siste teikn må vere høgre-til-venstre"}
+        }
+    }
+    returner {"ok": sann, "verdi": _kod(norm), "grunn": ""}
+}
+
+# Som pg_saslprep + kallarane i libpq/tenaren: ved feil blir det råe passordet brukt.
+funksjon saslprep(passord: tekst) -> tekst {
+    la r = saslprep_strikt(passord)
+    returner r["verdi"]
+}
+
+funksjon status() { returner {"abi": "norscode-saslprep-v1", "rfc": 4013, "nfkc": "delmengd"} }

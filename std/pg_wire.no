@@ -1,0 +1,931 @@
+# pg_wire.no — PostgreSQL wire-protokoll v3: reine meldingar, SCRAM, MD5 og typekonvertering
+#
+# Ingen sokkel, ingen tilstand. Alt her er funksjonar frå bytes til bytes (og tilbake), slik at
+# protokollen kan testast byte-eksakt utan nettverk. std.pg legg transport, tilkoplingstilstand
+# og API oppå denne modulen.
+#
+# Bytemodell: ei «bytestreng» (tekst) har eitt teikn per byte, og bytes er liste_heiltall (0..255).
+# Kodane følgjer https://www.postgresql.org/docs/current/protocol-message-formats.html
+#
+# Bruk:
+#   bruk std.pg_wire som w
+#   la b = w.q("SELECT 1")                 # Query-melding som bytes
+#   la m = w.pakk_ut(84, buf, start, slutt)  # dekod ei backend-melding til ordbok
+
+bruk std.sha256 som sha
+bruk std.md5 som md5
+bruk std.krypto som krypto
+bruk std.base64 som base64
+
+# ─── Byte- og tekst-hjelparar ─────────────────────────────────────────────────
+
+funksjon i32(n: heltall) -> liste_heiltall {
+    returner [(n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255]
+}
+
+funksjon i16(n: heltall) -> liste_heiltall {
+    returner [(n >> 8) & 255, n & 255]
+}
+
+funksjon i64(n: heltall) -> liste_heiltall {
+    returner [(n >> 56) & 255, (n >> 48) & 255, (n >> 40) & 255, (n >> 32) & 255,
+              (n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255]
+}
+
+# Signert 32-bit big-endian frå bytes[pos..pos+4).
+funksjon les_i32(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la v = (bytes[pos] << 24) + (bytes[pos + 1] << 16) + (bytes[pos + 2] << 8) + bytes[pos + 3]
+    hvis v >= 2147483648 { returner v - 4294967296 }
+    returner v
+}
+
+# Usignert 16-bit.
+funksjon les_u16(bytes: liste_heiltall, pos: heltall) -> heltall {
+    returner (bytes[pos] << 8) + bytes[pos + 1]
+}
+
+# Signert 16-bit.
+funksjon les_i16(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la v = (bytes[pos] << 8) + bytes[pos + 1]
+    hvis v >= 32768 { returner v - 65536 }
+    returner v
+}
+
+# Signert 64-bit big-endian.
+funksjon les_i64(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la hi = les_i32(bytes, pos)
+    la lo = (bytes[pos + 4] << 24) + (bytes[pos + 5] << 16) + (bytes[pos + 6] << 8) + bytes[pos + 7]
+    returner hi * 4294967296 + lo
+}
+
+funksjon legg_til_alle(mål: liste_heiltall, kjelde: liste_heiltall) {
+    la i: heltall = 0
+    mens i < lengde(kjelde) {
+        legg_til(mål, kjelde[i])
+        i = i + 1
+    }
+}
+
+# Finn indeksen til neste NUL-byte frå pos (eller lengda om det ikkje finst).
+funksjon nul(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la i: heltall = pos
+    mens i < lengde(bytes) og bytes[i] != 0 { i = i + 1 }
+    returner i
+}
+
+# Teikn (< 256 = éi byte; høgare = UTF-8-kode) → bytes. Same modell som std.pg.
+funksjon utf8(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis c < 256 {
+            legg_til(ut, c)
+        } ellers hvis c < 2048 {
+            legg_til(ut, 192 + (c / 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers hvis c < 65536 {
+            legg_til(ut, 224 + (c / 4096))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers {
+            legg_til(ut, 240 + (c / 262144))
+            legg_til(ut, 128 + ((c / 4096) % 64))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# bytes[start, slutt) som bytestreng (eitt teikn per byte).
+funksjon fra_bytes(bytes: liste_heiltall, start: heltall, slutt: heltall) -> tekst {
+    la ut: liste_tekst = []
+    la i: heltall = start
+    mens i < slutt {
+        legg_til(ut, builtin.chr(bytes[i]))
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# Bytestreng → bytes (eitt teikn = éi byte; teikn over 255 blir UTF-8-kodar).
+funksjon til_bytes(s: tekst) -> liste_heiltall {
+    returner utf8(s)
+}
+
+funksjon cstr(s: tekst) -> liste_heiltall {
+    la b = utf8(s)
+    legg_til(b, 0)
+    returner b
+}
+
+la _HEX = "0123456789abcdef"
+
+funksjon bytes_til_hex(bytes: liste_heiltall) -> tekst {
+    la d: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(bytes) {
+        la b = bytes[i] & 255
+        legg_til(d, builtin.slice(_HEX, (b >> 4) & 15, ((b >> 4) & 15) + 1))
+        legg_til(d, builtin.slice(_HEX, b & 15, (b & 15) + 1))
+        i = i + 1
+    }
+    returner builtin.join(d, "")
+}
+
+funksjon _hex_verdi(c: tekst) -> heltall {
+    la k = builtin.char_code(c)
+    hvis k >= 97 { returner k - 87 }
+    hvis k >= 65 { returner k - 55 }
+    returner k - 48
+}
+
+funksjon hex_til_bytes(hex: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i + 1 < lengde(hex) {
+        legg_til(ut, _hex_verdi(builtin.slice(hex, i, i + 1)) * 16 + _hex_verdi(builtin.slice(hex, i + 1, i + 2)))
+        i = i + 2
+    }
+    returner ut
+}
+
+# ─── Rammer (frontend → server) ───────────────────────────────────────────────
+
+# Type-byte + lengde (inkl. lengdefeltet) + innhald.
+funksjon melding(typ: tekst, innhald: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [builtin.char_code(typ)]
+    legg_til_alle(ut, i32(lengde(innhald) + 4))
+    legg_til_alle(ut, innhald)
+    returner ut
+}
+
+# StartupMessage (ingen type-byte): protokoll 3.0 + user/database/…-par.
+# `ekstra` er ei ordbok med fleire oppstartsparametrar (t.d. application_name).
+funksjon startup(brukar: tekst, database: tekst, ekstra: ordbok_tekst) -> liste_heiltall {
+    la innhald: liste_heiltall = i32(196608)
+    legg_til_alle(innhald, cstr("user"))
+    legg_til_alle(innhald, cstr(brukar))
+    legg_til_alle(innhald, cstr("database"))
+    legg_til_alle(innhald, cstr(database))
+    legg_til_alle(innhald, cstr("client_encoding"))
+    legg_til_alle(innhald, cstr("UTF8"))
+    la nk = nøkler(ekstra)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        legg_til_alle(innhald, cstr(nk[i]))
+        legg_til_alle(innhald, cstr(tekst(ekstra[nk[i]])))
+        i = i + 1
+    }
+    legg_til(innhald, 0)
+    la ramme: liste_heiltall = i32(lengde(innhald) + 4)
+    legg_til_alle(ramme, innhald)
+    returner ramme
+}
+
+# SSLRequest: lengd 8 + magisk kode 80877103.
+funksjon ssl_request() -> liste_heiltall {
+    returner [0, 0, 0, 8, 4, 210, 22, 47]
+}
+
+# CancelRequest: lengd 16 + kode 80877102 + prosess-id + hemmeleg nøkkel.
+funksjon cancel_request(pid: heltall, nokkel: heltall) -> liste_heiltall {
+    la ut: liste_heiltall = i32(16)
+    legg_til_alle(ut, i32(80877102))
+    legg_til_alle(ut, i32(pid))
+    legg_til_alle(ut, i32(nokkel))
+    returner ut
+}
+
+funksjon q(sql: tekst) -> liste_heiltall {
+    returner melding("Q", cstr(sql))
+}
+
+# Parse: namn på setninga ("" = unnamed), SQL, og valfrie parametertypar (OID; 0 = lat tenaren velje).
+funksjon parse(namn: tekst, sql: tekst, oidar: liste_heiltall) -> liste_heiltall {
+    la inn: liste_heiltall = cstr(namn)
+    legg_til_alle(inn, cstr(sql))
+    legg_til_alle(inn, i16(lengde(oidar)))
+    la i: heltall = 0
+    mens i < lengde(oidar) {
+        legg_til_alle(inn, i32(oidar[i]))
+        i = i + 1
+    }
+    returner melding("P", inn)
+}
+
+# Bind: portal, setningsnamn, format per parameter (0 tekst, 1 binær; lengd 0 = alle tekst,
+# lengd 1 = same for alle), verdiar (bytes eller null for SQL NULL), format for resultatkolonnar
+# (same reglar som for parametrane).
+funksjon bind(portal: tekst, setning: tekst, param_format: liste_heiltall, verdiar: liste, resultat_format: liste_heiltall) -> liste_heiltall {
+    la inn: liste_heiltall = cstr(portal)
+    legg_til_alle(inn, cstr(setning))
+    legg_til_alle(inn, i16(lengde(param_format)))
+    la i: heltall = 0
+    mens i < lengde(param_format) {
+        legg_til_alle(inn, i16(param_format[i]))
+        i = i + 1
+    }
+    legg_til_alle(inn, i16(lengde(verdiar)))
+    i = 0
+    mens i < lengde(verdiar) {
+        hvis verdiar[i] == null {
+            legg_til_alle(inn, i32(-1 + 4294967296))
+        } ellers {
+            legg_til_alle(inn, i32(lengde(verdiar[i])))
+            legg_til_alle(inn, verdiar[i])
+        }
+        i = i + 1
+    }
+    legg_til_alle(inn, i16(lengde(resultat_format)))
+    i = 0
+    mens i < lengde(resultat_format) {
+        legg_til_alle(inn, i16(resultat_format[i]))
+        i = i + 1
+    }
+    returner melding("B", inn)
+}
+
+# Describe: slag «S» (setning) eller «P» (portal).
+funksjon describe(slag: tekst, namn: tekst) -> liste_heiltall {
+    la inn: liste_heiltall = [builtin.char_code(slag)]
+    legg_til_alle(inn, cstr(namn))
+    returner melding("D", inn)
+}
+
+# Execute: portal + maks rader (0 = alle).
+funksjon execute(portal: tekst, maks_rader: heltall) -> liste_heiltall {
+    la inn: liste_heiltall = cstr(portal)
+    legg_til_alle(inn, i32(maks_rader))
+    returner melding("E", inn)
+}
+
+funksjon sync() -> liste_heiltall {
+    returner melding("S", [])
+}
+
+funksjon flush() -> liste_heiltall {
+    returner melding("H", [])
+}
+
+# Close: slag «S» eller «P».
+funksjon lukk_melding(slag: tekst, namn: tekst) -> liste_heiltall {
+    la inn: liste_heiltall = [builtin.char_code(slag)]
+    legg_til_alle(inn, cstr(namn))
+    returner melding("C", inn)
+}
+
+funksjon terminate() -> liste_heiltall {
+    returner melding("X", [])
+}
+
+funksjon passord_melding(passord: tekst) -> liste_heiltall {
+    returner melding("p", cstr(passord))
+}
+
+# SASLInitialResponse: mekanismenamn (C-streng) + lengd + første klientmelding.
+funksjon sasl_init(mekanisme: tekst, data: liste_heiltall) -> liste_heiltall {
+    la inn: liste_heiltall = cstr(mekanisme)
+    legg_til_alle(inn, i32(lengde(data)))
+    legg_til_alle(inn, data)
+    returner melding("p", inn)
+}
+
+funksjon sasl_svar(data: liste_heiltall) -> liste_heiltall {
+    returner melding("p", data)
+}
+
+funksjon copy_data(data: liste_heiltall) -> liste_heiltall {
+    returner melding("d", data)
+}
+
+funksjon copy_done() -> liste_heiltall {
+    returner melding("c", [])
+}
+
+funksjon copy_fail(grunn: tekst) -> liste_heiltall {
+    returner melding("f", cstr(grunn))
+}
+
+# ─── Rammer (server → frontend): dekoding ─────────────────────────────────────
+
+# Les éi ramme frå buf ved pos. Gir [type, innhaldsstart, innhaldsslutt, neste_pos],
+# eller null når bufferen ikkje har heile rama enno.
+funksjon neste_ramme(buf: liste_heiltall, pos: heltall) -> liste {
+    hvis lengde(buf) - pos < 5 { returner null }
+    la len = les_i32(buf, pos + 1)
+    hvis len < 4 { kast "PgProtokollFeil: ugyldig meldingslengd " + tekst_fra_heltall(len) }
+    hvis lengde(buf) - pos < 1 + len { returner null }
+    returner [buf[pos], pos + 5, pos + 1 + len, pos + 1 + len]
+}
+
+# ErrorResponse/NoticeResponse → ordbok frå feltkode (ein bokstav) til verdi.
+# Viktige felt: S alvor, V alvor (ikkje lokalisert), C SQLSTATE, M melding, D detalj, H tips,
+# P posisjon, W kontekst, s skjema, t tabell, c kolonne, d datatype, n constraint.
+funksjon pakk_felt(buf: liste_heiltall, start: heltall, slutt: heltall) -> ordbok_tekst {
+    la ut = {}
+    la i: heltall = start
+    mens i < slutt og buf[i] != 0 {
+        la kode = builtin.chr(buf[i])
+        la ende = nul(buf, i + 1)
+        ut[kode] = fra_bytes(buf, i + 1, ende)
+        i = ende + 1
+    }
+    returner ut
+}
+
+# «melding (SQLSTATE kode)» frå ei felt-ordbok. Same form som std.pg har brukt heile tida.
+funksjon feil_tekst(felt: ordbok_tekst) -> tekst {
+    la m = "ukjend feil"
+    hvis har_nokkel(felt, "M") { m = felt["M"] }
+    hvis har_nokkel(felt, "C") og felt["C"] != "" { returner m + " (SQLSTATE " + felt["C"] + ")" }
+    returner m
+}
+
+# Dekod ei backend-melding (type-byte `typ`, innhald buf[start..slutt)) til ei ordbok med nøkkelen
+# «type» (kort namn). Ukjende typar gir {"type": "ukjend", "kode": typ}.
+funksjon pakk_ut(typ: heltall, buf: liste_heiltall, start: heltall, slutt: heltall) -> ordbok {
+    hvis typ == 82 {
+        # Authentication*
+        la kode = les_i32(buf, start)
+        la r = {"type": "auth", "kode": kode}
+        hvis kode == 5 {
+            r["salt"] = [buf[start + 4], buf[start + 5], buf[start + 6], buf[start + 7]]
+        }
+        hvis kode == 10 {
+            la mek: liste_tekst = []
+            la i: heltall = start + 4
+            mens i < slutt og buf[i] != 0 {
+                la e = nul(buf, i)
+                legg_til(mek, fra_bytes(buf, i, e))
+                i = e + 1
+            }
+            r["mekanismar"] = mek
+        }
+        hvis kode == 11 eller kode == 12 {
+            r["data"] = fra_bytes(buf, start + 4, slutt)
+        }
+        returner r
+    }
+    hvis typ == 83 {
+        la e1 = nul(buf, start)
+        la e2 = nul(buf, e1 + 1)
+        returner {"type": "param", "namn": fra_bytes(buf, start, e1), "verdi": fra_bytes(buf, e1 + 1, e2)}
+    }
+    hvis typ == 75 {
+        returner {"type": "nokkel", "pid": les_i32(buf, start), "nokkel": les_i32(buf, start + 4)}
+    }
+    hvis typ == 90 {
+        returner {"type": "klar", "status": builtin.chr(buf[start])}
+    }
+    hvis typ == 84 {
+        la n = les_u16(buf, start)
+        la pos: heltall = start + 2
+        la kol = []
+        la k: heltall = 0
+        mens k < n {
+            la e = nul(buf, pos)
+            la namn = fra_bytes(buf, pos, e)
+            kol_legg_til(kol, namn, buf, e + 1)
+            pos = e + 1 + 18
+            k = k + 1
+        }
+        returner {"type": "radbeskriving", "kolonnar": kol}
+    }
+    hvis typ == 68 {
+        la n = les_u16(buf, start)
+        la pos: heltall = start + 2
+        la celler = []
+        la k: heltall = 0
+        mens k < n {
+            la len = les_i32(buf, pos)
+            pos = pos + 4
+            hvis len < 0 {
+                legg_til(celler, null)
+            } ellers {
+                legg_til(celler, fra_bytes(buf, pos, pos + len))
+                pos = pos + len
+            }
+            k = k + 1
+        }
+        returner {"type": "datarad", "celler": celler}
+    }
+    hvis typ == 67 {
+        returner {"type": "ferdig", "tag": fra_bytes(buf, start, nul(buf, start))}
+    }
+    hvis typ == 69 {
+        returner {"type": "feil", "felt": pakk_felt(buf, start, slutt)}
+    }
+    hvis typ == 78 {
+        returner {"type": "notis", "felt": pakk_felt(buf, start, slutt)}
+    }
+    hvis typ == 65 {
+        la e1 = nul(buf, start + 4)
+        la e2 = nul(buf, e1 + 1)
+        returner {"type": "varsel", "pid": les_i32(buf, start), "kanal": fra_bytes(buf, start + 4, e1), "nyttelast": fra_bytes(buf, e1 + 1, e2)}
+    }
+    hvis typ == 116 {
+        la n = les_u16(buf, start)
+        la oidar: liste_heiltall = []
+        la k: heltall = 0
+        mens k < n {
+            legg_til(oidar, les_i32(buf, start + 2 + 4 * k))
+            k = k + 1
+        }
+        returner {"type": "parameterbeskriving", "oidar": oidar}
+    }
+    hvis typ == 49 { returner {"type": "parse_ok"} }
+    hvis typ == 50 { returner {"type": "bind_ok"} }
+    hvis typ == 51 { returner {"type": "lukk_ok"} }
+    hvis typ == 110 { returner {"type": "ingen_data"} }
+    hvis typ == 115 { returner {"type": "portal_stoppa"} }
+    hvis typ == 73 { returner {"type": "tom_spørjing"} }
+    hvis typ == 71 eller typ == 72 eller typ == 87 {
+        la n = les_u16(buf, start + 1)
+        la fm: liste_heiltall = []
+        la k: heltall = 0
+        mens k < n {
+            legg_til(fm, les_u16(buf, start + 3 + 2 * k))
+            k = k + 1
+        }
+        la namn = "copy_inn"
+        hvis typ == 72 { namn = "copy_ut" }
+        hvis typ == 87 { namn = "copy_begge" }
+        returner {"type": namn, "format": buf[start], "kolonneformat": fm}
+    }
+    hvis typ == 100 { returner {"type": "copy_data", "data": fra_bytes(buf, start, slutt)} }
+    hvis typ == 99 { returner {"type": "copy_ferdig"} }
+    returner {"type": "ukjend", "kode": typ}
+}
+
+# Legg éin RowDescription-kolonne (felt etter namnet, frå `p`) til lista.
+funksjon kol_legg_til(kol: liste, namn: tekst, buf: liste_heiltall, p: heltall) {
+    legg_til(kol, {"namn": namn, "tabell_oid": les_i32(buf, p), "attnr": les_i16(buf, p + 4),
+                   "oid": les_i32(buf, p + 6), "storleik": les_i16(buf, p + 10),
+                   "modifikator": les_i32(buf, p + 12), "format": les_u16(buf, p + 16)})
+}
+
+# ─── Autentisering: MD5 og SCRAM-SHA-256 ──────────────────────────────────────
+
+# AuthenticationMD5Password: "md5" + md5hex(md5hex(passord + brukar) + salt).
+funksjon md5_passord(brukar: tekst, passord: tekst, salt: liste_heiltall) -> tekst {
+    la indre = md5.hash_bytes(utf8(passord + brukar))
+    la ytre: liste_heiltall = utf8(indre)
+    legg_til_alle(ytre, salt)
+    returner "md5" + md5.hash_bytes(ytre)
+}
+
+funksjon _hmac(nokkel: liste_heiltall, msg: liste_heiltall) -> liste_heiltall {
+    returner sha.hmac_sha256_bytes(nokkel, msg)
+}
+
+funksjon sha256_bytes(data: liste_heiltall) -> liste_heiltall {
+    returner hex_til_bytes(sha.hash_bytes(data))
+}
+
+funksjon _xor(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(a) {
+        legg_til(ut, a[i] ^ b[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# Tidskonstant samanlikning.
+funksjon bytes_like(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la diff: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(a) {
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    }
+    returner diff == 0
+}
+
+# Attributtet `namn` ("r", "s", "i", "v") frå ei SCRAM-melding «a=…,b=…». Tom tekst om det manglar.
+funksjon scram_attr(msg: tekst, namn: tekst) -> tekst {
+    la delar = builtin.split(msg, ",")
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], namn + "=") {
+            returner builtin.slice(delar[i], lengde(namn) + 1, lengde(delar[i]))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Første klientmelding. Postgres ignorerer brukarnamnet i SCRAM (sender det i oppstarten), så
+# brukar er normalt "". Gir {"bare": «n=…,r=…», "melding": «n,,» + bare}. Nonce må vere tilfeldig.
+funksjon scram_start(brukar: tekst, nonce: tekst) -> ordbok_tekst {
+    la bare = "n=" + brukar + ",r=" + nonce
+    returner {"bare": bare, "melding": "n,," + bare, "nonce": nonce}
+}
+
+# Utfør SCRAM-SHA-256-utrekninga (RFC 5802/7677). Passordet må alt vere SASLprep-normalisert.
+# Gir {"endeleg": klient-slutt-melding, "server_signatur": bytes}; kastar ved ugyldig serverfyrstemelding.
+funksjon scram_svar(tilstand: ordbok_tekst, server_forste: tekst, passord: tekst) -> ordbok_tekst {
+    la nonce = tilstand["nonce"]
+    la server_nonce = scram_attr(server_forste, "r")
+    hvis ikkje builtin.starts_with(server_nonce, nonce) eller lengde(server_nonce) <= lengde(nonce) {
+        kast "PgProtokollFeil: scram: tenaren returnerte ein nonce som ikkje bygger på vår"
+    }
+    la salt_b64 = scram_attr(server_forste, "s")
+    hvis salt_b64 == "" { kast "PgProtokollFeil: scram: manglar salt i svaret frå tenaren" }
+    la iter: heltall = 0
+    prøv { iter = heltall_fra_tekst(scram_attr(server_forste, "i")) } fang (e) { kast "PgProtokollFeil: scram: ugyldig iterasjonstal" }
+    hvis iter < 1 eller iter > 1000000 { kast "PgProtokollFeil: scram: urimeleg iterasjonstal frå tenaren" }
+    la salt = base64.dekod_bytes(salt_b64)
+    la pw = fra_bytes(utf8(passord), 0, lengde(utf8(passord)))
+    la sl = fra_bytes(salt, 0, lengde(salt))
+    la salta = hex_til_bytes(krypto.pbkdf2_sha256(pw, sl, iter, 32))
+    la klient_nokkel = _hmac(salta, utf8("Client Key"))
+    la lagra = sha256_bytes(klient_nokkel)
+    la utan_bevis = "c=biws,r=" + server_nonce
+    la auth_msg = utf8(tilstand["bare"] + "," + server_forste + "," + utan_bevis)
+    la klient_sig = _hmac(lagra, auth_msg)
+    la bevis = _xor(klient_nokkel, klient_sig)
+    la server_sig = _hmac(_hmac(salta, utf8("Server Key")), auth_msg)
+    returner {"endeleg": utan_bevis + ",p=" + base64.kod_bytes(bevis), "server_signatur": server_sig}
+}
+
+# Sjekk «v=…» i serverens sluttmelding mot venta signatur (tidskonstant).
+funksjon scram_verifiser(resultat: ordbok, server_slutt: tekst) -> boolsk {
+    la v = scram_attr(server_slutt, "v")
+    hvis v == "" { returner usann }
+    returner bytes_like(resultat["server_signatur"], base64.dekod_bytes(v))
+}
+
+# ─── Typekonvertering ─────────────────────────────────────────────────────────
+
+# Vanlege OID-ar. Alle andre typar kjem som tekst.
+funksjon oid_bool() -> heltall { returner 16 }
+funksjon oid_bytea() -> heltall { returner 17 }
+funksjon oid_int8() -> heltall { returner 20 }
+funksjon oid_int2() -> heltall { returner 21 }
+funksjon oid_int4() -> heltall { returner 23 }
+funksjon oid_text() -> heltall { returner 25 }
+funksjon oid_oid() -> heltall { returner 26 }
+funksjon oid_json() -> heltall { returner 114 }
+funksjon oid_float4() -> heltall { returner 700 }
+funksjon oid_float8() -> heltall { returner 701 }
+funksjon oid_varchar() -> heltall { returner 1043 }
+funksjon oid_date() -> heltall { returner 1082 }
+funksjon oid_time() -> heltall { returner 1083 }
+funksjon oid_timestamp() -> heltall { returner 1114 }
+funksjon oid_timestamptz() -> heltall { returner 1184 }
+funksjon oid_numeric() -> heltall { returner 1700 }
+funksjon oid_uuid() -> heltall { returner 2950 }
+funksjon oid_jsonb() -> heltall { returner 3802 }
+
+# Element-OID for kjende array-typar; 0 når OID-en ikkje er ein array.
+funksjon array_element(oid: heltall) -> heltall {
+    hvis oid == 1000 { returner 16 }
+    hvis oid == 1001 { returner 17 }
+    hvis oid == 1005 { returner 21 }
+    hvis oid == 1007 { returner 23 }
+    hvis oid == 1016 { returner 20 }
+    hvis oid == 1009 { returner 25 }
+    hvis oid == 1015 { returner 1043 }
+    hvis oid == 1002 { returner 18 }
+    hvis oid == 1014 { returner 1042 }
+    hvis oid == 1021 { returner 700 }
+    hvis oid == 1022 { returner 701 }
+    hvis oid == 1231 { returner 1700 }
+    hvis oid == 1182 { returner 1082 }
+    hvis oid == 1115 { returner 1114 }
+    hvis oid == 1185 { returner 1184 }
+    hvis oid == 2951 { returner 2950 }
+    hvis oid == 199 { returner 114 }
+    hvis oid == 3807 { returner 3802 }
+    hvis oid == 1028 { returner 26 }
+    returner 0
+}
+
+funksjon _siffer(n: heltall, bredde: heltall) -> tekst {
+    la s = tekst_fra_heltall(n)
+    mens lengde(s) < bredde { s = "0" + s }
+    returner s
+}
+
+# Dagar sidan 2000-01-01 → «YYYY-MM-DD» (proleptisk gregoriansk, Hinnant sin algoritme).
+funksjon dato_tekst(dagar: heltall) -> tekst {
+    la z = dagar + 730425
+    la era = z / 146097
+    hvis z < 0 { era = (z - 146096) / 146097 }
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = mp + 3
+    hvis mp >= 10 { m = mp - 9 }
+    hvis m <= 2 { y = y + 1 }
+    returner _siffer(y, 4) + "-" + _siffer(m, 2) + "-" + _siffer(d, 2)
+}
+
+# Mikrosekund etter midnatt → «HH:MM:SS[.ffffff]» (etterfølgjande nullar i brøken blir fjerna, som i Postgres).
+funksjon tid_tekst(mikro: heltall) -> tekst {
+    la s = mikro / 1000000
+    la frac = mikro - s * 1000000
+    la ut = _siffer(s / 3600, 2) + ":" + _siffer((s / 60) % 60, 2) + ":" + _siffer(s % 60, 2)
+    hvis frac != 0 {
+        la f = _siffer(frac, 6)
+        mens builtin.slice(f, lengde(f) - 1, lengde(f)) == "0" { f = builtin.slice(f, 0, lengde(f) - 1) }
+        ut = ut + "." + f
+    }
+    returner ut
+}
+
+# Mikrosekund sidan 2000-01-01 00:00:00 → «YYYY-MM-DD HH:MM:SS[.ffffff]».
+funksjon tidsstempel_tekst(mikro: heltall) -> tekst {
+    la dagar = mikro / 86400000000
+    la rest = mikro - dagar * 86400000000
+    hvis rest < 0 {
+        dagar = dagar - 1
+        rest = rest + 86400000000
+    }
+    returner dato_tekst(dagar) + " " + tid_tekst(rest)
+}
+
+# numeric, binært format → desimaltekst («-123.4500»).
+funksjon numeric_tekst(b: liste_heiltall, p: heltall) -> tekst {
+    la nsiffer = les_u16(b, p)
+    la vekt = les_i16(b, p + 2)
+    la teikn = les_u16(b, p + 4)
+    la dskala = les_u16(b, p + 6)
+    hvis teikn == 49152 { returner "NaN" }
+    hvis teikn == 53248 { returner "Infinity" }
+    hvis teikn == 61440 { returner "-Infinity" }
+    la heile: liste_tekst = []
+    la frac: liste_tekst = []
+    la i: heltall = 0
+    # sifferval i base 10000; plass i = vekt - i (>= 0 er heiltalsdelen)
+    la k: heltall = 0
+    mens k <= vekt {
+        la d = 0
+        hvis k < nsiffer { d = les_u16(b, p + 8 + 2 * k) }
+        hvis k == 0 { legg_til(heile, tekst_fra_heltall(d)) } ellers { legg_til(heile, _siffer(d, 4)) }
+        k = k + 1
+    }
+    hvis lengde(heile) == 0 { legg_til(heile, "0") }
+    # brøkdelen: sifferplassar vekt+1 ..
+    la fk: heltall = vekt + 1
+    hvis fk < 0 { fk = 0 }
+    la tom_før: heltall = 0
+    hvis vekt + 1 < 0 { tom_før = -(vekt + 1) }
+    la j: heltall = 0
+    mens j < tom_før { legg_til(frac, "0000") j = j + 1 }
+    mens fk < nsiffer {
+        legg_til(frac, _siffer(les_u16(b, p + 8 + 2 * fk), 4))
+        fk = fk + 1
+    }
+    la fs = builtin.join(frac, "")
+    mens lengde(fs) < dskala { fs = fs + "0" }
+    fs = builtin.slice(fs, 0, dskala)
+    la ut = builtin.join(heile, "")
+    hvis dskala > 0 { ut = ut + "." + fs }
+    hvis teikn == 16384 { ut = "-" + ut }
+    returner ut
+}
+
+# float8-bitar (signert 64-bit) → desimaltall.
+funksjon float8_frå_bits(bits: heltall) {
+    returner builtin.desimal_frå_bits(bits)
+}
+
+# float4-bitar (usignert 32-bit) → desimaltall.
+funksjon float4_frå_bits(u: heltall) {
+    la teikn = (u >> 31) & 1
+    la eks = (u >> 23) & 255
+    la mant = u & 8388607
+    la bits64 = 0
+    hvis eks == 255 {
+        bits64 = (2047 << 52) + (mant << 29)
+    } ellers hvis eks == 0 {
+        hvis mant == 0 {
+            bits64 = 0
+        } ellers {
+            # subnormal float4: mant * 2^-149
+            la v = (builtin.desimal_frå_bits(0) + mant) * builtin.desimal_frå_bits(3907433973178613760)
+            hvis teikn == 1 { returner 0 - v }
+            returner v
+        }
+    } ellers {
+        bits64 = ((eks - 127 + 1023) << 52) + (mant << 29)
+    }
+    hvis teikn == 1 { bits64 = bits64 + (1 << 63) }
+    returner builtin.desimal_frå_bits(bits64)
+}
+
+# Binærformat for éin verdi (bytestreng `s`) av type `oid` → Norscode-verdi.
+#   bool → boolsk; int2/int4/int8/oid → heltall; float4/float8 → desimaltall;
+#   numeric/date/time/timestamp(tz)/uuid/json/jsonb/text-typar → tekst;
+#   bytea → liste_heiltall; arrayar → liste (nøsta for fleire dimensjonar).
+funksjon dekod_binar(oid: heltall, s: tekst) {
+    la b = utf8(s)
+    la n = lengde(b)
+    hvis oid == 16 { returner b[0] != 0 }
+    hvis oid == 21 { returner les_i16(b, 0) }
+    hvis oid == 23 eller oid == 26 { returner les_i32(b, 0) }
+    hvis oid == 20 { returner les_i64(b, 0) }
+    hvis oid == 700 { returner float4_frå_bits(les_i32(b, 0) & 4294967295) }
+    hvis oid == 701 { returner float8_frå_bits(les_i64(b, 0)) }
+    hvis oid == 1700 { returner numeric_tekst(b, 0) }
+    hvis oid == 17 { returner b }
+    hvis oid == 1082 {
+        la d = les_i32(b, 0)
+        hvis d == 2147483647 { returner "infinity" }
+        hvis d == -2147483648 { returner "-infinity" }
+        returner dato_tekst(d)
+    }
+    hvis oid == 1083 { returner tid_tekst(les_i64(b, 0)) }
+    hvis oid == 1114 eller oid == 1184 {
+        la m = les_i64(b, 0)
+        hvis m == 9223372036854775807 { returner "infinity" }
+        hvis m == -9223372036854775807 - 1 { returner "-infinity" }
+        la t = tidsstempel_tekst(m)
+        hvis oid == 1184 { t = t + "+00" }
+        returner t
+    }
+    hvis oid == 2950 {
+        la h = bytes_til_hex(b)
+        returner builtin.slice(h, 0, 8) + "-" + builtin.slice(h, 8, 12) + "-" + builtin.slice(h, 12, 16) + "-" + builtin.slice(h, 16, 20) + "-" + builtin.slice(h, 20, 32)
+    }
+    hvis oid == 3802 { returner fra_bytes(b, 1, n) }
+    la el = array_element(oid)
+    hvis el != 0 { returner _dekod_binar_array(el, b) }
+    returner s
+}
+
+funksjon _dekod_binar_array(el: heltall, b: liste_heiltall) {
+    la ndim = les_i32(b, 0)
+    hvis ndim == 0 { returner [] }
+    la dimar: liste_heiltall = []
+    la pos: heltall = 12
+    la d: heltall = 0
+    mens d < ndim {
+        legg_til(dimar, les_i32(b, pos))
+        pos = pos + 8
+        d = d + 1
+    }
+    la flatt = []
+    la tot: heltall = 1
+    d = 0
+    mens d < ndim {
+        tot = tot * dimar[d]
+        d = d + 1
+    }
+    la k: heltall = 0
+    mens k < tot {
+        la len = les_i32(b, pos)
+        pos = pos + 4
+        hvis len < 0 {
+            legg_til(flatt, null)
+        } ellers {
+            legg_til(flatt, dekod_binar(el, fra_bytes(b, pos, pos + len)))
+            pos = pos + len
+        }
+        k = k + 1
+    }
+    returner _nøst(flatt, dimar, 0, [0])
+}
+
+# Del ei flat liste i nøsta lister etter dimensjonane.
+funksjon _nøst(flatt: liste, dimar: liste_heiltall, dim: heltall, teljar: liste_heiltall) {
+    la ut = []
+    la i: heltall = 0
+    mens i < dimar[dim] {
+        hvis dim == lengde(dimar) - 1 {
+            legg_til(ut, flatt[teljar[0]])
+            teljar[0] = teljar[0] + 1
+        } ellers {
+            legg_til(ut, _nøst(flatt, dimar, dim + 1, teljar))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Tekstformat for éin verdi av type `oid` → Norscode-verdi. Same typeavbilding som dekod_binar,
+# men numeric og dato/tid beheld tekstforma frå tenaren (taplaus), og bytea blir bytes.
+funksjon dekod_tekst(oid: heltall, s: tekst) {
+    hvis oid == 16 { returner s == "t" }
+    hvis oid == 20 eller oid == 21 eller oid == 23 eller oid == 26 {
+        prøv { returner heltall_fra_tekst(s) } fang (e) { returner s }
+    }
+    hvis oid == 700 eller oid == 701 { returner _flyttal_tekst(s) }
+    hvis oid == 17 { returner _bytea_tekst(s) }
+    la el = array_element(oid)
+    hvis el != 0 { returner _tekst_array(el, s) }
+    returner s
+}
+
+funksjon _flyttal_tekst(s: tekst) {
+    hvis s == "NaN" eller s == "Infinity" eller s == "-Infinity" { returner s }
+    prøv { returner builtin.desimaltall(s) } fang (e) { returner s }
+    returner s
+}
+
+# bytea i tekstformat: «\xdeadbeef» (hex-format, standard sidan 9.0) eller escape-format.
+funksjon _bytea_tekst(s: tekst) -> liste_heiltall {
+    hvis builtin.starts_with(s, "\\x") { returner hex_til_bytes(builtin.slice(s, 2, lengde(s))) }
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la c = builtin.slice(s, i, i + 1)
+        hvis c == "\\" og i + 1 < lengde(s) {
+            la n1 = builtin.slice(s, i + 1, i + 2)
+            hvis n1 == "\\" {
+                legg_til(ut, 92)
+                i = i + 2
+            } ellers hvis i + 3 < lengde(s) {
+                legg_til(ut, heltall_fra_tekst(builtin.slice(s, i + 1, i + 2)) * 64 + heltall_fra_tekst(builtin.slice(s, i + 2, i + 3)) * 8 + heltall_fra_tekst(builtin.slice(s, i + 3, i + 4)))
+                i = i + 4
+            } ellers {
+                legg_til(ut, 92)
+                i = i + 1
+            }
+        } ellers {
+            legg_til(ut, builtin.char_code(c))
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+# Array i tekstformat «{a,"b c",NULL,{x,y}}» → liste (element konvertert etter `el`).
+funksjon _tekst_array(el: heltall, s: tekst) {
+    la pos = [0]
+    # dimensjonsprefiks «[1:3]={…}» hoppast over
+    hvis builtin.starts_with(s, "[") {
+        la e = builtin.index_of(s, "=")
+        hvis e >= 0 { pos[0] = e + 1 }
+    }
+    returner _les_array(el, s, pos)
+}
+
+funksjon _les_array(el: heltall, s: tekst, pos: liste_heiltall) {
+    # pos[0] peikar på «{»
+    pos[0] = pos[0] + 1
+    la ut = []
+    la n = lengde(s)
+    mens pos[0] < n {
+        la c = builtin.slice(s, pos[0], pos[0] + 1)
+        hvis c == "}" {
+            pos[0] = pos[0] + 1
+            returner ut
+        }
+        hvis c == "," {
+            pos[0] = pos[0] + 1
+        } ellers hvis c == "{" {
+            legg_til(ut, _les_array(el, s, pos))
+        } ellers hvis c == "\"" {
+            la d: liste_tekst = []
+            pos[0] = pos[0] + 1
+            mens pos[0] < n og builtin.slice(s, pos[0], pos[0] + 1) != "\"" {
+                la ch = builtin.slice(s, pos[0], pos[0] + 1)
+                hvis ch == "\\" {
+                    pos[0] = pos[0] + 1
+                    ch = builtin.slice(s, pos[0], pos[0] + 1)
+                }
+                legg_til(d, ch)
+                pos[0] = pos[0] + 1
+            }
+            pos[0] = pos[0] + 1
+            legg_til(ut, dekod_tekst(el, builtin.join(d, "")))
+        } ellers {
+            la start = pos[0]
+            mens pos[0] < n og builtin.slice(s, pos[0], pos[0] + 1) != "," og builtin.slice(s, pos[0], pos[0] + 1) != "}" { pos[0] = pos[0] + 1 }
+            la tok = builtin.slice(s, start, pos[0])
+            hvis tok == "NULL" { legg_til(ut, null) } ellers { legg_til(ut, dekod_tekst(el, tok)) }
+        }
+    }
+    returner ut
+}
+
+# ─── Parameter-koding (binært format) ─────────────────────────────────────────
+
+# Verdi → bytes i binært format for type `oid`. Støtta: bool, int2/4/8, float4 (via float8-konvertering
+# ikkje støtta; bruk float8), float8, text/varchar/json (UTF-8), bytea (liste_heiltall), uuid («8-4-4-4-12»-tekst).
+funksjon kod_binar(oid: heltall, v) -> liste_heiltall {
+    hvis oid == 16 {
+        hvis v { returner [1] }
+        returner [0]
+    }
+    hvis oid == 21 { returner i16(v) }
+    hvis oid == 23 eller oid == 26 { returner i32(v) }
+    hvis oid == 20 { returner i64(v) }
+    hvis oid == 701 { returner i64(builtin.desimal_til_bits(v)) }
+    hvis oid == 17 { returner v }
+    hvis oid == 2950 { returner hex_til_bytes(tekst_erstatt(v, "-", "")) }
+    hvis oid == 25 eller oid == 1043 eller oid == 114 { returner utf8(tekst(v)) }
+    kast "PgTypeFeil: binær koding av OID " + tekst_fra_heltall(oid) + " er ikkje støtta"
+    returner []
+}

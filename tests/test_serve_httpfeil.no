@@ -1,0 +1,176 @@
+// 4.1: HTTPFeil-hierarkiet under ekte `nc serve` (barneprosess, NORSCODE_FAKE_HTTP_REQUESTS:
+// heile HTTP-vegen i nc_main utan sokkel; startup_hooks køyrer før førespurnadene).
+// tests/fixtures/httpfeil_app.no kastar kvar undertype av std.httpfeil og registrerer ein
+// feilhandterar for Konflikt i ein startup-hook. Sjekkar: rett statuskode og
+// {"detail": ...} per undertype, detalj som ordbok blir JSON, headers følgjer med,
+// registrert feilhandterar vinn for sin type (og berre den), vanleg unntak er framleis
+// 500 utan lekkasje, 404/405 er uendra. Utan endringa gjev kast av ein HTTPFeil-struktur
+// 500 «Intern feil» (alle undertypane feilar).
+// Kjører mot executable til den køyrande nc (eller NC_SERVE_TEST_BIN).
+bruk std.runtime.process_abi som process_abi
+
+funksjon crlf() -> tekst { returner "\r\n" }
+
+funksjon førespurnad(sti: tekst, ekstra: liste_tekst) -> tekst {
+    la r = "GET " + sti + " HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf()
+    la i: heiltall = 0
+    mens i < lengde(ekstra) {
+        r = r + ekstra[i] + crlf()
+        i = i + 1
+    }
+    returner r + crlf()
+}
+
+// NORSCODE_FAKE_HTTP_REQUESTS skil førespurnader med bokstaveleg «\n» (to teikn).
+funksjon saman(reqs: liste_tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(reqs) {
+        hvis i > 0 { ut = ut + "\\n" }
+        ut = ut + reqs[i]
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon serve_miljø(root: tekst, fast: tekst, reqs: tekst) -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_CMD": "serve",
+        "NORSCODE_FILE": root + "/tests/fixtures/httpfeil_app.no",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_ROOT": root,
+        "NC_SERVE_PORT": "48184",
+        "NC_SERVE_HOST": "127.0.0.1",
+        "NORSCODE_FAKE_HTTP_REQUESTS": reqs,
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_VM_FAST": fast,
+        "NORSCODE_VM_TARGET_CAPABILITIES": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": ""
+    }
+}
+
+// Opphev escaping når prosess-ABI-en har levert linjeskift som «\n» (to teikn),
+// eventuelt dobbelt («\\n»). Rå utdata (med ekte linjeskift) blir ikkje rørt.
+funksjon normaliser(t: tekst) -> tekst {
+    la s = t
+    la runde: heiltall = 0
+    mens ikkje builtin.contains(s, "\n") og builtin.contains(s, "\\n") og runde < 3 {
+        s = tekst_erstatt(s, "\\\\", "\\")
+        s = tekst_erstatt(s, "\\r", "\r")
+        s = tekst_erstatt(s, "\\n", "\n")
+        s = tekst_erstatt(s, "\\\"", "\"")
+        s = tekst_erstatt(s, "\\t", "\t")
+        runde = runde + 1
+    }
+    returner s
+}
+
+funksjon køyr_serve(runtime: tekst, root: tekst, fast: tekst, reqs: liste_tekst) -> tekst {
+    la req = process_abi.request(runtime, [], root, "", 600000, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, serve_miljø(root, fast, saman(reqs)))
+    la res = builtin.process_spawn_argv(req)
+    la ut = normaliser(tekst(res["stdout"]))
+    hvis tekst(res["status"]) != "ferdig" eller heltall_fra_tekst(tekst(res["exit_code"])) != 0 {
+        skriv("nc serve (VM_FAST=" + fast + ") feila: status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + "\n")
+        skriv("stdout:\n" + ut + "\nstderr:\n" + tekst(res["stderr"]) + "\n")
+        assert(usann)
+    }
+    returner ut
+}
+
+
+// Svar nr. n (0-basert): teksten frå n-te «HTTP/1.1 » til neste.
+funksjon svar_nr(ut: tekst, n: heiltall) -> tekst {
+    la rest = ut
+    la i: heiltall = 0
+    la p = builtin.index_of(rest, "HTTP/1.1 ")
+    mens p >= 0 og i < n {
+        rest = builtin.slice(rest, p + 9, lengde(rest))
+        p = builtin.index_of(rest, "HTTP/1.1 ")
+        i = i + 1
+    }
+    hvis p < 0 { returner "" }
+    rest = builtin.slice(rest, p + 9, lengde(rest))
+    la q = builtin.index_of(rest, "HTTP/1.1 ")
+    hvis q >= 0 { rest = builtin.slice(rest, 0, q) }
+    returner rest
+}
+
+la _feil: liste_tekst = []
+
+funksjon krev(namn: tekst, svar: tekst, sub: tekst) -> boolsk {
+    hvis ikkje builtin.contains(svar, sub) {
+        legg_til(_feil, namn)
+        skriv("SJEKK FEILA: " + namn + ": fann ikkje «" + sub + "» i «" + svar + "»\n")
+        returner usann
+    }
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    hvis miljo_hent("NC_SERVE_TEST_BIN") != "" { runtime = miljo_hent("NC_SERVE_TEST_BIN") }
+    la root = tekst(info["cwd"])
+    la sti = ["/funnet", "/generell", "/input", "/auth", "/forbode", "/konflikt", "/server", "/krasj", "/ok", "/finnesikkje"]
+    la reqs: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(sti) {
+        legg_til(reqs, førespurnad(sti[i], []))
+        i = i + 1
+    }
+    legg_til(reqs, "POST /ok HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf() + crlf())
+    la ut = køyr_serve(runtime, root, "0", reqs)
+
+    la a = svar_nr(ut, 0)
+    krev("IkkjeFunnet 404", a, "404")
+    krev("IkkjeFunnet detail", a, "{\"detail\":\"Fann ikkje\"}")
+    krev("IkkjeFunnet json", a, "application/json")
+    la g = svar_nr(ut, 1)
+    krev("HTTPFeil(418)", g, "418")
+    krev("HTTPFeil detail", g, "{\"detail\":\"tekanne\"}")
+    la inp = svar_nr(ut, 2)
+    krev("UgyldigInput 400", inp, "400")
+    krev("UgyldigInput ordbok-detalj", inp, "{\"detail\":{\"felt\":\"namn\",\"krav\":[\"påkravd\"]}}")
+    la u = svar_nr(ut, 3)
+    krev("IkkjeAutorisert 401", u, "401")
+    krev("IkkjeAutorisert header", u, "WWW-Authenticate: Bearer")
+    krev("IkkjeAutorisert detail", u, "{\"detail\":\"logg inn\"}")
+    la fb = svar_nr(ut, 4)
+    krev("Forbode 403", fb, "403")
+    krev("Forbode detail (handterar berre for Konflikt)", fb, "{\"detail\":\"ikkje din\"}")
+    la k = svar_nr(ut, 5)
+    krev("Konflikt feilhandterar 409", k, "409")
+    krev("Konflikt feilhandterar kropp", k, "{\"egen\":\"dobbel\"}")
+    krev("Konflikt feilhandterar header", k, "X-Handterar: konflikt")
+    la sv = svar_nr(ut, 6)
+    krev("ServerFeil 500", sv, "500")
+    krev("ServerFeil detail", sv, "{\"detail\":\"kaput\"}")
+    la x = svar_nr(ut, 7)
+    krev("vanleg unntak 500", x, "500")
+    krev("vanleg unntak lekkar ikkje", x, "Intern feil")
+    hvis builtin.contains(x, "gale internt") {
+        legg_til(_feil, "vanleg unntak lekkar teksten")
+        skriv("SJEKK FEILA: vanleg unntak lekkar teksten\n")
+    }
+    krev("vanleg rute 200", svar_nr(ut, 8), "200")
+    krev("ukjend rute 404", svar_nr(ut, 9), "404")
+    krev("feil metode 405", svar_nr(ut, 10), "405")
+
+    hvis lengde(_feil) > 0 {
+        skriv("utdata frå nc serve:\n" + ut + "\n")
+        kast "test_serve_httpfeil: " + tekst_fra_heltall(lengde(_feil)) + " sjekk(ar) feila"
+    }
+    skriv("test_serve_httpfeil OK\n")
+    returner 0
+}

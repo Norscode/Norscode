@@ -1,0 +1,83 @@
+// AOT-fikstur (rA-os punkt 8): prosess_start / prosess_vent_ikkje_blokkerande / prosess_drep
+// på linux-x86_64 (fork + dup2 + execve med fd-kart). Barnet er /bin/sh med stdin frå eit røyr
+// som forelderen held opent: sh blokkerer på lesinga → ferdig=usann; eit kommandokall på stdin
+// og lukking gjev ferdig=sann med exit-kode; eit andre barn blir drepe (SIGKILL → status 137).
+// Exit 42 = alt OK; 2..30 = steg som feila.
+bruk std.native_gap
+
+funksjon feil(kode: heiltall, m: tekst) -> heiltall {
+    skriv("aot_x86_prosess_start FEIL " + tekst_fra_heltall(kode) + ": " + m + "\n")
+    returner kode
+}
+
+// pipe2(&fd[2], O_CLOEXEC=0x80000) → [les, skriv]
+funksjon lag_royr() -> liste_heiltall {
+    la a = builtin.sys6(9, 0, 4096, 3, 34, -1, 0)
+    hvis builtin.sys6(293, a, 524288, 0, 0, 0, 0) != 0 { returner [-1, -1] }
+    la par = builtin.raw_load64(a)
+    returner [par & 4294967295, (par >> 32) & 4294967295]
+}
+
+funksjon skriv_fd(fd: heiltall, s: tekst) -> heiltall {
+    la a = builtin.sys6(9, 0, 4096, 3, 34, -1, 0)
+    la i: heiltall = 0
+    mens i < lengde(s) { builtin.raw_store8(a + i, builtin.char_code(builtin.slice(s, i, i + 1))) i = i + 1 }
+    returner builtin.sys6(1, fd, a, lengde(s), 0, 0, 0)
+}
+
+funksjon vent_ferdig(pid: heiltall) {
+    la v = prosess_vent_ikkje_blokkerande(pid)
+    la n: heiltall = 0
+    mens ikkje v["ferdig"] og n < 200 {
+        vent.sov(10)
+        v = prosess_vent_ikkje_blokkerande(pid)
+        n = n + 1
+    }
+    returner v
+}
+
+funksjon start() -> heiltall {
+    // Barn 1: sh med stdin/stdout frå røyr. Cloexec-røyr-endane lukkar seg ved execve; dup2-kopiane held.
+    la inn = lag_royr()
+    la ut = lag_royr()
+    hvis inn[0] < 0 eller ut[0] < 0 { returner feil(2, "pipe2") }
+    la pid = prosess_start("/bin/sh", [inn[0], ut[1], 2])
+    hvis pid <= 0 { returner feil(3, "prosess_start pid=" + tekst_fra_heltall(pid)) }
+    socket_close(inn[0])
+    socket_close(ut[1])
+    vent.sov(50)
+    la v0 = prosess_vent_ikkje_blokkerande(pid)
+    hvis v0["ferdig"] eller v0["status"] != 0 { returner feil(4, "burde kjøre enno") }
+    skriv_fd(inn[1], "echo hei frå barnet; exit 7\n")
+    la v1 = vent_ferdig(pid)
+    hvis ikkje v1["ferdig"] eller v1["status"] != 7 { returner feil(5, "venta ferdig/7, fekk status=" + tekst_fra_heltall(v1["status"])) }
+    la svar = fd_les(ut[0], 4096)
+    hvis svar != "hei frå barnet\n" { returner feil(6, "stdout frå barnet: «" + svar + "»") }
+    // alt hausta: ECHILD → ferdig=sann, status −1, feil −10
+    la v2 = prosess_vent_ikkje_blokkerande(pid)
+    hvis ikkje v2["ferdig"] eller v2["status"] != -1 eller v2["feil"] != -10 { returner feil(7, "andre wait4 skal gje ECHILD") }
+    socket_close(inn[1])
+    socket_close(ut[0])
+
+    // Barn 2: køyrer til det blir drepe.
+    la inn2 = lag_royr()
+    la pid2 = prosess_start("/bin/sh", [inn2[0], 1, 2])
+    hvis pid2 <= 0 { returner feil(8, "prosess_start 2") }
+    socket_close(inn2[0])
+    vent.sov(50)
+    la w0 = prosess_vent_ikkje_blokkerande(pid2)
+    hvis w0["ferdig"] { returner feil(9, "barn 2 burde kjøre enno") }
+    hvis prosess_drep(pid2) != 0 { returner feil(10, "kill") }
+    la w1 = vent_ferdig(pid2)
+    hvis ikkje w1["ferdig"] eller w1["status"] != 137 { returner feil(11, "venta 137 etter SIGKILL, fekk " + tekst_fra_heltall(w1["status"])) }
+    socket_close(inn2[1])
+
+    // Feilsti: finst ikkje → barnet sluttar med 127; kill på ukjent pid → −ESRCH (−3).
+    la pid3 = prosess_start("/finst/ikkje", [0, 1, 2])
+    hvis pid3 <= 0 { returner feil(12, "fork for ugyldig sti") }
+    la x = vent_ferdig(pid3)
+    hvis x["status"] != 127 { returner feil(13, "venta 127, fekk " + tekst_fra_heltall(x["status"])) }
+    hvis prosess_drep(pid3) != -3 { returner feil(14, "kill på hausta pid skal gje −ESRCH") }
+    skriv("aot_x86_prosess_start OK\n")
+    returner 42
+}

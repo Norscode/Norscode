@@ -295,3 +295,24 @@ primitiv + rein Norscode:
 Seed-porten: `tools/seed_gate_tests.txt` (krev_ny_seed-lista) via harnessen med
 `NC_NATIVE=<fersk seed>` — harnessen slepp desse testane laus berre når `builtin.vent.sov`
 verkeleg søv (vent_sov-atomet) og NC_TEST_ALL/NC_SLOW_TESTS er sette.
+
+## R4 (F09 + F22): listebuiltins og struktur-verdisemantikk i AOT
+
+- **F09 (x86-64):** `pop_siste`/`fjern_siste` på tom liste og `fjern_indeks`/`fjern` med indeks
+  utanfor [0, lengde) kastar som VM-en (atoma `list_pop_safe`/`list_remove_safe`);
+  `fjern(liste, verdi)` med ikkje-heiltal fjernar første like element og gjev bool. `sett_inn`
+  (R1) klamrar indeksen. Fiksturen `tests/fixtures/aot_x86_listebuiltins.no` gjev same
+  utskrift på VM og AOT (`tests/test_x86_listebuiltins.no`).
+- **F22 (VM, x86-64, ARM64):** `tekst(s)`/`skriv(s)`/`"a" + s` på ein struktur gjev
+  `Namn(felt=verdi, …)`; ein metode `til_tekst` vinn. `==`/`!=` på to strukturar er felt for
+  felt (same `__struktur__`; ulike typar er ulike); ein metode `er_lik` vinn. Lister med minst
+  eitt struktur-element blir viste som `[a, b]`.
+  - VM: `vm_tekst_av`/`vm_lik` i `selfhost/vm.no` (syklusvern via kortvarig `__vis__`-merke).
+  - x86-64: maskinkode-atoma `to_text_struct`/`to_text_liste`/`struct_eq`/`metode_nokkel`
+    (kroker i `to_text` og `eq`). Avvik: ordbøker (og lister i lister) som inneheld
+    strukturar blir `[verdi]`; `struct_eq` har ikkje syklusvern (sirkulære strukturar gjev
+    stakk-overflow).
+  - ARM64: `std/verdi_rt.no` (rein Norscode), lagt til implisitt av `bygg-native` for
+    linux-arm64/macos-arm64 når NCB-en har `__struktur__`; kodegenen kallar han frå
+    tekst()/==/!=/skriv. Utan modulen i bunten (t.d. `--ncb`-vegen) er åtferda den gamle
+    (`[verdi]`, identitet).
