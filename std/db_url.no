@@ -124,9 +124,117 @@ funksjon _sql_ord(sql: tekst) -> liste_tekst {
     returner ord
 }
 
+# Hopp over ein sitert streng frå posisjon `i` (rett etter opningsteiknet). Gir posisjonen etter avsluttande
+# sitat. Doblinga ('' / "") er escape. Med `esc` (E'…') er \x òg escape. Uavslutta streng gir lengde(sql).
+funksjon _hopp_streng(sql: tekst, start: heltall, sitat: tekst, esc: boolsk) -> heltall {
+    la n = lengde(sql)
+    la i = start
+    mens i < n {
+        la ch = builtin.slice(sql, i, i + 1)
+        hvis esc og ch == "\\" {
+            i = i + 2
+        } ellers hvis ch == sitat {
+            hvis i + 1 < n og builtin.slice(sql, i + 1, i + 2) == sitat {
+                i = i + 2
+            } ellers {
+                returner i + 1
+            }
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner n
+}
+
+# Er `'` på posisjon i opningen av ein E'…'-streng (E/e rett før, ikkje som del av eit lengre ord)?
+funksjon _er_e_streng(sql: tekst, i: heltall) -> boolsk {
+    hvis i < 1 { returner usann }
+    la f = builtin.slice(sql, i - 1, i)
+    hvis f != "e" og f != "E" { returner usann }
+    hvis i > 1 og _ord_teikn(builtin.char_code(builtin.slice(sql, i - 2, i - 1))) { returner usann }
+    returner sann
+}
+
+# Del SQL i setningar ved ; utanfor '…', "…", E'…', $$…$$ / $tag$…$tag$, -- linjekommentar og /* … */.
+# Gir trimma, ikkje-tomme setningar utan avsluttande ;.
+funksjon _del_setningar(sql: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la n = lengde(sql)
+    la start: heltall = 0
+    la i: heltall = 0
+    mens i < n {
+        la ch = builtin.slice(sql, i, i + 1)
+        la neste = ""
+        hvis i + 1 < n { neste = builtin.slice(sql, i + 1, i + 2) }
+        hvis ch == "'" {
+            i = _hopp_streng(sql, i + 1, "'", _er_e_streng(sql, i))
+        } ellers hvis ch == "\"" {
+            i = _hopp_streng(sql, i + 1, "\"", usann)
+        } ellers hvis ch == "-" og neste == "-" {
+            mens i < n og builtin.slice(sql, i, i + 1) != "\n" { i = i + 1 }
+        } ellers hvis ch == "/" og neste == "*" {
+            la djup: heltall = 1
+            i = i + 2
+            mens i < n og djup > 0 {
+                la a = builtin.slice(sql, i, i + 1)
+                la b = ""
+                hvis i + 1 < n { b = builtin.slice(sql, i + 1, i + 2) }
+                hvis a == "/" og b == "*" {
+                    djup = djup + 1
+                    i = i + 2
+                } ellers hvis a == "*" og b == "/" {
+                    djup = djup - 1
+                    i = i + 2
+                } ellers {
+                    i = i + 1
+                }
+            }
+        } ellers hvis ch == "$" {
+            la j: heltall = i + 1
+            mens j < n og _ord_teikn(builtin.char_code(builtin.slice(sql, j, j + 1))) { j = j + 1 }
+            la tag_ok = j < n og builtin.slice(sql, j, j + 1) == "$"
+            hvis tag_ok og j > i + 1 {
+                la c0 = builtin.char_code(builtin.slice(sql, i + 1, i + 2))
+                hvis c0 >= 48 og c0 <= 57 { tag_ok = usann }
+            }
+            hvis tag_ok og i > 0 og _ord_teikn(builtin.char_code(builtin.slice(sql, i - 1, i))) { tag_ok = usann }
+            hvis tag_ok {
+                la tag = builtin.slice(sql, i, j + 1)
+                la resten = builtin.slice(sql, j + 1, n)
+                la idx = builtin.index_of(resten, tag)
+                hvis idx < 0 { i = n } ellers { i = j + 1 + idx + lengde(tag) }
+            } ellers {
+                i = i + 1
+            }
+        } ellers hvis ch == ";" {
+            la s = builtin.trim(builtin.slice(sql, start, i))
+            hvis s != "" { legg_til(ut, s) }
+            start = i + 1
+            i = i + 1
+        } ellers {
+            i = i + 1
+        }
+    }
+    la rest = builtin.trim(builtin.slice(sql, start, n))
+    hvis rest != "" { legg_til(ut, rest) }
+    returner ut
+}
+
 # Lesing = SELECT/SHOW, eller WITH som ikkje inneheld INSERT/UPDATE/DELETE/MERGE som heile ord
 # (data-modifiserande CTE). Alt anna (og usikre tilfelle) er ikkje lesing, så ingen retry.
 funksjon _er_lesing(sql: tekst) -> boolsk {
+    # Heile batchen må vere lesing (simple-query kan ha fleire ;-separerte setningar).
+    la delar = _del_setningar(sql)
+    hvis lengde(delar) == 0 { returner usann }
+    la k: heltall = 0
+    mens k < lengde(delar) {
+        hvis ikkje _er_lesing_ei(delar[k]) { returner usann }
+        k = k + 1
+    }
+    returner sann
+}
+
+funksjon _er_lesing_ei(sql: tekst) -> boolsk {
     la s = builtin.lower(builtin.trim(sql))
     hvis builtin.starts_with(s, "select") eller builtin.starts_with(s, "show") { returner sann }
     hvis builtin.starts_with(s, "with") {
@@ -226,6 +334,7 @@ funksjon _til_dollar(sql: tekst) -> tekst {
     la ut: liste_tekst = []
     la n: heltall = 0
     la sitat = ""
+    la esc_str = usann   # inne i E'…': \x er escape
     la ord = ""          # ordet som blir bygd / sist ferdige ord
     la i_ord = usann
     la førre = ""        # klasse for førre ikkje-blanke token: "" (start), "w" (ord), "q" (streng) eller teiknet
@@ -236,10 +345,27 @@ funksjon _til_dollar(sql: tekst) -> tekst {
         la c = builtin.char_code(ch)
         hvis sitat != "" {
             i_ord = usann
-            hvis ch == sitat { sitat = "" førre = "q" }
-            legg_til(ut, ch)
+            hvis esc_str og ch == "\\" og i + 1 < lengd {
+                legg_til(ut, ch)
+                legg_til(ut, builtin.slice(sql, i + 1, i + 2))
+                i = i + 1
+            } ellers hvis ch == sitat {
+                hvis i + 1 < lengd og builtin.slice(sql, i + 1, i + 2) == sitat {
+                    # '' / "" er escape inne i literalen
+                    legg_til(ut, ch)
+                    legg_til(ut, ch)
+                    i = i + 1
+                } ellers {
+                    sitat = ""
+                    førre = "q"
+                    legg_til(ut, ch)
+                }
+            } ellers {
+                legg_til(ut, ch)
+            }
         } ellers hvis ch == "'" eller ch == "\"" {
             sitat = ch
+            esc_str = ch == "'" og _er_e_streng(sql, i)
             i_ord = usann
             legg_til(ut, ch)
         } ellers hvis _ord_teikn(c) {
@@ -336,7 +462,7 @@ funksjon rollback(handle) -> bool {
 # Køyr fleire ;-separerte setningar. Gir tal på setningar som råka rader, eller -1 ved feil.
 funksjon migrate(handle, skript: tekst) -> heltall {
     hvis _pg(handle) {
-        la delar = builtin.split(skript, ";")
+        la delar = _del_setningar(skript)
         la tal: heltall = 0
         la i: heltall = 0
         mens i < lengde(delar) {
