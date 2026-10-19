@@ -3590,6 +3590,7 @@ funksjon atomic_operation(req) {
 //                rows*inner*columns <= 2e7; left/right liste med rett lengd; kvar
 //                verdi heiltal i [-32768, 32767]; int64-akkumulering;
 //                backend "metal" → feil "metal backend unavailable" (Linux-stubben).
+//   last_opp / matmul_i32 med left_handle / frigjer → vedvarande vekter (sjå under).
 //
 // SIMD-vegen er EKTE SSE4.1: ein fast kjerne (pmulld 4×i32 → pmovsxdq → paddq i64)
 // blir skriven éin gong i ei mmap-sone, mprotect-a til R|X (W^X, som JIT-backenden)
@@ -3606,6 +3607,20 @@ funksjon atomic_operation(req) {
 
 la _tn_simd = 0            // 0 ukjent, 1 SSE4.1-kjerne klar, 2 ikkje tilgjengeleg (same 0-init-mønster som _jit_skrap/_arena)
 la _tn_kode = 0            // R|X-sida med kjerne + cpuid-stubb
+
+// Vedvarande vekter (handtak): ei venstre-matrise (t.d. vektene i eit lineært lag) blir
+// validert og pakka ÉIN gong i ei eiga mmap-sone (i32, rows × inner_p, same layout som
+// A i kjerne-ABI-en). Seinare matmul_i32 med «left_handle» pakkar berre høgre-sida (ofte
+// éin vektor) og les resultatet, i staden for å validere og pakke heile vektmatrisa i
+// kvart kall. Same handtak-bord-mønster som JIT-en (_jit_tabell).
+//   last_opp    {left, rows, inner}        → {status, handle, rows, inner, backend}
+//   matmul_i32  {left_handle, right, columns} (rows/inner frå handtaket)
+//   frigjer     {handle}
+// Grenser for handtak: rows ≤ 1 048 576, inner ≤ 4096, rows·inner ≤ 67 108 864,
+// columns ≤ 4096, rows·columns ≤ 4 194 304, inner·columns ≤ 1 000 000.
+la _tn_tabell = {}
+la _tn_neste = 0
+la _tn_aktive = 0
 
 funksjon _tn_kjerne_bytes() -> liste_heiltall {
     returner [
@@ -3869,20 +3884,7 @@ funksjon _tn_matmul_simd(l, r, rader: heiltall, inner: heiltall, kolonner: heilt
     la a_adr: heiltall = blokk + 64
     la b_adr: heiltall = a_adr + a_len
     la o_adr: heiltall = b_adr + b_len
-    la rr: heiltall = 0
-    mens rr < rader {
-        la basis: heiltall = rr * inner
-        la k: heiltall = 0
-        mens k < inner {
-            la lo: heiltall = l[basis + k]
-            la hi: heiltall = 0
-            hvis k + 1 < inner { hi = l[basis + k + 1] }
-            hvis lo < 0 { lo = lo + 4294967296 }
-            builtin.raw_store64(a_adr + (rr * inner_p + k) * 4, hi * 4294967296 + lo)
-            k = k + 2
-        }
-        rr = rr + 1
-    }
+    _tn_pakk_a(l, rader, inner, inner_p, a_adr)
     la c: heiltall = 0
     mens c < kolonner {
         la k: heiltall = 0
@@ -3917,6 +3919,148 @@ funksjon _tn_matmul_simd(l, r, rader: heiltall, inner: heiltall, kolonner: heilt
     returner ut
 }
 
+// Pakk venstre-matrisa l (rader × inner, radvis) til i32 i a_adr (rader × inner_p).
+funksjon _tn_pakk_a(l, rader: heiltall, inner: heiltall, inner_p: heiltall, a_adr: heiltall) {
+    la rr: heiltall = 0
+    mens rr < rader {
+        la basis: heiltall = rr * inner
+        la k: heiltall = 0
+        mens k < inner {
+            la lo: heiltall = l[basis + k]
+            la hi: heiltall = 0
+            hvis k + 1 < inner { hi = l[basis + k + 1] }
+            hvis lo < 0 { lo = lo + 4294967296 }
+            builtin.raw_store64(a_adr + (rr * inner_p + k) * 4, hi * 4294967296 + lo)
+            k = k + 2
+        }
+        rr = rr + 1
+    }
+}
+
+funksjon _tn_last_opp(req) {
+    la rader = _tn_heiltal(req, "rows")
+    la inner = _tn_heiltal(req, "inner")
+    hvis rader <= 0 eller inner <= 0 eller rader > 1048576 eller inner > 4096 eller rader * inner > 67108864 {
+        returner _tn_svar("feil", "tensor limits exceeded")
+    }
+    la l = []
+    hvis finnes_nøkkel(req, "left") { l = req["left"] }
+    hvis builtin.type(l) != "liste" eller lengde(l) != rader * inner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis ikkje _tn_int16_liste(l, rader * inner) { returner _tn_svar("feil", "left value outside int16 range") }
+    la e = {"rows": rader, "inner": inner, "simd": usann, "adr": 0, "len": 0, "inner_p": 0, "l": []}
+    hvis _tn_simd_klar() {
+        la inner_p: heiltall = ((inner + 3) / 4) * 4
+        la a_len: heiltall = rader * inner_p * 4
+        la total: heiltall = ((a_len + 4095) / 4096) * 4096
+        la adr = _sys_mmap_rw(total)
+        hvis adr >= 0 {
+            _tn_pakk_a(l, rader, inner, inner_p, adr)
+            e["simd"] = sann
+            e["adr"] = adr
+            e["len"] = total
+            e["inner_p"] = inner_p
+        }
+    }
+    // Utan SIMD (eller om mmap feila): behald lista og rekn skalart, same svar.
+    hvis ikkje e["simd"] { e["l"] = l }
+    _tn_neste = _tn_neste + 1
+    la h = "tensor-" + tekst_fra_heltall(_tn_neste)
+    _tn_tabell[h] = e
+    _tn_aktive = _tn_aktive + 1
+    la ut = _tn_svar("ferdig", "")
+    ut["handle"] = h
+    ut["rows"] = rader
+    ut["inner"] = inner
+    la b = "scalar"
+    hvis e["simd"] { b = _tn_backend() }
+    ut["backend"] = b
+    returner ut
+}
+
+funksjon _tn_frigjer(req) {
+    la h = _tn_tekst(req, "handle")
+    hvis h == "" eller ikkje finnes_nøkkel(_tn_tabell, h) { returner _tn_svar("feil", "unknown or freed tensor handle") }
+    la e = _tn_tabell[h]
+    hvis e["simd"] { _sys_munmap(e["adr"], e["len"]) }
+    fjern_nokkel(_tn_tabell, h)
+    _tn_aktive = _tn_aktive - 1
+    la ut = _tn_svar("ferdig", "")
+    ut["handle"] = h
+    returner ut
+}
+
+funksjon _tn_matmul_handtak(req) {
+    la h = _tn_tekst(req, "left_handle")
+    hvis h == "" eller ikkje finnes_nøkkel(_tn_tabell, h) { returner _tn_svar("feil", "unknown or freed tensor handle") }
+    la e = _tn_tabell[h]
+    la rader: heiltall = e["rows"]
+    la inner: heiltall = e["inner"]
+    la kolonner = _tn_heiltal(req, "columns")
+    // rows/inner er valfrie i førespurnaden, men må stemme med handtaket om dei er med.
+    hvis finnes_nøkkel(req, "rows") og _tn_heiltal(req, "rows") != rader { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis finnes_nøkkel(req, "inner") og _tn_heiltal(req, "inner") != inner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis kolonner <= 0 eller kolonner > 4096 eller rader * kolonner > 4194304 eller inner * kolonner > 1000000 {
+        returner _tn_svar("feil", "tensor limits exceeded")
+    }
+    la r = []
+    hvis finnes_nøkkel(req, "right") { r = req["right"] }
+    hvis builtin.type(r) != "liste" eller lengde(r) != inner * kolonner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis ikkje _tn_int16_liste(r, inner * kolonner) { returner _tn_svar("feil", "right value outside int16 range") }
+    la data = []
+    la backend = "scalar"
+    hvis e["simd"] og _tn_kode != 0 {
+        la inner_p: heiltall = e["inner_p"]
+        la b_len: heiltall = kolonner * inner_p * 4
+        la o_len: heiltall = rader * kolonner * 8
+        la total: heiltall = ((64 + b_len + o_len + 4095) / 4096) * 4096
+        la blokk = _sys_mmap_rw(total)
+        hvis blokk >= 0 {
+            la b_adr: heiltall = blokk + 64
+            la o_adr: heiltall = b_adr + b_len
+            la c: heiltall = 0
+            mens c < kolonner {
+                la k: heiltall = 0
+                mens k < inner {
+                    la lo: heiltall = r[k * kolonner + c]
+                    la hi: heiltall = 0
+                    hvis k + 1 < inner { hi = r[(k + 1) * kolonner + c] }
+                    hvis lo < 0 { lo = lo + 4294967296 }
+                    builtin.raw_store64(b_adr + (c * inner_p + k) * 4, hi * 4294967296 + lo)
+                    k = k + 2
+                }
+                c = c + 1
+            }
+            builtin.raw_store64(blokk, e["adr"])
+            builtin.raw_store64(blokk + 8, b_adr)
+            builtin.raw_store64(blokk + 16, o_adr)
+            builtin.raw_store64(blokk + 24, rader)
+            builtin.raw_store64(blokk + 32, inner_p)
+            builtin.raw_store64(blokk + 40, kolonner)
+            hvis builtin.raw_call(_tn_kode, blokk) == 1 {
+                la ut2: liste_heiltall = []
+                la i: heiltall = 0
+                mens i < rader * kolonner {
+                    legg_til(ut2, builtin.raw_load64(o_adr + i * 8))
+                    i = i + 1
+                }
+                data = ut2
+                backend = _tn_backend()
+            }
+            _sys_munmap(blokk, total)
+        }
+    }
+    hvis lengde(data) == 0 {
+        hvis e["simd"] { returner _tn_svar("feil", "tensor kernel failed") }
+        data = _tn_matmul_skalar(e["l"], r, rader, inner, kolonner)
+    }
+    la ut = _tn_svar("ferdig", "")
+    ut["data"] = data
+    ut["rows"] = rader
+    ut["columns"] = kolonner
+    ut["backend"] = backend
+    returner ut
+}
+
 funksjon tensor_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _tn_svar("feil", "request must be a map") }
     hvis _tn_tekst(req, "abi") != "norscode-tensor-v1" { returner _tn_svar("feil", "invalid ABI") }
@@ -3928,9 +4072,14 @@ funksjon tensor_operation(req) {
         hvis _tn_simd_klar() { lanes = 4 }
         s["vector_lanes"] = lanes
         s["metal_available"] = usann
+        s["persistent_weights"] = sann
+        s["handles"] = _tn_aktive
         returner s
     }
+    hvis op == "last_opp" { returner _tn_last_opp(req) }
+    hvis op == "frigjer" { returner _tn_frigjer(req) }
     hvis op != "matmul_i32" { returner _tn_svar("feil", "unsupported tensor operation") }
+    hvis finnes_nøkkel(req, "left_handle") { returner _tn_matmul_handtak(req) }
     la rader = _tn_heiltal(req, "rows")
     la inner = _tn_heiltal(req, "inner")
     la kolonner = _tn_heiltal(req, "columns")
