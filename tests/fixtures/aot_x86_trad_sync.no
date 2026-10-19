@@ -1,0 +1,126 @@
+// F37 grøne trådar: mutex/condition (thread_sync) og std.samtid / std.kanal oppå dei.
+//   * to trådar auker ein delt teljar under mutex med yield midt i den kritiske seksjonen
+//   * condition_wait/signal: produsent/forbrukar, timeout på condition utan signal
+//   * std.samtid.tråd_start/tråd_join, monitor, semafor, nedteljar
+//   * std.kanal: blokkerande kanal mellom to trådar
+//   * stakkoverflyt i tråd gjev status error (ikkje krasj)
+// exit 42 = OK, elles stegnummeret.
+bruk std.native_gap
+bruk std.samtid som sm
+bruk std.kanal som kanal
+
+la teljar = 0
+la logg = []
+
+funksjon sync(op: tekst, h: tekst, mh: tekst, ms: heiltall) -> ordbok {
+    returner builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": op, "handle": h,
+        "thread_id": "x", "mutex_handle": mh, "timeout_ms": tekst_fra_heltall(ms)})
+}
+funksjon spawn(fn: tekst, args: ordbok) -> ordbok {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn", "fn": fn,
+        "args": args, "name": "t", "stack_bytes": "65536"})
+}
+funksjon join(h: ordbok) -> ordbok {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": h["handle"], "thread_id": h["thread_id"], "timeout_ms": "20000"})
+}
+
+funksjon teller(args: ordbok) -> tekst {
+    la m = args["m"]
+    la i = 0
+    mens i < 50 {
+        sync("mutex_lock", m, "", 0 - 1)
+        la v = teljar
+        sync("yield", "x", "", 0)          // anna tråd kan berre kome til om låsen ikkje held
+        teljar = v + 1
+        sync("mutex_unlock", m, "", 0)
+        i = i + 1
+    }
+    returner "ferdig"
+}
+
+funksjon produsent(args: ordbok) -> tekst {
+    la m = args["m"]
+    la c = args["c"]
+    vent.sov(20)
+    sync("mutex_lock", m, "", 0 - 1)
+    teljar = 777
+    sync("condition_signal", c, "", 0)
+    sync("mutex_unlock", m, "", 0)
+    returner "signalert"
+}
+
+funksjon kanalsendar(args: ordbok) -> tekst {
+    la k = args["k"]
+    la i = 0
+    mens i < 20 {
+        kanal.send_vent(k, i)
+        i = i + 1
+    }
+    kanal.lukk(k)
+    returner "sendt"
+}
+
+funksjon uendeleg(n: heiltall) -> heiltall {
+    returner 1 + uendeleg(n + 1)
+}
+funksjon overflyt(args: ordbok) -> tekst {
+    returner tekst_fra_heltall(uendeleg(0))
+}
+
+funksjon samtid_kropp() -> heiltall {
+    teljar = teljar + 1000
+    returner 5
+}
+
+funksjon start() -> heiltall {
+    // 1. mutex: 2 trådar x 50 inkrement med yield i seksjonen -> 100 eksakt
+    la m = sync("mutex_create", "", "", 0)["handle"]
+    la a = spawn("__main__.teller", {"m": m})
+    la b = spawn("__main__.teller", {"m": m})
+    hvis join(a)["status"] != "finished" { returner 1 }
+    hvis join(b)["status"] != "finished" { returner 2 }
+    hvis teljar != 100 { returner 3 }
+    // 2. condition: hovudtråden ventar, produsenten signaliserer
+    la c = sync("condition_create", "", "", 0)["handle"]
+    teljar = 0
+    la p = spawn("__main__.produsent", {"m": m, "c": c})
+    sync("mutex_lock", m, "", 0 - 1)
+    la w = sync("condition_wait", c, m, 5000)
+    hvis w["status"] != "ready" { returner 4 }
+    hvis teljar != 777 { returner 5 }
+    sync("mutex_unlock", m, "", 0)
+    hvis join(p)["value"] != "signalert" { returner 6 }
+    // 3. condition utan signal: timeout, mutex halden att
+    sync("mutex_lock", m, "", 0 - 1)
+    la t0 = builtin.tid_ms()
+    la w2 = sync("condition_wait", c, m, 80)
+    hvis w2["status"] != "timeout" { returner 7 }
+    hvis builtin.tid_ms() - t0 < 60 { returner 8 }
+    sync("mutex_unlock", m, "", 0)
+    // 4. samtid: backend, tråd_start/join, monitor
+    hvis sm.backend() != "vm-green" { returner 9 }
+    teljar = 0
+    la t = sm.tråd_start(fun() -> samtid_kropp())
+    sm.tråd_join(t)
+    hvis teljar != 1000 { returner 10 }
+    // 5. kanal mellom trådar (kapasitet 3, sendar blokkerer når full)
+    la k = kanal.ny_blokkerande_kanal(3)
+    la s = spawn("__main__.kanalsendar", {"k": k})
+    la sum = 0
+    la n = 0
+    mens n < 20 {
+        la mr = kanal.motta_vent(k)
+        la v = mr["verdi"]
+        sum = sum + v
+        n = n + 1
+    }
+    hvis sum != 190 { returner 11 }
+    hvis join(s)["value"] != "sendt" { returner 12 }
+    // 6. stakkoverflyt i tråd -> status error, hovudtråden lever
+    la o = spawn("__main__.overflyt", {})
+    la ro = join(o)
+    hvis ro["status"] != "error" { returner 13 }
+    skriv("aot_x86_trad_sync OK\n")
+    returner 42
+}
