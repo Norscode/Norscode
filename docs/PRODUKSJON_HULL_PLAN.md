@@ -92,10 +92,10 @@ Desse fire er **kode-komplette** men merkte eksperimentell/delvis. Det som står
 
 | Modul | Kva står att | Type |
 |---|---|---|
-| `network_runtime` | Ekte Windows SChannel TLS 1.3-handshake for gjeldande kandidatgenerasjon (Wine kan ikkje TLS 1.3 → treng ekte Windows) | Attestasjon |
+| `network_runtime` | SChannel-klient (TLS 1.3-handshake) er attestert på ekte Windows i CI (windows-runtime-attestation, test_windows_schannel_client). Manglar: test av SChannel-serversida | Attestasjon (server) |
 | `std.dns` | Ekstern multi-plattform interop + release-/providergate (svarar alt ekte Pebble dns-01 i CI) | Verifisering |
 | `std.tls_acme` | Ekstern sikkerheitsrevisjon (full utstedelse alt verifisert mot Pebble) | Revisjon |
-| `std.sikkerheit` | Ekstern sikkerheitsrevisjon + Windows AppContainer/SChannel-attestasjon | Revisjon |
+| `std.sikkerheit` | Ekstern sikkerheitsrevisjon. Windows AppContainer (test_windows_process_appcontainer) og SChannel-klient er attesterte på ekte Windows; manglar test av nettverksnekting i AppContainer | Revisjon |
 | `std.domenehost` | Ingen eigen kode — blir stabil automatisk når dei tre over er grøne | Avleidd |
 
 **Handling:** (1) køyr `tools/windows_runtime_attestation.no` mot ny kandidat → løftar `network_runtime`. (2) Planlegg ekstern tredjeparts-revisjon av krypto/TLS/ACME. (3) DNS-interop-testmatrise mot fleire eksterne resolverar.
