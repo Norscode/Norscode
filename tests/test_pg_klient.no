@@ -1,0 +1,208 @@
+bruk std.pg som pg
+
+// H1: Postgres wire v3-klient mot ein ekte tenar (trust-autentisering, enkel spørring).
+// Køyrer berre når NORSCODE_PG_TEST_DSN er sett (t.d. "host=127.0.0.1 port=55432 dbname=test user=norscode");
+// elles hoppar testen over, så CI utan Postgres-tenar blir ikkje raud.
+
+// H2: SCRAM-SHA-256 mot ein tenar som krev passord (NORSCODE_PG_TEST_SCRAM_DSN,
+// t.d. "host=127.0.0.1 port=55433 dbname=test user=norscode password=hemmeleg-pw").
+// DSN utan password=-delen.
+funksjon _utan_passord(dsn: tekst) -> tekst {
+    la delar = builtin.split(dsn, " ")
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        hvis ikkje builtin.starts_with(delar[i], "password=") { legg_til(ut, delar[i]) }
+        i = i + 1
+    }
+    returner builtin.join(ut, " ")
+}
+
+// Verdien til nøkkelen i ein DSN («user=ola» → «ola»).
+funksjon _felt(dsn: tekst, nokkel: tekst) -> tekst {
+    la delar = builtin.split(dsn, " ")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], nokkel + "=") { returner builtin.slice(delar[i], lengde(nokkel) + 1, lengde(delar[i])) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _test_copy(c) {
+    pg.execute_raw(c, "DROP TABLE IF EXISTS h6_copy")
+    pg.execute_raw(c, "CREATE TABLE h6_copy (id int, namn text, merk text)")
+    la inn = [["1", "Ola", "a\tb"], ["2", pg.sql_null(), "linje1\nlinje2"], ["3", "bak\\slash", ""]]
+    assert_eq(pg.copy_inn(c, "COPY h6_copy (id, namn, merk) FROM STDIN", inn), 3)
+    la ut = pg.copy_ut(c, "COPY (SELECT id, namn, merk FROM h6_copy ORDER BY id) TO STDOUT")
+    assert_eq(lengde(ut), 3)
+    assert_eq(ut[0][2], "a\tb")
+    assert(ut[1][1] == pg.sql_null())
+    assert_eq(ut[1][2], "linje1\nlinje2")
+    assert_eq(ut[2][1], "bak\\slash")
+    assert_eq(ut[2][2], "")
+    la feil = usann
+    prøv { pg.copy_inn(c, "COPY h6_copy (id) FROM STDIN", [["ikkje-tal"]]) } fang (e) { feil = sann }
+    assert(feil)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM h6_copy"), 3)
+    pg.execute_raw(c, "DROP TABLE h6_copy")
+}
+
+funksjon _test_scram() {
+    la dsn = miljo_hent("NORSCODE_PG_TEST_SCRAM_DSN")
+    hvis dsn == "" {
+        skriv("test_pg_klient: scram HOPPA OVER (NORSCODE_PG_TEST_SCRAM_DSN ikkje sett)\n")
+        returner
+    }
+    la c = pg.open(dsn)
+    assert_eq(pg.query_verdi(c, "SELECT current_user", []), _felt(dsn, "user"))
+    assert_eq(pg.query_verdi(c, "SELECT 6 * 7", []), "42")
+    pg.close(c)
+
+    // Feil passord: tenaren avviser (SQLSTATE 28P01), og passordet lekk ikkje
+    la utan = _utan_passord(dsn)
+    la feila = usann
+    prøv { pg.open(utan + " password=feil-passord-xyz") } fang (e) {
+        feila = sann
+        assert(builtin.index_of(tekst(e), "28P01") >= 0)
+        assert(builtin.index_of(tekst(e), "feil-passord-xyz") < 0)
+    }
+    assert(feila)
+
+    // Ingen passord: klienten stoppar sjølv med ein tydeleg feil
+    la ingen = usann
+    prøv { pg.open(utan) } fang (e) {
+        ingen = sann
+        assert(builtin.index_of(tekst(e), "krev passord") >= 0)
+    }
+    assert(ingen)
+}
+
+funksjon start() -> heiltall {
+    la dsn = miljo_hent("NORSCODE_PG_TEST_DSN")
+    hvis dsn == "" {
+        skriv("test_pg_klient: HOPPA OVER (NORSCODE_PG_TEST_DSN ikkje sett)\n")
+        returner 0
+    }
+    assert(pg.tilgjengeleg())
+
+    la c = pg.open(dsn)
+    assert(pg.er_tilkopla(c))
+
+    // Enkel verdi og kolonnenamn
+    assert_eq(pg.query_verdi(c, "SELECT 40 + 2 AS svar", []), "42")
+    assert_eq(pg.query_int(c, "SELECT 7"), 7)
+    assert_eq(builtin.join(pg.kolonnar(c, "SELECT 1 AS a, 'x' AS b WHERE false"), ","), "a,b")
+
+    // DDL, INSERT med tal, RETURNING, UPDATE/DELETE-tal
+    pg.execute_raw(c, "DROP TABLE IF EXISTS h1_brukar")
+    pg.execute_raw(c, "CREATE TABLE h1_brukar (id serial PRIMARY KEY, namn text NOT NULL, alder int)")
+    assert_eq(pg.execute_raw(c, "INSERT INTO h1_brukar (namn, alder) VALUES ('Ola', 30), ('Kari', 25), ('Åse', NULL)"), 3)
+    assert_eq(pg.execute_raw(c, "UPDATE h1_brukar SET alder = alder + 1 WHERE alder IS NOT NULL"), 2)
+    la rader = pg.query_raw(c, "SELECT id, namn, alder FROM h1_brukar ORDER BY id")
+    assert_eq(lengde(rader), 3)
+    assert_eq(rader[0]["namn"], "Ola")
+    assert_eq(rader[0]["alder"], "31")
+    assert_eq(rader[2]["namn"], "Åse")
+    assert_eq(rader[2]["alder"], "")
+
+    // UTF-8 tur-retur, inkludert 4-byte-teikn og literal() med apostrof
+    // Tenaren skal sjå ekte UTF-8: «Åse» er 3 teikn og 4 byte (ikkje dobbeltkoda)
+    assert_eq(pg.query_verdi(c, "SELECT char_length($1) || '/' || octet_length($1)", ["Åse"]), "3/4")
+    la rar = "blåbærsyltetøy ø æ å 🙂 O'Reilly"
+    pg.execute_raw(c, "INSERT INTO h1_brukar (namn) VALUES (" + pg.literal(rar) + ")")
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM h1_brukar WHERE namn LIKE 'blå%'", []), rar)
+
+    // Transaksjon: rollback fjernar, commit beheld
+    pg.begin(c)
+    pg.execute_raw(c, "DELETE FROM h1_brukar")
+    pg.rollback(c)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM h1_brukar"), 4)
+    pg.begin(c)
+    assert_eq(pg.execute_raw(c, "DELETE FROM h1_brukar WHERE alder IS NULL"), 2)
+    pg.commit(c)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM h1_brukar"), 2)
+
+    // Feil frå tenaren: tydeleg melding med SQLSTATE, og tilkoplinga er brukbar etterpå
+    la feila = usann
+    prøv { pg.query_raw(c, "SELECT * FROM finst_ikkje") } fang (e) {
+        feila = sann
+        assert(builtin.index_of(tekst(e), "SQLSTATE 42P01") >= 0)
+    }
+    assert(feila)
+    assert_eq(pg.query_int(c, "SELECT 1"), 1)
+
+    // Brot mot constraint
+    la brot = usann
+    prøv { pg.execute_raw(c, "INSERT INTO h1_brukar (namn) VALUES (NULL)") } fang (e) {
+        brot = sann
+        assert(builtin.index_of(tekst(e), "23502") >= 0)
+    }
+    assert(brot)
+
+    // H4: parametrar ($1) via utvida protokoll, separat frå SQL-en
+    assert_eq(pg.query_verdi(c, "SELECT $1::int + $2::int", ["40", "2"]), "42")
+    pg.execute_raw(c, "DROP TABLE IF EXISTS h4_t")
+    pg.execute_raw(c, "CREATE TABLE h4_t (id int PRIMARY KEY, namn text, aktiv bool, tal bigint)")
+    assert_eq(pg.execute(c, "INSERT INTO h4_t VALUES ($1, $2, $3, $4)", ["1", "Ola", "true", "9000000000"]), 1)
+    assert_eq(pg.execute(c, "INSERT INTO h4_t VALUES ($1, $2, $3, $4)", ["2", pg.sql_null(), "false", pg.sql_null()]), 1)
+    # SQL-injeksjon i verdien blir berre data
+    la innsprøyting = "x'); DROP TABLE h4_t; --"
+    assert_eq(pg.execute(c, "INSERT INTO h4_t (id, namn) VALUES ($1, $2)", ["3", innsprøyting]), 1)
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM h4_t WHERE id = $1", ["3"]), innsprøyting)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM h4_t"), 3)
+    # UTF-8 i parameter
+    assert_eq(pg.query_verdi(c, "SELECT $1 || '!'", ["blåbær 🙂"]), "blåbær 🙂!")
+    # Typa resultat: NULL som null, bool som boolsk, heiltal som heltall, stort tal som heltall
+    la typa = pg.query_typa(c, "SELECT id, namn, aktiv, tal FROM h4_t WHERE id <= $1 ORDER BY id", ["2"])
+    assert_eq(lengde(typa), 2)
+    assert_eq(typa[0]["id"], 1)
+    assert_eq(typa[0]["namn"], "Ola")
+    assert(typa[0]["aktiv"] == sann)
+    assert_eq(typa[0]["tal"], 9000000000)
+    assert(typa[1]["namn"] == null)
+    assert(typa[1]["aktiv"] == usann)
+    assert(typa[1]["tal"] == null)
+    # Vanleg query() held NULL som tom tekst
+    assert_eq(pg.query(c, "SELECT namn FROM h4_t WHERE id = $1", ["2"])[0]["namn"], "")
+    # Feil i parametrisert spørring: SQLSTATE, og tilkoplinga er brukbar etterpå
+    la pfeil = usann
+    prøv { pg.query(c, "SELECT $1::int", ["ikkje-eit-tal"]) } fang (e) {
+        pfeil = sann
+        assert(builtin.index_of(tekst(e), "22P02") >= 0)
+    }
+    assert(pfeil)
+    la pfeil2 = usann
+    prøv { pg.query(c, "SELECT 1", ["overflødig"]) } fang (e) { pfeil2 = sann }
+    assert(pfeil2)
+    assert_eq(pg.query_int(c, "SELECT 1"), 1)
+    # Hjelparar og bulk_insert bruker parametrar
+    assert(pg.tabell_finst(c, "h4_t"))
+    assert(ikkje pg.tabell_finst(c, "finst_ikkje_h4"))
+    assert(pg.kolonne_finst(c, "h4_t", "namn"))
+    assert(ikkje pg.kolonne_finst(c, "h4_t", "mangler"))
+    assert_eq(pg.bulk_insert(c, "h4_t", ["id", "namn"], [["10", "a'b"], ["11", "c"]]), 2)
+    assert_eq(pg.query_verdi(c, "SELECT namn FROM h4_t WHERE id = 10", []), "a'b")
+    pg.execute_raw(c, "DROP TABLE h4_t")
+    _test_copy(c)
+
+    // Stor resultatmengd (fleire TCP-lesingar; tolka VM er treg, så moderat storleik)
+    assert_eq(pg.query_int(c, "SELECT count(*) FROM generate_series(1, 20000)"), 20000)
+    assert_eq(lengde(pg.query_raw(c, "SELECT g, repeat('x', 50) AS pad FROM generate_series(1, 300) g")), 300)
+
+    pg.execute_raw(c, "DROP TABLE h1_brukar")
+    pg.close(c)
+    assert(ikkje pg.er_tilkopla(c))
+
+    // Feil passord/brukar gir feil utan å lekke passordet
+    la dårleg = usann
+    prøv { pg.open("host=127.0.0.1 port=1 dbname=x user=y password=hemmeleg") } fang (e) {
+        dårleg = sann
+        assert(builtin.index_of(tekst(e), "hemmeleg") < 0)
+    }
+    assert(dårleg)
+
+    _test_scram()
+    skriv("test_pg_klient: OK\n")
+    returner 0
+}
