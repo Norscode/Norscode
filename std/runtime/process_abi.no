@@ -27,17 +27,57 @@ funksjon _trygt_felt(verdi: tekst) -> boolsk {
     returner builtin.index_of(verdi, "\u0000") < 0 og builtin.index_of(verdi, "\n") < 0 og builtin.index_of(verdi, "\r") < 0
 }
 
+# Verifiser tekstforma foer konvertering: heiltall_fra_tekst kan elles
+# godta eller normalisere ugyldige tal i ein sikkerheitskritisk ABI.
+# 18 teikn er alltid innanfor signed 64-bit, og langt over runtime-grensene.
+funksjon _kanonisk_heiltal(verdi: tekst) -> boolsk {
+    la n: heiltall = lengde(verdi)
+    hvis n == 0 eller n > 18 { returner usann }
+    la start: heiltall = 0
+    hvis builtin.slice(verdi, 0, 1) == "-" {
+        hvis n == 1 { returner usann }
+        start = 1
+    }
+    hvis builtin.slice(verdi, start, start + 1) == "0" og n > start + 1 { returner usann }
+    la i: heiltall = start
+    mens i < n {
+        la kode: heiltall = builtin.char_code(builtin.slice(verdi, i, i + 1))
+        hvis kode < 48 eller kode > 57 { returner usann }
+        i = i + 1
+    }
+    # Konverter berre etter at alle teikn og lengda er kontrollerte.
+    returner tekst_fra_heltall(heltall_fra_tekst(verdi)) == verdi
+}
+
 funksjon _gyldig_sandbox(profil: tekst) -> boolsk {
     returner profil == "none" eller profil == "restricted" eller
         profil == "no-network" eller profil == "no-write" eller profil == "pure"
 }
 
 funksjon _gyldige_grenser(r: ordbok_tekst) -> boolsk {
+    hvis ikkje _kanonisk_heiltal(r["max_memory_bytes"]) eller ikkje _kanonisk_heiltal(r["max_open_files"]) { returner usann }
     la minne = heltall_fra_tekst(r["max_memory_bytes"])
     la filer = heltall_fra_tekst(r["max_open_files"])
     hvis minne < 0 eller minne > 8589934592 { returner usann }
     hvis filer < 0 eller filer > 4096 { returner usann }
     returner r["inherit_env"] == "0" eller r["inherit_env"] == "1"
+}
+
+# Delt kontrakt for prosessmiljø, brukt av plan, dry-run og native ABI.
+# Slik kan ikkje ein ugyldig plan visast som "would_start" for så å bli avvist.
+funksjon gyldig_environment(miljø) -> boolsk {
+    hvis builtin.type(miljø) != "ordbok" { returner usann }
+    la nøklar = nøkler(miljø)
+    la mi: heiltall = 0
+    mens mi < lengde(nøklar) {
+        la nøkkel = tekst(nøklar[mi])
+        hvis builtin.type(miljø[nøkkel]) != "tekst" { returner usann }
+        la verdi = miljø[nøkkel]
+        hvis nøkkel == "" eller builtin.index_of(nøkkel, "=") >= 0 eller
+           ikkje _trygt_felt(nøkkel) eller ikkje _trygt_felt(verdi) { returner usann }
+        mi = mi + 1
+    }
+    returner sann
 }
 
 funksjon gyldig_request(r: ordbok_tekst) -> boolsk {
@@ -47,29 +87,50 @@ funksjon gyldig_request(r: ordbok_tekst) -> boolsk {
        ikkje finnes_nøkkel(r, "max_output_bytes") eller ikkje finnes_nøkkel(r, "sandbox") eller
        ikkje finnes_nøkkel(r, "max_memory_bytes") eller ikkje finnes_nøkkel(r, "max_open_files") eller
        ikkje finnes_nøkkel(r, "inherit_env") { returner usann }
-    hvis r["abi"] != versjon() eller r["executable"] == "" eller ikkje _trygt_felt(r["executable"]) { returner usann }
-    hvis heltall_fra_tekst(r["timeout_ms"]) <= 0 eller heltall_fra_tekst(r["max_output_bytes"]) <= 0 { returner usann }
+    # Same fail-closed kontrakt for synkron og asynkron spawn.
+    # Andre async-operasjonar (poll, wait, signal) er ikkje spawn-requestar.
+    hvis r["abi"] != versjon() {
+        hvis r["abi"] != async_versjon() eller ikkje finnes_nøkkel(r, "operation") eller
+           r["operation"] != "spawn_argv" { returner usann }
+    }
+    # Alle grensene blir serialiserte som tekst, men backend kan få
+    # vilkårlege verdiar frå VM/JSON. Avvis feil type før indeks/søk.
+    hvis builtin.type(r["executable"]) != "tekst" eller
+       builtin.type(r["cwd"]) != "tekst" eller
+       builtin.type(r["stdin"]) != "tekst" eller
+       builtin.type(r["sandbox"]) != "tekst" eller
+       builtin.type(r["timeout_ms"]) != "tekst" eller
+       builtin.type(r["max_output_bytes"]) != "tekst" eller
+       builtin.type(r["max_memory_bytes"]) != "tekst" eller
+       builtin.type(r["max_open_files"]) != "tekst" eller
+       builtin.type(r["inherit_env"]) != "tekst" { returner usann }
+    hvis r["executable"] == "" eller ikkje _trygt_felt(r["executable"]) { returner usann }
+    hvis ikkje _kanonisk_heiltal(r["timeout_ms"]) eller ikkje _kanonisk_heiltal(r["max_output_bytes"]) { returner usann }
+    la tidsgrense = heltall_fra_tekst(r["timeout_ms"])
+    la utgrense = heltall_fra_tekst(r["max_output_bytes"])
+    hvis tidsgrense <= 0 eller tidsgrense > 2147483647 { returner usann }
+    hvis utgrense <= 0 eller utgrense > 2147483647 { returner usann }
     hvis r["cwd"] != "" og ikkje _trygt_felt(r["cwd"]) { returner usann }
     hvis ikkje _trygt_felt(r["stdin"]) eller ikkje _gyldig_sandbox(r["sandbox"]) eller ikkje _gyldige_grenser(r) { returner usann }
+    # Capture-flagg er valfrie for eldre klientar, men skal vere
+    # kanoniske boolske tekstar dersom dei finst. Ugyldige verdiar
+    # skal aldri tolkast ulikt av VM og native backend.
+    hvis finnes_nøkkel(r, "capture_stdout") {
+        hvis builtin.type(r["capture_stdout"]) != "tekst" { returner usann }
+        hvis r["capture_stdout"] != "sann" og r["capture_stdout"] != "usann" { returner usann }
+    }
+    hvis finnes_nøkkel(r, "capture_stderr") {
+        hvis builtin.type(r["capture_stderr"]) != "tekst" { returner usann }
+        hvis r["capture_stderr"] != "sann" og r["capture_stderr"] != "usann" { returner usann }
+    }
+    hvis builtin.type(r["args"]) != "liste" { returner usann }
     la args = r["args"]
     la i: heiltall = 0
     mens i < lengde(args) {
-        hvis ikkje _trygt_felt(args[i]) { returner usann }
+        hvis builtin.type(args[i]) != "tekst" eller ikkje _trygt_felt(args[i]) { returner usann }
         i = i + 1
     }
-    hvis finnes_nøkkel(r, "environment") {
-        la miljø = r["environment"]
-        hvis builtin.type(miljø) != "ordbok" { returner usann }
-        la nøklar = nøkler(miljø)
-        la mi = 0
-        mens mi < lengde(nøklar) {
-            la nøkkel = tekst(nøklar[mi])
-            hvis builtin.type(miljø[nøkkel]) != "tekst" { returner usann }
-            la verdi = miljø[nøkkel]
-            hvis nøkkel == "" eller builtin.index_of(nøkkel, "=") >= 0 eller ikkje _trygt_felt(nøkkel) eller ikkje _trygt_felt(verdi) { returner usann }
-            mi = mi + 1
-        }
-    }
+    hvis finnes_nøkkel(r, "environment") og ikkje gyldig_environment(r["environment"]) { returner usann }
     returner sann
 }
 
@@ -93,8 +154,21 @@ funksjon gyldig_resultat(r: ordbok_tekst) -> boolsk {
     // spawn-motoren med blokkerande venting og stemplar difor resultatet med
     // async_versjon() sjølv om dette er eit synkront spawn-resultat. Godta begge:
     // rå-vegen gjev norscode-process-spawn-v1, sandkasse-vegen norscode-native-process-v1.
+    hvis ikkje finnes_nøkkel(r, "abi") eller ikkje finnes_nøkkel(r, "status") eller
+       ikkje finnes_nøkkel(r, "pid") eller ikkje finnes_nøkkel(r, "exit_code") eller
+       ikkje finnes_nøkkel(r, "stdout") eller ikkje finnes_nøkkel(r, "stderr") eller
+       ikkje finnes_nøkkel(r, "wall_ms") eller ikkje finnes_nøkkel(r, "peak_rss_bytes") { returner usann }
+    # Synkrone kall les stdout/stderr utan nøkkelkontroll. Eit delvis eller
+    # feiltypet backend-svar må avvisast før kallaren brukar felta.
+    hvis builtin.type(r["abi"]) != "tekst" eller builtin.type(r["status"]) != "tekst" eller
+       builtin.type(r["pid"]) != "tekst" eller builtin.type(r["exit_code"]) != "tekst" eller
+       builtin.type(r["wall_ms"]) != "tekst" eller builtin.type(r["peak_rss_bytes"]) != "tekst" eller
+       builtin.type(r["stdout"]) != "tekst" eller builtin.type(r["stderr"]) != "tekst" { returner usann }
+    hvis finnes_nøkkel(r, "error") og builtin.type(r["error"]) != "tekst" { returner usann }
     hvis r["abi"] != versjon() og r["abi"] != async_versjon() { returner usann }
     hvis r["status"] != "ferdig" og r["status"] != "feil" og r["status"] != "timeout" og r["status"] != "signal" { returner usann }
+    hvis ikkje _kanonisk_heiltal(r["pid"]) eller ikkje _kanonisk_heiltal(r["exit_code"]) eller
+       ikkje _kanonisk_heiltal(r["wall_ms"]) eller ikkje _kanonisk_heiltal(r["peak_rss_bytes"]) { returner usann }
     hvis heltall_fra_tekst(r["pid"]) < -1 { returner usann }
     hvis r["status"] == "ferdig" og heltall_fra_tekst(r["exit_code"]) < 0 { returner usann }
     hvis ikkje finnes_nøkkel(r, "wall_ms") eller ikkje finnes_nøkkel(r, "peak_rss_bytes") { returner usann }
@@ -120,6 +194,14 @@ funksjon sett_sandbox(r: ordbok_tekst, profile: tekst, max_memory_bytes: heiltal
     returner r
 }
 
+# Bevar eksplisitte capture-val frå prosessplanen i native request.
+# Flagga er kanoniske tekstar, og gyldig_request avviser ugyldige val.
+funksjon sett_capture(r: ordbok_tekst, stdout_flagg: tekst, stderr_flagg: tekst) -> ordbok_tekst {
+    r["capture_stdout"] = stdout_flagg
+    r["capture_stderr"] = stderr_flagg
+    returner r
+}
+
 funksjon sett_environment(r: ordbok_tekst, miljø: ordbok_tekst) -> ordbok_tekst {
     r["environment"] = miljø
     returner r
@@ -141,13 +223,58 @@ funksjon async_signal_request(handle: tekst, signal: heiltall) -> ordbok_tekst {
     returner r
 }
 
+# Fail-closed validering av async handle-operasjonar. Dette er ei
+# eiga kontrakt frå spawn_argv (som bruker gyldig_request).
+funksjon gyldig_async_operasjon(r: ordbok_tekst) -> boolsk {
+    hvis ikkje finnes_nøkkel(r, "abi") eller ikkje finnes_nøkkel(r, "operation") eller
+       ikkje finnes_nøkkel(r, "handle") { returner usann }
+    hvis builtin.type(r["abi"]) != "tekst" eller builtin.type(r["operation"]) != "tekst" eller
+       builtin.type(r["handle"]) != "tekst" { returner usann }
+    hvis r["abi"] != async_versjon() eller r["handle"] == "" eller
+       ikkje _trygt_felt(r["handle"]) { returner usann }
+    la op = r["operation"]
+    hvis op == "poll" eller op == "read" eller op == "close" { returner sann }
+    hvis op == "wait" {
+        hvis ikkje finnes_nøkkel(r, "wait_ms") eller builtin.type(r["wait_ms"]) != "tekst" eller
+           ikkje _kanonisk_heiltal(r["wait_ms"]) { returner usann }
+        la ms = heltall_fra_tekst(r["wait_ms"])
+        returner ms >= 0 og ms <= 2147483647
+    }
+    hvis op == "signal" {
+        hvis ikkje finnes_nøkkel(r, "signal") eller builtin.type(r["signal"]) != "tekst" eller
+           ikkje _kanonisk_heiltal(r["signal"]) { returner usann }
+        la sig = heltall_fra_tekst(r["signal"])
+        returner sig == 1 eller sig == 2 eller sig == 9 eller sig == 15
+    }
+    returner usann
+}
+
 funksjon gyldig_async_resultat(r: ordbok_tekst) -> boolsk {
     hvis ikkje finnes_nøkkel(r, "abi") eller ikkje finnes_nøkkel(r, "status") eller
-       ikkje finnes_nøkkel(r, "pid") { returner usann }
+       ikkje finnes_nøkkel(r, "pid") eller ikkje finnes_nøkkel(r, "wall_ms") eller
+       ikkje finnes_nøkkel(r, "peak_rss_bytes") { returner usann }
+    hvis builtin.type(r["abi"]) != "tekst" eller builtin.type(r["status"]) != "tekst" eller
+       builtin.type(r["pid"]) != "tekst" eller builtin.type(r["wall_ms"]) != "tekst" eller
+       builtin.type(r["peak_rss_bytes"]) != "tekst" { returner usann }
     hvis r["abi"] != async_versjon() { returner usann }
     hvis r["status"] != "kjorer" og r["status"] != "ferdig" og r["status"] != "feil" og r["status"] != "timeout" og r["status"] != "signal" { returner usann }
-    hvis r["status"] == "kjorer" og r["handle"] == "" { returner usann }
-    hvis ikkje finnes_nøkkel(r, "wall_ms") eller ikkje finnes_nøkkel(r, "peak_rss_bytes") { returner usann }
+    hvis r["status"] == "kjorer" {
+        hvis ikkje finnes_nøkkel(r, "handle") eller builtin.type(r["handle"]) != "tekst" eller r["handle"] == "" { returner usann }
+    }
+    hvis finnes_nøkkel(r, "handle") {
+        hvis builtin.type(r["handle"]) != "tekst" eller r["handle"] == "" eller
+           ikkje _trygt_felt(r["handle"]) { returner usann }
+    }
+    # Native backend kan levere valfrie output-/feilfelt. Desse må vere
+    # tekst før høgare lag kan lese dei utan typekonvertering.
+    hvis finnes_nøkkel(r, "stdout") og builtin.type(r["stdout"]) != "tekst" { returner usann }
+    hvis finnes_nøkkel(r, "stderr") og builtin.type(r["stderr"]) != "tekst" { returner usann }
+    hvis finnes_nøkkel(r, "error") og builtin.type(r["error"]) != "tekst" { returner usann }
+    hvis finnes_nøkkel(r, "exit_code") {
+        hvis builtin.type(r["exit_code"]) != "tekst" eller ikkje _kanonisk_heiltal(r["exit_code"]) { returner usann }
+    }
+    hvis ikkje _kanonisk_heiltal(r["pid"]) eller ikkje _kanonisk_heiltal(r["wall_ms"]) eller
+       ikkje _kanonisk_heiltal(r["peak_rss_bytes"]) { returner usann }
     returner heltall_fra_tekst(r["pid"]) >= -1 og heltall_fra_tekst(r["wall_ms"]) >= 0 og
         heltall_fra_tekst(r["peak_rss_bytes"]) >= 0
 }
