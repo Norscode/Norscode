@@ -1,0 +1,574 @@
+# db_url.no — same flate som std.db, men motoren blir vald av adressa (H5/H6).
+#
+#   bruk std.db_url som db
+#
+#   la a = db.open("")                                  # NorsDB i minnet
+#   la b = db.open("/data/app.ndb")                     # NorsDB på fil
+#   la c = db.open("postgresql://app:pw@localhost:5432/appdb")   # Postgres
+#
+# Postgres-handtaket følgjer NorsDB-konvensjonen: execute() gir -1 og
+# siste_feil() forklarer, i staden for å kaste. Tekst-/heiltals-spørringar gir
+# "" / 0 ved feil. Koden din er den same for begge motorane.
+#
+# Tilkoplingspool (pool/pool_acquire/pool_release) fungerer for begge. Ei
+# Postgres-tilkopling som har gått i stykke blir erstatta ved neste uttak, og
+# SELECT/WITH/SHOW blir prøvd éin gong til på ei fersk tilkopling utanfor
+# transaksjon. Skrivande setningar blir ALDRI prøvd på nytt av seg sjølv, for
+# vi veit ikkje om tenaren rakk å utføre dei.
+#
+# Eigen modul (ikkje std.db) slik at appar som berre brukar NorsDB ikkje får
+# socket-/krypto-modulane med i kompileringa.
+
+bruk std.norsdb_db som norsdb
+bruk std.pg som pg
+
+funksjon backend() -> tekst { returner norsdb.backend() }
+funksjon status() -> ordbok_tekst { returner norsdb.status() }
+
+funksjon er_postgres_adresse(adresse: tekst) -> boolsk {
+    returner builtin.starts_with(adresse, "postgresql://") eller builtin.starts_with(adresse, "postgres://")
+}
+
+funksjon _pg(handle) -> boolsk {
+    returner finnes_nøkkel(handle, "_motor") og handle["_motor"] == "postgres"
+}
+
+funksjon _pg_opne(adresse: tekst) -> ordbok_tekst {
+    la h = {"_motor": "postgres", "_adresse": adresse, "_feil": "", "_i_tx": usann, "_lukka": usann, "_conn": ""}
+    prøv {
+        h["_conn"] = pg.open_url(adresse)
+    } fang (e) {
+        h["_feil"] = tekst(e)
+        h["_lukka"] = sann
+    }
+    returner h
+}
+
+funksjon open(adresse: tekst) -> ordbok_tekst {
+    hvis er_postgres_adresse(adresse) { returner _pg_opne(adresse) }
+    returner norsdb.open(adresse)
+}
+
+funksjon close(handle) -> bool {
+    hvis _pg(handle) {
+        pg.close(handle["_conn"])
+        handle["_lukka"] = sann
+        returner sann
+    }
+    returner norsdb.close(handle)
+}
+
+funksjon ping(handle) -> bool {
+    hvis _pg(handle) {
+        hvis handle["_lukka"] eller ikkje pg.er_tilkopla(handle["_conn"]) { returner usann }
+        returner sann
+    }
+    returner norsdb.ping(handle)
+}
+
+# Opprett Postgres-tilkoplinga på nytt (ikkje midt i ein transaksjon).
+funksjon _pg_gjenopprett(handle) -> bool {
+    hvis handle["_i_tx"] { returner usann }
+    pg.close(handle["_conn"])
+    la ny = _pg_opne(handle["_adresse"])
+    handle["_conn"] = ny["_conn"]
+    handle["_lukka"] = ny["_lukka"]
+    handle["_feil"] = ny["_feil"]
+    returner ikkje handle["_lukka"]
+}
+
+funksjon _ord_teikn(c: heiltall) -> boolsk {
+    returner (c >= 48 og c <= 57) eller (c >= 65 og c <= 90) eller (c >= 97 og c <= 122) eller c == 95 eller c > 127
+}
+
+# SQL med innhaldet i '…'-strengar (inkl. E'…' og ''-dobling), "…"-identifikatorar og kommentarar bytt ut med
+# mellomrom (aldri ord-treff der inne). Same skanning som _del_setningar og _til_dollar (_hopp_streng/_hopp_kommentar).
+funksjon _utan_strengar(sql: tekst) -> tekst {
+    la ut: liste_tekst = []
+    la n = lengde(sql)
+    la i: heltall = 0
+    mens i < n {
+        la ch = builtin.slice(sql, i, i + 1)
+        la slutt = i
+        hvis ch == "'" {
+            slutt = _hopp_streng(sql, i + 1, "'", _er_e_streng(sql, i))
+        } ellers hvis ch == "\"" {
+            slutt = _hopp_streng(sql, i + 1, "\"", usann)
+        } ellers {
+            slutt = _hopp_kommentar(sql, i)
+        }
+        hvis slutt > i {
+            legg_til(ut, " ")
+            i = slutt
+        } ellers {
+            legg_til(ut, ch)
+            i = i + 1
+        }
+    }
+    returner builtin.join(ut, "")
+}
+
+# Hopp over linje- (-- …) eller blokkommentar (/* … */, nesta) som startar på posisjon i. Gir posisjonen etter
+# kommentaren (linjekommentar: ved linjeskiftet), eller i uendra om ingen kommentar startar der.
+funksjon _hopp_kommentar(sql: tekst, start: heltall) -> heltall {
+    la n = lengde(sql)
+    hvis start + 1 >= n { returner start }
+    la ch = builtin.slice(sql, start, start + 1)
+    la neste = builtin.slice(sql, start + 1, start + 2)
+    la i = start
+    hvis ch == "-" og neste == "-" {
+        mens i < n og builtin.slice(sql, i, i + 1) != "\n" { i = i + 1 }
+        returner i
+    }
+    hvis ch == "/" og neste == "*" {
+        la djup: heltall = 1
+        i = i + 2
+        mens i < n og djup > 0 {
+            la a = builtin.slice(sql, i, i + 1)
+            la b = ""
+            hvis i + 1 < n { b = builtin.slice(sql, i + 1, i + 2) }
+            hvis a == "/" og b == "*" {
+                djup = djup + 1
+                i = i + 2
+            } ellers hvis a == "*" og b == "/" {
+                djup = djup - 1
+                i = i + 2
+            } ellers {
+                i = i + 1
+            }
+        }
+        returner i
+    }
+    returner start
+}
+
+# Heile ord (små bokstavar) i SQL utanfor strengliteralar.
+funksjon _sql_ord(sql: tekst) -> liste_tekst {
+    la s = builtin.lower(_utan_strengar(sql))
+    la ord: liste_tekst = []
+    la cur = ""
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        hvis _ord_teikn(builtin.char_code(ch)) {
+            cur = cur + ch
+        } ellers hvis cur != "" {
+            legg_til(ord, cur)
+            cur = ""
+        }
+        i = i + 1
+    }
+    hvis cur != "" { legg_til(ord, cur) }
+    returner ord
+}
+
+# Hopp over ein sitert streng frå posisjon `i` (rett etter opningsteiknet). Gir posisjonen etter avsluttande
+# sitat. Doblinga ('' / "") er escape. Med `esc` (E'…') er \x òg escape. Uavslutta streng gir lengde(sql).
+funksjon _hopp_streng(sql: tekst, start: heltall, sitat: tekst, esc: boolsk) -> heltall {
+    la n = lengde(sql)
+    la i = start
+    mens i < n {
+        la ch = builtin.slice(sql, i, i + 1)
+        hvis esc og ch == "\\" {
+            i = i + 2
+        } ellers hvis ch == sitat {
+            hvis i + 1 < n og builtin.slice(sql, i + 1, i + 2) == sitat {
+                i = i + 2
+            } ellers {
+                returner i + 1
+            }
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner n
+}
+
+# Er `'` på posisjon i opningen av ein E'…'-streng (E/e rett før, ikkje som del av eit lengre ord)?
+funksjon _er_e_streng(sql: tekst, i: heltall) -> boolsk {
+    hvis i < 1 { returner usann }
+    la f = builtin.slice(sql, i - 1, i)
+    hvis f != "e" og f != "E" { returner usann }
+    hvis i > 1 og _ord_teikn(builtin.char_code(builtin.slice(sql, i - 2, i - 1))) { returner usann }
+    returner sann
+}
+
+# Del SQL i setningar ved ; utanfor '…', "…", E'…', $$…$$ / $tag$…$tag$, -- linjekommentar og /* … */.
+# Gir trimma, ikkje-tomme setningar utan avsluttande ;.
+funksjon _del_setningar(sql: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la n = lengde(sql)
+    la start: heltall = 0
+    la i: heltall = 0
+    mens i < n {
+        la ch = builtin.slice(sql, i, i + 1)
+        la neste = ""
+        hvis i + 1 < n { neste = builtin.slice(sql, i + 1, i + 2) }
+        hvis ch == "'" {
+            i = _hopp_streng(sql, i + 1, "'", _er_e_streng(sql, i))
+        } ellers hvis ch == "\"" {
+            i = _hopp_streng(sql, i + 1, "\"", usann)
+        } ellers hvis _hopp_kommentar(sql, i) > i {
+            i = _hopp_kommentar(sql, i)
+        } ellers hvis ch == "$" {
+            la j: heltall = i + 1
+            mens j < n og _ord_teikn(builtin.char_code(builtin.slice(sql, j, j + 1))) { j = j + 1 }
+            la tag_ok = j < n og builtin.slice(sql, j, j + 1) == "$"
+            hvis tag_ok og j > i + 1 {
+                la c0 = builtin.char_code(builtin.slice(sql, i + 1, i + 2))
+                hvis c0 >= 48 og c0 <= 57 { tag_ok = usann }
+            }
+            hvis tag_ok og i > 0 og _ord_teikn(builtin.char_code(builtin.slice(sql, i - 1, i))) { tag_ok = usann }
+            hvis tag_ok {
+                la tag = builtin.slice(sql, i, j + 1)
+                la resten = builtin.slice(sql, j + 1, n)
+                la idx = builtin.index_of(resten, tag)
+                hvis idx < 0 { i = n } ellers { i = j + 1 + idx + lengde(tag) }
+            } ellers {
+                i = i + 1
+            }
+        } ellers hvis ch == ";" {
+            la s = builtin.trim(builtin.slice(sql, start, i))
+            hvis s != "" { legg_til(ut, s) }
+            start = i + 1
+            i = i + 1
+        } ellers {
+            i = i + 1
+        }
+    }
+    la rest = builtin.trim(builtin.slice(sql, start, n))
+    hvis rest != "" { legg_til(ut, rest) }
+    returner ut
+}
+
+# Lesing = SELECT/SHOW, eller WITH som ikkje inneheld INSERT/UPDATE/DELETE/MERGE som heile ord
+# (data-modifiserande CTE). Alt anna (og usikre tilfelle) er ikkje lesing, så ingen retry.
+funksjon _er_lesing(sql: tekst) -> boolsk {
+    # Heile batchen må vere lesing (simple-query kan ha fleire ;-separerte setningar).
+    la delar = _del_setningar(sql)
+    hvis lengde(delar) == 0 { returner usann }
+    la k: heltall = 0
+    mens k < lengde(delar) {
+        hvis ikkje _er_lesing_ei(delar[k]) { returner usann }
+        k = k + 1
+    }
+    returner sann
+}
+
+funksjon _er_lesing_ei(sql: tekst) -> boolsk {
+    la s = builtin.lower(builtin.trim(sql))
+    hvis builtin.starts_with(s, "select") eller builtin.starts_with(s, "show") { returner sann }
+    hvis builtin.starts_with(s, "with") {
+        la ord = _sql_ord(sql)
+        la i: heltall = 0
+        mens i < lengde(ord) {
+            la o = ord[i]
+            hvis o == "insert" eller o == "update" eller o == "delete" eller o == "merge" { returner usann }
+            i = i + 1
+        }
+        returner sann
+    }
+    returner usann
+}
+
+# Køyr éi Postgres-spørring. Gir {"ok": boolsk, "r": resultat}. Set _feil ved feil.
+# `modus`: "exec" | "tekst" | "rader" | "verdi"
+funksjon _pg_kjor(handle, sql: tekst, params: liste<tekst>, modus: tekst) -> ordbok_tekst {
+    hvis handle["_lukka"] eller ikkje pg.er_tilkopla(handle["_conn"]) {
+        hvis ikkje _pg_gjenopprett(handle) {
+            hvis handle["_feil"] == "" { handle["_feil"] = "PG-feil: tilkoplinga er lukka" }
+            returner {"ok": usann, "r": ""}
+        }
+    }
+    la forsøk: heltall = 0
+    mens forsøk < 2 {
+        prøv {
+            la r = ""
+            hvis modus == "exec" { r = pg.execute(handle["_conn"], sql, params) }
+            hvis modus == "verdi" { r = pg.query_verdi(handle["_conn"], sql, params) }
+            hvis modus == "rader" { r = pg.rader_tekst(handle["_conn"], sql, params) }
+            handle["_feil"] = ""
+            returner {"ok": sann, "r": r}
+        } fang (e) {
+            handle["_feil"] = tekst(e)
+            la teknisk = builtin.index_of(tekst(e), "SQLSTATE") < 0
+            hvis teknisk og forsøk == 0 og _er_lesing(sql) og _pg_gjenopprett(handle) {
+                forsøk = forsøk + 1
+            } ellers {
+                forsøk = 2
+            }
+        }
+    }
+    returner {"ok": usann, "r": ""}
+}
+
+funksjon siste_feil(handle) -> tekst {
+    hvis _pg(handle) { returner handle["_feil"] }
+    returner norsdb.siste_feil(handle)
+}
+
+funksjon execute(handle, sql: tekst) -> heltall {
+    hvis _pg(handle) {
+        la r = _pg_kjor(handle, sql, [], "exec")
+        hvis r["ok"] { returner r["r"] }
+        returner -1
+    }
+    returner norsdb.execute(handle, sql)
+}
+
+funksjon query_text(handle, sql: tekst) -> tekst {
+    hvis _pg(handle) { returner tekst(_pg_kjor(handle, sql, [], "verdi")["r"]) }
+    returner norsdb.query_text(handle, sql)
+}
+
+funksjon query_int(handle, sql: tekst) -> heltall {
+    hvis _pg(handle) {
+        la v = tekst(_pg_kjor(handle, sql, [], "verdi")["r"])
+        hvis v == "" { returner 0 }
+        prøv { returner heltall_fra_tekst(v) } fang (e) { returner 0 }
+        returner 0
+    }
+    returner norsdb.query_int(handle, sql)
+}
+
+funksjon query_rader(handle, sql: tekst) -> tekst {
+    hvis _pg(handle) { returner tekst(_pg_kjor(handle, sql, [], "rader")["r"]) }
+    returner norsdb.query_rader(handle, sql)
+}
+
+# NorsDB bruker ?-teikn; Postgres $1, $2. Byt ut ? (utanfor strengar) med $n så same SQL fungerer på begge.
+#
+# PostgreSQL har eigne ?-operatorar (JSONB: `?`, `?|`, `?&`) som ikkje skal omskrivast. Regel:
+#  - `?|` og `?&` er alltid operatorar.
+#  - Elles er `?` ein plasshaldar berre når førre ikkje-blanke token er starten av setninga, eitt av
+#    teikna ( [ , ; = < > + - * / | ? (|| = konkatenering; ? = operand etter ein ?-operator), eller eitt av nøkkelorda values, limit,
+#    offset, by, and, or, not, when, then, else, in, like, ilike, set, where, on, returning, select,
+#    as, is, between, case, having.
+#    Etter ein identifikator, `)`, `]`, `"` eller `'` er `?` ein operator (`data ? 'key'`, `(x) ? y`).
+#  - `?` inne i '…'-strengar og "…"-identifikatorar blir aldri rørt.
+funksjon _plasshaldar_ord(o: tekst) -> boolsk {
+    returner o == "values" eller o == "limit" eller o == "offset" eller o == "by" eller o == "and" eller o == "or" eller o == "not" eller o == "when" eller o == "then" eller o == "else" eller o == "in" eller o == "like" eller o == "ilike" eller o == "set" eller o == "where" eller o == "on" eller o == "returning" eller o == "select" eller o == "as" eller o == "is" eller o == "between" eller o == "case" eller o == "having"
+}
+
+funksjon _til_dollar(sql: tekst) -> tekst {
+    hvis builtin.index_of(sql, "?") < 0 { returner sql }
+    la ut: liste_tekst = []
+    la n: heltall = 0
+    la sitat = ""
+    la esc_str = usann   # inne i E'…': \x er escape
+    la ord = ""          # ordet som blir bygd / sist ferdige ord
+    la i_ord = usann
+    la førre = ""        # klasse for førre ikkje-blanke token: "" (start), "w" (ord), "q" (streng) eller teiknet
+    la i: heltall = 0
+    la lengd = lengde(sql)
+    mens i < lengd {
+        la ch = builtin.slice(sql, i, i + 1)
+        la c = builtin.char_code(ch)
+        hvis sitat != "" {
+            i_ord = usann
+            hvis esc_str og ch == "\\" og i + 1 < lengd {
+                legg_til(ut, ch)
+                legg_til(ut, builtin.slice(sql, i + 1, i + 2))
+                i = i + 1
+            } ellers hvis ch == sitat {
+                hvis i + 1 < lengd og builtin.slice(sql, i + 1, i + 2) == sitat {
+                    # '' / "" er escape inne i literalen
+                    legg_til(ut, ch)
+                    legg_til(ut, ch)
+                    i = i + 1
+                } ellers {
+                    sitat = ""
+                    førre = "q"
+                    legg_til(ut, ch)
+                }
+            } ellers {
+                legg_til(ut, ch)
+            }
+        } ellers hvis _hopp_kommentar(sql, i) > i {
+            la ks = _hopp_kommentar(sql, i)
+            legg_til(ut, builtin.slice(sql, i, ks))
+            i_ord = usann
+            i = ks - 1
+        } ellers hvis ch == "'" eller ch == "\"" {
+            sitat = ch
+            esc_str = ch == "'" og _er_e_streng(sql, i)
+            i_ord = usann
+            legg_til(ut, ch)
+        } ellers hvis _ord_teikn(c) {
+            hvis i_ord { ord = ord + builtin.lower(ch) } ellers { ord = builtin.lower(ch) }
+            i_ord = sann
+            førre = "w"
+            legg_til(ut, ch)
+        } ellers hvis ch == "?" {
+            i_ord = usann
+            la neste = ""
+            hvis i + 1 < lengd { neste = builtin.slice(sql, i + 1, i + 2) }
+            la plass = usann
+            hvis neste != "|" og neste != "&" {
+                hvis førre == "" eller førre == "(" eller førre == "[" eller førre == "," eller førre == ";" eller førre == "=" eller førre == "<" eller førre == ">" eller førre == "+" eller førre == "-" eller førre == "*" eller førre == "/" eller førre == "|" eller førre == "?" {
+                    plass = sann
+                } ellers hvis førre == "w" og _plasshaldar_ord(ord) {
+                    plass = sann
+                }
+            }
+            hvis plass {
+                n = n + 1
+                legg_til(ut, "$" + tekst_fra_heltall(n))
+                førre = "q"
+            } ellers {
+                legg_til(ut, ch)
+                førre = "?"
+            }
+        } ellers {
+            legg_til(ut, ch)
+            i_ord = usann
+            hvis ch != " " og ch != "\t" og ch != "\n" og ch != "\r" { førre = ch }
+        }
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# Bundne parametrar: på Postgres går dei som ekte parametrar ($1, $2, …), på
+# NorsDB blir ?-teikn bytt ut slik std.db alltid har gjort.
+funksjon execute_bundet(handle, sql: tekst, params: liste<tekst>) -> heltall {
+    hvis _pg(handle) {
+        la r = _pg_kjor(handle, _til_dollar(sql), params, "exec")
+        hvis r["ok"] { returner r["r"] }
+        returner -1
+    }
+    returner norsdb.execute_bundet(handle, sql, params)
+}
+
+funksjon query_text_bundet(handle, sql: tekst, params: liste<tekst>) -> tekst {
+    hvis _pg(handle) { returner tekst(_pg_kjor(handle, _til_dollar(sql), params, "verdi")["r"]) }
+    returner norsdb.query_text_bundet(handle, sql, params)
+}
+
+funksjon query_int_bundet(handle, sql: tekst, params: liste<tekst>) -> heltall {
+    hvis _pg(handle) {
+        la v = tekst(_pg_kjor(handle, _til_dollar(sql), params, "verdi")["r"])
+        hvis v == "" { returner 0 }
+        prøv { returner heltall_fra_tekst(v) } fang (e) { returner 0 }
+        returner 0
+    }
+    returner norsdb.query_int_bundet(handle, sql, params)
+}
+
+# ─── Transaksjonar ────────────────────────────────────────────────────────────
+
+funksjon begin(handle) -> bool {
+    hvis _pg(handle) {
+        la r = _pg_kjor(handle, "BEGIN", [], "exec")
+        hvis r["ok"] { handle["_i_tx"] = sann }
+        returner r["ok"]
+    }
+    returner norsdb.begin(handle)
+}
+
+funksjon commit(handle) -> bool {
+    hvis _pg(handle) {
+        la r = _pg_kjor(handle, "COMMIT", [], "exec")
+        handle["_i_tx"] = usann
+        returner r["ok"]
+    }
+    returner norsdb.commit(handle)
+}
+
+funksjon rollback(handle) -> bool {
+    hvis _pg(handle) {
+        hvis ikkje handle["_i_tx"] { returner usann }
+        la r = _pg_kjor(handle, "ROLLBACK", [], "exec")
+        handle["_i_tx"] = usann
+        returner r["ok"]
+    }
+    returner norsdb.rollback(handle)
+}
+
+# Køyr fleire ;-separerte setningar. Gir tal på setningar som råka rader, eller -1 ved feil.
+funksjon migrate(handle, skript: tekst) -> heltall {
+    hvis _pg(handle) {
+        la delar = _del_setningar(skript)
+        la tal: heltall = 0
+        la i: heltall = 0
+        mens i < lengde(delar) {
+            la s = builtin.trim(delar[i])
+            hvis s != "" {
+                la n = execute(handle, s)
+                hvis n < 0 { returner -1 }
+                hvis n > 0 { tal = tal + 1 }
+            }
+            i = i + 1
+        }
+        returner tal
+    }
+    returner norsdb.migrate(handle, skript)
+}
+
+# Køyr skript atomisk: 1 ved commit, 0 ved rollback.
+funksjon transaction(handle, skript: tekst) -> heltall {
+    hvis _pg(handle) {
+        hvis ikkje begin(handle) { returner 0 }
+        hvis migrate(handle, skript) >= 0 {
+            hvis commit(handle) { returner 1 }
+            returner 0
+        }
+        rollback(handle)
+        returner 0
+    }
+    returner norsdb.transaction(handle, skript)
+}
+
+funksjon backup(handle, sti: tekst) -> bool {
+    hvis _pg(handle) { returner usann }
+    returner norsdb.backup(handle, sti)
+}
+
+# ─── Tilkoplingspool ──────────────────────────────────────────────────────────
+# pool(adresse, maks) → pool_acquire → … → pool_release. Handtak ut over `maks`
+# blir avvist (handtak med siste_feil() = "pool full").
+
+funksjon pool(adresse: tekst, maks: heltall) -> ordbok_tekst {
+    returner {"_pool_sti": adresse, "_pool_maks": maks, "_pool_idle": [], "_pool_ute": 0}
+}
+
+funksjon pool_acquire(p) -> ordbok_tekst {
+    hvis p["_pool_ute"] >= p["_pool_maks"] {
+        returner {"_motor": "postgres", "_feil": "pool full", "_lukka": sann, "_i_tx": usann, "_conn": "", "_adresse": ""}
+    }
+    la c = {}
+    hvis lengde(p["_pool_idle"]) > 0 {
+        c = p["_pool_idle"][lengde(p["_pool_idle"]) - 1]
+        fjern_siste(p["_pool_idle"])
+        hvis ikkje ping(c) {
+            c = open(p["_pool_sti"])
+        }
+    } ellers {
+        c = open(p["_pool_sti"])
+    }
+    c["_pool"] = p
+    p["_pool_ute"] = p["_pool_ute"] + 1
+    returner c
+}
+
+# Gi tilbake eit handtak. Open transaksjon blir rulla tilbake først.
+funksjon pool_release(p, handle) -> bool {
+    hvis finnes_nøkkel(handle, "_i_tx") og handle["_i_tx"] { rollback(handle) }
+    hvis p["_pool_ute"] > 0 { p["_pool_ute"] = p["_pool_ute"] - 1 }
+    hvis ping(handle) { legg_til(p["_pool_idle"], handle) }
+    returner sann
+}
+
+funksjon pool_size(p) -> heltall {
+    returner lengde(p["_pool_idle"])
+}
+
+funksjon pool_close(p) -> bool {
+    la i: heltall = 0
+    mens i < lengde(p["_pool_idle"]) {
+        close(p["_pool_idle"][i])
+        i = i + 1
+    }
+    p["_pool_idle"] = []
+    returner sann
+}

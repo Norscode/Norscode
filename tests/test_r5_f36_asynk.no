@@ -1,0 +1,109 @@
+# R5 / F36: ekte asynk i VM-en. Eit kall til ein asynk funksjon gjev ei future og køyrer
+# samtidig (kooperativ planleggjar; ingen preemption mellom ventepunkt); vent parkerer
+# den kallande oppgåva; vent_alle / vent_første / vent_innan / sov_asynk / avbryt.
+# Programmet ligg i tests/fixtures/r5_f36_asynk.no (sjå docs/ASYNK.md).
+
+bruk selfhost.kompiler som kompiler
+bruk selfhost.vm som vm
+bruk tests.helpers.r5_bunt som bunt
+
+funksjon rapport_kart(rå: tekst) {
+    la kart = {}
+    for linje i builtin.split(rå, "|") {
+        la eq = builtin.index_of(linje, "=")
+        kart[builtin.slice(linje, 0, eq)] = builtin.slice(linje, eq + 1, lengde(linje))
+    }
+    returner kart
+}
+
+funksjon krev(kart, nøkkel: tekst, venta: tekst) -> heiltall {
+    hvis ikkje har_nokkel(kart, nøkkel) { kast "manglar rapportlinje " + nøkkel }
+    hvis kart[nøkkel] != venta { kast "rapportlinje " + nøkkel + ": fekk «" + kart[nøkkel] + "», venta «" + venta + "»" }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la kjelde = fil_les("tests/fixtures/r5_f36_asynk.no")
+    la ncb = bunt.bygg_ncb(kjelde)
+    la rå = tekst(vm.køyr_ncb(ncb))
+    la k = rapport_kart(rå)
+    # Kroppen startar ikkje ved kallet, men når kallaren ventar (synkron semantikk gav pluss_ein-start først).
+    krev(k, "a1_er_future", "sann")
+    krev(k, "a2_ikkje_ferdig_enno", "usann")
+    krev(k, "a3_verdi", "2")
+    krev(k, "a4_rekkjefølgje", "etter-kall,pluss_ein-start,etter-vent")
+    krev(k, "a5_vent_vanleg_verdi", "5")
+
+    # Samtidig: alle fire må vere inne før nokon kjem vidare (ei sekvensiell køyring ville stått fast).
+    krev(k, "b1_resultat", "abcd")
+    krev(k, "b2_alle_fire_inne_samtidig", "4")
+
+    # Ping-pong krev ekte samtidigheit.
+    krev(k, "c1_veksling", "A1,B1,A2,B2,A3,B3")
+
+    # Kooperativ: ei 20000-iterasjons-lykkje i hovudkoden blir ikkje avbroten av oppgåva.
+    krev(k, "d1_ingen_preemption", "hovud-lykkje-ferdig,oppgåve-køyrer")
+
+    # Nøsta vent, utflata future, delt future.
+    krev(k, "e1_nøsta_vent", "14")
+    krev(k, "e2_flata_future", "20")
+    krev(k, "e3_delt_future", "9,9")
+
+    # Unntak gjennom vent, med stakkspor frå oppgåva.
+    krev(k, "f1_type", "VerdiFeil")
+    krev(k, "f2_stakk_frå_oppgåva", "djupt")
+    krev(k, "f3_vent_alle_feil", "VerdiFeil")
+    krev(k, "f4_ikkje_venta_feil_ufarleg", "ok")
+
+    # vent_første og avbrot.
+    krev(k, "g1_fyrste", "rask")
+    krev(k, "g2_indeks", "1")
+    krev(k, "g3_avbryt_sein", "sann")
+    krev(k, "g4_avbryt_middels", "sann")
+    krev(k, "g5_avbroten_oppgåve", "AvbruttFeil,AvbruttFeil")
+    krev(k, "g6_ingen_sideeffekt_etter_avbrot", "ferdig-rask")
+    krev(k, "g7_kansellert", "sann")
+    krev(k, "g8_avbryt_ferdig", "usann")
+    krev(k, "h1_avbryt", "sann")
+    krev(k, "h2_vent_avbroten", "AvbruttFeil")
+    krev(k, "h3_kroppen_køyrde_aldri", "0")
+
+    # Tidsavbrot.
+    krev(k, "i1_timeout", "TimeoutFeil")
+    krev(k, "i2_raskt", "sann")
+    krev(k, "i3_timeout_er_futurefeil", "TimeoutFeil")
+    krev(k, "i4_oppgåva_avbroten", "sann")
+    krev(k, "i5_ingen_sideeffekt", "0")
+    krev(k, "i6_innan_fristen", "rask")
+    krev(k, "i7_vent_kallform_timeout", "TimeoutFeil")
+    krev(k, "i8_kallform_avbraut_oppgåva", "sann")
+    krev(k, "i9_kallform_innan_fristen", "rask2")
+    krev(k, "i10_kallform_frå_oppgåve", "oppgåve-fekk-timeout")
+
+    # Tråd som ventar på ei oppgåve.
+    krev(k, "j1_tråd_ventar_på_oppgåve", "110")
+
+    # Fire-og-gløym: ei ikkje-venta oppgåve blir køyrd ferdig før programmet sluttar.
+    la p2 = "la teljar: heiltall = 0\n" +
+        "asynk funksjon jobb() -> heiltall {\n" +
+        "    builtin.vent.sov(20)\n" +
+        "    teljar = teljar + 1\n" +
+        "    returner 0\n" +
+        "}\n" +
+        "funksjon start() -> heiltall {\n" +
+        "    jobb()\n" +
+        "    jobb()\n" +
+        "    returner teljar\n" +
+        "}\n"
+    la ncb2 = builtin.json_parse_raw(kompiler.kompiler_fil(p2, "__main__"))
+    assert_eq(tekst(vm.køyr_ncb(ncb2)), "0")
+    assert_eq(tekst(ncb2["functions"]["__vm_globals__"]["__main__"]["teljar"]), "2")
+
+    # Innbyggings-API-et (køyr_funksjon utan programkøyring) beheld synkron køyring.
+    la p3 = "asynk funksjon g(x: heiltall) -> heiltall {\n    returner x + 1\n}\n" +
+        "funksjon start() -> heiltall {\n    returner g(1)\n}\n"
+    la ncb3 = builtin.json_parse_raw(kompiler.kompiler_fil(p3, "__main__"))
+    assert_eq(tekst(vm.køyr_funksjon("__main__.start", [], ncb3["functions"], 0)), "2")
+    skriv("test_r5_f36_asynk OK\n")
+    returner 0
+}
