@@ -25,3 +25,23 @@ ikkje forsvinn. CI og manuelt testresultat må stadfestast før merge.
 
 Dette er ei avgrensa recovery-retting, ikkje fullstendig durabilitetsgaranti.
 Diskfeil, delvis skrift, korrupt data og fsync/atomisk rename krev vidare arbeid.
+
+## Neste hardening: validering og skrivekontroll (stacka PR)
+
+Oppstart krev no ein korrekt NORSDB2-header og fullførte S/Z-segmentpar.
+Ei heil `.cp2` må innehalde nøyaktig eitt komplett segment, utan
+overskytande postar eller avbrote hale. Ei ordinær `.cp` kan framleis
+ha ein ufullstendig SISTE delta; dette blir forkasta før replay, medan
+siste heile segment blir brukt. Ei fil utan heilt segment gjev eksplisitt
+feil i staden for at databasen ser tom ut.
+
+Før full checkpoint er rekna som vellykka, blir både `.cp2` og `.cp`
+kontrollerte mot forventa filstorleik. Ved inkrementell checkpoint må
+storleiken auke med heile det nye segmentet. Ved feila/ufullstendig
+skriving blir ikkje WAL fjerna eller epoken endra. Det er ein
+**storleikskontroll**, ikkje checksumming eller garanti for `fsync`;
+feil som ikkje endrar lengda kan framleis sleppe gjennom.
+
+Regresjonstestane i `tests/test_norsdb_checkpoint.no` dekkjer feil
+segmentstruktur, ufullstendig/ekstra `.cp2`, primærfil utan gyldig
+segment og feil ved checkpoint-skriving.
