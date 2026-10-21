@@ -45,3 +45,20 @@ feil som ikkje endrar lengda kan framleis sleppe gjennom.
 Regresjonstestane i `tests/test_norsdb_checkpoint.no` dekkjer feil
 segmentstruktur, ufullstendig/ekstra `.cp2`, primærfil utan gyldig
 segment og feil ved checkpoint-skriving.
+
+## CRC32 per nytt checkpoint-segment
+
+Nye `S ... Z`-segment brukar `Z<US>epoke<US>crc32<RS>` der
+CRC32 er eit desimalt u32-tal for alle byte frå `S` til og med
+siste `RS` før `Z`. Kontrollsummen er over eksakte lagringsbyte,
+ikke over den dekoda SQL-verdien. Full checkpoint, backup og
+inkrementell checkpoint skriv dette feltet. Ved opning blir CRC32
+verifisert før eit checkpoint blir spelt av. Endring av éin byte med
+same filstorleik blir dermed oppdaga. NORSDB2-segment utan CRC-felt
+kan framleis lesast for bakoverkompatibilitet, men dei gir ikkje den
+same korrupsjonsdeteksjonen.
+
+CRC32 er ein ikkje-kryptografisk feilkontroll; han gir ikkje vern
+mot medviten manipulering eller garanti for fsync/atomisk lagring.
+Test i `tests/test_norsdb_checkpoint.no` byter ut ein byte i den
+lagra radverdien utan å endre storleik og krev at opning feilar.
