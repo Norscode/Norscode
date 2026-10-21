@@ -18,6 +18,7 @@
 // payload (eksakt, negativ/bignum-trygt); fast-breidd heiltal er ei seinare optim.
 
 bruk std.bytes som bytes
+bruk std.filops som filops
 
 // ── Type-tags ────────────────────────────────────────────────────────
 funksjon tag_null()  -> heltall { returner 0 }
@@ -1950,39 +1951,62 @@ funksjon db_replay(db, payload) {
 funksjon _cp_hovud() -> tekst { returner "NORSDB2" }
 
 // Er teksten eit gyldig NORSDB2-checkpoint med minst eitt komplett segment?
-funksjon _cp_gyldig(t: tekst) -> boolsk {
-    hvis lengde(t) < 7 eller builtin.slice(t, 0, 7) != _cp_hovud() { returner usann }
-    returner builtin.index_of(t, builtin.chr(30) + "Z" + builtin.chr(31)) >= 0
-}
-
-// Finn siste fullførte epoke i checkpointet. -1 tyder at det ikkje finst
-// eit komplett S...Z-segment med samsvarande epoke. Ei trunkert hale etter
-// siste komplette segment er tillaten for .cp, men aldri for .cp2.
+// Krev ekte S/Z-segmentpar. cp2 frå full kompaktering må ha nøyaktig eitt
+// komplett segment og ingen ekstra postar etter Z. Eit ordinært .cp kan ha
+// ein avbroten SISTE delta, men minst eitt komplett segment må finnast.
 funksjon _cp_siste_epoke(t: tekst, krev_heil_fil: boolsk) -> heiltall {
     la rs = builtin.chr(30)
     la us = builtin.chr(31)
-    hvis lengde(t) < 7 eller builtin.slice(t, 0, 7) != _cp_hovud() { returner -1 }
     la postar = builtin.split(t, rs)
     hvis lengde(postar) < 4 eller postar[0] != _cp_hovud() { returner -1 }
-    hvis krev_heil_fil og postar[lengde(postar) - 1] != "" { returner -1 }
     la aktiv = -1
     la siste = -1
+    la fullførte = 0
     la i = 1
     mens i < lengde(postar) {
         la p = postar[i]
-        hvis builtin.starts_with(p, "S" + us) {
+        hvis p == "" {
+            hvis i != lengde(postar) - 1 { returner -1 }
+        } ellers hvis builtin.starts_with(p, "S" + us) {
             hvis aktiv >= 0 { returner -1 }
-            aktiv = builtin.heltall_fra_tekst(builtin.slice(p, 2, lengde(p)))
+            hvis krev_heil_fil og fullførte > 0 { returner -1 }
+            la epoketekst = builtin.slice(p, 2, lengde(p))
+            la e = builtin.heltall_fra_tekst(epoketekst)
+            hvis e < 0 eller tekst_fra_heltall(e) != epoketekst eller e <= siste { returner -1 }
+            aktiv = e
         } ellers hvis builtin.starts_with(p, "Z" + us) {
-            la e = builtin.heltall_fra_tekst(builtin.slice(p, 2, lengde(p)))
-            hvis aktiv < 0 eller e != aktiv eller e < siste { returner -1 }
+            hvis aktiv < 0 { returner -1 }
+            la epoketekst = builtin.slice(p, 2, lengde(p))
+            la e = builtin.heltall_fra_tekst(epoketekst)
+            hvis tekst_fra_heltall(e) != epoketekst eller e != aktiv { returner -1 }
             siste = e
+            fullførte = fullførte + 1
             aktiv = -1
+            hvis krev_heil_fil og i != lengde(postar) - 2 { returner -1 }
+        } ellers hvis aktiv < 0 {
+            // Datapost utanfor eit segment er ein korrupt checkpoint.
+            returner -1
         }
         i = i + 1
     }
-    hvis krev_heil_fil og aktiv >= 0 { returner -1 }
+    hvis krev_heil_fil og (aktiv >= 0 eller postar[lengde(postar) - 1] != "" eller fullførte != 1) {
+        returner -1
+    }
     returner siste
+}
+
+funksjon _cp_gyldig(t: tekst) -> boolsk {
+    returner _cp_siste_epoke(t, usann) >= 0
+}
+
+// Oppdater aldri WAL-/epokestatus om skrivinga feilar eller er forkorta.
+// Storleikskontroll les normalt metadata frå native stat (filops fallback).
+funksjon _skriv_cp_kontrollert(sti: tekst, innhald: tekst) {
+    prøv { builtin.fil_skriv(sti, innhald) }
+    fang (e) { kast "NorsDB: checkpoint-skriving feila: " + sti }
+    hvis filops.fil_storleik(sti) != lengde(innhald) {
+        kast "NorsDB: ufullstendig checkpoint-skriving: " + sti
+    }
 }
 
 // Les NORSDB2-checkpoint inn i db. Ufullstendig siste segment (krasj) ignorerast.
@@ -1990,7 +2014,7 @@ funksjon _les_cp_tekst(db, t: tekst) {
     la poster = builtin.split(t, builtin.chr(30))
     // Siste komplette segment-slutt.
     la siste_z = lengde(poster) - 1
-    mens siste_z > 0 og builtin.slice(poster[siste_z], 0, 1) != "Z" { siste_z = siste_z - 1 }
+    mens siste_z > 0 og ikkje builtin.starts_with(poster[siste_z], "Z" + builtin.chr(31)) { siste_z = siste_z - 1 }
     la base = 0
     la delta = 0
     la i_base = sann
@@ -2036,7 +2060,7 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             e1 = _cp_siste_epoke(builtin.fil_les(sti + ".cp"), usann)
         }
         hvis e2 >= 0 og e2 >= e1 {
-            builtin.fil_skriv(sti + ".cp", t2)
+            _skriv_cp_kontrollert(sti + ".cp", t2)
         }
         builtin.fil_slett(sti + ".cp2")
     }
@@ -2048,6 +2072,9 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             legacy = sann
         } ellers hvis _cp_gyldig(t) {
             _les_cp_tekst(db, t)
+        } ellers {
+            // Aldri opne eit øydelagt checkpoint som ein ny, tom database.
+            kast "NorsDB: ugyldig checkpoint: " + sti + ".cp"
         }
     }
     hvis builtin.fil_finnes(sti + ".wal") {
@@ -2123,7 +2150,14 @@ funksjon db_checkpoint(db) {
     la seg = "S" + us + e + rs
     hvis kropp != "" { seg = seg + kropp + rs }
     seg = seg + "Z" + us + e + rs
-    builtin.fil_append(sti + ".cp", seg)
+    la før = filops.fil_storleik(sti + ".cp")
+    hvis før < 0 { kast "NorsDB: kan ikkje lese checkpoint-storleik: " + sti }
+    prøv { builtin.fil_append(sti + ".cp", seg) }
+    fang (e) { kast "NorsDB: checkpoint-append feila: " + sti }
+    hvis filops.fil_storleik(sti + ".cp") != før + lengde(seg) {
+        // WAL finst framleis og kan brukast ved neste opning.
+        kast "NorsDB: ufullstendig checkpoint-append: " + sti
+    }
     builtin.fil_slett(sti + ".wal")
     db["_cp_delta"] = db["_cp_delta"] + lengde(seg)
     db["_absorbert"] = db["_epoke"]
@@ -2143,8 +2177,8 @@ funksjon db_checkpoint_full(db) {
     la e = tekst_fra_heltall(db["_epoke"])
     la base = db_serialiser(db)
     la innhald = _cp_hovud() + rs + "S" + us + e + rs + base + "Z" + us + e + rs
-    builtin.fil_skriv(sti + ".cp2", innhald)
-    builtin.fil_skriv(sti + ".cp", innhald)
+    _skriv_cp_kontrollert(sti + ".cp2", innhald)
+    _skriv_cp_kontrollert(sti + ".cp", innhald)
     builtin.fil_slett(sti + ".cp2")
     hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
     db["_cp_base"] = lengde(innhald)
