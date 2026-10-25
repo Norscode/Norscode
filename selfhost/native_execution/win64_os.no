@@ -73,7 +73,7 @@ funksjon os_importar_full() {
         // Windows. futex/clone/getdents er enosys, so dei (+ Find*/CreateThread) er fjerna.
         ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
             "VirtualProtect", "GetSystemTimePreciseAsFileTime",
-            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc",
+            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc", "VirtualFree",
             "GetEnvironmentStringsW",
             "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
             "CloseHandle", "SetFilePointerEx",
@@ -848,18 +848,10 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.push(a, asm.RBP())
     asm.mov(a, asm.RBP(), asm.RSP())
     asm.and_i(a, asm.RSP(), 0 - 16)
-    // Windows x64 stacken veks via guard-sider. Eitt sub rsp, 0x12300
-    // hoppar over guard-sida, og fyrste stack-skriv kan gje 0xC0000005.
-    // Probe kvar 4 KiB-side FØR lokalramma blir brukt (som MSVC __chkstk).
-    // 18 * 4096 + 768 = 74496 = 0x12300; alle steg held 16-byte ABI-alignment.
-    la probe_side: heiltall = 0
-    mens probe_side < 18 {
-        asm.sub_i(a, asm.RSP(), 4096)
-        asm.st_i(a, asm.RSP(), 0, 0)                    // touch guard page
-        probe_side = probe_side + 1
-    }
-    asm.sub_i(a, asm.RSP(), 768)
-    asm.st_i(a, asm.RSP(), 0, 0)
+    // Bruk den opphavlege 0x2300-stackramma. 64KiB UTF-16-env skal IKKJE
+    // liggje på stacken: Windows-peiken kan vere nær stack-grensa sjølv med
+    // guard-page probing. Bruk VirtualAlloc + VirtualFree i staden.
+    asm.sub_i(a, asm.RSP(), 8960)                      // 0x2300
     asm.st(a, asm.RSP(), 8608, asm.RDI())              // cmdline
     asm.st(a, asm.RSP(), 8616, asm.RSI())              // cwd
     asm.st(a, asm.RSP(), 8632, asm.RDX())              // out_buf
@@ -892,27 +884,34 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.lea(a, asm.RAX(), asm.RSP(), 4352)
     asm.st(a, asm.RSP(), 8624, asm.RAX())
     asm.merk(a, "os_win_spawn_nocwd")
-    // UTF-8 envblokk frå sys6 sitt 6. argument (r9) → UTF-16. 64 KiB
-    // stack-buffer ved rsp+8960, utan overlap med STARTUPINFO/pipe/locals.
-    // MultiByteToWideChar får EKSPLISITT lengde for å bevare NUL-separatorane
-    // i Windows KEY=VALUE\0...\0\0-miljøet. NULL = normal OS-arv.
-    asm.st_i(a, asm.RSP(), 8712, 0)                  // wide environment ptr
+    // UTF-8 envblokk frå sys6 sitt 6. argument (r9) → UTF-16.
+    // MultiByteToWideChar får eksplisitt lengde slik at NUL-skilja blir
+    // verna. NULL = OS-arva miljø. Alle allokeringar blir frigjorde.
+    asm.st_i(a, asm.RSP(), 8712, 0)                  // LPVOID lpEnvironment
     asm.st_i(a, asm.RSP(), 8720, 0)                  // dwCreationFlags
     asm.ld(a, asm.RAX(), asm.RSP(), 8704)
     asm.tst(a, asm.RAX(), asm.RAX())
     asm.jcc(a, asm.CC_E(), "os_win_spawn_noenv")
-    asm.ld(a, asm.R9(), asm.RAX(), 0)                // cbMultiByte frå header
-    asm.lea(a, asm.R8(), asm.RAX(), 8)               // tekst med innebygde NUL
-    asm.mov_i32(a, asm.RCX(), 65001)                 // CP_UTF8
+    // VirtualAlloc(NULL, 65536, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.mov_i64(a, asm.RDX(), 65536)
+    asm.mov_i64(a, asm.R8(), 12288)
+    asm.mov_i64(a, asm.R9(), 4)
+    iat(a, slot, base, "KERNEL32.dll!VirtualAlloc")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_env_fail")
+    asm.st(a, asm.RSP(), 8712, asm.RAX())
+    asm.ld(a, asm.RAX(), asm.RSP(), 8704)
+    asm.ld(a, asm.R9(), asm.RAX(), 0)                // UTF-8-lengd frå header
+    asm.lea(a, asm.R8(), asm.RAX(), 8)               // inkl. NUL-separatorar
+    asm.mov_i32(a, asm.RCX(), 65001)
     asm.xor(a, asm.RDX(), asm.RDX())
-    asm.lea(a, asm.RAX(), asm.RSP(), 8960)           // 65536 byte UTF-16-buffer
+    asm.ld(a, asm.RAX(), asm.RSP(), 8712)
     asm.st(a, asm.RSP(), 32, asm.RAX())
-    asm.st_i(a, asm.RSP(), 40, 32768)                // wchar_t-kapasitet
+    asm.st_i(a, asm.RSP(), 40, 32768)                // UTF-16 code units
     iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
     asm.tst(a, asm.RAX(), asm.RAX())
-    asm.jcc(a, asm.CC_E(), "os_win_spawn_env_fail") // aldri start med arva miljø ved feil
-    asm.lea(a, asm.RAX(), asm.RSP(), 8960)
-    asm.st(a, asm.RSP(), 8712, asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_env_fail")
     asm.st_i(a, asm.RSP(), 8720, 1024)               // CREATE_UNICODE_ENVIRONMENT
     asm.merk(a, "os_win_spawn_noenv")
     // SECURITY_ATTRIBUTES @0x21E8: nLength=24, lpSD=0, bInheritHandle=1
@@ -1021,6 +1020,17 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.merk(a, "os_win_spawn_fail")
     asm.mov_is(a, asm.RAX(), 0 - 1)
     asm.merk(a, "os_win_spawn_ut")
+    // VirtualFree kan endre RAX. Bevar exit-/feilkoden separat medan
+    // det allokerte UTF-16-miljøet blir frigjort (òg på alle feilvegar).
+    asm.st(a, asm.RSP(), 8736, asm.RAX())
+    asm.ld(a, asm.RCX(), asm.RSP(), 8712)
+    asm.tst(a, asm.RCX(), asm.RCX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_cleanup_done")
+    asm.xor(a, asm.RDX(), asm.RDX())                 // dwSize=0 med MEM_RELEASE
+    asm.mov_i32(a, asm.R8(), 32768)                  // MEM_RELEASE = 0x8000
+    iat(a, slot, base, "KERNEL32.dll!VirtualFree")
+    asm.merk(a, "os_win_spawn_cleanup_done")
+    asm.ld(a, asm.RAX(), asm.RSP(), 8736)
     asm.mov(a, asm.RSP(), asm.RBP())
     asm.pop(a, asm.RBP())
     asm.ret(a)
