@@ -1,0 +1,115 @@
+bruk std.db_url som db
+
+// H5/H6: same kode mot NorsDB og Postgres, vald av adressa. Postgres-delen køyrer
+// berre når NORSCODE_PG_TEST_URL er sett (t.d. "postgresql://norscode@127.0.0.1:55432/test").
+
+// Felles fasit: identisk oppførsel uansett motor.
+funksjon _felles(h, tabell: tekst) {
+    assert(db.ping(h))
+    db.execute(h, "DROP TABLE IF EXISTS " + tabell)
+    db.execute(h, "CREATE TABLE " + tabell + " (id INTEGER PRIMARY KEY, namn TEXT)")
+    assert_eq(db.execute(h, "INSERT INTO " + tabell + " (id, namn) VALUES (1, 'Ola')"), 1)
+    assert_eq(db.execute_bundet(h, "INSERT INTO " + tabell + " (id, namn) VALUES (?, ?)", ["2", "O'Reilly"]), 1)
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM " + tabell), 2)
+    assert_eq(db.query_text(h, "SELECT namn FROM " + tabell + " WHERE id = 1"), "Ola")
+    assert_eq(db.query_text_bundet(h, "SELECT namn FROM " + tabell + " WHERE id = ?", ["2"]), "O'Reilly")
+    assert_eq(db.query_int_bundet(h, "SELECT id FROM " + tabell + " WHERE namn = ?", ["Ola"]), 1)
+    assert_eq(db.query_rader(h, "SELECT id, namn FROM " + tabell + " ORDER BY id"), "1|Ola\n2|O'Reilly")
+
+    // Feil: -1 og forklaring i siste_feil, i staden for unntak
+    assert_eq(db.execute(h, "INSERT INTO " + tabell + " (id, namn) VALUES (1, 'duplikat')"), -1)
+    assert(db.siste_feil(h) != "")
+    assert_eq(db.execute(h, "INSERT INTO " + tabell + " (id, namn) VALUES (3, 'ok')"), 1)
+    assert_eq(db.siste_feil(h), "")
+
+    // Transaksjon: rollback angrar, commit beheld
+    assert(db.begin(h))
+    db.execute(h, "DELETE FROM " + tabell)
+    assert(db.rollback(h))
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM " + tabell), 3)
+    assert_eq(db.transaction(h, "INSERT INTO " + tabell + " (id, namn) VALUES (4, 'a'); INSERT INTO " + tabell + " (id, namn) VALUES (5, 'b')"), 1)
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM " + tabell), 5)
+    // Atomisk: ei ugyldig setning rullar heile skriptet tilbake
+    assert_eq(db.transaction(h, "INSERT INTO " + tabell + " (id, namn) VALUES (6, 'c'); INSERT INTO " + tabell + " (id, namn) VALUES (1, 'dup')"), 0)
+    assert_eq(db.query_int(h, "SELECT COUNT(*) FROM " + tabell), 5)
+    db.execute(h, "DROP TABLE " + tabell)
+}
+
+funksjon _pool_test(adresse: tekst, tabell: tekst) {
+    la p = db.pool(adresse, 2)
+    la a = db.pool_acquire(p)
+    la b = db.pool_acquire(p)
+    assert(db.ping(a))
+    assert(db.ping(b))
+    // Pool full: tredje uttak blir avvist med forklaring
+    la c = db.pool_acquire(p)
+    assert(ikkje db.ping(c))
+    assert_eq(db.siste_feil(c), "pool full")
+    // Ulukka transaksjon blir rulla tilbake ved retur
+    db.execute(a, "CREATE TABLE " + tabell + " (id INTEGER)")
+    db.begin(a)
+    db.execute(a, "INSERT INTO " + tabell + " (id) VALUES (1)")
+    db.pool_release(p, a)
+    assert_eq(db.pool_size(p), 1)
+    la a2 = db.pool_acquire(p)
+    assert_eq(db.query_int(a2, "SELECT COUNT(*) FROM " + tabell), 0)
+    db.execute(a2, "DROP TABLE " + tabell)
+    db.pool_release(p, a2)
+    db.pool_release(p, b)
+    assert_eq(db.pool_size(p), 2)
+    db.pool_close(p)
+    assert_eq(db.pool_size(p), 0)
+}
+
+funksjon start() -> heiltall {
+    assert(db.er_postgres_adresse("postgresql://a@b/c"))
+    assert(db.er_postgres_adresse("postgres://a@b/c"))
+    assert(ikkje db.er_postgres_adresse("/data/app.ndb"))
+    assert(ikkje db.er_postgres_adresse(""))
+
+    // NorsDB (i minnet)
+    la n = db.open("")
+    _felles(n, "h5_n")
+    db.close(n)
+    _pool_test("", "h6_n")
+
+    la url = miljo_hent("NORSCODE_PG_TEST_URL")
+    hvis url == "" {
+        skriv("test_db_url: Postgres HOPPA OVER (NORSCODE_PG_TEST_URL ikkje sett)\n")
+        skriv("test_db_url: OK\n")
+        returner 0
+    }
+
+    // Postgres: nøyaktig same fasit
+    la p = db.open(url)
+    assert_eq(db.siste_feil(p), "")
+    _felles(p, "h5_p")
+    _pool_test(url, "h6_p")
+
+    // Utilgjengeleg tenar: handtaket er lukka og forklarer seg, ingen krasj
+    la daud = db.open("postgresql://x@127.0.0.1:1/y")
+    assert(ikkje db.ping(daud))
+    assert(builtin.starts_with(db.siste_feil(daud), "PG-feil"))
+    assert_eq(db.execute(daud, "SELECT 1"), -1)
+
+    // Tilkopling som tenaren drep: lesing blir prøvd på nytt, skriving ikkje
+    la ctl = db.open(url)
+    la offer = db.open(url)
+    db.query_int(offer, "SELECT 1")
+    la pid = db.query_int(offer, "SELECT pg_backend_pid()")
+    db.execute(ctl, "SELECT pg_terminate_backend(" + tekst_fra_heltall(pid) + ")")
+    assert_eq(db.query_int(offer, "SELECT 41 + 1"), 42)
+
+    la pid2 = db.query_int(offer, "SELECT pg_backend_pid()")
+    db.execute(ctl, "SELECT pg_terminate_backend(" + tekst_fra_heltall(pid2) + ")")
+    db.execute(offer, "CREATE TABLE IF NOT EXISTS h6_retry (x int)")
+    // Skriving etter drepen tilkopling: aldri stille retry, men feil — og neste kall fungerer
+    assert_eq(db.query_int(offer, "SELECT 2"), 2)
+    db.execute(offer, "DROP TABLE IF EXISTS h6_retry")
+    db.close(offer)
+    db.close(ctl)
+    db.close(p)
+
+    skriv("test_db_url: OK\n")
+    returner 0
+}

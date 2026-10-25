@@ -1,0 +1,116 @@
+// std.http_download ende-til-ende mot ein lokal HTTP-tenar (tråd på 127.0.0.1).
+//
+// Regresjon: last_ned / _ein segfaulta på Linux x86-64-stage0 sjølv for plain
+// http://example.com/. Socket-primitiva var friske; krasjet var tekst_til_liten på
+// kvar hex-lesing (> 256 teikn): x86-64-atomet for lower brukte ein fast 256-byte
+// stakkbuffer. Testen lastar ned ein binær kropp på 3000 byte med Content-Length og
+// ein chunked kropp på 3200 byte, og sjekkar kvar byte i målfila.
+bruk std.http_download som download
+bruk std.socket som socket
+bruk std.bytes som bytes
+
+funksjon _hex_byte(v: heiltall) -> tekst {
+    la h = "0123456789abcdef"
+    returner builtin.slice(h, (v >> 4) & 15, ((v >> 4) & 15) + 1) + builtin.slice(h, v & 15, (v & 15) + 1)
+}
+
+// Kroppsbyte i: (i * 7 + 3) & 255 → alle byteverdiar, òg 0x00 og 0x0d/0x0a.
+funksjon _kropp_hex(n: heiltall) -> tekst {
+    la deler: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n { legg_til(deler, _hex_byte((i * 7 + 3) & 255)) i = i + 1 }
+    returner builtin.join(deler, "")
+}
+
+funksjon _tekst_hex(t: tekst) -> tekst {
+    la deler: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(t) { legg_til(deler, _hex_byte(builtin.char_code(builtin.slice(t, i, i + 1)))) i = i + 1 }
+    returner builtin.join(deler, "")
+}
+
+funksjon _skriv_alt(h: ordbok_tekst, hex: tekst) -> tekst {
+    la frist = builtin.tid_ms() + 10000
+    la rest = hex
+    mens rest != "" og builtin.tid_ms() < frist {
+        la r = socket.native_skriv_hex(h, rest)
+        hvis tekst(r["status"]) == "ok" {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            hvis n <= 0 eller n * 2 >= lengde(rest) { rest = "" }
+            ellers { rest = builtin.slice(rest, n * 2, lengde(rest)) }
+        } ellers hvis tekst(r["status"]) != "ventende" { returner "skriv:" + tekst(r["status"]) }
+    }
+    hvis rest != "" { returner "skriv:timeout" }
+    returner "ok"
+}
+
+// Tenar-tråd: aksepter éi tilkopling, les førespurnaden, send svaret, lukk.
+funksjon tenar(args: ordbok_tekst) -> tekst {
+    la lh: ordbok_tekst = {}
+    lh["handle"] = args["listener_handle"]
+    la frist = builtin.tid_ms() + 15000
+    la peer = {"status": "ventende"}
+    mens tekst(peer["status"]) == "ventende" og builtin.tid_ms() < frist { peer = socket.native_aksepter(lh) }
+    hvis tekst(peer["status"]) != "connected" { returner "accept:" + tekst(peer["status"]) }
+    la req = ""
+    mens builtin.index_of(req, "0d0a0d0a") < 0 og builtin.tid_ms() < frist {
+        la r = socket.native_les_hex(peer, 4096)
+        hvis tekst(r["status"]) == "ok" { req = req + tekst(r["data_hex"]) }
+        ellers hvis tekst(r["status"]) != "ventende" { returner "les:" + tekst(r["status"]) }
+    }
+    hvis builtin.index_of(req, "0d0a0d0a") < 0 { returner "les:timeout" }
+    la s = _skriv_alt(peer, args["svar_hex"])
+    socket.native_lukk(peer)
+    returner s
+}
+
+funksjon _last_ned_mot(svar_hex: tekst, mål: tekst) -> ordbok_tekst {
+    la l = socket.native_lytt("127.0.0.1", 0, 4)
+    assert_eq(tekst(l["status"]), "listening")
+    la port = tekst(l["port"])
+    la t = builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
+        "fn": "__main__.tenar", "args": {"listener_handle": l["handle"], "svar_hex": svar_hex},
+        "name": "http-tenar", "stack_bytes": "262144"})
+    la r = download.last_ned("http://127.0.0.1:" + port + "/fil.bin", {}, mål, 1048576, 15000, "")
+    la j = builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": "15000"})
+    socket.native_lukk(l)
+    assert_eq(tekst(j["value"]), "ok")
+    returner r
+}
+
+funksjon _sjekk_fil(mål: tekst, n: heiltall) -> heiltall {
+    la data = bytes.til_liste(builtin.fil_les_binær(mål))
+    assert_eq(lengde(data), n)
+    la i: heiltall = 0
+    la feil: heiltall = 0
+    mens i < n { hvis data[i] != ((i * 7 + 3) & 255) { feil = feil + 1 } i = i + 1 }
+    assert_eq(feil, 0)
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    builtin.mkdir_p("build")
+    la mål = "build/test-http-download-loopback-" + builtin.random_hex(6) + ".bin"
+
+    // 1) Content-Length, 3000 byte.
+    la hode = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3000\r\nConnection: close\r\n\r\n"
+    la r1 = _last_ned_mot(_tekst_hex(hode) + _kropp_hex(3000), mål)
+    assert_eq(tekst(r1["status"]), "ok")
+    assert_eq(tekst(r1["bytes"]), "3000")
+    _sjekk_fil(mål, 3000)
+
+    // 2) Chunked, to bitar (2000 + 1200 byte = 3200).
+    la kropp = _kropp_hex(3200)
+    la chunked = _tekst_hex("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7d0\r\n") +
+        builtin.slice(kropp, 0, 4000) + _tekst_hex("\r\n4b0\r\n") +
+        builtin.slice(kropp, 4000, 6400) + _tekst_hex("\r\n0\r\n\r\n")
+    la r2 = _last_ned_mot(chunked, mål)
+    assert_eq(tekst(r2["status"]), "ok")
+    assert_eq(tekst(r2["bytes"]), "3200")
+    _sjekk_fil(mål, 3200)
+
+    prøv { builtin.fil_slett(mål) } fang (e) {}
+    skriv("test_http_download_loopback OK\n")
+    returner 0
+}

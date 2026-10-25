@@ -1,0 +1,322 @@
+// tools/nc_debug.no — `nc debug <fil.no> [--bryt fil:linje]... [--kommandoar fil]` (F44).
+//
+// Enkel kommandolinje-debugger oppå VM-ens debugger-API (vm_debug_*, source_lines/
+// source_columns frå NCB). Programmet stoppar ved brytepunkt (utan --bryt: ved start
+// av start()). Kommandoar ved stopp:
+//   fortset | c        køyr til neste brytepunkt (eller slutt)
+//   steg | s           neste linje, òg inn i kalla funksjonar
+//   neste | n          neste linje i same funksjon (hopper over kall)
+//   skriv <var> | p    skriv ein lokal variabel
+//   lokale | l         alle lokale variablar
+//   stakk | bt         kallstakken med funksjon og linje
+//   kjelde | v         kjeldelinjer rundt gjeldande linje
+//   bryt <linje> | b   nytt brytepunkt;   fjern <linje>   fjern brytepunkt
+//   slutt | q          avslutt;   hjelp | h
+// --kommandoar <fil> les kommandoane frå ei fil (éin per linje) i staden for terminalen.
+// Debuggeren er av i vanleg køyring: han slår berre på VM-ens eksisterande debug-modus
+// for dette programmet (standardmodus, utan JIT). Argument frå NC_VERKTOY_ARGV.
+
+bruk selfhost.kompiler som kompiler
+bruk selfhost.vm som vm
+
+// All utskrift går også til ein buffer (testbar: u_logg()).
+la _u_buf = {"t": ""}
+
+funksjon u(t: tekst) -> heiltall {
+    _u_buf["t"] = _u_buf["t"] + t
+    skriv(t)
+    returner 0
+}
+
+funksjon u_logg() -> tekst { returner _u_buf["t"] }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon args() -> liste_tekst {
+    la rå = env("NC_VERKTOY_ARGV")
+    la ut: liste_tekst = []
+    hvis rå == "" { returner ut }
+    la delar = builtin.split(rå, "\n")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis delar[i] != "" { legg_til(ut, delar[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Brytepunkt: linje → (funksjon, ip) ────────────────────────────────────────────
+
+// Alle (fn|ip) der koden for `linje` startar (første ip i ein samanhengande rekkje).
+funksjon ip_for_linje(functions, linje: heiltall) -> liste_tekst {
+    la ut: liste_tekst = []
+    la ks = nøkler(functions)
+    la i = 0
+    mens i < lengde(ks) {
+        la fn = tekst(ks[i])
+        la def = functions[fn]
+        hvis builtin.type(def) == "ordbok" og finnes_nøkkel(def, "source_lines") {
+            hvis tekst(def["module"]) == "__main__" {
+                la ls = def["source_lines"]
+                la ip = 0
+                mens ip < lengde(ls) {
+                    hvis ls[ip] == linje og (ip == 0 eller ls[ip - 1] != linje) {
+                        legg_til(ut, fn + "|" + tekst_fra_heltall(ip))
+                    }
+                    ip = ip + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Næraste linje ≥ ønskt som har kode (i __main__), eller -1.
+funksjon neste_kodelinje(functions, linje: heiltall) -> heiltall {
+    la best = -1
+    la ks = nøkler(functions)
+    la i = 0
+    mens i < lengde(ks) {
+        la def = functions[tekst(ks[i])]
+        hvis builtin.type(def) == "ordbok" og finnes_nøkkel(def, "source_lines") {
+            hvis tekst(def["module"]) == "__main__" {
+                la ls = def["source_lines"]
+                la ip = 0
+                mens ip < lengde(ls) {
+                    hvis ls[ip] >= linje og (best < 0 eller ls[ip] < best) { best = ls[ip] }
+                    ip = ip + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner best
+}
+
+funksjon sett_bryt(functions, linje: heiltall, på: bool) -> tekst {
+    la faktisk = neste_kodelinje(functions, linje)
+    hvis faktisk < 0 { returner "ingen kode på eller etter linje " + tekst_fra_heltall(linje) }
+    la mål = ip_for_linje(functions, faktisk)
+    la i = 0
+    mens i < lengde(mål) {
+        la d = builtin.split(mål[i], "|")
+        hvis på { vm.vm_debug_breakpoint_add(functions, d[0], heltall_fra_tekst(d[1])) }
+        ellers { vm.vm_debug_breakpoint_remove(functions, d[0], heltall_fra_tekst(d[1])) }
+        i = i + 1
+    }
+    hvis faktisk != linje { returner "linje " + tekst_fra_heltall(linje) + " har ingen kode; brukar linje " + tekst_fra_heltall(faktisk) }
+    returner ""
+}
+
+// «fil:linje» eller berre «linje» → linjenummer (fila må vere programfila eller utelatt).
+funksjon bryt_linje(spes: tekst) -> heiltall {
+    la ix = builtin.index_of(spes, ":")
+    la t = spes
+    hvis ix >= 0 { t = builtin.slice(spes, ix + 1, lengde(spes)) }
+    hvis tekst_fra_heltall(heltall_fra_tekst(t)) != t { returner -1 }
+    returner heltall_fra_tekst(t)
+}
+
+// ── Visning ──────────────────────────────────────────────────────────────────
+
+funksjon kjeldelinje(linjer: liste_tekst, nr: heiltall) -> tekst {
+    hvis nr >= 1 og nr <= lengde(linjer) { returner linjer[nr - 1] }
+    returner ""
+}
+
+funksjon vis_stopp(functions, linjer: liste_tekst) -> heiltall {
+    la d = vm.vm_debug_state(functions)
+    la nr = heltall_fra_tekst(tekst(d["last_line"]))
+    u("→ " + tekst(d["last_function"]) + " linje " + tekst(d["last_line"]) + ": " +
+          builtin.trim(kjeldelinje(linjer, nr)) + "\n")
+    returner 0
+}
+
+funksjon vis_lokale(functions) -> heiltall {
+    la d = vm.vm_debug_state(functions)
+    la vars = builtin.json_parse_raw(tekst(d["last_variables"]))
+    hvis vars == null {
+        u("(ingen lokale)\n")
+        returner 0
+    }
+    la ks = nøkler(vars)
+    hvis lengde(ks) == 0 { u("(ingen lokale)\n") }
+    la i = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis ikkje builtin.starts_with(k, "__") { u("  " + k + " = " + builtin.json_stringify(vars[k]) + "\n") }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon vis_variabel(functions, namn: tekst) -> heiltall {
+    la d = vm.vm_debug_state(functions)
+    la vars = builtin.json_parse_raw(tekst(d["last_variables"]))
+    hvis vars != null og finnes_nøkkel(vars, namn) {
+        u(namn + " = " + builtin.json_stringify(vars[namn]) + "\n")
+    } ellers {
+        u(namn + ": <udefinert>\n")
+    }
+    returner 0
+}
+
+funksjon vis_stakk(functions) -> heiltall {
+    la frames = functions["__vm_active_frames__"]
+    la i = lengde(frames) - 1
+    mens i >= 0 {
+        la f = frames[i]
+        la pos = vm.vm_debug_source_position(functions, tekst(f["namn"]), f["ip"])
+        u("  #" + tekst_fra_heltall(lengde(frames) - 1 - i) + " " + tekst(f["namn"]) + " linje " + tekst(pos["line"]) + "\n")
+        i = i - 1
+    }
+    returner 0
+}
+
+funksjon vis_kjelde(functions, linjer: liste_tekst) -> heiltall {
+    la d = vm.vm_debug_state(functions)
+    la nr = heltall_fra_tekst(tekst(d["last_line"]))
+    la fra_nr = nr - 3
+    hvis fra_nr < 1 { fra_nr = 1 }
+    la til_nr = nr + 3
+    hvis til_nr > lengde(linjer) { til_nr = lengde(linjer) }
+    la i = fra_nr
+    mens i <= til_nr {
+        la merke = "  "
+        hvis i == nr { merke = "→ " }
+        u(merke + tekst_fra_heltall(i) + "  " + linjer[i - 1] + "\n")
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon hjelp() -> heiltall {
+    u("fortset|c  steg|s  neste|n  skriv|p <var>  lokale|l  stakk|bt  kjelde|v  bryt|b <linje>  fjern <linje>  slutt|q\n")
+    returner 0
+}
+
+// ── Køyring ──────────────────────────────────────────────────────────────────
+
+funksjon er_pausa(res) -> bool {
+    returner builtin.type(res) == "ordbok" og finnes_nøkkel(res, "status") og tekst(res["status"]) == "paused"
+}
+
+// Neste: stopp på ei ny linje i same eller grunnare ramme.
+funksjon neste_linje(functions) {
+    la d = vm.vm_debug_state(functions)
+    la djupn = heltall_fra_tekst(tekst(d["last_frame_depth"]))
+    la res = vm.vm_debug_resume(functions, "step_line")
+    mens er_pausa(res) og heltall_fra_tekst(tekst(vm.vm_debug_state(functions)["last_frame_depth"])) > djupn {
+        res = vm.vm_debug_resume(functions, "step_line")
+    }
+    returner res
+}
+
+funksjon les_kommando(kommandoar: liste_tekst, pos: heiltall) -> tekst {
+    hvis lengde(kommandoar) > 0 {
+        hvis pos >= lengde(kommandoar) { returner "slutt" }
+        u("(nc-debug) " + kommandoar[pos] + "\n")
+        returner kommandoar[pos]
+    }
+    la inn = ""
+    prøv { inn = builtin.readline("(nc-debug) ") } fang (e) { returner "slutt" }
+    returner inn
+}
+
+funksjon start() -> heiltall {
+    la a = args()
+    la fil = ""
+    la bryt_liste: liste_tekst = []
+    la kommandofil = ""
+    la i = 0
+    mens i < lengde(a) {
+        hvis a[i] == "--bryt" og i + 1 < lengde(a) { legg_til(bryt_liste, a[i + 1])  i = i + 1 }
+        ellers hvis a[i] == "--kommandoar" og i + 1 < lengde(a) { kommandofil = a[i + 1]  i = i + 1 }
+        ellers { fil = a[i] }
+        i = i + 1
+    }
+    hvis fil == "" eller ikkje builtin.fil_finnes(fil) {
+        u("bruk: nc debug <fil.no> [--bryt fil:linje]... [--kommandoar fil]\n")
+        returner 2
+    }
+    la kjelde = builtin.fil_les(fil)
+    la linjer = builtin.split(kjelde, "\n")
+    la kommandoar: liste_tekst = []
+    hvis kommandofil != "" {
+        kommandoar = builtin.split(builtin.fil_les(kommandofil), "\n")
+        hvis lengde(kommandoar) > 0 og kommandoar[lengde(kommandoar) - 1] == "" { kommandoar = builtin.slice(kommandoar, 0, lengde(kommandoar) - 1) }
+    }
+
+    miljo_sett("NORSCODE_VM_FAST", "0")
+    la ncb = builtin.json_parse_raw(kompiler.kompiler_fil(kjelde, "__main__"))
+    vm.vm_sett_kontekst(ncb)
+    la functions = ncb["functions"]
+    functions["__vm_debug__"]["enabled"] = "sann"
+    vm.vm_debug_suspend_on_hit(functions, sann)
+    hvis lengde(bryt_liste) == 0 {
+        vm.vm_debug_breakpoint_add(functions, ncb["entry"], 0)
+    }
+    la bi = 0
+    mens bi < lengde(bryt_liste) {
+        la nr = bryt_linje(bryt_liste[bi])
+        hvis nr < 0 { u("ugyldig brytepunkt: " + bryt_liste[bi] + "\n") }
+        ellers {
+            la m = sett_bryt(functions, nr, sann)
+            hvis m != "" { u(m + "\n") }
+        }
+        bi = bi + 1
+    }
+
+    la res = vm.køyr_funksjon(ncb["entry"], [], functions, 0)
+    la kpos = 0
+    mens er_pausa(res) {
+        vis_stopp(functions, linjer)
+        la gå = usann
+        mens ikkje gå {
+            la kmd = builtin.trim(les_kommando(kommandoar, kpos))
+            kpos = kpos + 1
+            la ord = builtin.split(kmd, " ")
+            la k0 = ord[0]
+            la arg = ""
+            hvis lengde(ord) > 1 { arg = builtin.trim(ord[1]) }
+            hvis k0 == "fortset" eller k0 == "c" {
+                res = vm.vm_debug_resume(functions, "continue")
+                gå = sann
+            } ellers hvis k0 == "steg" eller k0 == "s" {
+                res = vm.vm_debug_resume(functions, "step_line")
+                gå = sann
+            } ellers hvis k0 == "neste" eller k0 == "n" {
+                res = neste_linje(functions)
+                gå = sann
+            } ellers hvis k0 == "skriv" eller k0 == "p" {
+                vis_variabel(functions, arg)
+            } ellers hvis k0 == "lokale" eller k0 == "l" {
+                vis_lokale(functions)
+            } ellers hvis k0 == "stakk" eller k0 == "bt" {
+                vis_stakk(functions)
+            } ellers hvis k0 == "kjelde" eller k0 == "v" {
+                vis_kjelde(functions, linjer)
+            } ellers hvis k0 == "bryt" eller k0 == "b" {
+                la m = sett_bryt(functions, heltall_fra_tekst(arg), sann)
+                hvis m != "" { u(m + "\n") } ellers { u("brytepunkt sett\n") }
+            } ellers hvis k0 == "fjern" {
+                sett_bryt(functions, heltall_fra_tekst(arg), usann)
+                u("brytepunkt fjerna\n")
+            } ellers hvis k0 == "slutt" eller k0 == "q" {
+                vm.vm_debug_abort(functions)
+                u("avslutta\n")
+                returner 0
+            } ellers hvis k0 == "hjelp" eller k0 == "h" eller k0 == "?" {
+                hjelp()
+            } ellers hvis k0 != "" {
+                u("ukjend kommando: " + k0 + " (skriv hjelp)\n")
+            }
+        }
+    }
+    u("programmet er ferdig (resultat " + tekst(res) + ")\n")
+    returner 0
+}

@@ -1,0 +1,323 @@
+# std.tls13_klient: hjelparar mot referansemodulane, sertifikatsjekk (SAN/CN/tid/kjede),
+# og eit heilt TLS 1.3-handtrykk (P-256 ECDHE, TLS_CHACHA20_POLY1305_SHA256) mot ein liten tenar
+# bygd av dei uavhengige modulane std.tls13_keyschedule / std.tls13_record / std.tls13_handshake
+# (så klientens raske nøkkelplan og record-lag blir krysssjekka), med eit RSA-2048-sertifikat (rsa_pss_rsae_sha256).
+# Feilsituasjonar: feil vertsnamn, feil CA, endra CertificateVerify, endra Finished,
+# HelloRetryRequest og ukjend nøkkelgruppe.
+bruk std.tls13_klient som tls
+bruk std.tls13_handshake som hs
+bruk std.tls13_keyschedule som ks
+bruk std.tls13_record som rec
+bruk std.p256 som ec
+bruk std.sha256 som sha
+bruk std.rsa som rsa
+bruk std.bigint som bn
+bruk std.base64 som base64
+
+funksjon _b(h: tekst) -> liste_heiltall {
+    la d = "0123456789abcdef"
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(h) {
+        legg_til(ut, builtin.index_of(d, builtin.slice(h, i, i + 1)) * 16 + builtin.index_of(d, builtin.slice(h, i + 1, i + 2)))
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _tekst_b(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(s) { legg_til(ut, builtin.char_code(builtin.slice(s, i, i + 1)) & 255) i = i + 1 }
+    returner ut
+}
+
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+
+funksjon _har(s: tekst, del: tekst) -> boolsk {
+    returner builtin.index_of(s, del) >= 0
+}
+
+funksjon _pem(der: liste_heiltall) -> tekst {
+    returner "-----BEGIN CERTIFICATE-----\n" + base64.kod_bytes(der) + "\n-----END CERTIFICATE-----\n"
+}
+
+# ── Hjelparar ──────────────────────────────────────────────────────────────
+funksjon _test_hjelparar() {
+    la k = _b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    la m = _tekst_b("Norscode TLS-klient")
+    assert(_lik(tls._hmac(k, m), sha.hmac_sha256_bytes(k, m)))
+    assert(_lik(tls._hmac(_tekst_b("kort"), m), sha.hmac_sha256_bytes(_tekst_b("kort"), m)))
+    assert(_lik(tls._sha(m), _b(sha.hash_bytes(m))))
+    assert(_lik(tls._hkdf_extract([], k), ks.early_secret(k)))
+    assert(_lik(tls._hkdf_extract(m, k), sha.hmac_sha256_bytes(m, k)))
+    assert(_lik(tls._expand_label(k, "key", [], 32), ks.expand_label(k, "key", [], 32)))
+    assert(_lik(tls._expand_label(k, "iv", [], 12), ks.expand_label(k, "iv", [], 12)))
+    assert(_lik(tls._derive(k, "c hs traffic", k), ks.derive_secret(k, "c hs traffic", k)))
+    la tk = tls._trafikknokkel(tls.SUITE_CHACHA20(), k)
+    la rk = rec.traffic_keys(k)
+    assert(_lik(tk["key"], rk["key"]))
+    assert(_lik(tk["iv"], rk["iv"]))
+    # Tid
+    assert_eq(tls.iso_frå_epoke_ms(0), "1970-01-01T00:00:00Z")
+    assert_eq(tls.iso_frå_epoke_ms(1000000000000), "2001-09-09T01:46:40Z")
+    assert_eq(tls.iso_frå_epoke_ms(1782907200000), "2026-07-01T12:00:00Z")
+}
+
+funksjon _test_vertsnamn() {
+    la med_san = {"status": "ok", "sans": ["DNS:db.example.com", "DNS:*.intern.example", "IP:10.1.2.3"], "subject": "CN=ignorert"}
+    assert(tls.vert_matchar(med_san, "db.example.com"))
+    assert(tls.vert_matchar(med_san, "DB.Example.COM"))
+    assert(tls.vert_matchar(med_san, "a.intern.example"))
+    assert(ikkje tls.vert_matchar(med_san, "a.b.intern.example"))
+    assert(ikkje tls.vert_matchar(med_san, "intern.example"))
+    assert(tls.vert_matchar(med_san, "10.1.2.3"))
+    assert(ikkje tls.vert_matchar(med_san, "10.1.2.4"))
+    # Med SAN blir CN ignorert; IP matchar aldri DNS-SAN.
+    assert(ikkje tls.vert_matchar(med_san, "ignorert"))
+    la berre_cn = {"status": "ok", "sans": [], "subject": "O=X, CN=gammal.example"}
+    assert(tls.vert_matchar(berre_cn, "gammal.example"))
+    assert(ikkje tls.vert_matchar(berre_cn, "ny.example"))
+    assert(ikkje tls.vert_matchar(berre_cn, "10.0.0.1"))
+    assert(ikkje tls.vert_matchar(berre_cn, ""))
+}
+
+# Ekte openssl-generert ECDSA-P256-kjede (same som test_x509_chain_ecdsa).
+funksjon _test_tillit() {
+    la root = _b("308201373081dea003020102020101300a06082a8648ce3d040302301b3119301706035504030c104e6f7273636f646520454320526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a301b3119301706035504030c104e6f7273636f646520454320526f6f743059301306072a8648ce3d020106082a8648ce3d03010703420004a006038d528227f41f4c299ffa5113f86d5e805ac1fc1c150f9a6468a5246dcc7ce1a2e3228ddfa1378e21bf9100c8f0674d7742b26030f55bb072b8a15c71d0a3133011300f0603551d130101ff040530030101ff300a06082a8648ce3d040302034800304502210085a4d71ba29b2c3bed61d9b0c7699a110207c18cc17635d484ccbbf67631d9f00220678da4723060118d090862f6ee4699b3abb84da0bb437a1cdb40638c893d08e1")
+    la leaf = _b("308201443081eaa003020102020102300a06082a8648ce3d040302301b3119301706035504030c104e6f7273636f646520454320526f6f74301e170d3235303130313030303030305a170d3237303130313030303030305a301b3119301706035504030c106e6f7273636f64652e6578616d706c653059301306072a8648ce3d020106082a8648ce3d03010703420004ca20e0684558efd9d12ce44cd83371eece47a98f4d9d8c291f9ecee52731ae43f0c06795d96d5bf5d74e745b04da24b97d56d8b5c5bcde2ade3a04677f40d470a31f301d301b0603551d110414301282106e6f7273636f64652e6578616d706c65300a06082a8648ce3d040302034900304602210085264b1a76986d3027432f84fd17fbd1b620e001b935d19fd1abc9cb100e5a78022100ca56c5971aeed87b17fdfaebd1b71f4556ecd4cfb263f88db4703571f88216c2")
+    la pem = _pem(root) + _pem(leaf)
+    la ankere = tls.pem_sertifikat(pem)
+    assert_eq(lengde(ankere), 2)
+    assert(_lik(ankere[0], root))
+    # Leaf signert av roten (ECDSA-P256), roten som anker.
+    assert_eq(tls._sjekk_tillit([leaf, root], [root], "2026-06-01T12:00:00Z"), "")
+    # Leaf identisk med eit anker (pinning).
+    assert_eq(tls._sjekk_tillit([leaf], [leaf], "2026-06-01T12:00:00Z"), "")
+    # Utgått leaf.
+    assert(_har(tls._sjekk_tillit([leaf, root], [root], "2028-01-01T00:00:00Z"), "utanfor gyldigheitstida"))
+    # Ikkje enno gyldig.
+    assert(_har(tls._sjekk_tillit([leaf, root], [root], "2024-01-01T00:00:00Z"), "utanfor gyldigheitstida"))
+    # Tom ankerliste og leaf utan tilknyting.
+    assert(tls._sjekk_tillit([leaf], [], "2026-06-01T12:00:00Z") != "")
+    # Tenaren treng ikkje sende rota: leaf signert direkte av eit anker er nok.
+    assert_eq(tls._sjekk_tillit([leaf], [root], "2026-06-01T12:00:00Z"), "")
+}
+
+# RSASSA-PSS (SHA-256, MGF1-SHA256, salt 32 byte) med privat eksponent; n har eksakt 2048 bit.
+funksjon _pss_sign(n: liste_heiltall, d: liste_heiltall, melding: liste_heiltall) -> liste_heiltall {
+    la salt = _b("5555555555555555555555555555555555555555555555555555555555555555")
+    la m_hash = rsa._sha256_bytes(melding)
+    la h = rsa._sha256_bytes(_saman(_saman([0, 0, 0, 0, 0, 0, 0, 0], m_hash), salt))
+    la db: liste_heiltall = []
+    la i = 0
+    mens i < 190 { legg_til(db, 0) i = i + 1 }
+    legg_til(db, 1)
+    db = _saman(db, salt)
+    la masked = rsa._xor_liste(db, rsa._mgf1(h, 223))
+    masked[0] = masked[0] & 127
+    la em = _saman(_saman(masked, h), [188])
+    la m = bn.modexp(bn.fra_bytes(em), bn.fra_bytes(d), bn.fra_bytes(n))
+    returner bn.til_bytes(m, 256)
+}
+
+funksjon _ecdsa_root() -> liste_heiltall {
+    returner _b("308201373081dea003020102020101300a06082a8648ce3d040302301b3119301706035504030c104e6f7273636f646520454320526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a301b3119301706035504030c104e6f7273636f646520454320526f6f743059301306072a8648ce3d020106082a8648ce3d03010703420004a006038d528227f41f4c299ffa5113f86d5e805ac1fc1c150f9a6468a5246dcc7ce1a2e3228ddfa1378e21bf9100c8f0674d7742b26030f55bb072b8a15c71d0a3133011300f0603551d130101ff040530030101ff300a06082a8648ce3d040302034800304502210085a4d71ba29b2c3bed61d9b0c7699a110207c18cc17635d484ccbbf67631d9f00220678da4723060118d090862f6ee4699b3abb84da0bb437a1cdb40638c893d08e1")
+}
+
+# ── Mini-tenar for handtrykket ─────────────────────────────────────────────
+funksjon _server_hello_rec(spub: liste_heiltall, modus: tekst) -> liste_heiltall {
+    la rnd = _b("1111111111111111111111111111111111111111111111111111111111111111")
+    hvis modus == "hrr" { rnd = _b("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c") }
+    la ext: liste_heiltall = []
+    hs._legg(ext, hs._ext(43, hs._u16(772)))
+    la gruppe = 23
+    hvis modus == "gruppe" { gruppe = 29 }
+    la ksent = hs._u16(gruppe)
+    hs._legg(ksent, hs._vec16(spub))
+    hs._legg(ext, hs._ext(51, ksent))
+    la body: liste_heiltall = [3, 3]
+    hs._legg(body, rnd)
+    hs._legg(body, hs._vec8([]))
+    hs._legg(body, hs._u16(4867))
+    hs._legg(body, [0])
+    hs._legg(body, hs._vec16(ext))
+    returner hs.encode_handshake(2, body)
+}
+
+funksjon _rec(typ: heiltall, body: liste_heiltall) -> liste_heiltall {
+    returner _saman([typ, 3, 3, (lengde(body) >> 8) & 255, lengde(body) & 255], body)
+}
+
+# Køyr eit handtrykk: gir {status, feil, appdata_ok}.
+# sc: {n, d, cert_der, shared, spriv, spub, cpub, cpriv, modus}
+funksjon _handtrykk(sc: ordbok, hostname: tekst, ca_pem: tekst) -> ordbok {
+    la s = tls.ny({"hostname": hostname, "ca_pem": ca_pem, "ecdh_priv": sc["cpriv"], "ecdh_pub": sc["cpub"],
+                   "random": _b("2222222222222222222222222222222222222222222222222222222222222222"), "no_iso": "2026-12-01T12:00:00Z"})
+    la chrec = tls.start(s)
+    assert_eq(chrec[0], 22)
+    la CH = builtin.slice(chrec, 5, lengde(chrec))
+    # ClientHello-innhald: SNI, grupper, sigalgs, versjon og key_share med vår offentlege nøkkel.
+    la ph = hs.parse_handshake(CH, 0)
+    la ch = hs.parse_client_hello(CH, ph["start"], ph["end"])
+    assert(ch["ok"])
+    assert_eq(ch["server_name"], hostname)
+    assert_eq(lengde(ch["suites"]), 1)
+    assert_eq(ch["suites"][0], 4867)
+    la kse = hs.finn_ext(CH, ch["ext_start"], ch["ext_end"], 51)
+    assert(kse["funne"])
+    assert(_lik(builtin.slice(kse["data"], 6, 71), sc["cpub"]))
+    assert(hs.finn_ext(CH, ch["ext_start"], ch["ext_end"], 43)["funne"])
+    assert(hs.finn_ext(CH, ch["ext_start"], ch["ext_end"], 13)["funne"])
+
+    la SH = _server_hello_rec(sc["spub"], sc["modus"])
+    la r1 = tls.motta(s, _rec(22, SH))
+    hvis sc["modus"] == "hrr" eller sc["modus"] == "gruppe" {
+        returner {"status": r1["status"], "feil": r1["feil"], "appdata_ok": usann}
+    }
+    assert_eq(r1["status"], "ventande")
+
+    # Tenarens nøkkelplan frå referansemodulane
+    la early = ks.early_secret([])
+    la derived1 = ks.derive_secret(early, "derived", ks.transcript_hash([]))
+    la hs_secret = ks.handshake_secret(derived1, sc["shared"])
+    la th_sh = ks.transcript_hash(_saman(CH, SH))
+    la c_hs = ks.derive_secret(hs_secret, "c hs traffic", th_sh)
+    la s_hs = ks.derive_secret(hs_secret, "s hs traffic", th_sh)
+    la master = ks.master_secret(ks.derive_secret(hs_secret, "derived", ks.transcript_hash([])))
+    la EE = hs.build_encrypted_extensions()
+    la CERT = hs.build_certificate(sc["cert_der"])
+    la tr1 = _saman(_saman(_saman(CH, SH), EE), CERT)
+    la cv_innhald = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", ks.transcript_hash(tr1))
+    la sig = _pss_sign(sc["n"], sc["d"], cv_innhald)
+    hvis sc["modus"] == "cv" { sig[0] = sig[0] ^ 1 }
+    la CV = hs.build_certificate_verify(2052, sig)
+    la tr2 = _saman(tr1, CV)
+    la fmac = sha.hmac_sha256_bytes(ks.expand_label(s_hs, "finished", [], 32), ks.transcript_hash(tr2))
+    hvis sc["modus"] == "fin" { fmac[0] = fmac[0] ^ 1 }
+    la SFIN = hs.build_finished(fmac)
+    la flight = _saman(_saman(_saman(EE, CERT), CV), SFIN)
+    la sk = rec.traffic_keys(s_hs)
+    la enc = rec.krypter_post(sk["key"], sk["iv"], 0, 22, flight)
+    # Del flighten over to records (tester delvis mottak) og legg til ei CCS-record først.
+    la r2 = tls.motta(s, _saman([20, 3, 3, 0, 1, 1], builtin.slice(enc, 0, 0)))
+    assert_eq(r2["status"], "ventande")
+    la r3 = tls.motta(s, enc)
+    hvis r3["status"] != "ferdig" {
+        returner {"status": r3["status"], "feil": r3["feil"], "appdata_ok": usann}
+    }
+    # Klientens Finished må stemme med tenarens utrekning.
+    la tr3 = _saman(tr2, SFIN)
+    la ck = rec.traffic_keys(c_hs)
+    la dec = rec.dekrypter_post(ck["key"], ck["iv"], 0, r3["ut"])
+    assert_eq(dec["status"], "ok")
+    assert_eq(dec["type"], 22)
+    la cfin_forventa = hs.build_finished(sha.hmac_sha256_bytes(ks.expand_label(c_hs, "finished", [], 32), ks.transcript_hash(tr3)))
+    assert(_lik(dec["plaintext"], cfin_forventa))
+    # Applikasjonsdata begge vegar, med NewSessionTicket-record framfor svaret.
+    la s_ap = ks.derive_secret(master, "s ap traffic", ks.transcript_hash(tr3))
+    la c_ap = ks.derive_secret(master, "c ap traffic", ks.transcript_hash(tr3))
+    la sak = rec.traffic_keys(s_ap)
+    la cak = rec.traffic_keys(c_ap)
+    la billett = rec.krypter_post(sak["key"], sak["iv"], 0, 22, [4, 0, 0, 4, 0, 0, 0, 0])
+    la svar = _tekst_b("hei frå tenaren")
+    la post = rec.krypter_post(sak["key"], sak["iv"], 1, 23, svar)
+    la d = tls.dekrypter_straum(s, _saman(billett, post))
+    assert_eq(d["status"], "ok")
+    assert(_lik(d["data"], svar))
+    # Ei record delt over to kall
+    la post2 = rec.krypter_post(sak["key"], sak["iv"], 2, 23, _tekst_b("to delar"))
+    la d2a = tls.dekrypter_straum(s, builtin.slice(post2, 0, 7))
+    assert_eq(lengde(d2a["data"]), 0)
+    la d2b = tls.dekrypter_straum(s, builtin.slice(post2, 7, lengde(post2)))
+    assert(_lik(d2b["data"], _tekst_b("to delar")))
+    la klientpost = tls.krypter_app(s, _tekst_b("hei frå klienten"))
+    la kdec = rec.dekrypter_post(cak["key"], cak["iv"], 0, klientpost)
+    assert_eq(kdec["status"], "ok")
+    assert_eq(kdec["type"], 23)
+    assert(_lik(kdec["plaintext"], _tekst_b("hei frå klienten")))
+    # close_notify
+    la lukk = rec.krypter_post(sak["key"], sak["iv"], 3, 21, [1, 0])
+    assert_eq(tls.dekrypter_straum(s, lukk)["status"], "lukka")
+    assert_eq(s["cipher"], "TLS_CHACHA20_POLY1305_SHA256")
+    returner {"status": "ferdig", "feil": "", "appdata_ok": sann}
+}
+
+funksjon _test_handtrykk() {
+    la cert = _b("308203333082021ba00302010202140bc9a53b618d6f05ccdd547abf63abf4f592ebb8300d06092a864886f70d01010b0500301a3118301606035504030c0f64622e746573742e6578616d706c653020170d3236313031323132303730335a180f32313236303931383132303730335a301a3118301606035504030c0f64622e746573742e6578616d706c6530820122300d06092a864886f70d01010105000382010f003082010a02820101008eca86f3dbdf567ce25e2b47a03ddb8420f153e7c62418bf8d0ea89a40469dbaa9178481b2a3f3bca660dee02a9ec4f516d8a909fa580d39554795ba30bc7a398a060a4f7ea9463fd46f0bb0c2f79f4e0910ac1b16a6d1c112ce224b8a8438bd6b0c6911c9adb0638a877df84dac1defbe17e2a24e3a62346084ed6c84ef4433bd98db62c909096d99f15a32c8b631591f1b8fffcefec7b28714f6858d1d431b1f6f7be1c8ab931c67c7fb9e7d4ebc7e0236d667e5cdb6776f3a72eb36f39896eb015fd10e4f43120d5dfd895c1b164463be019156e075331366d004dc7f7689770dab4eefbdd982fec7e6bd83a769d7383ae0946b12b088e93f1b1a619c21bd0203010001a36f306d301d0603551d0e0416041475d645ab767cca3082584482bdddfe4340b3fff8301f0603551d2304183016801475d645ab767cca3082584482bdddfe4340b3fff8300f0603551d130101ff040530030101ff301a0603551d1104133011820f64622e746573742e6578616d706c65300d06092a864886f70d01010b050003820101006d87101b9be679e6e8599c5394a913d5a2cd645105b6e0ffeba0bce5f99197346769467ed434dd10828bcdc2a5040d72e845d90e66fff355d1e863701197fc88348759bbd4dbf9c7e4b908c51ddd01789321d82b4484061c8cab2af5e1100eaecf8171522329d194f4eae5feac4d7ab686e2ec276d0daca0881ef20758559b02f95308c04a65b3b36567c16c617962770f16462a699904c89782da0016e32a8b0b16a4a564331b926428b7a6507e7f9310b17f64977952469baaa0e85d8142cb5795a29c383e3be89ac369ebaf2739a5e474aadef16df1444d0a8a2ef47e0a60355c766644a6cd7b05fc69628adc48d1bceaa6ef5932c832b6ecd6e7bce4b137")
+    la annan = _ecdsa_root()
+    la cpriv = _b("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+    la spriv = _b("2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
+    la cpub = ec.offentleg(cpriv)
+    la spub = ec.offentleg(spriv)
+    la shared = ec.delt(spriv, cpub)
+    assert_eq(lengde(shared), 32)
+    la sc = {"n": _b("8eca86f3dbdf567ce25e2b47a03ddb8420f153e7c62418bf8d0ea89a40469dbaa9178481b2a3f3bca660dee02a9ec4f516d8a909fa580d39554795ba30bc7a398a060a4f7ea9463fd46f0bb0c2f79f4e0910ac1b16a6d1c112ce224b8a8438bd6b0c6911c9adb0638a877df84dac1defbe17e2a24e3a62346084ed6c84ef4433bd98db62c909096d99f15a32c8b631591f1b8fffcefec7b28714f6858d1d431b1f6f7be1c8ab931c67c7fb9e7d4ebc7e0236d667e5cdb6776f3a72eb36f39896eb015fd10e4f43120d5dfd895c1b164463be019156e075331366d004dc7f7689770dab4eefbdd982fec7e6bd83a769d7383ae0946b12b088e93f1b1a619c21bd"), "d": _b("0898026d76358159f2fe321c08c2f9e719f5a9143475efe55e9c758a4578a75758841fbac2faba1987cf21b79b82a8ea8bad5b7fe5bbf51d63bda64c2984233c3b1841c533a39f0b0a35b78480d2a3cc5639eef35f9cee0b0a9eff9266857b45ef2c1b57249fb3c6b1e56249968724734d43a558b329fe2d496b06a6aa0d1da083553bd489f5f2cb783834006097853fd0aede88a2d65215fd129ad4681d3abc3e91b76f16a757dc85823a13728f529aefee0bb3a501aafbeab8c9bb3fabdca8f4223c2b24dfefafc861587f5540e7e9ada95d84798a435ba3e15ee157b66684deccf9a2e2fe2963c4477e517ebb3107daf334e5a7d2c975b779881616ab87e3"), "cert_der": cert, "shared": shared, "spriv": spriv, "spub": spub, "cpub": cpub, "cpriv": cpriv, "modus": ""}
+
+    # Gyldig handtrykk, sertifikatet er pinna i ca_pem.
+    la t0 = tid_ms()
+    la ok = _handtrykk(sc, "db.test.example", _pem(cert))
+    skriv("test_tls13_klient: eitt handtrykk (klientsida) ms " + tekst(tid_ms() - t0) + "\n")
+    assert_eq(ok["status"], "ferdig")
+    assert(ok["appdata_ok"])
+
+    # Feil vertsnamn.
+    la f1 = _handtrykk(sc, "feil.test.example", _pem(cert))
+    assert_eq(f1["status"], "feil")
+    assert(_har(f1["feil"], "gjeld ikkje vertsnamnet"))
+
+    # Feil CA: tenaren sitt sertifikat er ikkje knytt til ca_pem.
+    la f2 = _handtrykk(sc, "db.test.example", _pem(annan))
+    assert_eq(f2["status"], "feil")
+    assert(_har(f2["feil"], "ikkje signert av noko sertifikat i ca_fil"))
+
+    # Tom CA-liste.
+    la f2b = _handtrykk(sc, "db.test.example", "ingen PEM her")
+    assert_eq(f2b["status"], "feil")
+    assert(_har(f2b["feil"], "ingen sertifikat i ca_fil"))
+
+    # Endra CertificateVerify.
+    sc["modus"] = "cv"
+    la f3 = _handtrykk(sc, "db.test.example", _pem(cert))
+    assert_eq(f3["status"], "feil")
+    assert(_har(f3["feil"], "CertificateVerify"))
+
+    # Endra Finished.
+    sc["modus"] = "fin"
+    la f4 = _handtrykk(sc, "db.test.example", _pem(cert))
+    assert_eq(f4["status"], "feil")
+    assert(_har(f4["feil"], "Finished"))
+
+    # HelloRetryRequest og ukjend gruppe gir tydeleg feil (ingen ny ECDH nødvendig).
+    sc["modus"] = "hrr"
+    la f5 = _handtrykk(sc, "db.test.example", _pem(cert))
+    assert_eq(f5["status"], "feil")
+    assert(_har(f5["feil"], "HelloRetryRequest"))
+    sc["modus"] = "gruppe"
+    la f6 = _handtrykk(sc, "db.test.example", _pem(cert))
+    assert_eq(f6["status"], "feil")
+    assert(_har(f6["feil"], "nøkkelgruppe"))
+}
+
+funksjon start() -> heiltall {
+    _test_hjelparar()
+    _test_vertsnamn()
+    _test_tillit()
+    _test_handtrykk()
+    skriv("test_tls13_klient OK")
+    returner 0
+}

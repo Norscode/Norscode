@@ -1,0 +1,106 @@
+# 5b: `nc dev` / `nc serve --reload`. Starter tools/nc_dev.no som barn, endrar ei kjeldefil
+# medan tenaren køyrer og sjekkar at (1) nytt svar kjem etter endring, (2) ein
+# kompileringsfeil lèt den gamle tenaren stå, (3) ei vellukka rettelse tek over att.
+# Barnet blir stoppa ryddig via NC_DEV_STOPPFIL.
+
+bruk std.http som http
+bruk std.runtime.process_abi som process_abi
+
+funksjon app_tekst(versjon: tekst) -> tekst {
+    returner "bruk std.web som web\nbruk std.http_cache som hc\n\nfunksjon rot(ctx: ordbok_tekst) -> ordbok_tekst {\n    web.route(\"GET /\")\n    returner hc.nytt_svar(200, \"text/plain; charset=utf-8\", \"" + versjon + "\")\n}\n"
+}
+
+funksjon hent(port: tekst) -> tekst {
+    prøv {
+        la r = http.request("GET", "http://127.0.0.1:" + port + "/", {}, {}, "", 2000)
+        returner http.response_text(r)
+    } fang (e) { returner "" }
+    returner ""
+}
+
+# Les utdata frå dev-barnet til `nål` finst `n` gonger i det samla utdataet (maks `maks_ms`).
+# Me sender aldri GET før tenaren har meldt «Socket-lytting aktiv»: ein tilkopling mot
+# lukka port krasjar http.request i den committed seeden (kjend, uavhengig av 5b).
+funksjon tal_forekomstar(t: tekst, nål: tekst) -> heiltall {
+    la n: heiltall = 0
+    la rest = t
+    la p = builtin.index_of(rest, nål)
+    mens p >= 0 {
+        n = n + 1
+        rest = builtin.slice(rest, p + lengde(nål), lengde(rest))
+        p = builtin.index_of(rest, nål)
+    }
+    returner n
+}
+
+funksjon vent_utdata(handle: tekst, buf: ordbok_tekst, nål: tekst, n: heiltall, maks_ms: heiltall) -> bool {
+    la brukt = 0
+    mens brukt < maks_ms {
+        la bit = builtin.process_operation(process_abi.async_operation("read", handle))
+        buf["ut"] = buf["ut"] + tekst(bit["stdout"]) + tekst(bit["stderr"])
+        hvis tal_forekomstar(buf["ut"], nål) >= n { returner sann }
+        builtin.process_operation(process_abi.async_wait_request(handle, 200))
+        brukt = brukt + 200
+    }
+    skriv("TIDSUTLØP venta på «" + nål + "» x" + tekst_fra_heltall(n) + "; utdata så langt:\n" + buf["ut"] + "\n")
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la mappe = "build/dev_test_5b"
+    prøv { builtin.mkdir(mappe) } fang (e) { }
+    la app = mappe + "/app.no"
+    la stopp = mappe + "/stopp"
+    prøv { builtin.fil_slett(stopp) } fang (e) { }
+    builtin.fil_skriv(app, app_tekst("versjon-1"))
+    la port = "48431"
+
+    miljo_sett("NC_VERKTOY_ARGV", app + "\n--port\n" + port + "\n--intervall\n100\n--debounce\n150")
+    miljo_sett("NC_DEV_STOPPFIL", stopp)
+    miljo_sett("NC_DEV_MAKS_MS", "240000")
+    miljo_sett("NORSCODE_ROOT", root)
+    la nc = miljo_hent("NC_NATIVE")
+    hvis nc == "" { nc = root + "/bin/nc" }
+    la areq = process_abi.async_spawn_request(nc, ["run", "tools/nc_dev.no"], root, "", 300000, 67108864)
+    areq = process_abi.sett_sandbox(areq, "none", 4294967296, 1024, sann)
+    areq = process_abi.sett_environment(areq, {
+        "NC_VERKTOY_ARGV": app + "\n--port\n" + port + "\n--intervall\n100\n--debounce\n150",
+        "NC_DEV_STOPPFIL": stopp, "NC_DEV_MAKS_MS": "240000", "NORSCODE_ROOT": root,
+        # Arva kommandokontrakt frå testløparen må ikkje vinne over argv (ellers køyrer barnet testen på nytt).
+        "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "", "NC_TEST_FILE": "",
+        "NORSCODE_VM_CI_COMMAND": "", "NORSCODE_VM_CI_CHILD_CMD": "", "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_FILE": "", "NORSCODE_RUN_CMD": ""})
+    la h = builtin.process_operation(areq)
+    assert_eq(tekst(h["status"]), "kjorer")
+    la handle = tekst(h["handle"])
+
+    la buf: ordbok_tekst = {"ut": ""}
+    la lyttar = "Socket-lytting aktiv"
+    assert(vent_utdata(handle, buf, lyttar, 1, 120000))
+    assert_eq(hent(port), "versjon-1")
+
+    builtin.fil_skriv(app, app_tekst("versjon-2"))
+    assert(vent_utdata(handle, buf, lyttar, 2, 120000))
+    assert_eq(hent(port), "versjon-2")
+
+    # Kompileringsfeil: gamal tenar held fram.
+    builtin.fil_skriv(app, app_tekst("versjon-3") + "funksjon øydelagd( {\n")
+    assert(vent_utdata(handle, buf, "held fram til neste vellukka endring", 1, 120000))
+    assert_eq(hent(port), "versjon-2")
+
+    # Rettelse: ny tenar.
+    builtin.fil_skriv(app, app_tekst("versjon-4"))
+    assert(vent_utdata(handle, buf, lyttar, 3, 120000))
+    assert_eq(hent(port), "versjon-4")
+
+    builtin.fil_skriv(stopp, "x")
+    la st = builtin.process_operation(process_abi.async_wait_request(handle, 30000))
+    vent_utdata(handle, buf, "avslutta", 1, 1000)
+    prøv { builtin.process_operation(process_abi.async_operation("close", handle)) } fang (e) { }
+    assert_eq(tekst(st["status"]), "ferdig")
+    assert_inneholder(buf["ut"], "endra: app.no → startar på nytt")
+    assert_inneholder(buf["ut"], "kompileringsfeil")
+    returner 0
+}
