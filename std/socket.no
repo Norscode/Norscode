@@ -23,8 +23,8 @@ funksjon native_versjon() -> tekst { returner "norscode-native-network-v1" }
 funksjon _native_req(operation: tekst, handle: tekst) -> ordbok_tekst { returner {"abi": native_versjon(), "operation": operation, "handle": handle} }
 
 funksjon _reparer_dns_hex_transport(data_hex: tekst) -> tekst {
-    // Stage-0 teksttransport kan fjerne NUL-byte frå TCP-resultat. Gjenopprett
-    // berre den kjende DNS-ramma; andre protokollar blir urørte.
+    // Historisk DNS-spesifikk stage-0-reparasjon. Skal berre kallast frå
+    // native_les_hex_dns, ikkje frå generisk binær socket-I/O.
     hvis lengde(data_hex) < 16 { returner "" }
     la mark = builtin.index_of(data_hex, "840101")
     hvis mark < 2 { returner "" }
@@ -55,6 +55,7 @@ funksjon native_udp_tilkoble(host: tekst, port: heiltall) -> ordbok_tekst {
 }
 
 funksjon native_udp_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    hvis ikkje _gyldig_native_les_grense(maks) { returner _ugyldig_les_svar() }
     la req = _native_req("recvfrom", h["handle"])
     req["max"] = tekst_fra_heltall(maks)
     returner builtin.network_operation(req)
@@ -62,6 +63,7 @@ funksjon native_udp_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
 
 funksjon native_udp_skriv(h: ordbok_tekst, data_hex: tekst,
                           peer_host: tekst, peer_port: heiltall) -> ordbok_tekst {
+    hvis ikkje _gyldige_hex_bytes(data_hex) { returner _ugyldig_hex_svar() }
     la req = _native_req("sendto", h["handle"])
     req["data_hex"] = data_hex
     req["peer_host"] = peer_host
@@ -84,30 +86,24 @@ funksjon native_poll_vent(h: ordbok_tekst, events: heiltall, timeout_ms: heiltal
 
 funksjon native_aksepter(h: ordbok_tekst) -> ordbok_tekst { returner builtin.network_operation(_native_req("accept", h["handle"])) }
 funksjon native_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    hvis ikkje _gyldig_native_les_grense(maks) { returner _ugyldig_les_svar() }
     la req = _native_req("read", h["handle"])
     req["max"] = tekst_fra_heltall(maks)
     returner builtin.network_operation(req)
 }
 funksjon native_les_hex(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    hvis ikkje _gyldig_native_les_grense(maks) { returner _ugyldig_les_svar() }
     // Hex-lesing må prøvast først for TCP: teksttransport kan miste NUL-byte
     // i DNS-lengdeprefixet før recvfrom-fallbacken får sjansen.
     la native_hex_first = _native_req("read_hex", h["handle"])
     native_hex_first["max"] = tekst_fra_heiltall(maks)
     la native_hex_result = builtin.network_operation(native_hex_first)
     hvis native_hex_result["status"] != "feil" eller native_hex_result["error"] != "invalid operation" {
-        hvis native_hex_result["status"] == "ok" {
-            la dns_fixed_first = _reparer_dns_hex_transport(native_hex_result["data_hex"])
-            hvis dns_fixed_first != "" { native_hex_result["data_hex"] = dns_fixed_first }
-        }
         returner native_hex_result
     }
     la req = _native_req("recvfrom", h["handle"])
     req["max"] = tekst_fra_heltall(maks)
     la r = builtin.network_operation(req)
-    hvis r["status"] == "ok" og lengde(r["data_hex"]) > 0 {
-        la dns_fixed = _reparer_dns_hex_transport(r["data_hex"])
-        hvis dns_fixed != "" { r["data_hex"] = dns_fixed }
-    }
     hvis r["status"] == "ok" og lengde(r["data_hex"]) == 0 og lengde(r["data"]) > 0 {
         la recv_hex = ""
         la recv_i: heiltall = 0
@@ -152,12 +148,26 @@ funksjon native_les_hex(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
     fallback["data_hex"] = hex
     returner fallback
 }
+# Berre DNS skal kunne bruke historisk DNS-spesifikk transportreparasjon.
+# All anna binær-I/O må returnere uendra byte, inkludert TCP, WebSocket
+# og filoverføring der dei same bytekombinasjonane kan vere gyldig payload.
+funksjon native_les_hex_dns(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    la svar = native_les_hex(h, maks)
+    hvis svar["status"] == "ok" og finnes_nøkkel(svar, "data_hex") {
+        la reparert = _reparer_dns_hex_transport(svar["data_hex"])
+        hvis reparert != "" { svar["data_hex"] = reparert }
+    }
+    returner svar
+}
+
 funksjon native_skriv(h: ordbok_tekst, data: tekst) -> ordbok_tekst {
     la req = _native_req("write", h["handle"])
     req["data"] = data
     returner builtin.network_operation(req)
 }
 funksjon native_skriv_hex(h: ordbok_tekst, data_hex: tekst) -> ordbok_tekst {
+    # Fail-closed: ufullstendige eller ugyldige hex-par skal aldri sendast.
+    hvis ikkje _gyldige_hex_bytes(data_hex) { returner _ugyldig_hex_svar() }
     la req = _native_req("write_hex", h["handle"])
     req["data_hex"] = data_hex
     la r = builtin.network_operation(req)
@@ -171,6 +181,36 @@ funksjon native_skriv_hex(h: ordbok_tekst, data_hex: tekst) -> ordbok_tekst {
         i = i + 2
     }
     returner builtin.network_operation({"abi": native_versjon(), "operation": "write", "handle": h["handle"], "data": data})
+}
+
+# Same bytevalidering for native og tekst-fallback; ikkje trunker eller
+# konverter ugyldige heksadesimale teikn til NUL.
+funksjon _gyldige_hex_bytes(data_hex: tekst) -> boolsk {
+    la n: heiltall = lengde(data_hex)
+    hvis n % 2 != 0 { returner usann }
+    la i: heiltall = 0
+    mens i < n {
+        la kode: heiltall = builtin.char_code(builtin.slice(data_hex, i, i + 1))
+        hvis ikkje ((kode >= 48 og kode <= 57) eller
+                    (kode >= 65 og kode <= 70) eller
+                    (kode >= 97 og kode <= 102)) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# 64 KiB er den avgrensa native I/O-chunken brukt i std og
+# hindrar at ugyldig/store lesingar blir sendte vidare til backend.
+funksjon _gyldig_native_les_grense(maks: heiltall) -> boolsk {
+    returner maks > 0 og maks <= 65536
+}
+
+funksjon _ugyldig_les_svar() -> ordbok_tekst {
+    returner {"abi": native_versjon(), "status": "feil", "error": "ugyldig leselengd"}
+}
+
+funksjon _ugyldig_hex_svar() -> ordbok_tekst {
+    returner {"abi": native_versjon(), "status": "feil", "error": "ugyldig hex-payload"}
 }
 
 funksjon _hex_digit(v: heiltall) -> tekst {
@@ -201,6 +241,7 @@ funksjon native_iocp_aksepter(listener: ordbok_tekst) -> ordbok_tekst {
 }
 
 funksjon native_iocp_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    hvis ikkje _gyldig_native_les_grense(maks) { returner _ugyldig_les_svar() }
     la req = _native_req("iocp_read", h["handle"])
     req["max"] = tekst_fra_heiltall(maks)
     returner builtin.network_operation(req)

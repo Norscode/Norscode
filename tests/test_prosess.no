@@ -9,6 +9,20 @@ funksjon sjekk(namn: tekst, ok: bool) {
 }
 
 funksjon start() -> heiltall {
+    # Native async-kall må avvise ugyldige handle før backend-dispatch.
+    la tom_handle: ordbok_tekst = {}
+    la blank_handle: ordbok_tekst = {"handle": ""}
+    la kontroll_handle: ordbok_tekst = {"handle": "bad" + builtin.chr(10) + "handle"}
+    assert_eq(prosess.native_async_poll(tom_handle)["status"], "feil")
+    assert_eq(prosess.native_async_les(tom_handle)["status"], "feil")
+    assert_eq(prosess.native_async_lukk(tom_handle)["status"], "feil")
+    assert_eq(prosess.native_async_poll(blank_handle)["status"], "feil")
+    assert_eq(prosess.native_async_les(blank_handle)["status"], "feil")
+    assert_eq(prosess.native_async_lukk(blank_handle)["status"], "feil")
+    assert_eq(prosess.native_async_poll(kontroll_handle)["status"], "feil")
+    assert_eq(prosess.native_async_les(kontroll_handle)["status"], "feil")
+    assert_eq(prosess.native_async_lukk(kontroll_handle)["status"], "feil")
+
     la policy = prosess.ny_policy("runtime")
     la plan = prosess.start_plan("/bin/echo hei")
 
@@ -39,6 +53,44 @@ funksjon start() -> heiltall {
     sjekk("dry-run stdout", t.inneholder(prosess.stdout(res), "dry-run"))
     assert_eq(prosess.vent(res), 0)
 
+    # Tekstplanar skal avvise ugyldige og overstore tal alt i dry-run.
+    la tekst_grenser = prosess.start_plan("/bin/echo hei")
+    tekst_grenser["timeout_seconds"] = "ikkje-tal"
+    assert(ikkje prosess.valider_plan(policy, tekst_grenser))
+    assert_eq(prosess.tørrkøyr(policy, tekst_grenser)["action"], "reject")
+    tekst_grenser["timeout_seconds"] = "030"
+    assert(ikkje prosess.valider_plan(policy, tekst_grenser))
+    tekst_grenser["timeout_seconds"] = "2147484"
+    assert(ikkje prosess.valider_plan(policy, tekst_grenser))
+    tekst_grenser["timeout_seconds"] = "30"
+    tekst_grenser["max_output_bytes"] = "9999999999999999999"
+    assert(ikkje prosess.valider_plan(policy, tekst_grenser))
+    tekst_grenser["max_output_bytes"] = "2147483648"
+    assert(ikkje prosess.valider_plan(policy, tekst_grenser))
+    tekst_grenser["max_output_bytes"] = "1048576"
+    assert(prosess.valider_plan(policy, tekst_grenser))
+    assert_eq(prosess.tørrkøyr(policy, tekst_grenser)["action"], "would_start")
+
+    # Tekstplanen skal ikkje godkjenne verdiar som native argv-planen
+    # ville avvist. Dry-run og async må følgje same IO-kontrakt.
+    la tekst_io = prosess.start_plan("/bin/echo hei")
+    tekst_io["capture_stdout"] = "ja"
+    assert(ikkje prosess.valider_plan(policy, tekst_io))
+    assert_eq(prosess.tørrkøyr(policy, tekst_io)["action"], "reject")
+    assert_eq(prosess.start_async_trygt(policy, tekst_io, "")["status"], "feil")
+    tekst_io["capture_stdout"] = "usann"
+    tekst_io["capture_stderr"] = "false"
+    assert(ikkje prosess.valider_plan(policy, tekst_io))
+    tekst_io["capture_stderr"] = "sann"
+    tekst_io["cwd"] = "bad" + builtin.chr(10) + "path"
+    assert(ikkje prosess.valider_plan(policy, tekst_io))
+    tekst_io["cwd"] = ""
+    tekst_io["stdin"] = "bad" + builtin.chr(13) + "input"
+    assert(ikkje prosess.valider_plan(policy, tekst_io))
+    tekst_io["stdin"] = ""
+    assert(prosess.valider_plan(policy, tekst_io))
+    assert_eq(prosess.tørrkøyr(policy, tekst_io)["action"], "would_start")
+
     la argv_policy = prosess.ny_policy("argv")
     assert(prosess.tillat(argv_policy, "printf"))
     la argv_plan = prosess.start_argv_plan("/usr/bin/printf", ["%s|%s", "hei; dette er eitt argument", "x y"])
@@ -49,6 +101,128 @@ funksjon start() -> heiltall {
     assert(prosess.er_ok(argv_backend))
     sjekk("argv backend køyrer shell-fritt", prosess.stdout(argv_backend) == "hei; dette er eitt argument|x y")
     sjekk("argv backend har separat stderr", prosess.stderr(argv_backend) == "")
+
+    # Capture-val i plan skal vere kanoniske og sendast til native ABI.
+    # Ugyldige flagg må avvisast før både sync og async dispatch.
+    la capture_plan = prosess.start_argv_plan("/usr/bin/printf", ["capture"])
+    assert(prosess.valider_argv_plan(argv_policy, capture_plan))
+    capture_plan["capture_stdout"] = "ja"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, capture_plan))
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(argv_policy, capture_plan)), -1)
+    assert_eq(prosess.start_argv_async_trygt(argv_policy, capture_plan)["status"], "feil")
+    capture_plan["capture_stdout"] = "sann"
+    capture_plan["capture_stderr"] = "false"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, capture_plan))
+    capture_plan["capture_stderr"] = "usann"
+    assert(prosess.valider_argv_plan(argv_policy, capture_plan))
+    capture_plan["capture_stderr"] = "sann"
+    assert(prosess.valider_argv_plan(argv_policy, capture_plan))
+
+    # Ikkje slepp ugyldig miljø vidare til native async-prosessmotor.
+    # Her må feilen returnerast før det blir oppretta ein barneprosess.
+    la async_ugyldig = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    prosess.med_miljø(async_ugyldig, {"UGYLDIG=NOKKEL": "verdi"})
+    assert(ikkje prosess.valider_argv_plan(argv_policy, async_ugyldig))
+    la avvist_async = prosess.start_argv_async_trygt(argv_policy, async_ugyldig)
+    assert_eq(avvist_async["status"], "feil")
+    assert_eq(avvist_async["error"], "argv-prosess avvist av policy")
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(argv_policy, async_ugyldig)), -1)
+    # Verifiser også fail-closed på miljøverdiar med kontrollteikn.
+    la miljø_nul = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    prosess.med_miljø(miljø_nul, {"NC_TEST": "ok" + builtin.chr(10) + "BAD=1"})
+    assert(ikkje prosess.valider_argv_plan(argv_policy, miljø_nul))
+    assert_eq(prosess.start_argv_async_trygt(argv_policy, miljø_nul)["status"], "feil")
+    la miljø_ok = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    prosess.med_miljø(miljø_ok, {"NC_TEST": "ok"})
+    assert(prosess.valider_argv_plan(argv_policy, miljø_ok))
+
+    # Tidlegare kunne ein skrivefeil i sandboxnamn behalde default "none".
+    # Det skal no avvisast baade ved planvalidering og sync/async start.
+    la ugyldig_sandbox = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    prosess.med_sandbox(ugyldig_sandbox, "no-netwrok", 268435456, 32, usann)
+    assert_eq(ugyldig_sandbox["sandbox"], "no-netwrok")
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldig_sandbox))
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(argv_policy, ugyldig_sandbox)), -1)
+    assert_eq(prosess.start_argv_async_trygt(argv_policy, ugyldig_sandbox)["status"], "feil")
+    la gyldig_sandbox = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    prosess.med_sandbox(gyldig_sandbox, "no-network", 268435456, 32, usann)
+    assert(prosess.valider_argv_plan(argv_policy, gyldig_sandbox))
+
+    # Store/ikkje-kanoniske tal skal avvisast før sekund->ms og
+    # andre heiltallskonverteringar ved native prosessstart.
+    la ugyldige_grenser = prosess.start_argv_plan("/usr/bin/printf", ["x"])
+    ugyldige_grenser["timeout_seconds"] = "9999999999999999999"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["timeout_seconds"] = "2147484"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["timeout_seconds"] = "030"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["timeout_seconds"] = "30"
+    ugyldige_grenser["max_output_bytes"] = "2147483648"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["max_output_bytes"] = "4096"
+    ugyldige_grenser["max_memory_bytes"] = "8589934593"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["max_memory_bytes"] = "536870912"
+    ugyldige_grenser["max_open_files"] = "4097"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["max_open_files"] = "64"
+    ugyldige_grenser["cwd"] = "bad" + builtin.chr(10) + "path"
+    assert(ikkje prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+    ugyldige_grenser["cwd"] = ""
+    assert(prosess.valider_argv_plan(argv_policy, ugyldige_grenser))
+
+    # Eksakt allowlist vernar mot basename-kollisjon i til dømes /tmp.
+    la strict_policy = prosess.ny_policy("strict-argv")
+    assert(prosess.tillat(strict_policy, "printf"))
+    la trusted = prosess.start_argv_plan("/usr/bin/printf", ["ok"])
+    la untrusted = prosess.start_argv_plan("/tmp/printf", ["ok"])
+    assert(prosess.valider_argv_plan(strict_policy, trusted))
+    assert(prosess.valider_argv_plan(strict_policy, untrusted))
+    assert(prosess.krev_eksakte_programstiar(strict_policy))
+    # Kommandoar som bruker PATH skal ikkje omgå streng argv-allowlist.
+    assert(ikkje prosess.policy_tillater(strict_policy, "/usr/bin/printf x"))
+    assert(ikkje prosess.er_ok(prosess.start_trygt(strict_policy, prosess.start_plan("/usr/bin/printf x"))))
+    assert(ikkje prosess.valider_argv_plan(strict_policy, trusted))
+    assert(ikkje prosess.valider_argv_plan(strict_policy, untrusted))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "printf"))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "/tmp/../usr/bin/printf"))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "/tmp/|printf"))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "/usr//bin/printf"))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "/usr/bin/printf/"))
+    assert(ikkje prosess.tillat_programsti(strict_policy, "/usr/./bin/printf"))
+    assert(prosess.tillat_programsti(strict_policy, "/usr/bin/printf"))
+    assert(prosess.valider_argv_plan(strict_policy, trusted))
+    # Sjølv om allowlist skulle innehalde ei ukanonisk sti, skal
+    # verken sync eller async kunne starte denne stien.
+    strict_policy["executable_allowlist"] = strict_policy["executable_allowlist"] + "/usr//bin/printf|"
+    la tvetydig = prosess.start_argv_plan("/usr//bin/printf", ["ok"])
+    assert(ikkje prosess.valider_argv_plan(strict_policy, tvetydig))
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(strict_policy, tvetydig)), -1)
+    assert_eq(prosess.start_argv_async_trygt(strict_policy, tvetydig)["status"], "feil")
+    assert(ikkje prosess.valider_argv_plan(strict_policy, untrusted))
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(strict_policy, untrusted)), -1)
+    assert_eq(prosess.start_argv_async_trygt(strict_policy, untrusted)["status"], "feil")
+    assert(prosess.er_ok(prosess.start_argv_trygt(strict_policy, trusted)))
+
+    # Feilformatert policy kan ikkje stille deaktivere strict executable-mode.
+    # Dette gjeld baade tekstkommando og sync/async argv.
+    la korrupt_policy = prosess.ny_policy("korrupt-strict")
+    assert(prosess.tillat(korrupt_policy, "printf"))
+    assert(prosess.tillat_programsti(korrupt_policy, "/usr/bin/printf"))
+    korrupt_policy["strict_executables"] = "ja"
+    assert(ikkje prosess.policy_tillater(korrupt_policy, "/usr/bin/printf x"))
+    assert(ikkje prosess.valider_argv_plan(korrupt_policy, trusted))
+    assert_eq(prosess.returkode(prosess.start_argv_trygt(korrupt_policy, trusted)), -1)
+    assert_eq(prosess.start_argv_async_trygt(korrupt_policy, trusted)["status"], "feil")
+    korrupt_policy["strict_executables"] = "sann"
+    assert(prosess.valider_argv_plan(korrupt_policy, trusted))
+    assert(ikkje prosess.policy_tillater(korrupt_policy, "/usr/bin/printf x"))
+    fjern_nokkel(korrupt_policy, "strict_executables")
+    assert(ikkje prosess.valider_argv_plan(korrupt_policy, trusted))
+    assert(ikkje prosess.policy_tillater(korrupt_policy, "/usr/bin/printf x"))
+    korrupt_policy["strict_executables"] = "usann"
+    assert(prosess.valider_argv_plan(korrupt_policy, trusted))
 
     la shell_policy = prosess.ny_policy("shell-guard")
     assert(prosess.tillat(shell_policy, "echo"))
@@ -61,6 +235,14 @@ funksjon start() -> heiltall {
     la avvist = prosess.start_trygt(policy, farleg)
     sjekk("avvis farleg kommando", ikkje prosess.er_ok(avvist))
     sjekk("avvis grunn", t.inneholder(prosess.stderr(avvist), "policy"))
+
+    # Ingen ugyldig async wait/signal request skal naa native dispatch.
+    assert_eq(prosess.native_async_vent({}, -1)["status"], "feil")
+    assert_eq(prosess.native_async_vent({"handle": "h1"}, -1)["error"], "ugyldig async wait request")
+    assert_eq(prosess.native_async_vent({"handle": "h1"}, 2147483648)["status"], "feil")
+    assert_eq(prosess.native_async_signal({"handle": "h1"}, 0)["status"], "feil")
+    assert_eq(prosess.native_async_signal({"handle": "h1"}, 16)["status"], "feil")
+    assert_eq(prosess.native_async_signal({}, 15)["status"], "feil")
 
     la kill = prosess.drep_plan(123)
     assert_eq(kill["action"], "kill")
