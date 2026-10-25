@@ -48,6 +48,13 @@ funksjon IMPORT_VA() { returner OSTAB_VA() + OSTAB_LEN() * 8 } // 0x772000
 // Lambda-hjelparen les og nullstiller sloten i prologen (sjå kompiler_fn_v2). Sida
 // er rot for GC-skanninga, men closuren ligg uansett på kallaren sin operandstakk.
 funksjon LAMBDA_CAPTURE_VA() { returner HOST_ABI_VA() + 4072 }
+// F37 grøne trådar (fase 1): to rå ord rett etter handler-teljaren/last_exc (same segment, nullfylt
+// av lasteren): GREEN_CUR = peikar til ctx-blokka til tråden som køyrer, GREEN_TAB = peikar til
+// ctx-tabellen (ord 0 = tal oppføringar, så ctx-peikarar; 0 = ledig) som gc_mark_roots skannar.
+// Berre i bruk når programmet har std.native_gap._gr_inngang (green_i_bruk = 1); elles uendra bytar.
+funksjon GREEN_CUR_VA() { returner hl.HANDLER_COUNT_VA(X86_MAL()) + 16 }
+funksjon GREEN_TAB_VA() { returner hl.HANDLER_COUNT_VA(X86_MAL()) + 24 }
+la green_i_bruk: heiltall = 0
 // Heap-/GC-layouten (HEAP_VA, GC_*, live-map, mark-stakk, cache-område, handler-region)
 // ligg i heap_layout.no (F2.2), delt med arm64-codegenen. Denne codegenen dekkjer x86-64-måla:
 // linux-x86_64 (standard) og windows-x86_64 (WINDOWS_SEED_PLAN W1). Målet kjem frå NC_TARGET;
@@ -69,6 +76,22 @@ funksjon ER_WINDOWS() -> boolsk { returner X86_MAL() == "windows-x86_64" }
 // nummer), og -ENOSYS i staden for clone/futex/lstat/getdents64/rename/symlink/uname/getcwd/
 // readlink. Linux-vegen er byte-identisk (kvar gate er `hvis ER_NOS()`).
 funksjon ER_NOS() -> boolsk { returner X86_MAL() == "norscodeos-x86_64" }
+// NC_SAFEPOINT_TERSKEL: heiltal 1..2147483647 (same validering som NC_HEAP_MIB); tom = standard.
+funksjon sp_terskel_frå_env(standard: heltall) -> heltall {
+    la raa = miljo_hent("NC_SAFEPOINT_TERSKEL")
+    hvis raa == "" { returner standard }
+    la n: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(raa) {
+        la c = builtin.char_code(builtin.slice(raa, i, i + 1))
+        hvis c < 48 eller c > 57 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL må vere eit heiltal (1..2147483647), fekk «" + raa + "»" }
+        n = n * 10 + (c - 48)
+        hvis n > 2147483647 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL er for stor: " + raa }
+        i = i + 1
+    }
+    hvis n < 1 { kast "native_codegen_v2: NC_SAFEPOINT_TERSKEL må vere ≥ 1 (fekk " + raa + ")" }
+    returner n
+}
 // Rekursjonsvakta: stakk-grensa ([STACK_LIMIT_VA]) = initiell rsp − STAKK_GRENSE_BYTE.
 // linux-x86_64/windows-x86_64: 7 MiB (hovudtråden har 8 MiB). norscodeos-x86_64: 960 KiB som
 // standard — NorscodeOS-kjernen gjev ring-3-prosessen ei lat stakkregion med sidekvote, og
@@ -181,97 +204,61 @@ funksjon RT_BUILD_MAP_REV() { returner RT_SLOT(49) }
 // RT_LOWER/RT_UPPER landar i den endra legacy-runtime-tabellen etter at
 // runtime-biten blir utvida. Denne emitteren held derfor sjølve operasjonen
 // i same bytebuffer som resten av v2-runtimeen.
-// Delt i to parameterlause funksjonar: den gamle boolske parameteren
+// Delt i to funksjonar utan boolsk parameter: den gamle boolske parameteren
 // (upper) vart feilkompilert av codegen-ELF-en (las alltid som sann → begge
-// atoma fekk upper-logikk). Hardkoda konstantar unngår heilt arg-passeringa.
-funksjon emit_ascii_lower_runtime(bytes) {
-    legg_til(bytes, 0x48)
-    legg_til(bytes, 0x81)
-    legg_til(bytes, 0xEC)
-    u32(bytes, 256)
-    copy(bytes, [0x48, 0x8B, 0x47, 0x08, 0x48, 0x8B, 0x08, 0x45, 0x31, 0xC0])
+// atoma fekk upper-logikk). Hardkoda konstantar unngår heilt den arg-passeringa.
+// Resultatet blir allokert med str_new (lengd = kjeldelengd) og fylt direkte.
+// FIKS: gamal kode kopierte via ein fast 256-byte stakkbuffer (sub rsp,256) utan
+// lengdsjekk → tekst over 256 byte skreiv over returadressa (SIGSEGV på Linux-stage0).
+// Ikkje-ASCII-byte (t.d. UTF-8 for æøå) blir kopierte urørde.
+funksjon emit_ascii_lower_runtime(bytes, str_new_va: heiltall) {
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])           // push rbx,r12,r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x49, 0x89, 0xC4])                       // mov r12,rax
+    copy(bytes, [0x4C, 0x8B, 0x28])                       // mov r13,[rax] (lengd)
+    copy(bytes, [0x4C, 0x89, 0xEF])                       // mov rdi,r13
+    call_rel32(bytes, str_new_va, TEXT_VA())              // rax = ny streng, rdx = byte
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
     la loop = lengde(bytes)
-    copy(bytes, [0x49, 0x39, 0xC8])
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x83)
-    la je_done = lengde(bytes)
-    u32(bytes, 0)
-    copy(bytes, [0x42, 0x8A, 0x54, 0x00, 0x08, 0x80, 0xFA])
-    legg_til(bytes, 0x41)
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x82)
-    la je_store1 = lengde(bytes)
-    u32(bytes, 0)
-    legg_til(bytes, 0x80)
-    legg_til(bytes, 0xFA)
-    legg_til(bytes, 0x5A)
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x87)
-    la ja_store = lengde(bytes)
-    u32(bytes, 0)
-    legg_til(bytes, 0x80)
-    legg_til(bytes, 0xC2)
-    legg_til(bytes, 0x20)
-    la store = lengde(bytes)
-    copy(bytes, [0x42, 0x88, 0x14, 0x04, 0x49, 0xFF, 0xC0])
-    legg_til(bytes, 0xE9)
-    la jmp_loop = lengde(bytes)
-    u32(bytes, 0)
-    la done = lengde(bytes)
-    copy(bytes, [0x48, 0x89, 0xE7, 0x48, 0x89, 0xCE])
-    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
-    copy(bytes, [0x48, 0x81, 0xC4])
-    u32(bytes, 256)
-    legg_til(bytes, 0xC3)
-    patch_jump(bytes, je_done, done)
-    patch_jump(bytes, je_store1, store)
-    patch_jump(bytes, ja_store, store)
+    copy(bytes, [0x4C, 0x39, 0xE9])                       // cmp rcx,r13
+    la jae_done = emit_jcc_placeholder(bytes, 0x83)       // jae done
+    copy(bytes, [0x45, 0x8A, 0x44, 0x0C, 0x08])           // mov r8b,[r12+rcx+8]
+    copy(bytes, [0x41, 0x80, 0xF8, 0x41])                 // cmp r8b,'A'
+    copy(bytes, [0x72, 0x0A])                             // jb store
+    copy(bytes, [0x41, 0x80, 0xF8, 0x5A])                 // cmp r8b,'Z'
+    copy(bytes, [0x77, 0x04])                             // ja store
+    copy(bytes, [0x41, 0x80, 0xC0, 0x20])                 // add r8b,0x20
+    copy(bytes, [0x44, 0x88, 0x04, 0x0A])                 // store: mov [rdx+rcx],r8b
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    la jmp_loop = emit_jmp_placeholder(bytes)
     patch_jump(bytes, jmp_loop, loop)
+    patch_jump(bytes, jae_done, lengde(bytes))
+    copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3])     // done: pop r13,r12,rbx; ret (rax = ny streng)
 }
 
-funksjon emit_ascii_upper_runtime(bytes) {
-    legg_til(bytes, 0x48)
-    legg_til(bytes, 0x81)
-    legg_til(bytes, 0xEC)
-    u32(bytes, 256)
-    copy(bytes, [0x48, 0x8B, 0x47, 0x08, 0x48, 0x8B, 0x08, 0x45, 0x31, 0xC0])
+funksjon emit_ascii_upper_runtime(bytes, str_new_va: heiltall) {
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])           // push rbx,r12,r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x49, 0x89, 0xC4])                       // mov r12,rax
+    copy(bytes, [0x4C, 0x8B, 0x28])                       // mov r13,[rax] (lengd)
+    copy(bytes, [0x4C, 0x89, 0xEF])                       // mov rdi,r13
+    call_rel32(bytes, str_new_va, TEXT_VA())              // rax = ny streng, rdx = byte
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
     la loop = lengde(bytes)
-    copy(bytes, [0x49, 0x39, 0xC8])
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x83)
-    la je_done = lengde(bytes)
-    u32(bytes, 0)
-    copy(bytes, [0x42, 0x8A, 0x54, 0x00, 0x08, 0x80, 0xFA])
-    legg_til(bytes, 0x61)
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x82)
-    la je_store1 = lengde(bytes)
-    u32(bytes, 0)
-    legg_til(bytes, 0x80)
-    legg_til(bytes, 0xFA)
-    legg_til(bytes, 0x7A)
-    legg_til(bytes, 0x0F)
-    legg_til(bytes, 0x87)
-    la ja_store = lengde(bytes)
-    u32(bytes, 0)
-    legg_til(bytes, 0x80)
-    legg_til(bytes, 0xC2)
-    legg_til(bytes, 0xE0)
-    la store = lengde(bytes)
-    copy(bytes, [0x42, 0x88, 0x14, 0x04, 0x49, 0xFF, 0xC0])
-    legg_til(bytes, 0xE9)
-    la jmp_loop = lengde(bytes)
-    u32(bytes, 0)
-    la done = lengde(bytes)
-    copy(bytes, [0x48, 0x89, 0xE7, 0x48, 0x89, 0xCE])
-    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
-    copy(bytes, [0x48, 0x81, 0xC4])
-    u32(bytes, 256)
-    legg_til(bytes, 0xC3)
-    patch_jump(bytes, je_done, done)
-    patch_jump(bytes, je_store1, store)
-    patch_jump(bytes, ja_store, store)
+    copy(bytes, [0x4C, 0x39, 0xE9])                       // cmp rcx,r13
+    la jae_done = emit_jcc_placeholder(bytes, 0x83)       // jae done
+    copy(bytes, [0x45, 0x8A, 0x44, 0x0C, 0x08])           // mov r8b,[r12+rcx+8]
+    copy(bytes, [0x41, 0x80, 0xF8, 0x61])                 // cmp r8b,'a'
+    copy(bytes, [0x72, 0x0A])                             // jb store
+    copy(bytes, [0x41, 0x80, 0xF8, 0x7A])                 // cmp r8b,'z'
+    copy(bytes, [0x77, 0x04])                             // ja store
+    copy(bytes, [0x41, 0x80, 0xC0, 0xE0])                 // add r8b,0xE0 (−0x20)
+    copy(bytes, [0x44, 0x88, 0x04, 0x0A])                 // store: mov [rdx+rcx],r8b
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    la jmp_loop = emit_jmp_placeholder(bytes)
     patch_jump(bytes, jmp_loop, loop)
+    patch_jump(bytes, jae_done, lengde(bytes))
+    copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3])     // done: pop r13,r12,rbx; ret (rax = ny streng)
 }
 
 // ─── Byte-emitering ──────────────────────────────────────────────────────────
@@ -2828,6 +2815,347 @@ funksjon emit_r2_metode_atom(bytes, atomics) {
     patch_jump(bytes, fm_kast, atomics["throw_unwind"] - TEXT_VA())
 }
 
+// R4/F22: automatisk til_tekst og strukturell likskap for strukturar i x86-AOT
+// (VM-paritet, sjå vm.no vm_tekst_av/vm_lik). Tre atom + to krokar:
+//   metode_nokkel(rdi=tag, rsi=metode) → rax = nøkkel «tag.metode» (streng) | 0
+//     (EKSAKT oppslag i verts-funksjonstabellen som kall_metode; ingen fuzzy-treff);
+//   to_text_struct(rdi=ordbok) → rax = «Namn(felt=verdi, …)» | 0 (ikkje ein struktur);
+//     ein metode «til_tekst» vinn; syklusvern via kortvarig «__vis__»-merke (→ «Namn(...)»);
+//     felt blir viste med to_text (nøsta strukturar rekursivt; lister/ordbøker «[verdi]»);
+//   struct_eq(rdi, rsi: to ordbøker) → rax = 0 (ikkje to strukturar: identitet som før) |
+//     1 (ulike) | 2 (like): same __struktur__, ein metode «er_lik» vinn, elles felt for
+//     felt med eq (djupt). Sirkulære strukturar har ikkje syklusvern her (stakk-overflow).
+// Kroken i to_text (type 4) og i eq-prologen kallar atoma; kall-plassane blir lappa her.
+funksjon emit_r4_verdi_atom(bytes, atomics) {
+    // ── metode_nokkel ────────────────────────────────────────────────────────────
+    atomics["metode_nokkel"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0)
+    copy(bytes, [0x49, 0x89, 0xF5])                // mov r13,rsi (metode)
+    copy(bytes, [0x49, 0x89, 0xFE])                // mov r14,rdi (tag)
+    emit_stakk_tekst(bytes, ".")
+    copy(bytes, [0x4C, 0x89, 0xF7, 0x48, 0x89, 0xC6]) // mov rdi,r14; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7, 0x4C, 0x89, 0xEE]) // mov rdi,rax; mov rsi,r13
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC7])                // mov r15,rax (nøkkel)
+    copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax
+    call_rel32(bytes, atomics["host_resolve"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la mn_ingen1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x38])                // mov rdi,[rax] (radnamn, C-streng)
+    copy(bytes, [0x49, 0x8B, 0x77, 0x08])          // mov rsi,[r15+8]
+    copy(bytes, [0x48, 0x8B, 0x16])                // mov rdx,[rsi] (len)
+    copy(bytes, [0x48, 0x83, 0xC6, 0x08])          // add rsi,8
+    copy(bytes, [0x31, 0xC9])                      // xor ecx,ecx
+    la mn_lokke = lengde(bytes)
+    copy(bytes, [0x48, 0x39, 0xD1])                // cmp rcx,rdx
+    la mn_ferdig = emit_jcc_placeholder(bytes, 0x83) // jae ferdig
+    copy(bytes, [0x0F, 0xB6, 0x04, 0x0F])          // movzx eax,byte [rdi+rcx]
+    copy(bytes, [0x3A, 0x04, 0x0E])                // cmp al,[rsi+rcx]
+    la mn_ingen2 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x48, 0xFF, 0xC1])                // inc rcx
+    la mn_att = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, mn_att, mn_lokke)
+    patch_jump(bytes, mn_ferdig, lengde(bytes))
+    copy(bytes, [0x80, 0x3C, 0x0F, 0x00])          // cmp byte [rdi+rcx],0
+    la mn_ingen3 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x4C, 0x89, 0xF8])                // mov rax,r15
+    la mn_ut = emit_jmp_placeholder(bytes)
+    la mn_ingenl = lengde(bytes)
+    patch_jump(bytes, mn_ingen1, mn_ingenl) patch_jump(bytes, mn_ingen2, mn_ingenl) patch_jump(bytes, mn_ingen3, mn_ingenl)
+    copy(bytes, [0x31, 0xC0])                      // xor eax,eax
+    patch_jump(bytes, mn_ut, lengde(bytes))
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    // ── to_text_struct ───────────────────────────────────────────────────────────
+    atomics["to_text_struct"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16 ([rsp]=indeks, [rsp+8]=nøkkel)
+    copy(bytes, [0x48, 0x89, 0xFB])                // mov rbx,rdi (ordbok)
+    emit_stakk_tekst(bytes, "__struktur__")
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x89, 0xC6]) // mov rdi,rbx; mov rsi,rax
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tts_null = emit_je_placeholder(bytes)       // ikkje struktur → 0
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax (tag)
+    emit_stakk_tekst(bytes, "til_tekst")
+    copy(bytes, [0x48, 0x89, 0xC6, 0x4C, 0x89, 0xE7]) // mov rsi,rax; mov rdi,r12
+    call_rel32(bytes, atomics["metode_nokkel"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tts_utanhook = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC7])                // mov r15,rax (nøkkel)
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])    // mov edi,1
+    call_rel32(bytes, atomics["list_new_cap"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (args)
+    copy(bytes, [0x4C, 0x89, 0xF7, 0x48, 0x89, 0xDE]) // mov rdi,r14; mov rsi,rbx
+    call_rel32(bytes, atomics["list_app"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xFF, 0x4C, 0x89, 0xF6]) // mov rdi,r15; mov rsi,r14
+    call_rel32(bytes, atomics["ncb_kall"], TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())
+    la tts_ut1 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tts_utanhook, lengde(bytes))
+    // namn = __type__ (elles tag)
+    emit_stakk_tekst(bytes, "__type__")
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x89, 0xC6]) // mov rdi,rbx; mov rsi,rax
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tts_harnamn = emit_jne_placeholder(bytes)
+    copy(bytes, [0x4C, 0x89, 0xE0])                // mov rax,r12
+    patch_jump(bytes, tts_harnamn, lengde(bytes))
+    copy(bytes, [0x49, 0x89, 0xC5])                // mov r13,rax (namn)
+    // syklusvern
+    emit_stakk_tekst(bytes, "__vis__")
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (merke-nøkkel)
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xF6]) // mov rdi,rbx; mov rsi,r14
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tts_ikkjebesokt = emit_je_placeholder(bytes)
+    emit_stakk_tekst(bytes, "(...)")
+    copy(bytes, [0x4C, 0x89, 0xEF, 0x48, 0x89, 0xC6]) // mov rdi,r13; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    la tts_ut2 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tts_ikkjebesokt, lengde(bytes))
+    // nøklar (utan strukturmerka) FØR merket blir sett
+    copy(bytes, [0x48, 0x89, 0xDF])                // mov rdi,rbx
+    call_rel32(bytes, atomics["nokler_safe"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC7])                // mov r15,rax (nøkkelliste)
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xF6, 0x4C, 0x89, 0xEA]) // mov rdi,rbx; mov rsi,r14; mov rdx,r13
+    call_rel32(bytes, atomics["map_set"], TEXT_VA())
+    emit_stakk_tekst(bytes, "(")
+    copy(bytes, [0x4C, 0x89, 0xEF, 0x48, 0x89, 0xC6]) // mov rdi,r13; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax (resultat)
+    copy(bytes, [0x48, 0xC7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00]) // mov qword [rsp],0
+    la tts_lokke = lengde(bytes)
+    copy(bytes, [0x49, 0x8B, 0x47, 0x08])          // mov rax,[r15+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax] (len)
+    copy(bytes, [0x48, 0x39, 0x0C, 0x24])          // cmp [rsp],rcx
+    la tts_endelokke = emit_jcc_placeholder(bytes, 0x83) // jae slutt
+    copy(bytes, [0x48, 0x83, 0x3C, 0x24, 0x00])    // cmp qword [rsp],0
+    la tts_ingenkomma = emit_je_placeholder(bytes)
+    emit_stakk_tekst(bytes, ", ")
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    patch_jump(bytes, tts_ingenkomma, lengde(bytes))
+    copy(bytes, [0x49, 0x8B, 0x47, 0x08])          // mov rax,[r15+8]
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])          // mov rdx,[rax+16]
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x24])          // mov rcx,[rsp]
+    copy(bytes, [0x48, 0x8B, 0x34, 0xCA])          // mov rsi,[rdx+rcx*8] (nøkkel)
+    copy(bytes, [0x48, 0x89, 0x74, 0x24, 0x08])    // mov [rsp+8],rsi
+    copy(bytes, [0x4C, 0x89, 0xE7])                // mov rdi,r12
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    emit_stakk_tekst(bytes, "=")
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x8B, 0x74, 0x24, 0x08]) // mov rdi,rbx; mov rsi,[rsp+8]
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    copy(bytes, [0x48, 0xFF, 0x04, 0x24])          // inc qword [rsp]
+    la tts_att = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tts_att, tts_lokke)
+    patch_jump(bytes, tts_endelokke, lengde(bytes))
+    emit_stakk_tekst(bytes, ")")
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xF6]) // mov rdi,rbx; mov rsi,r14
+    call_rel32(bytes, atomics["map_del"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE0])                // mov rax,r12
+    la tts_ut3 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, tts_null, lengde(bytes))
+    copy(bytes, [0x31, 0xC0])                      // xor eax,eax
+    la tts_utl = lengde(bytes)
+    patch_jump(bytes, tts_ut1, tts_utl) patch_jump(bytes, tts_ut2, tts_utl) patch_jump(bytes, tts_ut3, tts_utl)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    // ── to_text_liste(rdi=liste) → «[a, b]» når minst eitt element er ein struktur, elles 0 ──
+    atomics["to_text_liste"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0x48, 0x89, 0xFB])                // mov rbx,rdi
+    copy(bytes, [0x45, 0x31, 0xFF])                // xor r15d,r15d
+    la ttl_skann = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])          // mov rax,[rbx+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax]
+    copy(bytes, [0x49, 0x39, 0xCF])                // cmp r15,rcx
+    la ttl_ingen = emit_jcc_placeholder(bytes, 0x83) // jae ingen
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])          // mov rdx,[rax+16]
+    copy(bytes, [0x4A, 0x8B, 0x3C, 0xFA])          // mov rdi,[rdx+r15*8]
+    copy(bytes, [0x48, 0x85, 0xFF])                // test rdi,rdi
+    la ttl_neste1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x04])          // cmp qword [rdi],4
+    la ttl_neste2 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x48, 0x89, 0x7C, 0x24, 0x08])    // mov [rsp+8],rdi
+    emit_stakk_tekst(bytes, "__struktur__")
+    copy(bytes, [0x48, 0x89, 0xC6, 0x48, 0x8B, 0x7C, 0x24, 0x08]) // mov rsi,rax; mov rdi,[rsp+8]
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la ttl_funne = emit_jne_placeholder(bytes)
+    la ttl_neste = lengde(bytes)
+    patch_jump(bytes, ttl_neste1, ttl_neste) patch_jump(bytes, ttl_neste2, ttl_neste)
+    copy(bytes, [0x49, 0xFF, 0xC7])                // inc r15
+    la ttl_att = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, ttl_att, ttl_skann)
+    patch_jump(bytes, ttl_ingen, lengde(bytes))
+    copy(bytes, [0x31, 0xC0])                      // xor eax,eax
+    la ttl_ut1 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, ttl_funne, lengde(bytes))
+    emit_stakk_tekst(bytes, "[")
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    copy(bytes, [0x45, 0x31, 0xFF])                // xor r15d,r15d
+    la ttl_lokke = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])          // mov rax,[rbx+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax]
+    copy(bytes, [0x49, 0x39, 0xCF])                // cmp r15,rcx
+    la ttl_slutt = emit_jcc_placeholder(bytes, 0x83)
+    copy(bytes, [0x4D, 0x85, 0xFF])                // test r15,r15
+    la ttl_ingenkomma = emit_je_placeholder(bytes)
+    emit_stakk_tekst(bytes, ", ")
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    patch_jump(bytes, ttl_ingenkomma, lengde(bytes))
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])          // mov rax,[rbx+8]
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])          // mov rdx,[rax+16]
+    copy(bytes, [0x4A, 0x8B, 0x3C, 0xFA])          // mov rdi,[rdx+r15*8]
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC4])                // mov r12,rax
+    copy(bytes, [0x49, 0xFF, 0xC7])                // inc r15
+    la ttl_att2 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, ttl_att2, ttl_lokke)
+    patch_jump(bytes, ttl_slutt, lengde(bytes))
+    emit_stakk_tekst(bytes, "]")
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x89, 0xC6]) // mov rdi,r12; mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    patch_jump(bytes, ttl_ut1, lengde(bytes))
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    // ── struct_eq ────────────────────────────────────────────────────────────────
+    atomics["struct_eq"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0x48, 0x89, 0xFB, 0x49, 0x89, 0xF4]) // mov rbx,rdi; mov r12,rsi
+    emit_stakk_tekst(bytes, "__struktur__")
+    copy(bytes, [0x49, 0x89, 0xC7])                // mov r15,rax
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xFE]) // mov rdi,rbx; mov rsi,r15
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la seq_n1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC5])                // mov r13,rax (tag a)
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x4C, 0x89, 0xFE]) // mov rdi,r12; mov rsi,r15
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la seq_n2 = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (tag b)
+    copy(bytes, [0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xF6]) // mov rdi,r13; mov rsi,r14
+    call_rel32(bytes, atomics["eq"], TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])    // cmp qword [rax+8],0
+    la seq_u1 = emit_je_placeholder(bytes)         // ulike typar → 1
+    emit_stakk_tekst(bytes, "er_lik")
+    copy(bytes, [0x48, 0x89, 0xC6, 0x4C, 0x89, 0xEF]) // mov rsi,rax; mov rdi,r13
+    call_rel32(bytes, atomics["metode_nokkel"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la seq_utanhook = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC7])                // mov r15,rax (nøkkel)
+    copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
+    call_rel32(bytes, atomics["list_new_cap"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (args)
+    copy(bytes, [0x4C, 0x89, 0xF7, 0x48, 0x89, 0xDE]) // mov rdi,r14; mov rsi,rbx
+    call_rel32(bytes, atomics["list_app"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xF7, 0x4C, 0x89, 0xE6]) // mov rdi,r14; mov rsi,r12
+    call_rel32(bytes, atomics["list_app"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xFF, 0x4C, 0x89, 0xF6]) // mov rdi,r15; mov rsi,r14
+    call_rel32(bytes, atomics["ncb_kall"], TEXT_VA())
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la seq_u2 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x38, 0x05])          // cmp qword [rax],5 (bool)
+    la seq_u3 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])    // cmp qword [rax+8],0
+    la seq_u4 = emit_je_placeholder(bytes)
+    la seq_l1 = emit_jmp_placeholder(bytes)        // → like
+    patch_jump(bytes, seq_utanhook, lengde(bytes))
+    // felt for felt
+    copy(bytes, [0x48, 0x89, 0xDF])                // mov rdi,rbx
+    call_rel32(bytes, atomics["nokler_safe"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC5])                // mov r13,rax (nøklar a)
+    copy(bytes, [0x4C, 0x89, 0xE7])                // mov rdi,r12
+    call_rel32(bytes, atomics["nokler_safe"], TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (nøklar b)
+    copy(bytes, [0x49, 0x8B, 0x45, 0x08])          // mov rax,[r13+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax]
+    copy(bytes, [0x49, 0x8B, 0x56, 0x08])          // mov rdx,[r14+8]
+    copy(bytes, [0x48, 0x3B, 0x0A])                // cmp rcx,[rdx]
+    la seq_u5 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x45, 0x31, 0xFF])                // xor r15d,r15d
+    la seq_lokke = lengde(bytes)
+    copy(bytes, [0x49, 0x8B, 0x45, 0x08])          // mov rax,[r13+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax]
+    copy(bytes, [0x49, 0x39, 0xCF])                // cmp r15,rcx
+    la seq_l2 = emit_jcc_placeholder(bytes, 0x83)  // jae like
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])          // mov rdx,[rax+16]
+    copy(bytes, [0x4A, 0x8B, 0x34, 0xFA])          // mov rsi,[rdx+r15*8] (nøkkel)
+    copy(bytes, [0x48, 0x89, 0x34, 0x24])          // mov [rsp],rsi
+    copy(bytes, [0x4C, 0x89, 0xE7])                // mov rdi,r12
+    call_rel32(bytes, atomics["map_has"], TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])    // cmp qword [rax+8],0
+    la seq_u6 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x89, 0xDF, 0x48, 0x8B, 0x34, 0x24]) // mov rdi,rbx; mov rsi,[rsp]
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x08])    // mov [rsp+8],rax (verdi a)
+    copy(bytes, [0x4C, 0x89, 0xE7, 0x48, 0x8B, 0x34, 0x24]) // mov rdi,r12; mov rsi,[rsp]
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC6, 0x48, 0x8B, 0x7C, 0x24, 0x08]) // mov rsi,rax; mov rdi,[rsp+8]
+    call_rel32(bytes, atomics["eq"], TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])    // cmp qword [rax+8],0
+    la seq_u7 = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0xFF, 0xC7])                // inc r15
+    la seq_att = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, seq_att, seq_lokke)
+    // utfall
+    la seq_ulike = lengde(bytes)
+    patch_jump(bytes, seq_u1, seq_ulike) patch_jump(bytes, seq_u2, seq_ulike) patch_jump(bytes, seq_u3, seq_ulike)
+    patch_jump(bytes, seq_u4, seq_ulike) patch_jump(bytes, seq_u5, seq_ulike) patch_jump(bytes, seq_u6, seq_ulike)
+    patch_jump(bytes, seq_u7, seq_ulike)
+    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])    // mov eax,1
+    la seq_ut1 = emit_jmp_placeholder(bytes)
+    la seq_like = lengde(bytes)
+    patch_jump(bytes, seq_l1, seq_like) patch_jump(bytes, seq_l2, seq_like)
+    copy(bytes, [0xB8, 0x02, 0x00, 0x00, 0x00])    // mov eax,2
+    la seq_ut2 = emit_jmp_placeholder(bytes)
+    la seq_ikkje = lengde(bytes)
+    patch_jump(bytes, seq_n1, seq_ikkje) patch_jump(bytes, seq_n2, seq_ikkje)
+    copy(bytes, [0x31, 0xC0])                      // xor eax,eax
+    la seq_utl = lengde(bytes)
+    patch_jump(bytes, seq_ut1, seq_utl) patch_jump(bytes, seq_ut2, seq_utl)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    // lapp dei framover-refererte kallplassane (to_text-kroken og eq-prologen)
+    la r4_lapp: liste_tekst = ["r4_tt_kall", "to_text_struct", "r4_tl_kall", "to_text_liste", "r4_eq_kall", "struct_eq"]
+    la r4_i: heiltall = 0
+    mens r4_i < 6 {
+        la r4_pos: heiltall = atomics[r4_lapp[r4_i]]
+        la r4_rel: heiltall = (atomics[r4_lapp[r4_i + 1]] - (TEXT_VA() + r4_pos + 4)) & 4294967295
+        bytes[r4_pos] = r4_rel & 255
+        bytes[r4_pos + 1] = (r4_rel >> 8) & 255
+        bytes[r4_pos + 2] = (r4_rel >> 16) & 255
+        bytes[r4_pos + 3] = (r4_rel >> 24) & 255
+        r4_i = r4_i + 2
+    }
+}
+
 // Emitterer R2-atoma i runtimen (etter gc_safepoint-stubben).
 funksjon emit_r2_atom(bytes, atomics) {
     // ── host_resolve(rdi=namn-streng) → rax = rad i verts-funksjonstabellen | 0 ─────
@@ -3252,11 +3580,6 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
     legg_til(bytes, 0xC3)
 
-    atomics["lower"] = TEXT_VA() + lengde(bytes)
-    emit_ascii_lower_runtime(bytes)
-    atomics["upper"] = TEXT_VA() + lengde(bytes)
-    emit_ascii_upper_runtime(bytes)
-
     // tekst(x): streng (type 2) → som han er; heiltal (type 1) → RT_INT_TO_STR (desimal);
     // elles tom streng. FIKS: gamal kode handterte BERRE type 2 → tekst(heiltall) gav tom
     // streng (t.d. litmus «sum[0]=», tekst(i)). No har heiltal-greina.
@@ -3305,6 +3628,36 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // "" gjorde m.a. tekst(ordbok)-samanlikningar og loggar ulike, 2026-09-06).
     la tt_checkverdi = lengde(bytes)               // check_verdi:
     patch_jump(bytes, tt_pnotbool, tt_checkverdi)
+    // R4/F22: ordbok (4) → to_text_struct (strukturar: «Namn(felt=verdi, …)» / til_tekst-metode);
+    // returnerer 0 for ei vanleg ordbok, som då fell til «[verdi]» som før.
+    copy(bytes, [0x48, 0x83, 0xF8, 0x04])          // cmp rax,4
+    la tt_r4_skip = emit_jne_placeholder(bytes)
+    copy(bytes, [0x57])                            // push rdi
+    copy(bytes, [0xE8])                            // call to_text_struct (lappa i emit_r4_verdi_atom)
+    u32(bytes, 0)
+    atomics["r4_tt_kall"] = lengde(bytes) - 4
+    copy(bytes, [0x5F])                            // pop rdi
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tt_r4_rest = emit_je_placeholder(bytes)
+    copy(bytes, [0xC3])                            // ret (rax = strukturtekst)
+    patch_jump(bytes, tt_r4_rest, lengde(bytes))
+    copy(bytes, [0x48, 0x8B, 0x07])                // mov rax,[rdi] (type att)
+    patch_jump(bytes, tt_r4_skip, lengde(bytes))
+    // R4/F22: liste (3) med minst eitt struktur-element → «[elem, elem]» (to_text_liste);
+    // 0 → «[verdi]» som før (lister utan strukturar og nøsta lister er uendra).
+    copy(bytes, [0x48, 0x83, 0xF8, 0x03])          // cmp rax,3
+    la tt_r4_skip3 = emit_jne_placeholder(bytes)
+    copy(bytes, [0x57])                            // push rdi
+    copy(bytes, [0xE8])                            // call to_text_liste (lappa i emit_r4_verdi_atom)
+    u32(bytes, 0)
+    atomics["r4_tl_kall"] = lengde(bytes) - 4
+    copy(bytes, [0x5F])                            // pop rdi
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tt_r4_rest3 = emit_je_placeholder(bytes)
+    copy(bytes, [0xC3])                            // ret
+    patch_jump(bytes, tt_r4_rest3, lengde(bytes))
+    copy(bytes, [0x48, 0x8B, 0x07])                // mov rax,[rdi] (type att)
+    patch_jump(bytes, tt_r4_skip3, lengde(bytes))
     copy(bytes, [0x48, 0x83, 0xF8, 0x03])          // cmp rax,3
     copy(bytes, [0x74, 0x0A])                      // je .verdi (+10: cmp 4 B + jne 6 B) — +11 hoppa INN i
                                                    // «sub rsp,16» → «sub esp,16» → rsp trunkert → SIGSEGV
@@ -3941,6 +4294,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         copy(bytes, [0xB8, 0xE4, 0x00, 0x00, 0x00])       // mov eax,228
         copy(bytes, [0x0F, 0x05])                         // syscall
     }
+    // FEILKONTRAKT (punkt 6, som random_byte): feilar clock_gettime (rax < 0, t.d. seccomp/
+    // manglande klokke-kapabilitet) blir svaret −errno, ikkje søppel frå uinitialisert stakk.
+    copy(bytes, [0x48, 0x85, 0xC0, 0x78, 0x29])           // test rax,rax; js feil (+41)
     copy(bytes, [0x48, 0x8B, 0x04, 0x24])                 // mov rax,[rsp] (sek)
     copy(bytes, [0x48, 0x69, 0xC0, 0xE8, 0x03, 0x00, 0x00]) // imul rax,rax,1000
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
@@ -3951,7 +4307,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x01, 0xF8])                       // add rax,rdi
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
-    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
+    copy(bytes, [0xEB, 0x07])                             // jmp ferdig (+7)
+    copy(bytes, [0x48, 0x89, 0xC7])                       // feil: mov rdi,rax (−errno)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // ferdig: rax = int-NcVal
     legg_til(bytes, 0xC3)                                 // ret
 
     // ── random_byte() → int 0..255 via getrandom(2) (x86-64 #318) ────────────────
@@ -5836,6 +6195,62 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC4, 0x08])           // add rsp,8
     copy(bytes, [0xC3])                             // ret
 
+    // ── F37 grøne trådar (fase 1, kooperativ, éin OS-tråd) ───────────────────────
+    // ctx-blokk (rå 8-byte-ord): +0 lagra rsp, +8 handler-teljar, +16 stakkgrense (STACK_LIMIT),
+    // +24 stakk-topp (stack_base, øvre skanngrense), +32 inngangsfunksjon (NcVal*, for green_boot).
+    // green_switch(fra_ctx, til_ctx): lagrar callee-saved + rsp + handler-teljar + stakkgrenser i
+    // «fra», lastar «til» og returnerer i den tråden (boksa 0). Tråden skannast av gc_mark_roots via
+    // GREEN_TAB når han er suspendert. green_boot er retur-målet for ein ny tråds fyrste switch:
+    // han kallar ncb_kall(ctx[+32]) på den nye stakken; funksjonen må aldri returnere.
+    // Windows: stubbar (xor eax,eax; ret) — Norscode-sida gater på native_target().
+    hvis green_i_bruk == 1 {
+        hvis ER_WINDOWS() {
+            la gw_namn: liste_tekst = ["green_switch", "green_boot_va", "green_setup"]
+            la gw_i: heiltall = 0
+            mens gw_i < lengde(gw_namn) {
+                atomics[gw_namn[gw_i]] = TEXT_VA() + lengde(bytes)
+                copy(bytes, [0x31, 0xC0, 0xC3])
+                gw_i = gw_i + 1
+            }
+        } ellers {
+            atomics["green_switch"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8] (fra)
+            copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (til)
+            copy(bytes, [0x53, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,rbp,r12-r15
+            copy(bytes, [0x48, 0x89, 0x27])                 // mov [rdi],rsp
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL())) // mov rax,[count]
+            copy(bytes, [0x48, 0x89, 0x47, 0x08])           // mov [rdi+8],rax
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, STACK_LIMIT_VA())               // mov rax,[limit]
+            copy(bytes, [0x48, 0x89, 0x47, 0x10])           // mov [rdi+16],rax
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) copy(bytes, _heap_abs4(48))               // mov rax,[stack_base]
+            copy(bytes, [0x48, 0x89, 0x47, 0x18])           // mov [rdi+24],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x08])           // mov rax,[rsi+8]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, hl.HANDLER_COUNT_VA(X86_MAL())) // mov [count],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x10])           // mov rax,[rsi+16]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, STACK_LIMIT_VA())               // mov [limit],rax
+            copy(bytes, [0x48, 0x8B, 0x46, 0x18])           // mov rax,[rsi+24]
+            copy(bytes, [0x48, 0x89, 0x04, 0x25]) copy(bytes, _heap_abs4(48))               // mov [stack_base],rax
+            copy(bytes, [0x48, 0x89, 0x34, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov [GREEN_CUR],rsi
+            copy(bytes, [0x48, 0x8B, 0x26])                 // mov rsp,[rsi]
+            copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5D, 0x5B]) // pop r15,r14,r13,r12,rbp,rbx
+            copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8 (justering)
+            call_rel32(bytes, RT_INT(), TEXT_VA())          // rax = boksa 0
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])     // add rsp,8; ret
+
+            // green_setup(ctx0, tabell): sett GREEN_CUR = ctx0 og GREEN_TAB = tabell.
+            atomics["green_setup"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8]
+            copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8]
+            copy(bytes, [0x48, 0x89, 0x3C, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov [GREEN_CUR],rdi
+            copy(bytes, [0x48, 0x89, 0x34, 0x25]) u32(bytes, GREEN_TAB_VA())                 // mov [GREEN_TAB],rsi
+            copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])
+            call_rel32(bytes, RT_INT(), TEXT_VA())
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+        }
+    }
+
     // heap_bump() -> boksa bump-peikar ([HEAP_VA]).
     atomics["heap_bump"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -7148,6 +7563,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
 
+    // lower/upper treng str_new (variabel lengd), so dei blir emitterte her.
+    atomics["lower"] = TEXT_VA() + lengde(bytes)
+    emit_ascii_lower_runtime(bytes, atomics["str_new"])
+    atomics["upper"] = TEXT_VA() + lengde(bytes)
+    emit_ascii_upper_runtime(bytes, atomics["str_new"])
+
     atomics["list_new_cap"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53])                                     // push rbx
     copy(bytes, [0x41, 0x54])                               // push r12
@@ -7790,6 +8211,36 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la eq_fall: heltall = lengde(bytes)
     la efi: heltall = 0
     mens efi < lengde(eq_list_falls) { patch_jump(bytes, eq_list_falls[efi], eq_fall) efi = efi + 1 }
+    // R4/F22: to ikkje-null ordbøker (type 4) → struct_eq (strukturell likskap for strukturar).
+    // 0 = ikkje to strukturar → identitet som før; 1 = ulike; 2 = like.
+    la eq_map_falls: liste = []
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    legg_til(eq_map_falls, emit_je_placeholder(bytes))
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    legg_til(eq_map_falls, emit_je_placeholder(bytes))
+    copy(bytes, [0x48, 0x83, 0x3F, 0x04])                   // cmp qword[rdi],4
+    legg_til(eq_map_falls, emit_jne_placeholder(bytes))
+    copy(bytes, [0x48, 0x83, 0x3E, 0x04])                   // cmp qword[rsi],4
+    legg_til(eq_map_falls, emit_jne_placeholder(bytes))
+    copy(bytes, [0x57, 0x56])                               // push rdi; push rsi
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                   // sub rsp,8 (16-align)
+    copy(bytes, [0xE8])                                     // call struct_eq (lappa i emit_r4_verdi_atom)
+    u32(bytes, 0)
+    atomics["r4_eq_kall"] = lengde(bytes) - 4
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                   // add rsp,8
+    copy(bytes, [0x5E, 0x5F])                               // pop rsi; pop rdi
+    copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
+    legg_til(eq_map_falls, emit_je_placeholder(bytes))      // 0 → identitet
+    copy(bytes, [0x48, 0x83, 0xF8, 0x02])                   // cmp rax,2
+    la eq_map_like = emit_je_placeholder(bytes)
+    copy(bytes, [0x31, 0xFF])                               // xor edi,edi
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())                 // usann
+    patch_jump(bytes, eq_map_like, lengde(bytes))
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])             // mov edi,1
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())                 // sann
+    la eq_fall2: heiltall = lengde(bytes)
+    la efi2: heiltall = 0
+    mens efi2 < lengde(eq_map_falls) { patch_jump(bytes, eq_map_falls[efi2], eq_fall2) efi2 = efi2 + 1 }
     // bytes-prolog: to ikkje-null type-7-operandar (bytes) → list_eq (same layout).
     la eq_bytes_falls: liste = []
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
@@ -9940,6 +10391,41 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_scan - (lengde(bytes) + 4)) & 4294967295)
     la mrt_scandone = lengde(bytes)                // .scan_done:
     patch_jump(bytes, mrt_pscandone, mrt_scandone)
+    // F37: skann dei suspenderte grøne trådstakkane [lagra rsp, stakk-topp) (GREEN_TAB). Hopp over
+    // tråden som køyrer (GREEN_CUR; stakken hans er skanna over). Callee-saved rbx/r12/r13 blir
+    // berga; gc_push bevarer alt anna.
+    hvis green_i_bruk == 1 og ikkje ER_WINDOWS() {
+        copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])  // push rbx,r12,r13
+        copy(bytes, [0x4C, 0x8B, 0x24, 0x25]) u32(bytes, GREEN_TAB_VA())  // mov r12,[GREEN_TAB]
+        copy(bytes, [0x4D, 0x85, 0xE4])              // test r12,r12
+        la gtb_ingen = emit_je_placeholder(bytes)
+        copy(bytes, [0x4D, 0x8B, 0x2C, 0x24])        // mov r13,[r12] (tal oppføringar)
+        copy(bytes, [0x49, 0x83, 0xC4, 0x08])        // add r12,8
+        la gtb_lp = lengde(bytes)                    // .lp:
+        copy(bytes, [0x4D, 0x85, 0xED])              // test r13,r13
+        la gtb_slutt = emit_je_placeholder(bytes)
+        copy(bytes, [0x49, 0x8B, 0x1C, 0x24])        // mov rbx,[r12]
+        copy(bytes, [0x49, 0x83, 0xC4, 0x08])        // add r12,8
+        copy(bytes, [0x49, 0xFF, 0xCD])              // dec r13
+        copy(bytes, [0x48, 0x85, 0xDB])              // test rbx,rbx
+        copy(bytes, [0x0F, 0x84]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // jz .lp
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GREEN_CUR_VA())  // mov rax,[GREEN_CUR]
+        copy(bytes, [0x48, 0x39, 0xC3])              // cmp rbx,rax
+        copy(bytes, [0x0F, 0x84]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // je .lp
+        copy(bytes, [0x48, 0x8B, 0x33])              // mov rsi,[rbx] (lagra rsp)
+        copy(bytes, [0x48, 0x8B, 0x53, 0x18])        // mov rdx,[rbx+24] (stakk-topp)
+        la gtb_sc = lengde(bytes)                    // .sc:
+        copy(bytes, [0x48, 0x39, 0xD6])              // cmp rsi,rdx
+        copy(bytes, [0x0F, 0x83]) u32(bytes, (gtb_lp - (lengde(bytes) + 4)) & 4294967295)  // jae .lp
+        copy(bytes, [0x48, 0x8B, 0x3E])              // mov rdi,[rsi]
+        call_rel32(bytes, atomics["gc_push"], TEXT_VA())
+        copy(bytes, [0x48, 0x83, 0xC6, 0x08])        // add rsi,8
+        copy(bytes, [0xE9]) u32(bytes, (gtb_sc - (lengde(bytes) + 4)) & 4294967295)        // jmp .sc
+        la gtb_ut = lengde(bytes)                    // .ut:
+        patch_jump(bytes, gtb_ingen, gtb_ut)
+        patch_jump(bytes, gtb_slutt, gtb_ut)
+        copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B])  // pop r13,r12,rbx
+    }
     // v8 (2026-09-26, GC-modus): STRUKTURVALIDERING av liste/map før markøren følgjer dei.
     // Rota er konservativ: ein daud stakkslot kan peike på ein gammal liste-boks (framleis
     // type 3) der payloaden sidan er frigjord og gjenbrukt, t.d. som element-array full av
@@ -10431,6 +10917,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la gc_port_bytes: heltall = 67108864
     hvis miljo_hent("NORSCODE_GC_TERSKEL_BYTES") != "" { gc_port_bytes = heltall_fra_tekst(miljo_hent("NORSCODE_GC_TERSKEL_BYTES")) }
     hvis gc_mode == "1" { sp_terskel = 1000 }
+    // NC_SAFEPOINT_TERSKEL=<1..2147483647>: overstyrer terskelen i flagg-AV-grenen (v3) so
+    // kollektor-vegen kan prøvast utan 2^31 safepoint (test: tests/test_x86_safepoint_nos.no).
+    // Utan env er terskelen uendra (2147483647) → byte-identisk output. Har ingen verknad i GC-modus.
+    hvis gc_mode != "1" { sp_terskel = sp_terskel_frå_env(sp_terskel) }
     // Stubben si adresse blir REGISTRERT her (atomics["gc_safepoint"]) — kallarane
     // brukte «TEXT_VA + rt_size - 93» (= dei siste 93 bytane av runtimeen), som er
     // FEIL så snart noko blir appenda etter stubben (main sine cache-trampoline-
@@ -10469,6 +10959,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la sp_pcollect: heltall = -1
     la sp_pskip1: heltall = -1
     la sp_pskip1b: heltall = -1
+    la sp_nos_hopp: heltall = -1
     hvis gc_mode == "1" {
         // port_dyn = GC_INIT_PORT (64 KiB) frå init_heap → første collect etter 64 KiB allokert (F2b).
         copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.GC_ALLOC_BYTES_VA(X86_MAL()))   // mov rax,[alloc]
@@ -10481,6 +10972,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         copy(bytes, [0x48, 0x3D]) u32(bytes, hl.GC_SOFT_BUDGET())                   // cmp rax,8 MiB
         sp_pskip1b = emit_jcc_placeholder(bytes, 0x82)                           // jb .skip
     } ellers {
+        // norscodeos-x86_64 UTAN GC-modus: ingen kollektor. Heap-segmentet er 64 MiB (HEAP_SZ_MÅL), og
+        // GC-metadata (bitmap @0x40600000, live-map, mark-stakk) ligg utanfor det kjerna mappar —
+        // første collect (teljaren når 2^31 safepoint, t.d. etter ~239 tunge HTTP-økter) gav ring-3-#PF
+        // (rip i gc_bitmap_clear/gc_mark_roots, cr2=0x40600000). OS-program held heapen flat med
+        // heap_merke/heap_sett. Hopp rett til .skip; resten av v3-koden er då uoppnåeleg.
+        hvis X86_MAL() == "norscodeos-x86_64" { sp_nos_hopp = emit_jmp_placeholder(bytes) }
         // ── v3 (paritet flagg AV): (teljar ≥ terskel OG bump−sist ≥ port) ELLER bump ≥ SOFT ──
         copy(bytes, [0x48, 0xA1])                       // mov rax,[counter]
         u64(bytes, safepoint_adresse)
@@ -10587,10 +11084,28 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la sp_skip = lengde(bytes)                     // .skip:
     patch_jump(bytes, sp_pskip1, sp_skip)
     hvis sp_pskip1b >= 0 { patch_jump(bytes, sp_pskip1b, sp_skip) }
+    hvis sp_nos_hopp >= 0 { patch_jump(bytes, sp_nos_hopp, sp_skip) }
     copy(bytes, [0xC3])                            // ret
     // R2: dynamiske kall (ncb_call_fn/CALL_VALUE), assert-sjekkar og bytes_new.
     emit_r2_atom(bytes, atomics)
     emit_r2_metode_atom(bytes, atomics)                  // R2/F20
+    // F37: green_boot/green_boot_va må komme etter ncb_kall (emit_r2_atom).
+    hvis green_i_bruk == 1 og ikkje ER_WINDOWS() {
+            atomics["green_boot"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GREEN_CUR_VA())                 // mov rax,[GREEN_CUR]
+            copy(bytes, [0x48, 0x8B, 0x78, 0x20])           // mov rdi,[rax+32] (inngangsfunksjon)
+            copy(bytes, [0x31, 0xF6])                       // xor esi,esi (ingen arg)
+            copy(bytes, [0x48, 0x83, 0xE4, 0xF0])           // and rsp,-16
+            call_rel32(bytes, atomics["ncb_kall"], TEXT_VA())
+            copy(bytes, [0x0F, 0x0B])                       // ud2 (inngangen returnerer aldri)
+
+            // green_boot_va() → boksa VA til green_boot (til den krafta fyrste ramma på ein ny stakk).
+            atomics["green_boot_va"] = TEXT_VA() + lengde(bytes)
+            copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8
+            copy(bytes, [0xBF]) u32(bytes, atomics["green_boot"])  // mov edi,&green_boot
+            call_rel32(bytes, RT_INT(), TEXT_VA())
+            copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])     // add rsp,8; ret
+    }
     // ── R1/F09: list_insert rdi=liste rsi=indeks (heiltals-NcVal) rdx=verdi → rax=liste ──
     // sett_inn(liste, indeks, verdi) på plass, same kontrakt som VM-armen og
     // std.native_gap.sett_inn: indeks utanfor [0, lengde] blir klamra. Legg verdien
@@ -10628,6 +11143,112 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x5C])                               // pop r12
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
+
+    // ── R4/F09: list_pop_safe rdi=liste → siste | kast «pop_siste frå tom liste» ──────
+    // VM-paritet for pop_siste/fjern_siste: tom liste kastar eit fangbart unntak
+    // (før: stille null frå list_pop). Ikkje-liste/null går uendra til list_pop.
+    atomics["list_pop_safe"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    la lps_null = emit_je_placeholder(bytes)                // jz null
+    copy(bytes, [0x48, 0x83, 0x3F, 0x03])                   // cmp qword [rdi],3
+    la lps_tail1 = emit_jne_placeholder(bytes)              // jne tail
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,[rdi+8]
+    copy(bytes, [0x48, 0x83, 0x38, 0x00])                   // cmp qword [rax],0
+    la lps_tom = emit_je_placeholder(bytes)                 // je tom
+    patch_jump(bytes, lps_tail1, lengde(bytes))
+    jump_rel32(bytes, atomics["list_pop"], TEXT_VA())       // tail: jmp list_pop
+    patch_jump(bytes, lps_null, lengde(bytes))
+    copy(bytes, [0x31, 0xC0, 0xC3])                         // null: xor eax,eax; ret
+    patch_jump(bytes, lps_tom, lengde(bytes))
+    copy(bytes, [0x48, 0x83, 0xE4, 0xF0])                   // tom: and rsp,-16
+    emit_stakk_tekst(bytes, "pop_siste frå tom liste")      // rax = melding
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    la lps_kast = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, lps_kast, atomics["throw_unwind"] - TEXT_VA())
+
+    // ── R4/F09: list_remove_safe rdi=liste rsi=indeks|verdi ────────────────────────────
+    // VM-paritet for fjern/fjern_indeks: heiltals-indeks utanfor [0,len) kastar
+    // «fjern: indeks utanfor: N»; ein ikkje-heiltals-verdi fjernar første like element
+    // (eq-atomet) og gjev bool (sann = fjerna). Heiltal i rekkjevidd → list_remove.
+    atomics["list_remove_safe"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                     // push rbx
+    copy(bytes, [0x41, 0x54])                               // push r12
+    copy(bytes, [0x41, 0x55])                               // push r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x48, 0x89, 0xFB])                         // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                         // mov r12,rsi
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    la lrs_tail0 = emit_je_placeholder(bytes)               // jz tail
+    copy(bytes, [0x48, 0x83, 0x3F, 0x03])                   // cmp qword [rdi],3
+    la lrs_tail1 = emit_jne_placeholder(bytes)              // jne tail (ikkje liste)
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    la lrs_val0 = emit_je_placeholder(bytes)                // jz verdi
+    copy(bytes, [0x48, 0x83, 0x3E, 0x01])                   // cmp qword [rsi],1
+    la lrs_val1 = emit_jne_placeholder(bytes)               // jne verdi
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])                   // mov rax,[rbx+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                         // mov rcx,[rax]   (len)
+    copy(bytes, [0x49, 0x8B, 0x54, 0x24, 0x08])             // mov rdx,[r12+8] (indeks)
+    copy(bytes, [0x48, 0x85, 0xD2])                         // test rdx,rdx
+    la lrs_oob1 = emit_jcc_placeholder(bytes, 0x88)         // js oob
+    copy(bytes, [0x48, 0x39, 0xCA])                         // cmp rdx,rcx
+    la lrs_oob2 = emit_jcc_placeholder(bytes, 0x8D)         // jge oob
+    patch_jump(bytes, lrs_tail0, lengde(bytes))
+    patch_jump(bytes, lrs_tail1, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0xDF])                         // tail: mov rdi,rbx
+    copy(bytes, [0x4C, 0x89, 0xE6])                         //       mov rsi,r12
+    copy(bytes, [0x41, 0x5D])                               //       pop r13
+    copy(bytes, [0x41, 0x5C])                               //       pop r12
+    copy(bytes, [0x5B])                                     //       pop rbx
+    jump_rel32(bytes, atomics["list_remove"], TEXT_VA())    //       jmp list_remove
+    patch_jump(bytes, lrs_oob1, lengde(bytes))
+    patch_jump(bytes, lrs_oob2, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0xD7])                         // oob: mov rdi,rdx
+    call_rel32(bytes, RT_INT(), TEXT_VA())                  // rax = boks(indeks)
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())        // rax = tekst(indeks)
+    copy(bytes, [0x49, 0x89, 0xC5])                         // mov r13,rax
+    emit_stakk_tekst(bytes, "fjern: indeks utanfor: ")      // rax = prefiks
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    copy(bytes, [0x4C, 0x89, 0xEE])                         // mov rsi,r13
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    copy(bytes, [0x48, 0x83, 0xE4, 0xF0])                   // and rsp,-16
+    la lrs_kast = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, lrs_kast, atomics["throw_unwind"] - TEXT_VA())
+    // verdi: løkke over elementa, første eq-treff blir fjerna
+    patch_jump(bytes, lrs_val0, lengde(bytes))
+    patch_jump(bytes, lrs_val1, lengde(bytes))
+    copy(bytes, [0x45, 0x31, 0xED])                         // xor r13d,r13d
+    la lrs_lokke = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x43, 0x08])                   // mov rax,[rbx+8]
+    copy(bytes, [0x48, 0x8B, 0x08])                         // mov rcx,[rax]
+    copy(bytes, [0x49, 0x39, 0xCD])                         // cmp r13,rcx
+    la lrs_ikkje = emit_jcc_placeholder(bytes, 0x83)        // jae ikkje funne
+    copy(bytes, [0x48, 0x8B, 0x50, 0x10])                   // mov rdx,[rax+16]
+    copy(bytes, [0x4A, 0x8B, 0x3C, 0xEA])                   // mov rdi,[rdx+r13*8]
+    copy(bytes, [0x4C, 0x89, 0xE6])                         // mov rsi,r12
+    call_rel32(bytes, atomics["eq"], TEXT_VA())             // rax = bool
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])             // cmp qword [rax+8],0
+    la lrs_funne = emit_jcc_placeholder(bytes, 0x85)        // jne funne
+    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
+    la lrs_att = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, lrs_att, lrs_lokke)
+    patch_jump(bytes, lrs_funne, lengde(bytes))
+    copy(bytes, [0x4C, 0x89, 0xEF])                         // funne: mov rdi,r13
+    call_rel32(bytes, RT_INT(), TEXT_VA())                  // rax = boks(indeks)
+    copy(bytes, [0x48, 0x89, 0xC6])                         // mov rsi,rax
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
+    call_rel32(bytes, atomics["list_remove"], TEXT_VA())
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])             // mov edi,1
+    la lrs_ferdig = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, lrs_ikkje, lengde(bytes))
+    copy(bytes, [0x31, 0xFF])                               // ikkje funne: xor edi,edi
+    patch_jump(bytes, lrs_ferdig, lengde(bytes))
+    copy(bytes, [0x41, 0x5D])                               // pop r13
+    copy(bytes, [0x41, 0x5C])                               // pop r12
+    copy(bytes, [0x5B])                                     // pop rbx
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())                 // jmp RT_BOOL (rdi = 0/1)
+
+    emit_r4_verdi_atom(bytes, atomics)                   // R4/F22: struktur til_tekst + likskap
 
     // norscodeos-x86_64: sys6-porten (sist i runtimen, so linux-x86_64 er byte-identisk).
     hvis ER_NOS() { emit_nos_sys6_port(bytes, atomics) }
@@ -10669,7 +11290,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 funksjon nos_sys6_tillatne() -> liste_heiltall {
     returner [0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 21, 22, 24, 35, 39,
               41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-              60, 61, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
+              60, 61, 62, 83, 84, 87, 90, 110, 228, 231, 271, 288, 293, 318, 4097]
 }
 
 funksjon nos_nr_tillate(nr: heiltall) -> boolsk {
@@ -11244,6 +11865,13 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             la catch_lbl3: tekst = tekst(instr[1])
             la ct3: tekst = "*"
             hvis lengde(instr) >= 3 og builtin.type(instr[2]) == "tekst" { ct3 = tekst(instr[2]) }
+            // R4/F32: rota «Unntak» fangar alt; multi-catch («A|B»), modulkvalifiserte
+            // grensesnitt og ikkje-bladtypar i unntakshierarkiet (VerdiFeil, HostFeil,
+            // FutureFeil) har ingen AOT-semantikk enno → eksplisitt NATIV-GAP.
+            hvis ct3 == "Unntak" { ct3 = "*" }
+            hvis builtin.index_of(ct3, "|") >= 0 eller builtin.index_of(ct3, ".") >= 0 eller ct3 == "VerdiFeil" eller ct3 == "HostFeil" eller ct3 == "FutureFeil" {
+                kast "native_codegen_v2: NATIV-GAP: fang-typen " + ct3 + " (multi-catch/unntakshierarki/grensesnitt) er ikkje støtta i AOT"
+            }
             copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov rax,[count]
             copy(buf, [0x48, 0x89, 0xC1])                // mov rcx,rax
             copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
@@ -11263,6 +11891,10 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             }
             copy(buf, [0x48, 0xFF, 0xC1])                // inc rcx
             copy(buf, [0x48, 0x89, 0x0C, 0x25]) u32(buf, hl.HANDLER_COUNT_VA(X86_MAL()))   // mov [count],rcx (count++)
+
+        // ─── F45: GI (generator-yield) har ingen AOT-semantikk enno ──────────────
+        ellers hvis op == "GI"
+            kast "native_codegen_v2: NATIV-GAP: gi (generator) er ikkje støtta i AOT; køyr på VM-en (sjå docs/GENERATORAR.md)"
 
         // ─── TRY_END (pop handler) ──────────────────────────────────────────────
         ellers hvis op == "TRY_END"
@@ -11369,6 +12001,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.atomic_xadd" eller fn_nm == "atomic_xadd" { returner atomic_vas["atomic_xadd"] }
     hvis fn_nm == "builtin.atomic_cas" eller fn_nm == "atomic_cas" { returner atomic_vas["atomic_cas"] }
     hvis fn_nm == "builtin.thread_spawn_native" eller fn_nm == "thread_spawn_native" { returner atomic_vas["thread_spawn_native"] }
+    hvis fn_nm == "builtin.green_switch" eller fn_nm == "green_switch" { returner atomic_vas["green_switch"] }
+    hvis fn_nm == "builtin.green_boot_va" eller fn_nm == "green_boot_va" { returner atomic_vas["green_boot_va"] }
+    hvis fn_nm == "builtin.green_setup" eller fn_nm == "green_setup" { returner atomic_vas["green_setup"] }
     hvis fn_nm == "builtin.heap_bump" eller fn_nm == "heap_bump" { returner atomic_vas["heap_bump"] }
     hvis fn_nm == "builtin.obj_addr" eller fn_nm == "obj_addr" { returner atomic_vas["obj_addr"] }
     hvis fn_nm == "builtin.stack_base" eller fn_nm == "stack_base" { returner atomic_vas["stack_base"] }
@@ -11546,8 +12181,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_map_get     { returner RT_MAP_GET() }
     hvis er_legg_til    { returner RT_LIST_APP() }
     hvis er_lengde      { returner atomic_vas["lengde_safe"] }
-    hvis er_fjern_siste { returner RT_LIST_POP() }
-    hvis er_fjern       { returner RT_LIST_REMOVE() }
+    // R4/F09: VM-paritet (tom liste / indeks utanfor kastar; fjern(liste, verdi) fjernar etter verdi).
+    hvis er_fjern_siste { returner atomic_vas["list_pop_safe"] }
+    hvis er_fjern       { returner atomic_vas["list_remove_safe"] }
     // R1/F09: sett_inn(liste, indeks, verdi) → list_insert-atomet (før: gap-ruta til
     // std.native_gap.sett_inn berre når modulen var i bunten, elles null-fallback → 10,30).
     hvis fn_nm == "builtin.sett_inn" eller fn_nm == "sett_inn" { returner atomic_vas["list_insert"] }
@@ -11596,6 +12232,8 @@ funksjon er_tryggleiks_builtin(fn_nm: tekst) -> boolsk {
 la builtin_rapport_uloyste: liste_tekst = []
 // Modulen til funksjonen kompiler_fn_v2 held på med (sys6-porten for norscodeos-x86_64).
 la nos_gjeldande_modul: tekst = ""
+// Namnet på funksjonen som blir kompilert (feilmelding for ukjende kall, punkt 9).
+la nos_gjeldande_fn: tekst = ""
 
 funksjon builtin_rapport_noter(fn_nm: tekst, nargs: heiltall) -> heiltall {
     hvis miljo_hent("NC_BUILTIN_REPORT") != "1" { returner 0 }
@@ -11649,6 +12287,15 @@ funksjon builtin_rapport_skriv() -> heiltall {
 }
 
 funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd_offs, code_va, atomic_vas) {
+    // F37: søvn skal gje frå seg kontrollen til andre grøne trådar. Når programmet har den
+    // kooperative planleggjaren (std.native_gap._gr_sov), går vent.sov(ms) gjennom han; utan
+    // grøne trådar søv han med nanosleep som før. native_gap sjølv kallar atomet direkte.
+    hvis nargs == 1 og ikkje ER_WINDOWS() og finnes_nøkkel(fn_vas, "std.native_gap._gr_sov") og nos_gjeldande_modul != "std.native_gap" {
+        hvis fn_nm == "builtin.vent.sov" eller fn_nm == "vent.sov" eller fn_nm == "builtin.sov" eller builtin.ends_with(fn_nm, ".vent.sov") {
+            emit_user_call(buf, fn_vas["std.native_gap._gr_sov"], nargs, code_va)
+            returner
+        }
+    }
     la er_exit = fn_nm == "stopp" eller fn_nm == "exit" eller fn_nm == "builtin.exit" eller builtin.ends_with(fn_nm, ".stopp") eller builtin.ends_with(fn_nm, ".exit")
     la er_type = fn_nm == "builtin.type" eller fn_nm == "builtin.type_av" eller fn_nm == "type_av" eller fn_nm == "type"
     hvis er_exit {
@@ -12159,12 +12806,17 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         } ellers {
             copy(buf, [0x31, 0xFF, 0x48, 0x89, 0xE6, 0x0F, 0x05])
         }
+        // FEILKONTRAKT (punkt 6): clock_gettime < 0 → tid_ms() gjev −errno (som random_byte),
+        // ikkje søppel frå uinitialisert stakk. Epoke-ms er alltid ≥ 0, so < 0 er eintydig feil.
+        copy(buf, [0x48, 0x85, 0xC0, 0x78, 0x25])                                    // test rax,rax; js feil (+37)
         copy(buf, [0x48, 0x69, 0x3C, 0x24])
         u32(buf, 1000)
         copy(buf, [0x48, 0x8B, 0x44, 0x24, 0x08, 0x31, 0xD2])
         copy(buf, [0x48, 0xB9])
         u64(buf, 1000000)
         copy(buf, [0x48, 0xF7, 0xF1, 0x48, 0x01, 0xC7, 0x48, 0x83, 0xC4, 0x10])
+        copy(buf, [0xEB, 0x07])                                                      // jmp ferdig (+7)
+        copy(buf, [0x48, 0x89, 0xC7, 0x48, 0x83, 0xC4, 0x10])                        // feil: mov rdi,rax; add rsp,16
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)
         returner
@@ -12427,6 +13079,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // Køyr FØR siste-segment-matchinga slik at builtin.sha256 ikkje bind seg
     // til std.krypto.sha256 (uendeleg rekursjon).
     la gap_kand = gr.gap_rute(fn_nm)
+    // F37: thread_pool-probe (std.samtid.backend) og thread_yield er x86-lokale ruter (gap_ruter.no
+    // er delt med arm64 og blir ikkje endra her).
+    hvis lengde(gap_kand) == 0 og (fn_nm == "builtin.thread_pool" eller fn_nm == "thread_pool") { gap_kand = ["std.native_gap.thread_pool"] }
     hvis lengde(gap_kand) > 0 {
         la gap_va: heltall = 0
         la gi: heltall = 0
@@ -12469,6 +13124,19 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         // gc-litmus) har ikkje env.write → miljo_sett kastar Sikkerheitsfeil. Då
         // skriv vi berre åtvaringa utan dedup.
         builtin_rapport_noter(fn_nm, nargs)
+        // Punkt 9 (norscodeos-x86_64): eit ukjent/uløyst kall er KOMPILERINGSFEIL, ikkje stille
+        // null-fallback — på OS-målet finst ingen VM-fallback-krok som kunne ha svart. Gammal
+        // åtferd (null-fallback + åtvaring) med NC_UKJENT_KALL=null. Andre mål er uendra.
+        // Kall frå std.*-modular (t.d. builtin.desimaltall i std.native_gap._jpr_tal, som berre
+        // har rute når std.desimaltall_tekst er i bunten) held fram som null-fallback + åtvaring
+        // (synleg i byggjeloggen og i NC_BUILTIN_REPORT=1); NC_UKJENT_KALL=strikt gjer òg dei til feil.
+        la nos_ukjent_modus = miljo_hent("NC_UKJENT_KALL")
+        la nos_std_modul = builtin.starts_with(nos_gjeldande_modul, "std.")
+        hvis ER_NOS() og nos_ukjent_modus != "null" og (nos_ukjent_modus == "strikt" eller ikkje nos_std_modul) {
+            kast "native codegen (norscodeos-x86_64): ukjent kall " + fn_nm + "/" + tekst_fra_heltall(nargs) +
+                 " i funksjonen " + nos_gjeldande_fn + " (modul «" + nos_gjeldande_modul +
+                 "») har ingen rute i bunten; null-fallback er av for brukarkode på OS-målet (NC_UKJENT_KALL=null gjev gammal åtferd)"
+        }
         // a12fix: tryggleiksbuiltins utan rute er BYGGFEIL, ikkje null-fallback. Eit
         // AOT-program med builtin.random_hex men utan std.native_gap fekk token == "" utan
         // unnatak (CSRF-/sesjons-/MFA-token tomme); pbkdf2/argon2id ville gje "" som hash.
@@ -12527,12 +13195,19 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     emit_user_call(buf, fn_va, nargs, code_va)
 }
 
+// F43: refleksjonsbuiltins finst berre i VM-en (treng køyretidsregisteret med NCB-metadata).
+funksjon er_refleksjon_builtin(n: tekst) -> boolsk {
+    returner n == "typar_av" eller n == "type_info" eller n == "funksjon_info" eller n == "finn_med_annotasjon" eller n == "hent_felt" eller n == "sett_felt"
+}
+
 // R1/F10: kall som skal kaste ved køyring i staden for å gje null når codegenen
 // ikkje har noko mål for dei (sjå fn_va == 0-greina i emit_builtin_or_user_call).
 funksjon er_fail_closed_kall(fn_nm: tekst) -> boolsk {
     hvis builtin.starts_with(fn_nm, "builtin.") {
         la n = builtin.slice(fn_nm, 8, lengde(fn_nm))
-        returner builtin.starts_with(n, "thread_") eller n == "atomic_operation" eller builtin.starts_with(n, "vm_")
+        // F45/F46: generator- og frys-innebygde finst berre i VM-en (NATIV-GAP ved køyring).
+        hvis n == "frys" eller n == "er_frosen" eller n == "tin" eller n == "gen_neste" eller n == "gen_ferdig" { returner sann }
+        returner builtin.starts_with(n, "thread_") eller n == "atomic_operation" eller builtin.starts_with(n, "vm_") eller builtin.starts_with(n, "unntak_") eller er_refleksjon_builtin(n)
     }
     // Kvalifisert brukarmodul-kall (modul.funksjon) utan mål i bunten.
     returner builtin.index_of(fn_nm, ".") >= 0
@@ -12774,6 +13449,8 @@ funksjon kompiler_v2(ncb_json) {
     // _start må lagre til same adresse før første miljo_hent().
     la envp_store_va: heltall = hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET()
 
+    green_i_bruk = 0
+    hvis finnes_nøkkel(fns, "std.native_gap._gr_inngang") { green_i_bruk = 1 }
     la rt_package = bygg_runtime_v2(argv_store_va)
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
@@ -12872,6 +13549,7 @@ funksjon kompiler_v2(ncb_json) {
         la m_def = fns[m_fn]
         la m_vars = samle_vars_fn(m_def)
         hvis fi2 < 100 { native_codegen_trace("målepass vars=" + tekst_fra_heltall(fi2)) }
+        nos_gjeldande_fn = m_fn
         la m_code = kompiler_fn_v2(m_def, m_vars, fn_vas, rd_offs,
             fn_vas[m_fn], gc_safepoint_va, atomic_vas, global_vas)
         hvis fi2 < 100 { native_codegen_trace("målepass kode=" + tekst_fra_heltall(fi2)) }
@@ -12946,6 +13624,7 @@ funksjon kompiler_v2(ncb_json) {
         la fn: tekst = sorted[fi3]
         la fn_def2 = fns[fn]
         la fn_vars = samle_vars_fn(fn_def2)
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def2, fn_vars, fn_vas, rd_offs,
             TEXT_VA() + lengde(text), gc_safepoint_va, atomic_vas, global_vas)
         copy(text, fn_code)
@@ -13303,6 +13982,8 @@ funksjon ncval_x86_setup(ncb) {
     la data_bytes = data_res[0]
     la rd_offs = data_res[1]
     la argv_store_va: heiltall = HOST_ABI_VA()
+    green_i_bruk = 0
+    hvis finnes_nøkkel(fns, "std.native_gap._gr_inngang") { green_i_bruk = 1 }
     la rt_package = bygg_runtime_v2(argv_store_va)
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
@@ -13418,6 +14099,7 @@ funksjon ncval_x86_measure_with(oppsett, start: heiltall, count: heiltall) -> or
         la fn: tekst = sorted[fi]
         la fn_def = fns[fn]
         la fn_vars = samle_vars_fn(fn_def)
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def, fn_vars, placeholder, rd_offs,
             TEXT_VA(), gc_safepoint_va, atomic_vas, global_vas)
         sizes[fn] = lengde(fn_code)
@@ -13449,6 +14131,7 @@ funksjon ncval_x86_emit_with(oppsett, sizes, start: heiltall, count: heiltall) -
         la fn_def = fns[fn]
         la fn_vars = samle_vars_fn(fn_def)
         // eiga_va = den endelege VA-en for denne funksjonen (= fn_vas[fn]).
+        nos_gjeldande_fn = fn
         la fn_code = kompiler_fn_v2(fn_def, fn_vars, fn_vas, rd_offs,
             fn_vas[fn], gc_safepoint_va, atomic_vas, global_vas)
         copy(bytes, fn_code)

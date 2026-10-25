@@ -18,6 +18,8 @@
 // payload (eksakt, negativ/bignum-trygt); fast-breidd heiltal er ei seinare optim.
 
 bruk std.bytes som bytes
+bruk std.filops som filops
+bruk std.png_enkel som png
 
 // ── Type-tags ────────────────────────────────────────────────────────
 funksjon tag_null()  -> heltall { returner 0 }
@@ -162,8 +164,25 @@ funksjon btre_søk(node, nøkkel: heltall) -> heltall {
     returner btre_søk(node["c"][i], nøkkel)
 }
 
-// Sett inn nøkkel→data. Returnerer (evt. ny) rot.
+// Oppdater eksisterande nøkkel utan å endre strukturen i treet.
+// Ei duplikatinnsetjing må ikkje skape to kopiar av same nøkkel.
+funksjon _btre_oppdater(node, nøkkel: heltall, data: heltall) -> boolsk {
+    la i: heltall = 0
+    mens i < node["antall"] og nøkkel > node["n"][i] {
+        i = i + 1
+    }
+    hvis i < node["antall"] og node["n"][i] == nøkkel {
+        node["d"][i] = data
+        returner sann
+    }
+    hvis node["blad"] { returner usann }
+    returner _btre_oppdater(node["c"][i], nøkkel, data)
+}
+
+// Sett inn nøkkel→data, eller erstatt data dersom nøkkelen alt finst.
+// Returnerer (evt. ny) rot.
 funksjon btre_sett_inn(rot, nøkkel: heltall, data: heltall) {
+    hvis _btre_oppdater(rot, nøkkel, data) { returner rot }
     la grad = _btre_grad()
     hvis rot["antall"] == (2 * grad - 1) {
         la ny_rot: ordbok_tekst = {"n": [], "d": [], "c": [rot], "blad": usann, "antall": 0}
@@ -1933,9 +1952,72 @@ funksjon db_replay(db, payload) {
 funksjon _cp_hovud() -> tekst { returner "NORSDB2" }
 
 // Er teksten eit gyldig NORSDB2-checkpoint med minst eitt komplett segment?
+// Krev ekte S/Z-segmentpar. cp2 frå full kompaktering må ha nøyaktig eitt
+// komplett segment og ingen ekstra postar etter Z. Eit ordinært .cp kan ha
+// ein avbroten SISTE delta, men minst eitt komplett segment må finnast.
+funksjon _cp_siste_epoke(t: tekst, krev_heil_fil: boolsk) -> heiltall {
+    la rs = builtin.chr(30)
+    la us = builtin.chr(31)
+    la postar = builtin.split(t, rs)
+    hvis lengde(postar) < 4 eller postar[0] != _cp_hovud() { returner -1 }
+    la aktiv = -1
+    la siste = -1
+    la fullførte = 0
+    la seg_start = -1
+    la i = 1
+    mens i < lengde(postar) {
+        la p = postar[i]
+        hvis p == "" {
+            hvis i != lengde(postar) - 1 { returner -1 }
+        } ellers hvis builtin.starts_with(p, "S" + us) {
+            hvis aktiv >= 0 { returner -1 }
+            hvis krev_heil_fil og fullførte > 0 { returner -1 }
+            la epoketekst = builtin.slice(p, 2, lengde(p))
+            la e = builtin.heltall_fra_tekst(epoketekst)
+            hvis e < 0 eller tekst_fra_heltall(e) != epoketekst eller e <= siste { returner -1 }
+            aktiv = e
+            seg_start = i
+        } ellers hvis builtin.starts_with(p, "Z" + us) {
+            hvis aktiv < 0 { returner -1 }
+            la f = builtin.split(p, us)
+            hvis lengde(f) != 2 og lengde(f) != 3 { returner -1 }
+            la epoketekst = f[1]
+            la e = builtin.heltall_fra_tekst(epoketekst)
+            hvis tekst_fra_heltall(e) != epoketekst eller e != aktiv { returner -1 }
+            hvis lengde(f) == 3 {
+                // Nytt format: CRC32 over S + data-postar, inklusive siste RS.
+                la kontroll = builtin.join(builtin.slice(postar, seg_start, i), rs) + rs
+                la crc = png.crc32(kontroll)
+                hvis f[2] != tekst_fra_heltall(crc) { returner -1 }
+            }
+            siste = e
+            fullførte = fullførte + 1
+            aktiv = -1
+            hvis krev_heil_fil og i != lengde(postar) - 2 { returner -1 }
+        } ellers hvis aktiv < 0 {
+            // Datapost utanfor eit segment er ein korrupt checkpoint.
+            returner -1
+        }
+        i = i + 1
+    }
+    hvis krev_heil_fil og (aktiv >= 0 eller postar[lengde(postar) - 1] != "" eller fullførte != 1) {
+        returner -1
+    }
+    returner siste
+}
+
 funksjon _cp_gyldig(t: tekst) -> boolsk {
-    hvis lengde(t) < 7 eller builtin.slice(t, 0, 7) != _cp_hovud() { returner usann }
-    returner builtin.index_of(t, builtin.chr(30) + "Z" + builtin.chr(31)) >= 0
+    returner _cp_siste_epoke(t, usann) >= 0
+}
+
+// Oppdater aldri WAL-/epokestatus om skrivinga feilar eller er forkorta.
+// Storleikskontroll les normalt metadata frå native stat (filops fallback).
+funksjon _skriv_cp_kontrollert(sti: tekst, innhald: tekst) {
+    prøv { builtin.fil_skriv(sti, innhald) }
+    fang (e) { kast "NorsDB: checkpoint-skriving feila: " + sti }
+    hvis filops.fil_storleik(sti) != lengde(innhald) {
+        kast "NorsDB: ufullstendig checkpoint-skriving: " + sti
+    }
 }
 
 // Les NORSDB2-checkpoint inn i db. Ufullstendig siste segment (krasj) ignorerast.
@@ -1943,7 +2025,7 @@ funksjon _les_cp_tekst(db, t: tekst) {
     la poster = builtin.split(t, builtin.chr(30))
     // Siste komplette segment-slutt.
     la siste_z = lengde(poster) - 1
-    mens siste_z > 0 og builtin.slice(poster[siste_z], 0, 1) != "Z" { siste_z = siste_z - 1 }
+    mens siste_z > 0 og ikkje builtin.starts_with(poster[siste_z], "Z" + builtin.chr(31)) { siste_z = siste_z - 1 }
     la base = 0
     la delta = 0
     la i_base = sann
@@ -1979,10 +2061,18 @@ funksjon db_fil_finst(sti: tekst) -> boolsk {
 funksjon db_åpne(sti: tekst) -> ordbok_tekst {
     la db = db_ny(sti)
     la legacy = usann
-    // Fullfør ei avbroten kompaktering.
+    // Fullfør berre ei faktisk nyare og fullført kompaktering. Ei gammal
+    // .cp2 skal aldri rulle tilbake ein nyare .cp med ferdige delta-segment.
     hvis builtin.fil_finnes(sti + ".cp2") {
         la t2 = builtin.fil_les(sti + ".cp2")
-        hvis _cp_gyldig(t2) { builtin.fil_skriv(sti + ".cp", t2) }
+        la e2 = _cp_siste_epoke(t2, sann)
+        la e1 = -1
+        hvis builtin.fil_finnes(sti + ".cp") {
+            e1 = _cp_siste_epoke(builtin.fil_les(sti + ".cp"), usann)
+        }
+        hvis e2 >= 0 og e2 >= e1 {
+            _skriv_cp_kontrollert(sti + ".cp", t2)
+        }
         builtin.fil_slett(sti + ".cp2")
     }
     hvis builtin.fil_finnes(sti + ".cp") {
@@ -1993,6 +2083,9 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             legacy = sann
         } ellers hvis _cp_gyldig(t) {
             _les_cp_tekst(db, t)
+        } ellers {
+            // Aldri opne eit øydelagt checkpoint som ein ny, tom database.
+            kast "NorsDB: ugyldig checkpoint: " + sti + ".cp"
         }
     }
     hvis builtin.fil_finnes(sti + ".wal") {
@@ -2067,8 +2160,15 @@ funksjon db_checkpoint(db) {
     la e = tekst_fra_heltall(db["_epoke"])
     la seg = "S" + us + e + rs
     hvis kropp != "" { seg = seg + kropp + rs }
-    seg = seg + "Z" + us + e + rs
-    builtin.fil_append(sti + ".cp", seg)
+    seg = seg + "Z" + us + e + us + tekst_fra_heltall(png.crc32(seg)) + rs
+    la før = filops.fil_storleik(sti + ".cp")
+    hvis før < 0 { kast "NorsDB: kan ikkje lese checkpoint-storleik: " + sti }
+    prøv { builtin.fil_append(sti + ".cp", seg) }
+    fang (e) { kast "NorsDB: checkpoint-append feila: " + sti }
+    hvis filops.fil_storleik(sti + ".cp") != før + lengde(seg) {
+        // WAL finst framleis og kan brukast ved neste opning.
+        kast "NorsDB: ufullstendig checkpoint-append: " + sti
+    }
     builtin.fil_slett(sti + ".wal")
     db["_cp_delta"] = db["_cp_delta"] + lengde(seg)
     db["_absorbert"] = db["_epoke"]
@@ -2087,9 +2187,10 @@ funksjon db_checkpoint_full(db) {
     la rs = builtin.chr(30)
     la e = tekst_fra_heltall(db["_epoke"])
     la base = db_serialiser(db)
-    la innhald = _cp_hovud() + rs + "S" + us + e + rs + base + "Z" + us + e + rs
-    builtin.fil_skriv(sti + ".cp2", innhald)
-    builtin.fil_skriv(sti + ".cp", innhald)
+    la kropp = "S" + us + e + rs + base
+    la innhald = _cp_hovud() + rs + kropp + "Z" + us + e + us + tekst_fra_heltall(png.crc32(kropp)) + rs
+    _skriv_cp_kontrollert(sti + ".cp2", innhald)
+    _skriv_cp_kontrollert(sti + ".cp", innhald)
     builtin.fil_slett(sti + ".cp2")
     hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
     db["_cp_base"] = lengde(innhald)
@@ -2106,6 +2207,7 @@ funksjon db_checkpoint_full(db) {
 funksjon db_backup(db, sti: tekst) {
     la us = builtin.chr(31)
     la rs = builtin.chr(30)
-    la innhald = _cp_hovud() + rs + "S" + us + "0" + rs + db_serialiser(db) + "Z" + us + "0" + rs
+    la kropp = "S" + us + "0" + rs + db_serialiser(db)
+    la innhald = _cp_hovud() + rs + kropp + "Z" + us + "0" + us + tekst_fra_heltall(png.crc32(kropp)) + rs
     builtin.fil_skriv(sti, innhald)
 }

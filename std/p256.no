@@ -1,0 +1,787 @@
+# p256.no - NIST P-256 (secp256r1) i rein Norscode: ECDH og rask ECDSA-verifikasjon.
+#
+# Laga for den tolka VM-en, der ein vanleg bigint-multiplikasjon + divisjon (std.bigint)
+# tek ~12 ms per feltmultiplikasjon og éin skalarmultiplikasjon går over fleire minutt.
+# Her:
+#   - feltelement = 8 ord à 32 bit (little-endian), 64-bit omslutande heiltalsaritmetikk
+#     gjev heile 32x32-produktet (lav/høg del blir skild med maske);
+#   - reduksjon med Solinas-forma til p (FIPS 186-4 D.2.3), ingen divisjon;
+#   - affine punkt: den modulære inversen går gjennom det native modexp-atomet
+#     (builtin.bn_modexp_bytes, a^(p-2) mod p), så ein affin addisjon kostar
+#     3 multiplikasjonar + 1 atomkall, mot ~12 multiplikasjonar i Jacobian-form;
+#   - 4-bits vindauge for skalarmultiplikasjon.
+# Ikkje konstanttid (klientsida: éin kortlevd, tilfeldig eksponent per handtrykk).
+bruk std.bigint som bn
+
+funksjon _M() -> heiltall { returner 4294967295 }
+
+funksjon _hex_ord(h: tekst) -> liste_heiltall {
+    # 64 hex-teikn (big-endian) -> 8 ord, minst signifikante fyrst.
+    la ut: liste_heiltall = []
+    la d = "0123456789abcdef"
+    la i = 0
+    mens i < 8 {
+        la v = 0
+        la j = 0
+        mens j < 8 {
+            v = v * 16 + builtin.index_of(d, builtin.slice(h, (7 - i) * 8 + j, (7 - i) * 8 + j + 1))
+            j = j + 1
+        }
+        legg_til(ut, v)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon P() -> liste_heiltall { returner _hex_ord("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff") }
+funksjon ORDEN() -> liste_heiltall { returner _hex_ord("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551") }
+funksjon _B() -> liste_heiltall { returner _hex_ord("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b") }
+funksjon _GX() -> liste_heiltall { returner _hex_ord("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296") }
+funksjon _GY() -> liste_heiltall { returner _hex_ord("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5") }
+
+la _PORD = _hex_ord("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+la _P_BYTES: liste_heiltall = [255,255,255,255,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255]
+
+# ── Omforming ord <-> bytes ────────────────────────────────────────────────
+funksjon fra_bytes(b: liste_heiltall) -> liste_heiltall {
+    # 32 bytes big-endian -> 8 ord (minst signifikante ord fyrst)
+    returner [(b[28] << 24) | (b[29] << 16) | (b[30] << 8) | b[31], (b[24] << 24) | (b[25] << 16) | (b[26] << 8) | b[27], (b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23], (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19], (b[12] << 24) | (b[13] << 16) | (b[14] << 8) | b[15], (b[8] << 24) | (b[9] << 16) | (b[10] << 8) | b[11], (b[4] << 24) | (b[5] << 16) | (b[6] << 8) | b[7], (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]]
+}
+
+funksjon til_bytes(a: liste_heiltall) -> liste_heiltall {
+    returner [(a[7] >> 24) & 255, (a[7] >> 16) & 255, (a[7] >> 8) & 255, a[7] & 255, (a[6] >> 24) & 255, (a[6] >> 16) & 255, (a[6] >> 8) & 255, a[6] & 255, (a[5] >> 24) & 255, (a[5] >> 16) & 255, (a[5] >> 8) & 255, a[5] & 255, (a[4] >> 24) & 255, (a[4] >> 16) & 255, (a[4] >> 8) & 255, a[4] & 255, (a[3] >> 24) & 255, (a[3] >> 16) & 255, (a[3] >> 8) & 255, a[3] & 255, (a[2] >> 24) & 255, (a[2] >> 16) & 255, (a[2] >> 8) & 255, a[2] & 255, (a[1] >> 24) & 255, (a[1] >> 16) & 255, (a[1] >> 8) & 255, a[1] & 255, (a[0] >> 24) & 255, (a[0] >> 16) & 255, (a[0] >> 8) & 255, a[0] & 255]
+}
+
+# ── Feltaritmetikk mod p (ord à 32 bit) ────────────────────────────────────
+# Sammenlikning a >= b (begge 8 ord).
+funksjon _geq(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    la i = 7
+    mens i >= 0 {
+        hvis a[i] > b[i] { returner sann }
+        hvis a[i] < b[i] { returner usann }
+        i = i - 1
+    }
+    returner sann
+}
+
+funksjon er_null(a: liste_heiltall) -> boolsk {
+    la i = 0
+    mens i < 8 {
+        hvis a[i] != 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    la i = 0
+    mens i < 8 {
+        hvis a[i] != b[i] { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# a - b utan modulus (a >= b føresett).
+funksjon _trekk_fra_rå(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la borrow = 0
+    la i = 0
+    mens i < 8 {
+        la t = a[i] - b[i] - borrow
+        hvis t < 0 { t = t + 4294967296 borrow = 1 } ellers { borrow = 0 }
+        legg_til(ut, t)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon add(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la t = a[0] + b[0]
+    la r0 = t & 4294967295
+    t = a[1] + b[1] + (t >> 32)
+    la r1 = t & 4294967295
+    t = a[2] + b[2] + (t >> 32)
+    la r2 = t & 4294967295
+    t = a[3] + b[3] + (t >> 32)
+    la r3 = t & 4294967295
+    t = a[4] + b[4] + (t >> 32)
+    la r4 = t & 4294967295
+    t = a[5] + b[5] + (t >> 32)
+    la r5 = t & 4294967295
+    t = a[6] + b[6] + (t >> 32)
+    la r6 = t & 4294967295
+    t = a[7] + b[7] + (t >> 32)
+    la r7 = t & 4294967295
+    hvis (t >> 32) == 1 {
+        # sum >= 2^256 > p: legg til 2^256 - p (= 2^224 - 2^192 - 2^96 + 1) og dropp overflyten
+        t = r0 + 1
+        r0 = t & 4294967295
+        t = r1 + (t >> 32)
+        r1 = t & 4294967295
+        t = r2 + (t >> 32)
+        r2 = t & 4294967295
+        t = r3 + 4294967295 + (t >> 32)
+        r3 = t & 4294967295
+        t = r4 + 4294967295 + (t >> 32)
+        r4 = t & 4294967295
+        t = r5 + 4294967295 + (t >> 32)
+        r5 = t & 4294967295
+        t = r6 + 4294967294 + (t >> 32)
+        r6 = t & 4294967295
+        t = r7 + (t >> 32)
+        r7 = t & 4294967295
+        returner [r0, r1, r2, r3, r4, r5, r6, r7]
+    }
+    la r: liste_heiltall = [r0, r1, r2, r3, r4, r5, r6, r7]
+    hvis r7 == 4294967295 {
+        hvis _geq(r, _PORD) { returner _trekk_fra_rå(r, _PORD) }
+    }
+    returner r
+}
+
+funksjon sub(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la t = a[0] - b[0]
+    la r0 = t & 4294967295
+    t = a[1] - b[1] + (t >> 32)
+    la r1 = t & 4294967295
+    t = a[2] - b[2] + (t >> 32)
+    la r2 = t & 4294967295
+    t = a[3] - b[3] + (t >> 32)
+    la r3 = t & 4294967295
+    t = a[4] - b[4] + (t >> 32)
+    la r4 = t & 4294967295
+    t = a[5] - b[5] + (t >> 32)
+    la r5 = t & 4294967295
+    t = a[6] - b[6] + (t >> 32)
+    la r6 = t & 4294967295
+    t = a[7] - b[7] + (t >> 32)
+    la r7 = t & 4294967295
+    hvis (t >> 32) < 0 {
+        # a < b: legg til p og dropp overflyten (p = [M, M, M, 0, 0, 0, 1, M])
+        t = r0 + 4294967295
+        r0 = t & 4294967295
+        t = r1 + 4294967295 + (t >> 32)
+        r1 = t & 4294967295
+        t = r2 + 4294967295 + (t >> 32)
+        r2 = t & 4294967295
+        t = r3 + (t >> 32)
+        r3 = t & 4294967295
+        t = r4 + (t >> 32)
+        r4 = t & 4294967295
+        t = r5 + (t >> 32)
+        r5 = t & 4294967295
+        t = r6 + 1 + (t >> 32)
+        r6 = t & 4294967295
+        t = r7 + 4294967295 + (t >> 32)
+        r7 = t & 4294967295
+    }
+    returner [r0, r1, r2, r3, r4, r5, r6, r7]
+}
+
+# Reduser eit 16-ords (512-bit) tal mod p med Solinas-forma.
+funksjon _reduser(c: liste_heiltall) -> liste_heiltall {
+    la c0 = c[0] la c1 = c[1] la c2 = c[2] la c3 = c[3]
+    la c4 = c[4] la c5 = c[5] la c6 = c[6] la c7 = c[7]
+    la c8 = c[8] la c9 = c[9] la c10 = c[10] la c11 = c[11]
+    la c12 = c[12] la c13 = c[13] la c14 = c[14] la c15 = c[15]
+    la a0 = c0 + c8 + c9 - c11 - c12 - c13 - c14
+    la a1 = c1 + c9 + c10 - c12 - c13 - c14 - c15
+    la a2 = c2 + c10 + c11 - c13 - c14 - c15
+    la a3 = c3 + 2 * c11 + 2 * c12 + c13 - c15 - c8 - c9
+    la a4 = c4 + 2 * c12 + 2 * c13 + c14 - c9 - c10
+    la a5 = c5 + 2 * c13 + 2 * c14 + c15 - c10 - c11
+    la a6 = c6 + 3 * c14 + 2 * c15 + c13 - c8 - c9
+    la a7 = c7 + 3 * c15 + c8 - c10 - c11 - c12 - c13
+    la r: liste_heiltall = [a0, a1, a2, a3, a4, a5, a6, a7]
+    la carry = 0
+    la i = 0
+    mens i < 8 {
+        la t = r[i] + carry
+        r[i] = t & 4294967295
+        carry = t >> 32
+        i = i + 1
+    }
+    mens carry != 0 {
+        r[0] = r[0] + carry
+        r[3] = r[3] - carry
+        r[6] = r[6] - carry
+        r[7] = r[7] + carry
+        carry = 0
+        i = 0
+        mens i < 8 {
+            la t = r[i] + carry
+            r[i] = t & 4294967295
+            carry = t >> 32
+            i = i + 1
+        }
+    }
+    hvis r[7] == 4294967295 {
+        hvis _geq(r, _PORD) { returner _trekk_fra_rå(r, _PORD) }
+    }
+    returner r
+}
+
+funksjon mul_enkel(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la c: liste_heiltall = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    la i = 0
+    mens i < 8 {
+        la ai = a[i]
+        la j = 0
+        mens j < 8 {
+            la p = ai * b[j]
+            la k = i + j
+            c[k] = c[k] + (p & 4294967295)
+            c[k + 1] = c[k + 1] + ((p >> 32) & 4294967295)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    la w: liste_heiltall = []
+    la carry = 0
+    la m = 0
+    mens m < 16 {
+        la t = c[m] + carry
+        legg_til(w, t & 4294967295)
+        carry = t >> 32
+        m = m + 1
+    }
+    returner _reduser(w)
+}
+
+# Feltmultiplikasjon mod p. Generert (utrulla): 64 delprodukt à 32x32 bit, kolonnesummar i lokale
+# variablar, Solinas-reduksjon (FIPS 186-4 D.2.3). Same resultat som den enkle løkka i testen.
+funksjon mul(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la a0 = a[0]
+    la a1 = a[1]
+    la a2 = a[2]
+    la a3 = a[3]
+    la a4 = a[4]
+    la a5 = a[5]
+    la a6 = a[6]
+    la a7 = a[7]
+    la b0 = b[0]
+    la b1 = b[1]
+    la b2 = b[2]
+    la b3 = b[3]
+    la b4 = b[4]
+    la b5 = b[5]
+    la b6 = b[6]
+    la b7 = b[7]
+    la p = 0
+    la c0 = 0
+    la c1 = 0
+    la c2 = 0
+    la c3 = 0
+    la c4 = 0
+    la c5 = 0
+    la c6 = 0
+    la c7 = 0
+    la c8 = 0
+    la c9 = 0
+    la c10 = 0
+    la c11 = 0
+    la c12 = 0
+    la c13 = 0
+    la c14 = 0
+    la c15 = 0
+    p = a0 * b0
+    c0 = c0 + (p & 4294967295)
+    c1 = c1 + ((p >> 32) & 4294967295)
+    p = a0 * b1
+    c1 = c1 + (p & 4294967295)
+    c2 = c2 + ((p >> 32) & 4294967295)
+    p = a0 * b2
+    c2 = c2 + (p & 4294967295)
+    c3 = c3 + ((p >> 32) & 4294967295)
+    p = a0 * b3
+    c3 = c3 + (p & 4294967295)
+    c4 = c4 + ((p >> 32) & 4294967295)
+    p = a0 * b4
+    c4 = c4 + (p & 4294967295)
+    c5 = c5 + ((p >> 32) & 4294967295)
+    p = a0 * b5
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a0 * b6
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a0 * b7
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a1 * b0
+    c1 = c1 + (p & 4294967295)
+    c2 = c2 + ((p >> 32) & 4294967295)
+    p = a1 * b1
+    c2 = c2 + (p & 4294967295)
+    c3 = c3 + ((p >> 32) & 4294967295)
+    p = a1 * b2
+    c3 = c3 + (p & 4294967295)
+    c4 = c4 + ((p >> 32) & 4294967295)
+    p = a1 * b3
+    c4 = c4 + (p & 4294967295)
+    c5 = c5 + ((p >> 32) & 4294967295)
+    p = a1 * b4
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a1 * b5
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a1 * b6
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a1 * b7
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a2 * b0
+    c2 = c2 + (p & 4294967295)
+    c3 = c3 + ((p >> 32) & 4294967295)
+    p = a2 * b1
+    c3 = c3 + (p & 4294967295)
+    c4 = c4 + ((p >> 32) & 4294967295)
+    p = a2 * b2
+    c4 = c4 + (p & 4294967295)
+    c5 = c5 + ((p >> 32) & 4294967295)
+    p = a2 * b3
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a2 * b4
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a2 * b5
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a2 * b6
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a2 * b7
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a3 * b0
+    c3 = c3 + (p & 4294967295)
+    c4 = c4 + ((p >> 32) & 4294967295)
+    p = a3 * b1
+    c4 = c4 + (p & 4294967295)
+    c5 = c5 + ((p >> 32) & 4294967295)
+    p = a3 * b2
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a3 * b3
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a3 * b4
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a3 * b5
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a3 * b6
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a3 * b7
+    c10 = c10 + (p & 4294967295)
+    c11 = c11 + ((p >> 32) & 4294967295)
+    p = a4 * b0
+    c4 = c4 + (p & 4294967295)
+    c5 = c5 + ((p >> 32) & 4294967295)
+    p = a4 * b1
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a4 * b2
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a4 * b3
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a4 * b4
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a4 * b5
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a4 * b6
+    c10 = c10 + (p & 4294967295)
+    c11 = c11 + ((p >> 32) & 4294967295)
+    p = a4 * b7
+    c11 = c11 + (p & 4294967295)
+    c12 = c12 + ((p >> 32) & 4294967295)
+    p = a5 * b0
+    c5 = c5 + (p & 4294967295)
+    c6 = c6 + ((p >> 32) & 4294967295)
+    p = a5 * b1
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a5 * b2
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a5 * b3
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a5 * b4
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a5 * b5
+    c10 = c10 + (p & 4294967295)
+    c11 = c11 + ((p >> 32) & 4294967295)
+    p = a5 * b6
+    c11 = c11 + (p & 4294967295)
+    c12 = c12 + ((p >> 32) & 4294967295)
+    p = a5 * b7
+    c12 = c12 + (p & 4294967295)
+    c13 = c13 + ((p >> 32) & 4294967295)
+    p = a6 * b0
+    c6 = c6 + (p & 4294967295)
+    c7 = c7 + ((p >> 32) & 4294967295)
+    p = a6 * b1
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a6 * b2
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a6 * b3
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a6 * b4
+    c10 = c10 + (p & 4294967295)
+    c11 = c11 + ((p >> 32) & 4294967295)
+    p = a6 * b5
+    c11 = c11 + (p & 4294967295)
+    c12 = c12 + ((p >> 32) & 4294967295)
+    p = a6 * b6
+    c12 = c12 + (p & 4294967295)
+    c13 = c13 + ((p >> 32) & 4294967295)
+    p = a6 * b7
+    c13 = c13 + (p & 4294967295)
+    c14 = c14 + ((p >> 32) & 4294967295)
+    p = a7 * b0
+    c7 = c7 + (p & 4294967295)
+    c8 = c8 + ((p >> 32) & 4294967295)
+    p = a7 * b1
+    c8 = c8 + (p & 4294967295)
+    c9 = c9 + ((p >> 32) & 4294967295)
+    p = a7 * b2
+    c9 = c9 + (p & 4294967295)
+    c10 = c10 + ((p >> 32) & 4294967295)
+    p = a7 * b3
+    c10 = c10 + (p & 4294967295)
+    c11 = c11 + ((p >> 32) & 4294967295)
+    p = a7 * b4
+    c11 = c11 + (p & 4294967295)
+    c12 = c12 + ((p >> 32) & 4294967295)
+    p = a7 * b5
+    c12 = c12 + (p & 4294967295)
+    c13 = c13 + ((p >> 32) & 4294967295)
+    p = a7 * b6
+    c13 = c13 + (p & 4294967295)
+    c14 = c14 + ((p >> 32) & 4294967295)
+    p = a7 * b7
+    c14 = c14 + (p & 4294967295)
+    c15 = c15 + ((p >> 32) & 4294967295)
+    la t = c0
+    la w0 = t & 4294967295
+    t = c1 + (t >> 32)
+    la w1 = t & 4294967295
+    t = c2 + (t >> 32)
+    la w2 = t & 4294967295
+    t = c3 + (t >> 32)
+    la w3 = t & 4294967295
+    t = c4 + (t >> 32)
+    la w4 = t & 4294967295
+    t = c5 + (t >> 32)
+    la w5 = t & 4294967295
+    t = c6 + (t >> 32)
+    la w6 = t & 4294967295
+    t = c7 + (t >> 32)
+    la w7 = t & 4294967295
+    t = c8 + (t >> 32)
+    la w8 = t & 4294967295
+    t = c9 + (t >> 32)
+    la w9 = t & 4294967295
+    t = c10 + (t >> 32)
+    la w10 = t & 4294967295
+    t = c11 + (t >> 32)
+    la w11 = t & 4294967295
+    t = c12 + (t >> 32)
+    la w12 = t & 4294967295
+    t = c13 + (t >> 32)
+    la w13 = t & 4294967295
+    t = c14 + (t >> 32)
+    la w14 = t & 4294967295
+    t = c15 + (t >> 32)
+    la w15 = t & 4294967295
+    t = w0 + w8 + w9 - w11 - w12 - w13 - w14
+    la r0 = t & 4294967295
+    t = w1 + w9 + w10 - w12 - w13 - w14 - w15 + (t >> 32)
+    la r1 = t & 4294967295
+    t = w2 + w10 + w11 - w13 - w14 - w15 + (t >> 32)
+    la r2 = t & 4294967295
+    t = w3 + 2 * w11 + 2 * w12 + w13 - w15 - w8 - w9 + (t >> 32)
+    la r3 = t & 4294967295
+    t = w4 + 2 * w12 + 2 * w13 + w14 - w9 - w10 + (t >> 32)
+    la r4 = t & 4294967295
+    t = w5 + 2 * w13 + 2 * w14 + w15 - w10 - w11 + (t >> 32)
+    la r5 = t & 4294967295
+    t = w6 + 3 * w14 + 2 * w15 + w13 - w8 - w9 + (t >> 32)
+    la r6 = t & 4294967295
+    t = w7 + 3 * w15 + w8 - w10 - w11 - w12 - w13 + (t >> 32)
+    la r7 = t & 4294967295
+    la carry = t >> 32
+    mens carry != 0 {
+        t = r0 + carry
+        r0 = t & 4294967295
+        t = r1 + (t >> 32)
+        r1 = t & 4294967295
+        t = r2 + (t >> 32)
+        r2 = t & 4294967295
+        t = r3 - carry + (t >> 32)
+        r3 = t & 4294967295
+        t = r4 + (t >> 32)
+        r4 = t & 4294967295
+        t = r5 + (t >> 32)
+        r5 = t & 4294967295
+        t = r6 - carry + (t >> 32)
+        r6 = t & 4294967295
+        t = r7 + carry + (t >> 32)
+        r7 = t & 4294967295
+        carry = t >> 32
+    }
+    la r: liste_heiltall = [r0, r1, r2, r3, r4, r5, r6, r7]
+    hvis r7 == 4294967295 {
+        hvis _geq(r, _PORD) { returner _trekk_fra_rå(r, _PORD) }
+    }
+    returner r
+}
+
+funksjon sqr(a: liste_heiltall) -> liste_heiltall {
+    returner mul(a, a)
+}
+
+# Modulær invers via native modexp-atom: a^(p-2) mod p. a != 0.
+funksjon inv(a: liste_heiltall) -> liste_heiltall {
+    la r = builtin.bn_modexp_bytes(til_bytes(a), _PM2_BYTES_FULL(), _P_BYTES)
+    hvis r == null eller lengde(r) == 0 {
+        # Reservevei: rein bigint
+        la x = bn.modexp(bn.fra_bytes(til_bytes(a)), bn.sub(bn.fra_bytes(_P_BYTES), [2]), bn.fra_bytes(_P_BYTES))
+        returner fra_bytes(bn.til_bytes(x, 32))
+    }
+    hvis lengde(r) == 32 { returner fra_bytes(r) }
+    la pad: liste_heiltall = []
+    la n = 32 - lengde(r)
+    mens n > 0 { legg_til(pad, 0) n = n - 1 }
+    la i = 0
+    mens i < lengde(r) { legg_til(pad, r[i]) i = i + 1 }
+    returner fra_bytes(pad)
+}
+
+funksjon _PM2_BYTES_FULL() -> liste_heiltall {
+    returner [255,255,255,255,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,253]
+}
+
+# ── Kurve y^2 = x^3 - 3x + b (affine punkt: [x, y]; uendeleg = tom liste) ──
+funksjon _ein() -> liste_heiltall { returner [1, 0, 0, 0, 0, 0, 0, 0] }
+
+funksjon er_på_kurva(x: liste_heiltall, y: liste_heiltall) -> boolsk {
+    hvis _geq(x, _PORD) eller _geq(y, _PORD) { returner usann }
+    la lhs = sqr(y)
+    la x3 = mul(sqr(x), x)
+    la rhs = add(sub(x3, add(add(x, x), x)), _B())
+    returner lik(lhs, rhs)
+}
+
+funksjon _dobling(pt: liste) -> liste {
+    hvis lengde(pt) == 0 { returner [] }
+    la x = pt[0]
+    la y = pt[1]
+    hvis er_null(y) { returner [] }
+    la t = mul(sub(x, _ein()), add(x, _ein()))
+    la teljar = add(add(t, t), t)
+    la lam = mul(teljar, inv(add(y, y)))
+    la x3 = sub(sub(sqr(lam), x), x)
+    la y3 = sub(mul(lam, sub(x, x3)), y)
+    returner [x3, y3]
+}
+
+funksjon _addisjon(p1: liste, p2: liste) -> liste {
+    hvis lengde(p1) == 0 { returner p2 }
+    hvis lengde(p2) == 0 { returner p1 }
+    la x1 = p1[0] la y1 = p1[1]
+    la x2 = p2[0] la y2 = p2[1]
+    hvis lik(x1, x2) {
+        hvis lik(y1, y2) { returner _dobling(p1) }
+        returner []
+    }
+    la lam = mul(sub(y2, y1), inv(sub(x2, x1)))
+    la x3 = sub(sub(sqr(lam), x1), x2)
+    la y3 = sub(mul(lam, sub(x1, x3)), y1)
+    returner [x3, y3]
+}
+
+# k (32 bytes big-endian) * pt, 4-bits vindauge.
+funksjon skalar(k: liste_heiltall, pt: liste) -> liste {
+    # Tabell 1..15
+    la tab: liste = [[], pt]
+    la i = 2
+    mens i < 16 {
+        hvis i % 2 == 0 {
+            legg_til(tab, _dobling(tab[i / 2]))
+        } ellers {
+            legg_til(tab, _addisjon(tab[i - 1], pt))
+        }
+        i = i + 1
+    }
+    la r: liste = []
+    la forst = sann
+    la byte_i = 0
+    mens byte_i < 32 {
+        la nib = 0
+        mens nib < 2 {
+            la d = 0
+            hvis nib == 0 { d = (k[byte_i] >> 4) & 15 } ellers { d = k[byte_i] & 15 }
+            hvis forst {
+                hvis d > 0 { r = tab[d] forst = usann }
+            } ellers {
+                r = _dobling(_dobling(_dobling(_dobling(r))))
+                hvis d > 0 { r = _addisjon(r, tab[d]) }
+            }
+            nib = nib + 1
+        }
+        byte_i = byte_i + 1
+    }
+    returner r
+}
+
+funksjon basispunkt() -> liste { returner [_GX(), _GY()] }
+
+# Fast-basis-multiplikasjon k*G. Basispunkta G_i = 2^(32*i) * G (i = 1..7) er førehandsutrekna
+# konstantar (x||y, 128 hex-teikn). k blir delt i åtte 32-bits ord k_i, og k*G = sum k_i * G_i
+# reknast ut med éin felles dobling per bit (31 doblingar + ~128 addisjonar), mot 256 doblingar for
+# vanleg vindauge-multiplikasjon.
+funksjon _G_KONSTANTAR() -> liste_tekst {
+    returner [
+        "7fe36b40af22af8921656b32262c71da1ab919365c65dfb63a5a9e22185a5943e697d45825b636249f09f40407dca6f174b3d5867b8af212d50d152c699ca101",
+        "0fa822bc2811aaa58492592e326e25de29493baaad651f7e90e75cb48e14db63bff44ae8f5dba80d6f4ad4bcb3df188b34b1a65050fe82f5e41124545f462ee7",
+        "4a5b506612a677a657880b3a18a2e902e9a521b074ca0141a84aa9397512218eeb13461ceac089f1c42604fbe1627d40626db15419e26d9d0beada7a4c4f3840",
+        "447d739beedb5e67fb982fd588c6766efc35ff7dc297eac357c84fc9d789bd852d4825ab834131eee12e9d953a4aaff73d349b95a7fae5000c7e33c972e25b32",
+        "8a535f566ec73617f5622df4373713269e4c35874afdf43aaee9c75df7f82f2a0455c08468b08bd737e02819085a92bfcde533864c8c7669c5f9a0ac223094b7",
+        "a6d39677a78492762736ff8344315fc596439591a3c6b94a6cf20ffb313728be674f84749b0b881666b8babd2d27ecdf824a920c2284059bf2bab833c357f5f4",
+        "68f6b8542783dfeeeb5b06e70ce08ffefd75f3fa01876bd86a703f10e895df07cbe1feba92e40ce6fbc8044dfda45028cf5293d2f310bf7f90c76f8a78712655"
+    ]
+}
+
+funksjon skalar_g(k: liste_heiltall) -> liste {
+    la punkt: liste = [basispunkt()]
+    la kon = _G_KONSTANTAR()
+    la i = 0
+    mens i < 7 {
+        legg_til(punkt, [_hex_ord(builtin.slice(kon[i], 0, 64)), _hex_ord(builtin.slice(kon[i], 64, 128))])
+        i = i + 1
+    }
+    # ord i = bytes k[28-4i .. 31-4i]
+    la ord: liste_heiltall = []
+    i = 0
+    mens i < 8 {
+        la o = 28 - 4 * i
+        legg_til(ord, (k[o] << 24) | (k[o + 1] << 16) | (k[o + 2] << 8) | k[o + 3])
+        i = i + 1
+    }
+    la r: liste = []
+    la b = 31
+    mens b >= 0 {
+        r = _dobling(r)
+        i = 0
+        mens i < 8 {
+            hvis ((ord[i] >> b) & 1) == 1 { r = _addisjon(r, punkt[i]) }
+            i = i + 1
+        }
+        b = b - 1
+    }
+    returner r
+}
+
+# ── Hendige API-ar ──────────────────────────────────────────────────────────
+# Nøkkelpar frå 32 tilfeldige bytes (må vere i [1, n-1]).
+funksjon privat_gyldig(k: liste_heiltall) -> boolsk {
+    la kw = fra_bytes(k)
+    hvis er_null(kw) { returner usann }
+    returner ikkje _geq(kw, ORDEN())
+}
+
+# Ukomprimert SEC1-punkt (65 bytes: 04 || X || Y) for k*G.
+funksjon offentleg(k: liste_heiltall) -> liste_heiltall {
+    la pt = skalar_g(k)
+    la ut: liste_heiltall = [4]
+    la xb = til_bytes(pt[0])
+    la yb = til_bytes(pt[1])
+    la i = 0
+    mens i < 32 { legg_til(ut, xb[i]) i = i + 1 }
+    i = 0
+    mens i < 32 { legg_til(ut, yb[i]) i = i + 1 }
+    returner ut
+}
+
+# Delt løyndom (X-koordinaten, 32 bytes) frå eigen privat k og motpartens SEC1-punkt.
+# Returnerer [] ved ugyldig punkt (ikkje på kurva / feil format).
+funksjon delt(k: liste_heiltall, peer: liste_heiltall) -> liste_heiltall {
+    hvis lengde(peer) != 65 eller peer[0] != 4 { returner [] }
+    la xb: liste_heiltall = []
+    la yb: liste_heiltall = []
+    la i = 1
+    mens i < 33 { legg_til(xb, peer[i]) legg_til(yb, peer[i + 32]) i = i + 1 }
+    la x = fra_bytes(xb)
+    la y = fra_bytes(yb)
+    hvis ikkje er_på_kurva(x, y) { returner [] }
+    la r = skalar(k, [x, y])
+    hvis lengde(r) == 0 { returner [] }
+    returner til_bytes(r[0])
+}
+
+funksjon status() { returner {"abi": "norscode-p256-v1", "kurve": "secp256r1", "ord": 32} }
+
+# ── ECDSA-verifikasjon (rask veg) ───────────────────────────────────────────
+# Alle argument er 32 bytes big-endian: (qx, qy) offentleg punkt, e = SHA-256-digest av meldinga,
+# (r, s) signaturen. Gir sann berre ved gyldig signatur (fail-closed).
+funksjon _ORDEN_BYTES() -> liste_heiltall {
+    returner [255,255,255,255,0,0,0,0,255,255,255,255,255,255,255,255,188,230,250,173,167,23,158,132,243,185,202,194,252,99,37,81]
+}
+funksjon _ORDEN_M2_BYTES() -> liste_heiltall {
+    returner [255,255,255,255,0,0,0,0,255,255,255,255,255,255,255,255,188,230,250,173,167,23,158,132,243,185,202,194,252,99,37,79]
+}
+
+funksjon ecdsa_verifiser(qx: liste_heiltall, qy: liste_heiltall, e: liste_heiltall, r: liste_heiltall, s: liste_heiltall) -> boolsk {
+    hvis lengde(qx) != 32 eller lengde(qy) != 32 eller lengde(e) != 32 eller lengde(r) != 32 eller lengde(s) != 32 { returner usann }
+    la rw = fra_bytes(r)
+    la sw = fra_bytes(s)
+    la n = ORDEN()
+    hvis er_null(rw) eller er_null(sw) { returner usann }
+    hvis _geq(rw, n) eller _geq(sw, n) { returner usann }
+    la x = fra_bytes(qx)
+    la y = fra_bytes(qy)
+    hvis ikkje er_på_kurva(x, y) { returner usann }
+    # w = s^-1 mod n (native modexp), u1 = e*w, u2 = r*w (mod n, std.bigint)
+    la wb = builtin.bn_modexp_bytes(s, _ORDEN_M2_BYTES(), _ORDEN_BYTES())
+    hvis wb == null eller lengde(wb) == 0 {
+        la wbn = bn.modexp(bn.fra_bytes(s), bn.fra_bytes(_ORDEN_M2_BYTES()), bn.fra_bytes(_ORDEN_BYTES()))
+        wb = bn.til_bytes(wbn, 32)
+    }
+    la nbn = bn.fra_bytes(_ORDEN_BYTES())
+    la wbn2 = bn.fra_bytes(wb)
+    la u1 = bn.til_bytes(bn.modulo(bn.mul(bn.fra_bytes(e), wbn2), nbn), 32)
+    la u2 = bn.til_bytes(bn.modulo(bn.mul(bn.fra_bytes(r), wbn2), nbn), 32)
+    la p1 = skalar_g(u1)
+    la p2 = skalar(u2, [x, y])
+    la sum = _addisjon(p1, p2)
+    hvis lengde(sum) == 0 { returner usann }
+    # x-koordinaten mod n == r
+    la xr = bn.til_bytes(bn.modulo(bn.fra_bytes(til_bytes(sum[0])), nbn), 32)
+    returner _lik_bytes(xr, r)
+}
+
+funksjon _lik_bytes(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) {
+        hvis a[i] != b[i] { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
