@@ -1,0 +1,431 @@
+// 5a (rC-serve): `nc serve --workers N` — leiar + N arbeidarar med SO_REUSEPORT, ende-til-ende.
+//
+// Startar tests/fixtures/serve_arbeidarar_app.no under `nc serve` med NORSCODE_WORKERS=3
+// (miljøkontrakten) og sjekkar:
+//   1. leiaren melder 3 arbeidarar, kvar med eigen pid
+//   2. 40 samtidige tilkoplingar vert svara på av FLEIRE ulike arbeidar-pid-ar (alle frå loggen)
+//   3. SIGKILL på éin arbeidar → leiaren startar han på nytt (ny pid), og den nye arbeidaren
+//      svarar òg på førespurnader; dei andre arbeidarane er urørte
+//   4. SIGTERM til leiaren → alle arbeidarar drenerer, leiaren sluttar med exit 0
+// Utan endringa (--workers ignorert, ein prosess) feilar sjekk 1/2.
+// Køyrer mot executable til den køyrande nc (eller NC_SERVE_TEST_BIN). Berre Linux
+// (SO_REUSEPORT-verdien er verifisert der; macOS er dokumentert i docs/NC_SERVE_WORKERS.md).
+bruk std.runtime.process_abi som process_abi
+bruk std.socket som socket
+bruk std.native_sys som nsys
+
+la _feil: liste_tekst = []
+
+funksjon krev(ok: boolsk, melding: tekst) -> boolsk {
+    hvis ikkje ok {
+        legg_til(_feil, melding)
+        skriv("SJEKK FEILA: " + melding + "\n")
+    }
+    returner ok
+}
+
+funksjon crlf() -> tekst { returner "\r\n" }
+
+funksjon port() -> heiltall { returner 48297 }
+
+funksjon serve_miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "PATH": "/usr/bin:/bin",
+        "HOME": miljo_hent("HOME"),
+        "TMPDIR": "/tmp",
+        "NORSCODE_CMD": "serve",
+        "NORSCODE_FILE": root + "/tests/fixtures/serve_arbeidarar_app.no",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_MODULE": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_WORKERS": "3",
+        "NC_SERVE_PORT": tekst_fra_heltall(port()),
+        "NC_SERVE_HOST": "127.0.0.1",
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read",
+        "NC_SERVE_DRAIN_MS": "4000",
+        "NORSCODE_FAKE_HTTP_REQUESTS": "",
+        "NORSCODE_FAKE_HTTP_REQUEST": "",
+        "NORSCODE_VM_CI_COMMAND": "",
+        "NORSCODE_VM_CI_CHILD_CMD": "",
+        "NORSCODE_VM_CI_CHILD_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": ""
+    }
+}
+
+// Opphev escaping når prosess-ABI-en har levert linjeskift som «\n» (to teikn).
+funksjon normaliser(t: tekst) -> tekst {
+    la s = t
+    la runde: heiltall = 0
+    mens ikkje builtin.contains(s, "\n") og builtin.contains(s, "\\n") og runde < 3 {
+        s = tekst_erstatt(s, "\\\\", "\\")
+        s = tekst_erstatt(s, "\\r", "\r")
+        s = tekst_erstatt(s, "\\n", "\n")
+        s = tekst_erstatt(s, "\\\"", "\"")
+        runde = runde + 1
+    }
+    returner s
+}
+
+// ── Barneprosessen ─────────────────────────────────────────────────────────
+
+funksjon barn_les(b: ordbok) -> tekst {
+    la r = builtin.process_operation(process_abi.async_operation("read", tekst(b["handle"])))
+    la ut = tekst(r["stdout"])
+    b["ut"] = tekst(b["ut"]) + ut
+    b["feil"] = tekst(b["feil"]) + tekst(r["stderr"])
+    returner ut
+}
+
+funksjon barn_status(b: ordbok) -> ordbok {
+    la r = builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 0))
+    b["status"] = tekst(r["status"])
+    b["exit"] = tekst(r["exit_code"])
+    returner r
+}
+
+funksjon barn_signal(b: ordbok, sig: heiltall) -> heiltall {
+    builtin.process_operation(process_abi.async_signal_request(tekst(b["handle"]), sig))
+    returner 0
+}
+
+// Vent til barnet er ferdig (høgst ms). Sann når det er ferdig.
+funksjon barn_vent(b: ordbok, ms: heiltall) -> boolsk {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        la r = builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 100))
+        barn_les(b)
+        b["status"] = tekst(r["status"])
+        b["exit"] = tekst(r["exit_code"])
+        hvis b["status"] != "kjorer" { returner sann }
+    }
+    returner usann
+}
+
+funksjon barn_stopp(b: ordbok) -> heiltall {
+    barn_les(b)
+    la r = builtin.process_operation(process_abi.async_operation("close", tekst(b["handle"])))
+    hvis tekst(r["status"]) != "" { b["status"] = tekst(r["status"]) }
+    returner 0
+}
+
+funksjon start_barn(runtime: tekst, root: tekst) -> ordbok {
+    la req = process_abi.async_spawn_request(runtime, [], root, "", 300000, 4194304)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, usann)
+    process_abi.sett_environment(req, serve_miljø(root))
+    la h = builtin.process_operation(req)
+    returner {"handle": tekst(h["handle"]), "status": tekst(h["status"]), "exit": "", "ut": "", "feil": ""}
+}
+
+// Vent på «Socket-lytting aktiv» i stdout (bundling av appen kan ta litt tid).
+funksjon vent_klar(b: ordbok, ms: heiltall) -> boolsk {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        barn_les(b)
+        hvis builtin.contains(normaliser(tekst(b["ut"])), "Socket-lytting aktiv") { returner sann }
+        barn_status(b)
+        hvis b["status"] != "kjorer" { returner usann }
+        builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 100))
+    }
+    returner usann
+}
+
+// ── Klient ─────────────────────────────────────────────────────────────────
+
+funksjon kople() -> ordbok {
+    la h = socket.native_tilkoble("127.0.0.1", port())
+    hvis tekst(h["status"]) != "connected" {
+        krev(usann, "tilkopling feila: " + tekst(h["error"]))
+    }
+    returner h
+}
+
+funksjon send(h: ordbok, data: tekst) -> boolsk {
+    la rest = data
+    la runde: heiltall = 0
+    mens rest != "" og runde < 1000 {
+        la r = socket.native_skriv(h, rest)
+        la st = tekst(r["status"])
+        hvis st == "ok" {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            rest = builtin.slice(rest, n, lengde(rest))
+        } ellers hvis st == "ventende" {
+            socket.native_poll_vent(h, 2, 50)
+        } ellers {
+            returner usann
+        }
+        runde = runde + 1
+    }
+    returner rest == ""
+}
+
+funksjon get(sti: tekst, ekstra: tekst) -> tekst {
+    returner "GET " + sti + " HTTP/1.1" + crlf() + "Host: 127.0.0.1" + crlf() + ekstra + crlf()
+}
+
+// Lengda til første fullstendige HTTP-svar i buf, eller −1.
+funksjon svar_lengd(buf: tekst) -> heiltall {
+    la hovud_ende = builtin.index_of(buf, "\r\n\r\n")
+    hvis hovud_ende < 0 { returner -1 }
+    la hovud = tekst_til_liten(builtin.slice(buf, 0, hovud_ende))
+    la cl: heiltall = 0
+    la p = builtin.index_of(hovud, "content-length:")
+    hvis p >= 0 {
+        la rest = builtin.slice(hovud, p + 15, lengde(hovud))
+        la nl = builtin.index_of(rest, "\r\n")
+        hvis nl >= 0 { rest = builtin.slice(rest, 0, nl) }
+        cl = heltall_fra_tekst(builtin.trim(rest))
+    }
+    hvis lengde(buf) < hovud_ende + 4 + cl { returner -1 }
+    returner hovud_ende + 4 + cl
+}
+
+// Les til `tal` fullstendige svar er komne, EOF, eller ms er gått.
+// {"svar": liste_tekst, "eof": boolsk, "ms": brukt tid, "rest": tekst}
+funksjon les_svar(h: ordbok, tal: heiltall, ms: heiltall) -> ordbok {
+    la start = builtin.tid_ms()
+    la buf = ""
+    la svar: liste_tekst = []
+    la eof = usann
+    mens lengde(svar) < tal og ikkje eof og builtin.tid_ms() - start < ms {
+        la r = socket.native_les(h, 65536)
+        la st = tekst(r["status"])
+        hvis st == "ok" {
+            buf = buf + tekst(r["data"])
+            la n = svar_lengd(buf)
+            mens n > 0 og lengde(svar) < tal {
+                legg_til(svar, builtin.slice(buf, 0, n))
+                buf = builtin.slice(buf, n, lengde(buf))
+                n = svar_lengd(buf)
+            }
+        } ellers hvis st == "eof" eller st == "feil" {
+            eof = sann
+        } ellers {
+            socket.native_poll_vent(h, 1, 50)
+        }
+    }
+    returner {"svar": svar, "eof": eof, "ms": builtin.tid_ms() - start, "rest": buf}
+}
+
+// Vent på EOF (sann) i høgst ms.
+funksjon vent_eof(h: ordbok, ms: heiltall) -> boolsk {
+    la start = builtin.tid_ms()
+    mens builtin.tid_ms() - start < ms {
+        la r = socket.native_les(h, 65536)
+        la st = tekst(r["status"])
+        hvis st == "eof" eller st == "feil" { returner sann }
+        hvis st != "ok" { socket.native_poll_vent(h, 1, 50) }
+    }
+    returner usann
+}
+
+funksjon status_av(svar: tekst) -> tekst {
+    hvis builtin.starts_with(svar, "HTTP/1.1 ") { returner builtin.slice(svar, 9, 12) }
+    returner ""
+}
+
+funksjon kropp_av(svar: tekst) -> tekst {
+    la hovud_ende = builtin.index_of(svar, "\r\n\r\n")
+    hvis hovud_ende < 0 { returner "" }
+    returner builtin.slice(svar, hovud_ende + 4, lengde(svar))
+}
+
+funksjon første(r: ordbok) -> tekst {
+    la s = r["svar"]
+    hvis lengde(s) > 0 { returner tekst(s[0]) }
+    returner ""
+}
+
+funksjon lukk(h: ordbok) -> heiltall {
+    prøv { socket.native_lukk(h) } fang (e) { }
+    returner 0
+}
+
+
+// Alle pid-ar i loggen etter «<mønster> ... (pid N)». Gjev liste av tekst.
+// SIGKILL til pid via /bin/sh (prosess-ABI; testen kan køyre i VM utan rå syscalls).
+funksjon drep_pid(pid: tekst, root: tekst) -> boolsk {
+    la req = process_abi.async_spawn_request("/bin/sh", ["-c", "kill -9 " + pid], root, "", 10000, 65536)
+    process_abi.sett_sandbox(req, "none", 536870912, 64, usann)
+    la h = builtin.process_operation(req)
+    hvis tekst(h["status"]) != "kjorer" { returner usann }
+    la r = builtin.process_operation(process_abi.async_wait_request(tekst(h["handle"]), 5000))
+    builtin.process_operation(process_abi.async_operation("close", tekst(h["handle"])))
+    returner tekst(r["exit_code"]) == "0"
+}
+
+funksjon pidar_etter(ut: tekst, merke: tekst) -> liste_tekst {
+    la res: liste_tekst = []
+    la rest = ut
+    la runde: heiltall = 0
+    mens runde < 200 {
+        la p = builtin.index_of(rest, merke)
+        hvis p < 0 { bryt }
+        rest = builtin.slice(rest, p + lengde(merke), lengde(rest))
+        la q = builtin.index_of(rest, "(pid ")
+        hvis q < 0 { bryt }
+        rest = builtin.slice(rest, q + 5, lengde(rest))
+        la e = builtin.index_of(rest, ")")
+        hvis e < 0 { bryt }
+        legg_til(res, builtin.slice(rest, 0, e))
+        runde = runde + 1
+    }
+    returner res
+}
+
+funksjon liste_har(l: liste_tekst, x: tekst) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis tekst(l[i]) == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Send GET /pid på n samtidige tilkoplingar og samle pid-ane som svarte.
+funksjon samle_pidar(n: heiltall) -> liste_tekst {
+    la hs: liste = []
+    la i: heiltall = 0
+    mens i < n {
+        la h = kople()
+        legg_til(hs, h)
+        i = i + 1
+    }
+    i = 0
+    mens i < n {
+        send(hs[i], get("/id", "Connection: close" + crlf()))
+        i = i + 1
+    }
+    la pidar: liste_tekst = []
+    i = 0
+    mens i < n {
+        la s = første(les_svar(hs[i], 1, 8000))
+        hvis status_av(s) == "200" { legg_til(pidar, kropp_av(s)) }
+        lukk(hs[i])
+        i = i + 1
+    }
+    returner pidar
+}
+
+funksjon unike(l: liste_tekst) -> liste_tekst {
+    la u: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis ikkje liste_har(u, tekst(l[i])) { legg_til(u, tekst(l[i])) }
+        i = i + 1
+    }
+    returner u
+}
+
+funksjon alle_ider(l: liste_tekst, antal: heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        la x = tekst(l[i])
+        la id = heltall_fra_tekst(builtin.slice(x, 0, builtin.index_of(x, ":")))
+        hvis id < 0 eller id >= antal { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// pid for arbeidar «id» frå «Arbeidar <id> klar (pid N).» i loggen.
+funksjon pid_for_id(ut: tekst, id: tekst) -> tekst {
+    la merke = "Arbeidar " + id + " klar (pid "
+    la p = builtin.index_of(ut, merke)
+    hvis p < 0 { returner "" }
+    la rest = builtin.slice(ut, p + lengde(merke), lengde(ut))
+    returner builtin.slice(rest, 0, builtin.index_of(rest, ")"))
+}
+
+funksjon vent_logg(b: ordbok, merke: tekst, ms: heiltall) -> boolsk {
+    la frist = builtin.tid_ms() + ms
+    mens builtin.tid_ms() < frist {
+        barn_les(b)
+        hvis builtin.contains(normaliser(tekst(b["ut"])), merke) { returner sann }
+        barn_status(b)
+        hvis b["status"] != "kjorer" { returner usann }
+        builtin.process_operation(process_abi.async_wait_request(tekst(b["handle"]), 100))
+    }
+    returner usann
+}
+
+funksjon køyr_scenario(b: ordbok) -> heiltall {
+    la ut = normaliser(tekst(b["ut"]))
+    krev(builtin.contains(ut, "Leiar: 3 arbeidarar"), "leiar: melder 3 arbeidarar")
+    la start_pidar = unike(pidar_etter(ut, "Arbeidar "))
+    krev(lengde(start_pidar) == 3, "leiar: tre ulike arbeidar-pid-ar i loggen, fekk " + tekst(lengde(start_pidar)))
+
+    // 2. samtidige førespurnader fordelt på fleire arbeidarar (svar = «<id>:<starttid>»).
+    la svar = samle_pidar(40)
+    krev(lengde(svar) == 40, "fordeling: 40 av 40 svar, fekk " + tekst(lengde(svar)))
+    la sett = unike(svar)
+    krev(lengde(sett) >= 2, "fordeling: minst to ulike arbeidarar svarte, fekk " + tekst(lengde(sett)))
+    krev(alle_ider(sett, 3), "fordeling: alle svar kjem frå arbeidar 0-2")
+
+    // 3. drep éin arbeidar (pid frå loggen) → leiaren startar han på nytt, med ny starttid.
+    hvis lengde(sett) >= 1 {
+        la gammal = tekst(sett[0])
+        la offer_id = builtin.slice(gammal, 0, builtin.index_of(gammal, ":"))
+        la offer_pid = pid_for_id(ut, offer_id)
+        krev(offer_pid != "", "omstart: fann pid for arbeidar " + offer_id)
+        krev(drep_pid(offer_pid, tekst(builtin.system_info()["cwd"])), "omstart: SIGKILL sendt til " + offer_pid)
+        krev(vent_logg(b, "starta arbeidar " + offer_id + " på nytt", 60000), "omstart: leiaren startar arbeidar " + offer_id + " på nytt")
+        la frist = builtin.tid_ms() + 90000
+        la ser_ny = usann
+        mens builtin.tid_ms() < frist og ikkje ser_ny {
+            la s2 = samle_pidar(30)
+            la i2: heiltall = 0
+            mens i2 < lengde(s2) {
+                la x = tekst(s2[i2])
+                hvis builtin.starts_with(x, offer_id + ":") og x != gammal { ser_ny = sann }
+                i2 = i2 + 1
+            }
+        }
+        krev(ser_ny, "omstart: den omstarta arbeidaren " + offer_id + " svarar (ny starttid)")
+    }
+
+    // 4. SIGTERM til leiaren: ordna stopp med exit 0.
+    barn_signal(b, 15)
+    krev(barn_vent(b, 20000), "stopp: leiaren sluttar etter SIGTERM")
+    krev(b["status"] == "ferdig" og b["exit"] == "0", "stopp: exit 0 (status " + tekst(b["status"]) + ", exit " + tekst(b["exit"]) + ")")
+    la ut3 = normaliser(tekst(b["ut"]))
+    krev(builtin.contains(ut3, "Leiar: stoppa"), "stopp: leiaren loggar stopp")
+    krev(builtin.contains(ut3, "SIGTERM motteke"), "stopp: arbeidarane fekk SIGTERM og drenerte")
+    la ny = socket.native_tilkoble("127.0.0.1", port())
+    krev(tekst(ny["status"]) != "connected", "stopp: porten er lukka etterpå")
+    hvis tekst(ny["status"]) == "connected" { lukk(ny) }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje builtin.starts_with(nsys.mål(), "linux") {
+        skriv("test_serve_arbeidarar: hoppar over (berre Linux)\n")
+        returner 0
+    }
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    hvis miljo_hent("NC_SERVE_TEST_BIN") != "" { runtime = miljo_hent("NC_SERVE_TEST_BIN") }
+    la root = tekst(info["cwd"])
+    la b = start_barn(runtime, root)
+    hvis b["status"] != "kjorer" {
+        kast "kunne ikkje starte nc serve: " + tekst(b["status"])
+    }
+    hvis vent_logg(b, "Arbeidar 2 klar", 240000) og vent_logg(b, "Arbeidar 1 klar", 60000) og vent_logg(b, "Arbeidar 0 klar", 60000) {
+        prøv {
+            køyr_scenario(b)
+        } fang (e) {
+            krev(usann, "unntak: " + tekst(e))
+        }
+    } ellers {
+        krev(usann, "arbeidarane vart ikkje klare")
+    }
+    barn_signal(b, 9)
+    barn_stopp(b)
+    hvis lengde(_feil) > 0 {
+        skriv("stdout frå nc serve:\n" + normaliser(tekst(b["ut"])) + "\nstderr:\n" + tekst(b["feil"]) + "\n")
+        kast "test_serve_arbeidarar: " + tekst_fra_heltall(lengde(_feil)) + " sjekk(ar) feila"
+    }
+    skriv("test_serve_arbeidarar OK\n")
+    returner 0
+}

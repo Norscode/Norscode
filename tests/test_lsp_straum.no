@@ -1,0 +1,300 @@
+// Strøymande språktenar (selfhost/lsp/straum.no): protokollkjernen testa uten
+// prosessar. Alle assertar er diskriminerande — eksakte linjer/kolonnar,
+// signaturar og rekkjer — ikkje berre «strengen finst i kjeldefila».
+//
+// Interaktiv strøyming med røyr er dekt av tests/aot_lsp_straum_drivar.no
+// (linux-x86_64 AOT); prosess-ende-til-ende i tests/test_lsp_straum_prosess.no.
+
+bruk selfhost.lsp.straum som s
+
+la ANTAL_FEIL = 0
+
+funksjon krev(ok: boolsk, namn: tekst, detalj) {
+    hvis ikkje ok {
+        ANTAL_FEIL = ANTAL_FEIL + 1
+        skriv("FEIL " + namn + ": " + s.lsp_js(detalj) + "\n")
+    }
+}
+
+// Dekod ei ramma utmelding til ordbok.
+funksjon dekod(ramme: tekst) {
+    la r = s.lsp_pakk_ut(ramme)
+    krev(finnes_nøkkel(r, "body"), "ramme dekodbar", ramme)
+    returner json_parse_raw(r["body"])
+}
+
+funksjon send(tilstand, json: tekst) {
+    la ut = s.lsp_behandle(tilstand, json_parse_raw(json))
+    la dekoda = []
+    la i = 0
+    mens i < lengde(ut) {
+        legg_til(dekoda, dekod(ut[i]))
+        i = i + 1
+    }
+    returner dekoda
+}
+
+funksjon diag_for(tilstand) {
+    la f = s.lsp_flush(tilstand)
+    la ut = []
+    la i = 0
+    mens i < lengde(f) {
+        legg_til(ut, dekod(f[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon open_json(uri: tekst, versjon: heiltall, kjelde: tekst) -> tekst {
+    returner "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\",\"version\":" + tekst(versjon) + ",\"text\":" + s.lsp_js_tekst(kjelde) + "}}}"
+}
+
+funksjon pos_json(metode: tekst, id: heiltall, uri: tekst, linje: heiltall, teikn: heiltall) -> tekst {
+    returner "{\"jsonrpc\":\"2.0\",\"id\":" + tekst(id) + ",\"method\":\"" + metode + "\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":" + tekst(linje) + ",\"character\":" + tekst(teikn) + "}}}"
+}
+
+funksjon test_ramming() {
+    // To meldingar i eitt bufferet, den andre delt midt i brødteksten.
+    la a = "{\"id\":1}"
+    la b = "{\"id\":2,\"x\":\"æø\"}"
+    la buf = "Content-Length: " + tekst(lengde(a)) + "\r\n\r\n" + a + "Content-Length: " + tekst(lengde(b)) + "\r\n\r\n" + builtin.slice(b, 0, 7)
+    la r1 = s.lsp_pakk_ut(buf)
+    krev(r1["body"] == a, "ramme 1 body", r1)
+    la r2 = s.lsp_pakk_ut(r1["rest"])
+    krev(finnes_nøkkel(r2, "ufullstendig"), "ramme 2 er ufullstendig", r2)
+    la r3 = s.lsp_pakk_ut(r1["rest"] + builtin.slice(b, 7, lengde(b)))
+    krev(r3["body"] == b og r3["rest"] == "", "ramme 2 fullstendig; lengd tel byte", r3)
+    krev(lengde("æ") == 2, "tekst er byte-sekvens", lengde("æ"))
+    // Header utan Content-Length blir eit feil, ikkje ei hengjande lykkje.
+    la r4 = s.lsp_pakk_ut("X-Foo: 1\r\n\r\n{}")
+    krev(finnes_nøkkel(r4, "feil"), "manglande Content-Length", r4)
+    // Rå JSON utan header
+    la r5 = s.lsp_pakk_ut("{\"a\":\"}\"}{\"b\":2}")
+    krev(r5["body"] == "{\"a\":\"}\"}" og r5["rest"] == "{\"b\":2}", "rå JSON respekterer strengar", r5)
+}
+
+funksjon test_utf16() {
+    krev(s.lsp_u16_til_byte("aæb", 2) == 3, "u16→byte etter æ", s.lsp_u16_til_byte("aæb", 2))
+    krev(s.lsp_byte_til_u16("aæb", 3) == 2, "byte→u16 etter æ", s.lsp_byte_til_u16("aæb", 3))
+    krev(s.lsp_byte_til_u16("a😀b", 5) == 3, "emoji tel som to UTF-16-einingar", s.lsp_byte_til_u16("a😀b", 5))
+    krev(s.lsp_u16_til_byte("a😀b", 3) == 5, "u16→byte etter emoji", s.lsp_u16_til_byte("a😀b", 3))
+}
+
+funksjon test_protokoll() {
+    la t = s.lsp_ny_tilstand()
+    la uri = "file:///t/a.no"
+
+    // initialize
+    la init = send(t, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file:///Users/x/proj%20a\"}}")
+    krev(lengde(init) == 1 og init[0]["id"] == 1, "initialize gjev eitt svar med id", init)
+    la cap = init[0]["result"]["capabilities"]
+    krev(cap["textDocumentSync"]["change"] == 2 og cap["textDocumentSync"]["openClose"] == sann, "inkrementell synk annonsert", cap)
+    krev(cap["hoverProvider"] == sann og cap["definitionProvider"] == sann og cap["documentSymbolProvider"] == sann, "capabilities", cap)
+    krev(cap["referencesProvider"] == sann og cap["renameProvider"] == sann og cap["documentFormattingProvider"] == sann, "capabilities 2", cap)
+    krev(cap["completionProvider"]["triggerCharacters"][0] == ".", "trigger-teikn", cap)
+    krev(t["rot"] == "/Users/x/proj a", "rot dekoda frå URI", t["rot"])
+    krev(lengde(send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")) == 0, "initialized gjev ingen svar", "")
+
+    // didOpen med typefeil
+    la kjelde = "// Legg saman to tal.\nfunksjon pluss(a: heltall, b: heltall) -> heltall {\n    returner a + b\n}\nstruktur Punkt { x: heltall, y: heltall }\nfunksjon start() {\n    la x: heltall = pluss(1, \"to\")\n    returner x\n}\n"
+    krev(lengde(send(t, open_json(uri, 1, kjelde))) == 0, "didOpen er varsel (ingen direkte svar)", "")
+    la d = diag_for(t)
+    krev(lengde(d) == 1 og d[0]["method"] == "textDocument/publishDiagnostics", "éi publishDiagnostics", d)
+    la diagnostikk = d[0]["params"]["diagnostics"]
+    krev(d[0]["params"]["uri"] == uri og d[0]["params"]["version"] == 1, "uri og versjon", d[0]["params"])
+    la funnet = null
+    la di = 0
+    mens di < lengde(diagnostikk) {
+        hvis diagnostikk[di]["code"] == "type-error" { funnet = diagnostikk[di] }
+        di = di + 1
+    }
+    krev(funnet != null, "type-error finst", diagnostikk)
+    hvis funnet != null {
+        krev(funnet["severity"] == 1, "type-error er severity 1", funnet)
+        krev(funnet["range"]["start"]["line"] == 6 og funnet["range"]["start"]["character"] == 29, "type-error på linje 6 kolonne 29 (0-basert)", funnet["range"])
+        krev(builtin.contains(funnet["message"], "pluss"), "meldinga nemner funksjonen", funnet["message"])
+    }
+
+    // hover på kallet pluss(...) (linje 6, teikn 22) → signatur + dokumentasjon
+    la h = send(t, pos_json("textDocument/hover", 2, uri, 6, 22))
+    krev(h[0]["id"] == 2, "hover svar-id", h)
+    la hv = h[0]["result"]["contents"]["value"]
+    krev(builtin.contains(hv, "funksjon pluss(a: heltall, b: heltall) -> heltall"), "hover-signatur", hv)
+    krev(builtin.contains(hv, "Legg saman to tal."), "hover-dokkommentar", hv)
+    krev(h[0]["result"]["range"]["start"]["character"] == 20 og h[0]["result"]["range"]["end"]["character"] == 25, "hover-rekkje dekkjer ordet", h[0]["result"]["range"])
+    // hover på lokal variabel x (linje 7, teikn 14) → type frå annotasjonen
+    la hl = send(t, pos_json("textDocument/hover", 3, uri, 7, 14))
+    krev(builtin.contains(hl[0]["result"]["contents"]["value"], "(variabel) x: heltall"), "hover lokal: type", hl)
+    // hover på kommentar gjev null
+    la hk = send(t, pos_json("textDocument/hover", 4, uri, 0, 5))
+    krev(hk[0]["result"] == null, "hover i kommentar gjev null", hk)
+    // hover på parameter
+    la hp = send(t, pos_json("textDocument/hover", 5, uri, 2, 13))
+    krev(builtin.contains(hp[0]["result"]["contents"]["value"], "(parameter) a: heltall"), "hover parameter", hp)
+
+    // definition: pluss-kallet → deklarasjonen (linje 1, kolonne 9)
+    la df = send(t, pos_json("textDocument/definition", 6, uri, 6, 22))
+    krev(df[0]["result"]["uri"] == uri og df[0]["result"]["range"]["start"]["line"] == 1 og df[0]["result"]["range"]["start"]["character"] == 9 og df[0]["result"]["range"]["end"]["character"] == 14, "definition av pluss", df)
+    // definition av lokal variabel x (bruk på linje 7) → la x på linje 6 kolonne 7
+    la dl = send(t, pos_json("textDocument/definition", 7, uri, 7, 14))
+    krev(dl[0]["result"]["range"]["start"]["line"] == 6 og dl[0]["result"]["range"]["start"]["character"] == 7, "definition av lokal", dl)
+    // definition av ukjend ord gjev null
+    la du = send(t, pos_json("textDocument/definition", 8, uri, 0, 5))
+    krev(du[0]["result"] == null, "definition i kommentar gjev null", du)
+
+    // completion: prefiks «pl» gjev berre pluss; ingen nøkkelord
+    la k1 = send(t, pos_json("textDocument/completion", 9, uri, 6, 22))
+    la it = k1[0]["result"]["items"]
+    krev(lengde(it) == 1 og it[0]["label"] == "pluss" og it[0]["kind"] == 3, "completion pl → pluss", it)
+    krev(builtin.contains(tekst(it[0]["detail"]), "-> heltall") og it[0]["documentation"] == "Legg saman to tal.", "completion detail+dok", it)
+    // tomt prefiks: lokale og nøkkelord, og struktur Punkt
+    la k2 = send(t, pos_json("textDocument/completion", 10, uri, 7, 4))
+    la lab = []
+    la ki = 0
+    mens ki < lengde(k2[0]["result"]["items"]) {
+        legg_til(lab, k2[0]["result"]["items"][ki]["label"])
+        ki = ki + 1
+    }
+    krev(builtin.contains(builtin.join(lab, ","), "returner") og builtin.contains(builtin.join(lab, ","), "Punkt") og builtin.contains(builtin.join(lab, ","), "pluss"), "completion: nøkkelord + symbol", builtin.join(lab, ","))
+
+    // documentSymbol
+    la sy = send(t, "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"}}}")
+    la sr = sy[0]["result"]
+    krev(lengde(sr) == 3, "tre toppnivå-symbol", lengde(sr))
+    krev(sr[0]["name"] == "pluss" og sr[0]["kind"] == 12 og sr[0]["range"]["start"]["line"] == 1 og sr[0]["range"]["end"]["line"] == 3, "symbol pluss med rekkje 1..3", sr[0])
+    krev(sr[1]["name"] == "Punkt" og sr[1]["kind"] == 23 og lengde(sr[1]["children"]) == 2 og sr[1]["children"][1]["name"] == "y", "struktur med felt", sr[1])
+    krev(sr[2]["name"] == "start" og sr[2]["selectionRange"]["start"]["line"] == 5, "symbol start", sr[2])
+
+    // references / rename
+    la rf = send(t, pos_json("textDocument/references", 12, uri, 1, 11))
+    krev(lengde(rf[0]["result"]) == 2, "to referansar til pluss (dekl + kall)", rf)
+    la rn = send(t, "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":1,\"character\":11},\"newName\":\"sum\"}}")
+    la ed = rn[0]["result"]["changes"][uri]
+    krev(lengde(ed) == 2 og ed[0]["newText"] == "sum" og ed[0]["range"]["start"]["line"] == 1 og ed[1]["range"]["start"]["line"] == 6, "rename gjev to redigeringar", rn)
+    la rn2 = send(t, "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":1,\"character\":11},\"newName\":\"la\"}}")
+    krev(rn2[0]["error"]["code"] == -32602, "rename til nøkkelord avvist", rn2)
+
+    // didChange inkrementelt: "to" → 2 fjernar typefeilen
+    send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\",\"version\":2},\"contentChanges\":[{\"range\":{\"start\":{\"line\":6,\"character\":29},\"end\":{\"line\":6,\"character\":33}},\"text\":\"2\"}]}}")
+    la d2 = diag_for(t)
+    la har_feil = usann
+    la d2d = d2[0]["params"]["diagnostics"]
+    la j = 0
+    mens j < lengde(d2d) {
+        hvis d2d[j]["code"] == "type-error" { har_feil = sann }
+        j = j + 1
+    }
+    krev(ikkje har_feil og d2[0]["params"]["version"] == 2, "inkrementell endring fjernar typefeilen", d2)
+    krev(builtin.contains(t["dokument"][uri]["innhald"], "pluss(1, 2)"), "dokumenttekst oppdatert", t["dokument"][uri]["innhald"])
+
+    // to endringar på rad → éi samla publishDiagnostics (koalesering)
+    send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\",\"version\":3},\"contentChanges\":[{\"text\":\"funksjon (\\n\"}]}}")
+    send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\",\"version\":4},\"contentChanges\":[{\"text\":\"funksjon f( {\\n\"}]}}")
+    la d3 = diag_for(t)
+    krev(lengde(d3) == 1 og d3[0]["params"]["version"] == 4, "koalesering: berre siste versjon blir publisert", d3)
+    krev(d3[0]["params"]["diagnostics"][0]["code"] == "syntax-error" og d3[0]["params"]["diagnostics"][0]["severity"] == 1, "syntaksfeil", d3)
+
+    // didClose tømer diagnostikk
+    la cl = send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"}}}")
+    krev(lengde(cl) == 1 og lengde(cl[0]["params"]["diagnostics"]) == 0, "didClose tømer", cl)
+    krev(lsp_hent_utan(t, uri) == null, "dokument fjerna", "")
+
+    // ukjend metode med id → MethodNotFound; utan id → ignorert
+    la uk = send(t, "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"foo/bar\"}")
+    krev(uk[0]["error"]["code"] == -32601, "ukjend metode", uk)
+    krev(lengde(send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"foo/varsel\"}")) == 0, "ukjent varsel ignorert", "")
+
+    // shutdown → null, deretter exit (kode 0 via avslutta+shutdown)
+    la sd = send(t, "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"shutdown\"}")
+    krev(sd[0]["id"] == 21 og sd[0]["result"] == null, "shutdown", sd)
+    la etter = send(t, pos_json("textDocument/hover", 22, uri, 0, 0))
+    krev(etter[0]["error"]["code"] == -32600, "førespurnad etter shutdown avvist", etter)
+    send(t, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+    krev(t["avslutta"] == sann og t["shutdown"] == sann, "exit etter shutdown", "")
+}
+
+funksjon lsp_hent_utan(t, uri: tekst) {
+    hvis finnes_nøkkel(t["dokument"], uri) { returner t["dokument"][uri] }
+    returner null
+}
+
+funksjon test_modul() {
+    // Modulfunksjonar via importalias: rota peikar på repoet (testen køyrer frå repo-rota).
+    la t = s.lsp_ny_tilstand()
+    la rot = tekst(builtin.system_info()["cwd"])
+    t["rot"] = rot
+    la uri = "file:///t/b.no"
+    la kjelde = "bruk std.tekst som t\nfunksjon start() {\n    la n = t.inneh\n}\n"
+    send(t, open_json(uri, 1, kjelde))
+    la k = send(t, pos_json("textDocument/completion", 1, uri, 2, 18))
+    la items = k[0]["result"]["items"]
+    krev(lengde(items) >= 1 og items[0]["label"] == "inneholder", "modulcompletion: t.inneh → inneholder", items)
+    send(t, open_json(uri, 2, "bruk std.tekst som t\nfunksjon start() {\n    la n = t.inneholder(\"a\", \"b\")\n}\n"))
+    la d = send(t, pos_json("textDocument/definition", 2, uri, 2, 16))
+    krev(d[0]["result"] != null og d[0]["result"]["range"]["start"]["line"] > 0 og d[0]["result"]["uri"] == "file://" + rot + "/std/tekst.no", "definition gjennom importalias → std/tekst.no", d)
+    la imp = send(t, pos_json("textDocument/definition", 3, uri, 0, 12))
+    krev(imp[0]["result"]["uri"] == "file://" + rot + "/std/tekst.no", "definition av modulnamn", imp)
+}
+
+funksjon test_formatering() {
+    la t = s.lsp_ny_tilstand()
+    la uri = "file:///t/c.no"
+    send(t, open_json(uri, 1, "funksjon  f( )  {\n  la   a=1\n  returner a\n}\n"))
+    la f = send(t, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"},\"options\":{\"tabSize\":4,\"insertSpaces\":true}}}")
+    krev(lengde(f[0]["result"]) == 1, "ei redigering", f)
+    krev(builtin.contains(f[0]["result"][0]["newText"], "    la a = 1"), "formatert innrykk og operatorar", f[0]["result"][0]["newText"])
+    krev(f[0]["result"][0]["range"]["start"]["line"] == 0 og f[0]["result"][0]["range"]["end"]["line"] == 4, "heile dokumentet erstatta", f[0]["result"][0]["range"])
+}
+
+funksjon test_ikkje_ascii() {
+    // Diagnostikk-kolonne i UTF-16 når linja har æøå før feilen.
+    la t = s.lsp_ny_tilstand()
+    la uri = "file:///t/d.no"
+    send(t, open_json(uri, 1, "funksjon f(a: heltall) -> heltall {\n    returner a\n}\nfunksjon start() {\n    la æøå = f(\"å\")\n}\n"))
+    la d = diag_for(t)[0]["params"]["diagnostics"]
+    la funnet = null
+    la i = 0
+    mens i < lengde(d) {
+        hvis d[i]["code"] == "type-error" { funnet = d[i] }
+        i = i + 1
+    }
+    krev(funnet != null, "type-error med ikkje-ASCII", d)
+    // «la æøå = f("å")»: argumentet «"å"» startar på byte 18 → UTF-16-kolonne 15.
+    krev(funnet["range"]["start"]["character"] == 15, "UTF-16-kolonne, ikkje byte", funnet["range"])
+}
+
+funksjon test_uri_til_sti() {
+    krev(s.lsp_uri_til_sti("file:///a/b") == "/a/b", "posix-uri", s.lsp_uri_til_sti("file:///a/b"))
+    krev(s.lsp_uri_til_sti("file:///a/c%23d") == "/a/c#d", "%23", s.lsp_uri_til_sti("file:///a/c%23d"))
+    krev(s.lsp_uri_til_sti("file:///a/%E2%82%AC") == "/a/€", "%E2%82%AC", s.lsp_uri_til_sti("file:///a/%E2%82%AC"))
+    krev(s.lsp_uri_til_sti("file:///C%3A/work") == "C:/work", "windows", s.lsp_uri_til_sti("file:///C%3A/work"))
+    krev(s.lsp_uri_til_sti("file:///c:/work/a%20b.no") == "c:/work/a b.no", "windows lite", s.lsp_uri_til_sti("file:///c:/work/a%20b.no"))
+    krev(s.lsp_uri_til_sti("file:///t/%C3%A6%C3%B8%C3%A5") == "/t/æøå", "norske bokstavar", s.lsp_uri_til_sti("file:///t/%C3%A6%C3%B8%C3%A5"))
+    krev(s.lsp_uri_til_sti("file:///a/100%") == "/a/100%", "ugyldig prosent", s.lsp_uri_til_sti("file:///a/100%"))
+    krev(s.lsp_sti_til_uri("C:/work/a.no") == "file:///C:/work/a.no", "sti til uri windows", s.lsp_sti_til_uri("C:/work/a.no"))
+    krev(s.lsp_sti_til_uri("/a/b c") == "file:///a/b%20c", "sti til uri posix", s.lsp_sti_til_uri("/a/b c"))
+    krev(s.lsp_sti_til_uri("/a/c#d?e%f") == "file:///a/c%23d%3Fe%25f", "sti til uri reserverte", s.lsp_sti_til_uri("/a/c#d?e%f"))
+    krev(s.lsp_sti_til_uri("C:/w/a#b.no") == "file:///C:/w/a%23b.no", "sti til uri windows #", s.lsp_sti_til_uri("C:/w/a#b.no"))
+    la rt = ["/a/c#d?e%f g", "/t/æøå/€.no", "C:/work/a b#.no", "/a-b_c.d~e/x"]
+    la rti = 0
+    mens rti < lengde(rt) {
+        krev(s.lsp_uri_til_sti(s.lsp_sti_til_uri(rt[rti])) == rt[rti], "rundtur", rt[rti])
+        rti = rti + 1
+    }
+}
+
+funksjon start() -> heiltall {
+    test_ramming()
+    test_utf16()
+    test_protokoll()
+    test_modul()
+    test_formatering()
+    test_ikkje_ascii()
+    test_uri_til_sti()
+    hvis ANTAL_FEIL > 0 {
+        skriv("test_lsp_straum FEILA: " + tekst(ANTAL_FEIL) + "\n")
+        returner 1
+    }
+    skriv("test_lsp_straum OK\n")
+    returner 0
+}

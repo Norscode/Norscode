@@ -1,108 +1,969 @@
-# pg.no — PostgreSQL-drivar for Norscode (IKKJE IMPLEMENTERT ENNO)
+# pg.no — PostgreSQL-klient for Norscode (wire-protokoll v3, enkel spørring)
 # Same API som std/db.no
 #
-# STATUS: fail-closed. Modulen kalla tidlegare builtin.pg_connect/pg_query/…,
-# som ikkje finst i VM-en eller nokon seed. Under seedar med «ukjent kall →
-# null» kunne open() då returnere "null" stilt, og appen trudde han var
-# tilkopla. No kastar alle operasjonar som treng ein tenar ein tydeleg feil
-# («PG-feil: PostgreSQL er ikkje støtta …») utan å røre builtin-ane, og utan å
-# ta med DSN/passord i meldinga. er_tilkopla() gjev usann, tilgjengeleg()
-# usann.
+# STATUS (H1+H2): rein Norscode over std.socket. Støttar oppstart, trust,
+# klartekst-passord og SCRAM-SHA-256 (med verifisering av tenarsignaturen),
+# enkel spørring (Query), transaksjonar og feilmeldingar frå tenaren.
+# TLS: sslmode=prefer|require|verify-full med sslrootcert=<PEM-fil> (std.tls13_klient, TLS 1.3).
+# md5-passord (AuthenticationMD5Password) og SASLprep for SCRAM-passord er støtta.
+# Passord blir aldri teke med i feilmeldingar.
 #
-# Ein Postgres-drivar i rein Norscode (wire-protokoll v3 over std.socket,
-# SCRAM-SHA-256, TLS via tls13_*) er planlagd i trinn 10 (Fase 4 plattform).
-# Bruk std.db (NorsDB) eller std.sqlite i mellomtida.
+# Alle verdiar kjem tilbake som tekst (tekstformat frå tenaren). SQL NULL blir
+# tom tekst inntil typa resultat kjem i H4.
 #
-# Bruk (når drivaren finst):
+# Bruk:
 #   bruk std.pg som pg
 #
-#   la conn = pg.open("host=localhost port=5432 dbname=myapp user=app password=hemmeleg")
-#   // Eller via URL:
-#   la conn = pg.open_url("postgresql://app:hemmeleg@localhost:5432/myapp")
-#   pg.execute(conn, "INSERT INTO brukar (namn) VALUES ($1)", ["Ola"])
-#   la rader = pg.query(conn, "SELECT * FROM brukar WHERE aktiv = $1", ["sann"])
+#   la conn = pg.open("host=localhost port=5432 dbname=myapp user=app")
+#   pg.execute_raw(conn, "INSERT INTO brukar (namn) VALUES ('Ola')")
+#   la rader = pg.query_raw(conn, "SELECT * FROM brukar")
+#   pg.close(conn)
+
+bruk std.socket som sok
+bruk std.sha256 som sha
+bruk std.krypto som krypto
+bruk std.base64 som base64
+bruk std.pg_csv som csv
+bruk std.pg_wire som w
+bruk std.tls13_klient som tls
+bruk std.md5 som md5
+bruk std.saslprep som sp
+
+# Aktive tilkoplingar: "pg:N" → tilstand. Tilkoplingshandtaket utanfor er berre ein tekst.
+la _TILK = {}
+la _TELJAR = {"n": 0}
 
 # ─── Status ───────────────────────────────────────────────────────────────────
 
-# Sann når ein PostgreSQL-drivar er tilgjengeleg. Alltid usann inntil trinn 10.
+# Sann når klienten kan snakke med ein tenar (trust/klartekst, enkel spørring).
 funksjon tilgjengeleg() -> boolsk {
+    returner sann
+}
+
+funksjon _feil(melding: tekst) {
+    kast "PG-feil: " + melding
+}
+
+# ─── Byte- og tekst-hjelparar ─────────────────────────────────────────────────
+
+funksjon _hex_siffer(v: heltall) -> tekst {
+    returner builtin.slice("0123456789abcdef", v, v + 1)
+}
+
+funksjon _hex_verdi(c: tekst) -> heltall {
+    la k = builtin.char_code(c)
+    hvis k >= 97 {returner k - 87}
+    hvis k >= 65 {returner k - 55}
+    returner k - 48
+}
+
+funksjon _til_hex(bytes: liste_heiltall) -> tekst {
+    la ut = ""
+    la i: heltall = 0
+    mens i < lengde(bytes) {
+        la b = bytes[i] & 255
+        ut = ut + _hex_siffer((b>>4) & 15) + _hex_siffer(b & 15)
+        i = i + 1
+    }
+    returner ut
+}
+
+# Hex-tekst → bytes, lagt rett på `mål`. Slår opp to teikn om gongen i ein tabell.
+la _HEXPAR = {}
+funksjon _hex_tabell() {
+    hvis lengde(_HEXPAR) > 0 {returner}
+    la sif = "0123456789abcdef"
+    la a: heltall = 0
+    mens a < 16 {
+        la b: heltall = 0
+        mens b < 16 {
+            _HEXPAR[builtin.slice(sif, a, a + 1) + builtin.slice(sif, b, b + 1)] = a * 16 + b
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+funksjon _hex_til(hex: tekst, mål: liste_heiltall) {
+    _hex_tabell()
+    la n = lengde(hex)
+    la i: heltall = 0
+    mens i + 1 < n {
+        legg_til(mål, _HEXPAR[builtin.slice(hex, i, i + 2)])
+        i = i + 2
+    }
+}
+
+# Strengar i Norscode er bytestrengar: eit teikn under 256 er éi byte (kjeldeliteralen «Åse» har lengd 4).
+# Teikn over 255 (frå builtin.chr) blir UTF-8-kodar.
+funksjon _utf8(s: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis c < 256 {
+            legg_til(ut, c)
+        } ellers hvis c < 2048 {
+            legg_til(ut, 192 + (c / 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers hvis c < 65536 {
+            legg_til(ut, 224 + (c / 4096))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        } ellers {
+            legg_til(ut, 240 + (c / 262144))
+            legg_til(ut, 128 + ((c / 4096) % 64))
+            legg_til(ut, 128 + ((c / 64) % 64))
+            legg_til(ut, 128 + (c % 64))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# bytes[start, slutt) som bytestreng (same modell som kjeldeliteralar): eitt teikn per byte.
+funksjon _frå_utf8(bytes: liste_heiltall, start: heltall, slutt: heltall) -> tekst {
+    la ut: liste_tekst = []
+    la i: heltall = start
+    mens i < slutt {
+        legg_til(ut, builtin.chr(bytes[i]))
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+funksjon _i32(n: heltall) -> liste_heiltall {
+    returner [(n>>24) & 255, (n>>16) & 255, (n>>8) & 255, n & 255]
+}
+
+funksjon _i16(n: heltall) -> liste_heiltall {
+    returner [(n>>8) & 255, n & 255]
+}
+
+# Les signert 32-bit big-endian frå bytes[pos..pos+4).
+funksjon _les_i32(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la v = (bytes[pos]<<24) + (bytes[pos + 1]<<16) + (bytes[pos + 2]<<8) + bytes[pos + 3]
+    hvis v >= 2147483648 {returner v - 4294967296}
+    returner v
+}
+
+funksjon _les_i16(bytes: liste_heiltall, pos: heltall) -> heltall {
+    returner (bytes[pos]<<8) + bytes[pos + 1]
+}
+
+# Finn indeksen til neste NUL-byte frå pos (eller lengda om det ikkje finst).
+funksjon _nul(bytes: liste_heiltall, pos: heltall) -> heltall {
+    la i: heltall = pos
+    mens i < lengde(bytes) og bytes[i] != 0 {i = i + 1}
+    returner i
+}
+
+funksjon _legg_til_alle(mål: liste_heiltall, kjelde: liste_heiltall) {
+    la i: heltall = 0
+    mens i < lengde(kjelde) {
+        legg_til(mål, kjelde[i])
+        i = i + 1
+    }
+}
+
+# Ei C-streng: UTF-8-bytes + avsluttande NUL.
+funksjon _cstr(s: tekst) -> liste_heiltall {
+    la b = _utf8(s)
+    legg_til(b, 0)
+    returner b
+}
+
+# Ei meldingsramme: type-byte + lengde (inkl. lengdefeltet) + innhald.
+funksjon _melding(typ: tekst, innhald: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [builtin.char_code(typ)]
+    _legg_til_alle(ut, _i32(lengde(innhald) + 4))
+    _legg_til_alle(ut, innhald)
+    returner ut
+}
+
+# ─── Transport ────────────────────────────────────────────────────────────────
+
+# Valfri ventekrok (berre for testar der tenaren køyrer i same program): blir kalla medan
+# vi ventar på sokkelen, slik at tenaren får svare.
+la _KROK = {}
+
+funksjon sett_ventekrok(f) {
+    _KROK["f"] = f
+}
+
+funksjon fjern_ventekrok() {
+    _KROK = {}
+}
+
+# Transport: {"r": sokkelhandtak, "tls": TLS-sesjon (berre etter oppgradering)}.
+# Utan "tls" går bytene rett til sokkelen (ingen ekstra kostnad for klartekst).
+funksjon _vent(t: ordbok, events: heltall) -> boolsk {
+    la h = t["r"]
+    hvis har_nokkel(_KROK, "f") {
+        la f = _KROK["f"]
+        la runde: heltall = 0
+        mens runde < 2000 {
+            hvis sok.native_poll_vent(h, events, 5)["status"] == "klar" { returner sann }
+            f()
+            runde = runde + 1
+        }
+        returner usann
+    }
+    returner sok.native_poll_vent(h, events, 10000)["status"] == "klar"
+}
+
+# Send rå bytes (hex) til sokkelen.
+funksjon _send_rå(t: ordbok, hex: tekst) {
+    la h = t["r"]
+    la totalt = lengde(hex) / 2
+    la sendt: heltall = 0
+    la forsøk: heltall = 0
+    # "ok" kan bety delvis skriving: value = tal sendte byte (2 hex-teikn per byte).
+    mens sendt < totalt og forsøk < 100000 {
+        la r = sok.native_skriv_hex(h, builtin.slice(hex, sendt * 2, lengde(hex)))
+        hvis tekst(r["status"]) == "ok" {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            hvis n <= 0 {_feil("kunne ikkje skrive til tenaren")}
+            sendt = sendt + n
+        } ellers hvis tekst(r["status"]) == "ventende" {
+            hvis ikkje _vent(t, 2) {_feil("tidsavbrot ved skriving til tenaren")}
+        } ellers {
+            _feil("kunne ikkje skrive til tenaren")
+        }
+        forsøk = forsøk + 1
+    }
+    hvis sendt < totalt {_feil("kunne ikkje skrive til tenaren")}
+}
+
+funksjon _send(t: ordbok, bytes: liste_heiltall) {
+    hvis har_nokkel(t, "tls") {
+        _send_rå(t, _til_hex(tls.krypter_app(t["tls"], bytes)))
+    } ellers {
+        _send_rå(t, _til_hex(bytes))
+    }
+}
+
+# Les eitt rått utsnitt frå sokkelen (opptil 4096 byte) som bytes. Tom liste = tenaren stengde.
+funksjon _les_rå(t: ordbok) -> liste_heiltall {
+    la h = t["r"]
+    mens sann {
+        la r = sok.native_les_hex(h, 4096)
+        la status = tekst(r["status"])
+        hvis status == "ventende" {
+            hvis ikkje _vent(t, 1) {_feil("tidsavbrot ved lesing frå tenaren")}
+        } ellers hvis status != "ok" {
+            _feil("tilkoplinga til tenaren vart broten")
+        } ellers {
+            la ut: liste_heiltall = []
+            _hex_til(tekst(r["data_hex"]), ut)
+            returner ut
+        }
+    }
+    returner []
+}
+
+# Les inn minst `behov` ubrukte byte i bufferen. `st[0]` er lesepos i `buf`.
+# Bufferen er ei lokal liste som blir sendt som parameter (å lese ei liste ut av
+# ein ordbok kopierer ho, og gjer lesing kvadratisk treg).
+funksjon _fyll(t: ordbok, buf: liste_heiltall, st: liste_heiltall, behov: heltall) {
+    hvis har_nokkel(t, "tls") {
+        la s = t["tls"]
+        la rå: liste_heiltall = []
+        mens lengde(buf) - st[0] < behov {
+            la d = tls.dekrypter_straum(s, rå)
+            hvis lengde(d["ut"]) > 0 { _send_rå(t, _til_hex(d["ut"])) }
+            _legg_til_alle(buf, d["data"])
+            hvis d["status"] == "feil" {_feil("TLS-feil: " + d["feil"])}
+            hvis lengde(buf) - st[0] < behov {
+                hvis d["status"] == "lukka" {_feil("tenaren stengde TLS-tilkoplinga")}
+                rå = _les_rå(t)
+                hvis lengde(rå) == 0 {_feil("tenaren stengde tilkoplinga")}
+            }
+        }
+        returner
+    }
+    mens lengde(buf) - st[0] < behov {
+        la rå = _les_rå(t)
+        hvis lengde(rå) == 0 {_feil("tenaren stengde tilkoplinga")}
+        _legg_til_alle(buf, rå)
+    }
+}
+
+# Les éi melding og gi [type, start, slutt]; innhaldet er buf[start..slutt).
+funksjon _les_melding(h: ordbok, buf: liste_heiltall, st: liste_heiltall) -> liste_heiltall {
+    _fyll(h, buf, st, 5)
+    la p = st[0]
+    la typ = buf[p]
+    la len = _les_i32(buf, p + 1)
+    hvis len < 4 {_feil("ugyldig melding frå tenaren")}
+    _fyll(h, buf, st, 1 + len)
+    st[0] = p + 1 + len
+    returner [typ, p + 5, p + 1 + len]
+}
+
+# ─── Protokoll ────────────────────────────────────────────────────────────────
+
+# Siste ErrorResponse (alle felt: S, V, C, M, D, H, P, W, s, t, c, d, n …), for feil_felt().
+la _SISTE = {"felt": {}}
+
+# ErrorResponse/NoticeResponse buf[start..slutt) → «melding (SQLSTATE kode)».
+funksjon _feiltekst(buf: liste_heiltall, start: heltall, slutt: heltall) -> tekst {
+    la felt = w.pakk_felt(buf, start, slutt)
+    _SISTE["felt"] = felt
+    returner w.feil_tekst(felt)
+}
+
+# Feil frå tenaren (ErrorResponse): unntakstype PgServerFeil, melding «… (SQLSTATE kode)».
+# `fang (e: PgServerFeil)` fangar berre desse; transportfeil og klientfeil er «PG-feil: …».
+funksjon _kast_server(melding: tekst) {
+    kast "PgServerFeil: " + melding
+}
+
+funksjon _tilstand(conn: tekst) -> ordbok_tekst {
+    hvis ikkje er_tilkopla(conn) {_feil("ingen open tilkopling")}
+    returner _TILK[conn]
+}
+
+# Les `key=value`-par, skilde med mellomrom. Verdien kan setjast i enkle sitat (key='a b'),
+# med \' og \\ som escapes inne i sitata (libpq-stil).
+funksjon _parse_dsn(dsn: tekst) -> ordbok_tekst {
+    la ut = {"host": "localhost", "port": "5432", "dbname": "", "user": "", "password": ""}
+    la ord: liste_tekst = []
+    la gjeldande = ""
+    la i_sitat = usann
+    la i: heltall = 0
+    mens i < lengde(dsn) {
+        la ch = builtin.slice(dsn, i, i + 1)
+        hvis i_sitat {
+            hvis ch == "\\" og i + 1 < lengde(dsn) {
+                i = i + 1
+                gjeldande = gjeldande + builtin.slice(dsn, i, i + 1)
+            } ellers hvis ch == "'" {
+                i_sitat = usann
+            } ellers {
+                gjeldande = gjeldande + ch
+            }
+        } ellers hvis ch == "'" {
+            i_sitat = sann
+        } ellers hvis ch == " " eller ch == "\t" eller ch == "\n" {
+            hvis gjeldande != "" {
+                legg_til(ord, gjeldande)
+                gjeldande = ""
+            }
+        } ellers {
+            gjeldande = gjeldande + ch
+        }
+        i = i + 1
+    }
+    hvis gjeldande != "" {legg_til(ord, gjeldande)}
+    la j: heltall = 0
+    mens j < lengde(ord) {
+        la eq = builtin.index_of(ord[j], "=")
+        hvis eq > 0 {
+            ut[builtin.slice(ord[j], 0, eq)] = builtin.slice(ord[j], eq + 1, lengde(ord[j]))
+        }
+        j = j + 1
+    }
+    hvis ut["dbname"] == "" {ut["dbname"] = ut["user"]}
+    returner ut
+}
+
+# ─── SCRAM-SHA-256 (RFC 5802 / 7677) ──────────────────────────────────────────
+
+# Byte-liste → tekst der kvart teikn er éi byte (<256). Både krypto.pbkdf2_sha256
+# og std.sha256 les teikn under 256 som rå bytes, så det gir binærsikker inndata.
+funksjon _bytes_som_tekst(bytes: liste_heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(bytes) {
+        legg_til(delar, builtin.chr(bytes[i]))
+        i = i + 1
+    }
+    returner builtin.join(delar, "")
+}
+
+funksjon _hmac(nøkkel: liste_heiltall, melding: liste_heiltall) -> liste_heiltall {
+    returner sha.hmac_sha256_bytes(nøkkel, melding)
+}
+
+funksjon _sha256_bytes(data: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    _hex_til(sha.hash_bytes(data), ut)
+    returner ut
+}
+
+funksjon _xor(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(a) {
+        legg_til(ut, a[i] ^ b[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# Tidskonstant samanlikning av to byte-lister.
+funksjon _bytes_like(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la diff: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(a) {
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    }
+    returner diff == 0
+}
+
+# Hent verdien til attributtet `namn` (t.d. "r", "s", "i", "v") frå ei SCRAM-melding «a=…,b=…».
+funksjon _scram_attr(melding: tekst, namn: tekst) -> tekst {
+    la delar = builtin.split(melding, ",")
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], namn + "=") {
+            returner builtin.slice(delar[i], lengde(namn) + 1, lengde(delar[i]))
+        }
+        i = i + 1
+    }
+    _feil("scram: manglar attributt «" + namn + "» i svaret frå tenaren")
+    returner ""
+}
+
+funksjon _tilbyr_mekanisme(buf: liste_heiltall, start: heltall, slutt: heltall, namn: tekst) -> boolsk {
+    la i: heltall = start
+    mens i < slutt og buf[i] != 0 {
+        la ende = _nul(buf, i)
+        hvis _frå_utf8(buf, i, ende) == namn { returner sann }
+        i = ende + 1
+    }
     returner usann
 }
 
-funksjon _ikkje_støtta(operasjon: tekst) {
-    kast "PG-feil: PostgreSQL er ikkje støtta enno (" + operasjon + "): std.pg har ingen drivar; " +
-         "Postgres-protokollen i rein Norscode kjem i trinn 10. Bruk std.db (NorsDB) eller std.sqlite."
+# Les neste melding og krev at det er AuthenticationSASL* med gitt kode. Gir [start, slutt].
+funksjon _krev_sasl(h: ordbok, buf: liste_heiltall, st: liste_heiltall, kode: heltall) -> liste_heiltall {
+    la m = _les_melding(h, buf, st)
+    hvis m[0] == 69 { _kast_server(_feiltekst(buf, m[1], m[2])) }
+    hvis m[0] != 82 eller _les_i32(buf, m[1]) != kode {
+        _feil("uventa melding under scram-autentisering")
+    }
+    returner [m[1] + 4, m[2]]
+}
+
+# Full SCRAM-SHA-256-utveksling. `mekstart..mekslutt` er mekanismelista frå tenaren.
+# Passordet blir SASLprep-normalisert (RFC 4013, som pg_saslprep); ved SASLprep-feil blir det råe passordet brukt.
+funksjon _scram(h: ordbok, buf: liste_heiltall, st: liste_heiltall, mekstart: heltall, mekslutt: heltall, passord: tekst) {
+    hvis passord == "" { _feil("tenaren krev passord, men ingen er oppgitt") }
+    hvis ikkje _tilbyr_mekanisme(buf, mekstart, mekslutt, "SCRAM-SHA-256") {
+        _feil("tenaren tilbyr ikkje SCRAM-SHA-256 (berre kanalbinding støtta av tenaren?)")
+    }
+    la nonce = builtin.random_hex(24)
+    la sst = w.scram_start("", nonce)
+    _send(h, w.sasl_init("SCRAM-SHA-256", _utf8(sst["melding"])))
+
+    la r1 = _krev_sasl(h, buf, st, 11)
+    la server_første = _frå_utf8(buf, r1[0], r1[1])
+    la res: ordbok = {}
+    prøv {
+        res = w.scram_svar(sst, server_første, sp.saslprep(passord))
+    } fang (e) {
+        _feil(tekst(e))
+    }
+    _send(h, w.sasl_svar(_utf8(res["endeleg"])))
+
+    la r2 = _krev_sasl(h, buf, st, 12)
+    la server_slutt = _frå_utf8(buf, r2[0], r2[1])
+    hvis ikkje w.scram_verifiser(res, server_slutt) {
+        _feil("scram: tenaren sin signatur stemmer ikkje (feil passord eller uekte tenar)")
+    }
+}
+
+# md5-passordsvar (AuthenticationMD5Password): "md5" + md5hex(md5hex(passord + brukar) + salt).
+# Saltet er dei fire bytane etter autentiseringskoden i bufferen.
+funksjon _md5_passord(brukar: tekst, passord: tekst, buf: liste_heiltall, saltpos: heltall) -> tekst {
+    la indre = md5.hash_bytes(_utf8(passord + brukar))
+    la ytre: liste_heiltall = _utf8(indre)
+    la i: heltall = 0
+    mens i < 4 {
+        legg_til(ytre, buf[saltpos + i])
+        i = i + 1
+    }
+    returner "md5" + md5.hash_bytes(ytre)
+}
+
+# Oppstart + autentisering. Les til ReadyForQuery.
+funksjon _oppstart(h: ordbok, p: ordbok_tekst) {
+    la ekstra = {}
+    hvis har_nokkel(p, "application_name") { ekstra["application_name"] = p["application_name"] }
+    _send(h, w.startup(p["user"], p["dbname"], ekstra))
+
+    la buf: liste_heiltall = []
+    la st: liste_heiltall = [0]
+    la ferdig = usann
+    mens ikkje ferdig {
+        la m = _les_melding(h, buf, st)
+        la t = m[0]
+        hvis t == 82 {
+            la kode = _les_i32(buf, m[1])
+            hvis kode == 0 {
+                # AuthenticationOk
+            } ellers hvis kode == 3 {
+                hvis p["password"] == "" {_feil("tenaren krev passord, men ingen er oppgitt")}
+                _send(h, _melding("p", _cstr(p["password"])))
+            } ellers hvis kode == 5 {
+                hvis p["password"] == "" {_feil("tenaren krev passord, men ingen er oppgitt")}
+                _send(h, _melding("p", _cstr(_md5_passord(p["user"], p["password"], buf, m[1] + 4))))
+            } ellers hvis kode == 10 {
+                _scram(h, buf, st, m[1] + 4, m[2], p["password"])
+            } ellers {
+                _feil("autentiseringsmetode " + tekst_fra_heltall(kode) + " er ikkje støtta")
+            }
+        } ellers hvis t == 69 {
+            _kast_server(_feiltekst(buf, m[1], m[2]))
+        } ellers hvis t == 90 {
+            _sett_klar(h, buf, m[1])
+            ferdig = sann
+        } ellers {
+            _bakgrunn(h, t, buf, m[1], m[2])
+        }
+    }
+}
+
+# Køyr éi SQL-setning (eller fleire) som enkel spørring.
+# Gir {"rader": liste<ordbok>, "kolonnar": liste<tekst>, "tag": tekst}; kastar ved feil.
+funksjon _kjor(conn: tekst, sql: tekst) -> ordbok_tekst {
+    la h = _tilstand(conn)["h"]
+    _send(h, _melding("Q", _cstr(sql)))
+    returner _samle(h)
+}
+
+# Verdi som skal sendast som SQL NULL i parameterlista.
+funksjon sql_null() -> tekst {
+    returner builtin.chr(0) + "pg:null"
+}
+
+# Binær parameter: `param(oid, verdi)` gir ein markørverdi for params-lista (sendt i binært format med
+# deklarert type). Støtta: bool, int2/int4/int8/oid, float8, text/varchar/json, bytea (liste_heiltall),
+# uuid. Vanlege tekstverdiar blir sendt i tekstformat og lèt tenaren velje type.
+funksjon param(oid: heltall, verdi) -> tekst {
+    hvis verdi == null { returner sql_null() }
+    returner builtin.chr(0) + "pg:bin:" + tekst_fra_heltall(oid) + ":" + w.bytes_til_hex(w.kod_binar(oid, verdi))
+}
+
+# Utvida protokoll: (Parse +) Bind + Describe + Execute + Sync.
+# Parametrane blir sendt separat frå SQL-en (ingen strenginnlimming). `stmt` er namnet på ei
+# førebudd setning ("" = unnamed; då blir Parse sendt med). `resultat_binar` ber om binært format
+# for alle resultatkolonnar.
+funksjon _kjor_utv(conn: tekst, stmt: tekst, sql: tekst, params: liste<tekst>, resultat_binar: boolsk) -> ordbok_tekst {
+    la h = _tilstand(conn)["h"]
+    hvis lengde(params) > 65535 { _feil("for mange parametrar (maks 65535)") }
+    la fmt: liste_heiltall = []
+    la oidar: liste_heiltall = []
+    la vals = []
+    la nokkel_null = sql_null()
+    la bin_prefiks = builtin.chr(0) + "pg:bin:"
+    la ingen_binar = sann
+    la i: heltall = 0
+    mens i < lengde(params) {
+        la pv = tekst(params[i])
+        hvis pv == nokkel_null {
+            legg_til(fmt, 0)
+            legg_til(oidar, 0)
+            legg_til(vals, null)
+        } ellers hvis builtin.starts_with(pv, bin_prefiks) {
+            la rest = builtin.slice(pv, lengde(bin_prefiks), lengde(pv))
+            la kol = builtin.index_of(rest, ":")
+            legg_til(fmt, 1)
+            legg_til(oidar, heltall_fra_tekst(builtin.slice(rest, 0, kol)))
+            legg_til(vals, w.hex_til_bytes(builtin.slice(rest, kol + 1, lengde(rest))))
+            ingen_binar = usann
+        } ellers {
+            legg_til(fmt, 0)
+            legg_til(oidar, 0)
+            legg_til(vals, _utf8(pv))
+        }
+        i = i + 1
+    }
+    hvis ingen_binar { fmt = [] }
+    la rfmt: liste_heiltall = []
+    hvis resultat_binar { rfmt = [1] }
+    la alt: liste_heiltall = []
+    hvis stmt == "" { _legg_til_alle(alt, w.parse("", sql, oidar)) }
+    _legg_til_alle(alt, w.bind("", stmt, fmt, vals, rfmt))
+    _legg_til_alle(alt, w.describe("P", ""))
+    _legg_til_alle(alt, w.execute("", 0))
+    _legg_til_alle(alt, w.sync())
+    _send(h, alt)
+    returner _samle(h)
+}
+
+funksjon _kjor_param(conn: tekst, sql: tekst, params: liste<tekst>) -> ordbok_tekst {
+    returner _kjor_utv(conn, "", sql, params, usann)
+}
+
+# ─── Bakgrunnsmeldingar (Notice, ParameterStatus, Notification, BackendKeyData, ReadyForQuery) ───
+
+# Valfri krok som blir kalla med ei ordbok av felt (S, C, M, D, H …) for kvar NoticeResponse.
+la _NOTISKROK = {}
+
+funksjon sett_notiskrok(f) {
+    _NOTISKROK["f"] = f
+}
+
+funksjon fjern_notiskrok() {
+    _NOTISKROK = {}
+}
+
+# Sist rapporterte transaksjonsstatus frå ReadyForQuery: «I» (ledig), «T» (i transaksjon), «E» (feila transaksjon).
+funksjon _sett_klar(h: ordbok, buf: liste_heiltall, p: heltall) {
+    h["status"] = builtin.chr(buf[p])
+}
+
+funksjon _bakgrunn(h: ordbok, t: heltall, buf: liste_heiltall, s: heltall, e: heltall) {
+    hvis t == 78 {
+        la felt = w.pakk_felt(buf, s, e)
+        hvis har_nokkel(h, "notiser") {
+            la l = h["notiser"]
+            legg_til(l, felt)
+            h["notiser"] = l
+        } ellers {
+            h["notiser"] = [felt]
+        }
+        hvis har_nokkel(_NOTISKROK, "f") {
+            la f = _NOTISKROK["f"]
+            f(felt)
+        }
+    } ellers hvis t == 83 {
+        la m = w.pakk_ut(83, buf, s, e)
+        la ps = {}
+        hvis har_nokkel(h, "params") { ps = h["params"] }
+        ps[m["namn"]] = m["verdi"]
+        h["params"] = ps
+    } ellers hvis t == 75 {
+        h["pid"] = _les_i32(buf, s)
+        h["nokkel"] = _les_i32(buf, s + 4)
+    } ellers hvis t == 65 {
+        la m = w.pakk_ut(65, buf, s, e)
+        hvis har_nokkel(h, "varsel") {
+            la l = h["varsel"]
+            legg_til(l, m)
+            h["varsel"] = l
+        } ellers {
+            h["varsel"] = [m]
+        }
+    }
+}
+
+# Les svaret på ei spørring til ReadyForQuery.
+# Gir rader (tekst-ordbøker), kolonnenamn, siste kommandotag, kolonne-OID-ar og -format,
+# rå celler per rad (tekst/bytestreng eller null) og eitt «sett» per ferdig kommando
+# (fleire setningar i éin enkel spørring).
+funksjon _samle(h: ordbok) -> ordbok_tekst {
+    la buf: liste_heiltall = []
+    la st: liste_heiltall = [0]
+    la kolonnar: liste_tekst = []
+    la rader = []
+    la tag = ""
+    la typar: liste_heiltall = []
+    la format: liste_heiltall = []
+    la nullar = []
+    la celler = []
+    la raa = []
+    la sett = []
+    la sett_start: heltall = 0
+    la poidar: liste_heiltall = []
+    la feil = ""
+    la ferdig = usann
+    mens ikkje ferdig {
+        la m = _les_melding(h, buf, st)
+        la t = m[0]
+        hvis t == 84 {
+            # RowDescription
+            kolonnar = []
+            typar = []
+            format = []
+            la n = _les_i16(buf, m[1])
+            la pos: heltall = m[1] + 2
+            la k: heltall = 0
+            mens k < n {
+                la slutt = _nul(buf, pos)
+                legg_til(kolonnar, _frå_utf8(buf, pos, slutt))
+                legg_til(typar, _les_i32(buf, slutt + 1 + 6))
+                legg_til(format, _les_i16(buf, slutt + 1 + 16))
+                pos = slutt + 1 + 18
+                k = k + 1
+            }
+        } ellers hvis t == 68 {
+            # DataRow
+            la n = _les_i16(buf, m[1])
+            la pos: heltall = m[1] + 2
+            la rad = {}
+            la celle_rad: liste_tekst = []
+            la raa_rad = []
+            la k: heltall = 0
+            mens k < n {
+                la len = _les_i32(buf, pos)
+                pos = pos + 4
+                la verdi = ""
+                hvis len < 0 {
+                    legg_til(nullar, [lengde(rader), kolonnar[k]])
+                    legg_til(raa_rad, null)
+                } ellers {
+                    hvis len > 0 {
+                        verdi = _frå_utf8(buf, pos, pos + len)
+                        pos = pos + len
+                    }
+                    legg_til(raa_rad, verdi)
+                }
+                rad[kolonnar[k]] = verdi
+                legg_til(celle_rad, verdi)
+                k = k + 1
+            }
+            legg_til(rader, rad)
+            legg_til(celler, celle_rad)
+            legg_til(raa, raa_rad)
+        } ellers hvis t == 67 {
+            tag = _frå_utf8(buf, m[1], _nul(buf, m[1]))
+            legg_til(sett, {"kolonnar": kolonnar, "tag": tag, "start": sett_start, "slutt": lengde(rader), "typar": typar, "format": format})
+            sett_start = lengde(rader)
+        } ellers hvis t == 116 {
+            poidar = w.pakk_ut(116, buf, m[1], m[2])["oidar"]
+        } ellers hvis t == 69 {
+            hvis feil == "" {feil = _feiltekst(buf, m[1], m[2])}
+        } ellers hvis t == 90 {
+            _sett_klar(h, buf, m[1])
+            ferdig = sann
+        } ellers {
+            _bakgrunn(h, t, buf, m[1], m[2])
+        }
+    }
+    hvis feil != "" {_kast_server(feil)}
+    returner {"rader": rader, "kolonnar": kolonnar, "tag": tag, "typar": typar, "format": format, "nullar": nullar, "celler": celler, "raa": raa, "sett": sett, "param_oidar": poidar}
+}
+
+# Sisste tal i ein CommandComplete-tag: «INSERT 0 3» → 3, «UPDATE 2» → 2.
+funksjon _tag_tal(tag: tekst) -> heltall {
+    la i: heltall = lengde(tag)
+    mens i > 0 og builtin.slice(tag, i - 1, i) != " " {i = i - 1}
+    hvis i == 0 {returner 0}
+    prøv {returner heltall_fra_tekst(builtin.slice(tag, i, lengde(tag)))} fang (e) {returner 0}
+    returner 0
+}
+
+# Brotne tilkoplingar kan ikkje brukast igjen (protokollen er ute av takt): marker dei lukka.
+funksjon _forkast(conn: tekst) {
+    hvis ikkje er_tilkopla(conn) { returner }
+    sok.native_lukk(_TILK[conn]["h"]["r"])
+    fjern_nokkel(_TILK, conn)
+}
+
+# Enkel spørring utan parametrar, utvida protokoll med.
+# Feil frå tenaren har SQLSTATE og lèt tilkoplinga leve; andre feil (transport) forkastar ho.
+funksjon _kor(conn: tekst, sql: tekst, params: liste<tekst>) -> ordbok_tekst {
+    prøv {
+        hvis lengde(params) == 0 { returner _kjor(conn, sql) }
+        returner _kjor_param(conn, sql, params)
+    } fang (e) {
+        hvis builtin.index_of(tekst(e), "SQLSTATE") < 0 og builtin.index_of(tekst(e), "ingen open tilkopling") < 0 {
+            _forkast(conn)
+        }
+        kast e
+    }
+    returner {}
 }
 
 # ─── Tilkopling ───────────────────────────────────────────────────────────────
 
+# TLS-oppgradering (SSLRequest → 'S' → TLS 1.3-handtrykk). Gir sann om TLS er i bruk.
+# sslmode: disable (standard; ingen TLS), prefer (TLS viss tenaren tilbyr det, elles klartekst),
+# require og verify-full (TLS er påbode). Alle modusar som brukar TLS verifiserer sertifikatet
+# mot sslrootcert (PEM-fil) inkludert vertsnamn; det finst ingen modus utan verifisering.
+funksjon _tls_oppgrader(t: ordbok, vertsnamn: tekst, modus: tekst, rotsert: tekst) -> boolsk {
+    hvis modus == "disable" { returner usann }
+    hvis modus != "prefer" og modus != "require" og modus != "verify-full" {
+        _feil("ukjend sslmode «" + modus + "» (støtta: disable, prefer, require, verify-full)")
+    }
+    _send_rå(t, _til_hex([0, 0, 0, 8, 4, 210, 22, 47]))
+    la svar = _les_rå(t)
+    hvis lengde(svar) == 0 { _feil("tenaren stengde tilkoplinga under SSLRequest") }
+    hvis svar[0] == 78 {
+        hvis modus == "prefer" { returner usann }
+        _feil("tenaren støttar ikkje TLS, men sslmode=" + modus + " krev det")
+    }
+    hvis svar[0] != 83 {
+        _feil("uventa svar på SSLRequest frå tenaren")
+    }
+    hvis rotsert == "" {
+        _feil("sslrootcert manglar: tenaren tilbyr TLS, og sertifikatet må verifiserast mot ei PEM-fil (sslrootcert=<fil>)")
+    }
+    la pem = ""
+    prøv { pem = fil_les(rotsert) } fang (e) { _feil("kunne ikkje lese sslrootcert " + rotsert + ": " + tekst(e)) }
+    hvis builtin.index_of(pem, "BEGIN CERTIFICATE") < 0 { _feil("sslrootcert " + rotsert + " inneheld ikkje noko PEM-sertifikat") }
+    la s = tls.ny({"hostname": vertsnamn, "ca_pem": pem})
+    _send_rå(t, _til_hex(tls.start(s)))
+    la ferdig = usann
+    # Tenaren ventar på ClientHello, så det kjem ingen byte etter 'S'; vi les neste svar frå sokkelen.
+    la rå = _les_rå(t)
+    hvis lengde(rå) == 0 { _feil("tenaren stengde tilkoplinga under TLS-handtrykket") }
+    mens ikkje ferdig {
+        la r = tls.motta(s, rå)
+        hvis r["status"] == "feil" { _feil("TLS-handtrykket feila: " + r["feil"]) }
+        hvis lengde(r["ut"]) > 0 { _send_rå(t, _til_hex(r["ut"])) }
+        hvis r["status"] == "ferdig" {
+            ferdig = sann
+        } ellers {
+            rå = _les_rå(t)
+            hvis lengde(rå) == 0 { _feil("tenaren stengde tilkoplinga under TLS-handtrykket") }
+        }
+    }
+    t["tls"] = s
+    returner sann
+}
+
+funksjon _opne(host: tekst, port: heltall, database: tekst, brukar: tekst, passord: tekst, ssl: ordbok) -> tekst {
+    hvis brukar == "" {_feil("brukar manglar i tilkoplingsstrengen")}
+    la tilkoblingsadresse = host
+    hvis har_nokkel(ssl, "hostaddr") og ssl["hostaddr"] != "" { tilkoblingsadresse = ssl["hostaddr"] }
+    la rh = sok.native_tilkoble(tilkoblingsadresse, port)
+    la t = {"r": rh}
+    la st = tekst(rh["status"])
+    hvis st == "ventende" eller st == "connecting" {
+        hvis ikkje _vent(t, 2) {
+            sok.native_lukk(rh)
+            _feil("tidsavbrot ved tilkopling til " + tilkoblingsadresse + ":" + tekst_fra_heltall(port))
+        }
+    } ellers hvis st == "feil" eller st == "error" {
+        _feil("kunne ikkje kople til " + tilkoblingsadresse + ":" + tekst_fra_heltall(port))
+    }
+    la c = {"h": t, "vert": tilkoblingsadresse, "port": port}
+    la p = {"user": brukar, "dbname": database, "password": passord}
+    hvis p["dbname"] == "" {p["dbname"] = brukar}
+    prøv {
+        hvis har_nokkel(ssl, "mode") og ssl["mode"] != "disable" {
+            la rot = ""
+            hvis har_nokkel(ssl, "rootcert") { rot = ssl["rootcert"] }
+            _tls_oppgrader(t, host, ssl["mode"], rot)
+        }
+        _oppstart(t, p)
+    } fang (e) {
+        sok.native_lukk(rh)
+        kast e
+    }
+    _TELJAR["n"] = _TELJAR["n"] + 1
+    la id = "pg:" + tekst_fra_heltall(_TELJAR["n"])
+    _TILK[id] = c
+    returner id
+}
+
+# Er tilkoplinga kryptert (TLS)? Gir t.d. "TLSv1.3 TLS_CHACHA20_POLY1305_SHA256", elles "".
+funksjon tls_info(conn: tekst) -> tekst {
+    hvis ikkje er_tilkopla(conn) {returner ""}
+    la t = _TILK[conn]["h"]
+    hvis ikkje har_nokkel(t, "tls") {returner ""}
+    la s = t["tls"]
+    returner s["tls_version"] + " " + s["cipher"]
+}
+
 funksjon open(dsn: tekst) -> tekst {
-    _ikkje_støtta("open")
-    returner ""
+    la p = _parse_dsn(dsn)
+    la port: heltall = 5432
+    prøv {port = heltall_fra_tekst(p["port"])} fang (e) {_feil("ugyldig port i tilkoplingsstrengen")}
+    la ssl = {"mode": "disable", "rootcert": "", "hostaddr": ""}
+    hvis har_nokkel(p, "sslmode") { ssl["mode"] = p["sslmode"] }
+    hvis har_nokkel(p, "sslrootcert") { ssl["rootcert"] = p["sslrootcert"] }
+    hvis har_nokkel(p, "hostaddr") { ssl["hostaddr"] = p["hostaddr"] }
+    returner _opne(p["host"], port, p["dbname"], p["user"], p["password"], ssl)
 }
 
 funksjon open_url(url: tekst) -> tekst {
-    // postgresql://brukar:passord@host:port/database
+    // postgresql://brukar:passord@host:port/database?sslmode=verify-full&sslrootcert=/sti/ca.crt
     la dsn = _url_til_dsn(url)
     returner open(dsn)
 }
 
 funksjon open_cfg(host: tekst, port: heltall, database: tekst, brukar: tekst, passord: tekst) -> tekst {
-    la dsn = "host=" + host + " port=" + tekst_fra_heltall(port) +
-             " dbname=" + database + " user=" + brukar + " password=" + passord
-    returner open(dsn)
+    returner _opne(host, port, database, brukar, passord, {"mode": "disable"})
 }
 
 funksjon close(conn: tekst) -> heltall {
+    hvis ikkje er_tilkopla(conn) {returner 0}
+    la c = _TILK[conn]
+    la t = c["h"]
+    prøv {_send(t, _melding("X", []))} fang (e) {}
+    hvis har_nokkel(t, "tls") {
+        prøv {_send_rå(t, _til_hex(tls.lukk(t["tls"])))} fang (e) {}
+    }
+    sok.native_lukk(t["r"])
+    fjern_nokkel(_TILK, conn)
     returner 0
 }
 
+# Talet registrerte (opne) tilkoplingar; lukka blir fjerna, så talet veks ikkje med opne/lukk-syklar.
+funksjon antal_tilkoplingar() -> heltall {
+    returner lengde(nøkler(_TILK))
+}
+
+# Berre for testar: registrer ei falsk tilkopling (ingen nett).
+funksjon _test_registrer(conn: tekst) {
+    _TILK[conn] = {"h": {"r": -1}}
+}
+
 funksjon er_tilkopla(conn: tekst) -> boolsk {
-    returner usann
+    hvis conn == "" {returner usann}
+    hvis ikkje har_nokkel(_TILK, conn) {returner usann}
+    returner ikkje har_nokkel(_TILK[conn], "lukka")
 }
 
 # ─── Spørjingar ───────────────────────────────────────────────────────────────
 
-// Execute med parameteriserte spørjingar ($1, $2, ...)
-funksjon execute(conn: tekst, sql: tekst, params: liste<tekst>) -> heltall {
-    _ikkje_støtta("execute")
-    returner 0
+// Execute med parameteriserte spørjingar ($1, $2, ...). Parametrar kjem i H4.
+funksjon execute(conn: tekst, sql: tekst, params: liste < tekst >) -> heltall {
+    la r = _kor(conn, sql, params)
+    returner _tag_tal(r["tag"])
 }
 
 funksjon execute_raw(conn: tekst, sql: tekst) -> heltall {
-    la tom: liste<tekst> = []
+    la tom: liste < tekst > = []
     returner execute(conn, sql, tom)
 }
 
-funksjon query(conn: tekst, sql: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
-    _ikkje_støtta("query")
-    returner []
+funksjon query(conn: tekst, sql: tekst, params: liste < tekst >) -> liste < ordbok_tekst > {
+    la r = _kor(conn, sql, params)
+    returner r["rader"]
 }
 
-funksjon query_raw(conn: tekst, sql: tekst) -> liste<ordbok_tekst> {
-    la tom: liste<tekst> = []
+funksjon query_raw(conn: tekst, sql: tekst) -> liste < ordbok_tekst > {
+    la tom: liste < tekst > = []
     returner query(conn, sql, tom)
 }
 
-funksjon query_ein(conn: tekst, sql: tekst, params: liste<tekst>) -> ordbok_tekst {
+funksjon query_ein(conn: tekst, sql: tekst, params: liste < tekst >) -> ordbok_tekst {
     la rader = query(conn, sql, params)
-    hvis lengde(rader) == 0 { returner {} }
+    hvis lengde(rader) == 0 {returner {}}
     returner rader[0]
 }
 
-funksjon query_verdi(conn: tekst, sql: tekst, params: liste<tekst>) -> tekst {
-    la rad = query_ein(conn, sql, params)
-    la nk = nøkler(rad)
-    hvis lengde(nk) == 0 { returner "" }
-    returner tekst(rad[nk[0]])
+# Kolonnenamn i resultatet av ei spørring, i rekkjefølgje (òg for tomt resultat).
+funksjon kolonnar(conn: tekst, sql: tekst) -> liste < tekst > {
+    la r = _kjor(conn, sql)
+    returner r["kolonnar"]
+}
+
+funksjon query_verdi(conn: tekst, sql: tekst, params: liste < tekst >) -> tekst {
+    la r = _kor(conn, sql, params)
+    hvis lengde(r["rader"]) == 0 eller lengde(r["kolonnar"]) == 0 {returner ""}
+    returner tekst(r["rader"][0][r["kolonnar"][0]])
 }
 
 funksjon query_int(conn: tekst, sql: tekst) -> heltall {
-    la tom: liste<tekst> = []
+    la tom: liste < tekst > = []
     la v = query_verdi(conn, sql, tom)
-    hvis v == "" { returner 0 }
-    prøv { returner heltall_fra_tekst(v) } fang (e) { returner 0 }
+    hvis v == "" {returner 0}
+    prøv {returner heltall_fra_tekst(v)} fang (e) {returner 0}
     returner 0
+}
+
+# Tekst-literal med ' dobla; trygg å lime inn i SQL.
+funksjon literal(verdi: tekst) -> tekst {
+    returner "'" + _esc(verdi) + "'"
 }
 
 # ─── Transaksjonar ────────────────────────────────────────────────────────────
@@ -130,38 +991,36 @@ funksjon rollback_to(conn: tekst, namn: tekst) -> heltall {
 # ─── Schema-hjelpar ───────────────────────────────────────────────────────────
 
 funksjon tabell_finst(conn: tekst, tabell: tekst) -> boolsk {
-    la tom: liste<tekst> = []
-    la n = query_int(conn, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '" + tabell + "'")
-    returner n > 0
+    la n = query_verdi(conn, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1", [tabell])
+    returner n != "0"
 }
 
 funksjon kolonne_finst(conn: tekst, tabell: tekst, kolonne: tekst) -> boolsk {
-    la n = query_int(conn, "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='" + tabell + "' AND column_name='" + kolonne + "'")
-    returner n > 0
+    la n = query_verdi(conn, "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2", [tabell, kolonne])
+    returner n != "0"
 }
 
 funksjon opprett_utvidinga(conn: tekst, namn: tekst) -> heltall {
-    returner execute_raw(conn, "CREATE EXTENSION IF NOT EXISTS \"" + namn + "\"")
+    returner execute_raw(conn, "CREATE EXTENSION IF NOT EXISTS \"" + tekst_erstatt(namn, "\"", "\"\"") + "\"")
 }
 
 # ─── COPY / bulk insert ───────────────────────────────────────────────────────
 
-funksjon bulk_insert(conn: tekst, tabell: tekst, kolonnar: liste<tekst>, rader: liste<liste<tekst>>) -> heltall {
+funksjon bulk_insert(conn: tekst, tabell: tekst, kolonnar: liste < tekst >, rader: liste < liste < tekst>>) -> heltall {
     la kol_str = builtin.join(kolonnar, ", ")
     la n: heltall = 0
     la i: heltall = 0
     mens i < lengde(rader) {
-        la rad: liste<tekst> = rader[i]
-        la verdi_delar: liste<tekst> = []
+        la rad: liste < tekst > = rader[i]
+        la verdi_delar: liste < tekst > = []
         la j: heltall = 0
         mens j < lengde(rad) {
             la v: tekst = rad[j]
-            legg_til(verdi_delar, "'" + _esc(v) + "'")
+            legg_til(verdi_delar, "$" + tekst_fra_heltall(j + 1))
             j = j + 1
         }
         la sql = "INSERT INTO " + tabell + " (" + kol_str + ") VALUES (" + builtin.join(verdi_delar, ",") + ")"
-        la tom: liste<tekst> = []
-        execute(conn, sql, tom)
+        execute(conn, sql, rad)
         n = n + 1
         i = i + 1
     }
@@ -170,31 +1029,686 @@ funksjon bulk_insert(conn: tekst, tabell: tekst, kolonnar: liste<tekst>, rader: 
 
 # ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
 
+funksjon _hex_sifferverdi(ch: tekst) -> heltall {
+    returner builtin.index_of("0123456789abcdef", builtin.lower(ch))
+}
+
+# Prosent-dekod (RFC 3986) til bytestreng (eitt teikn per byte, som resten av modulen):
+# %HH -> byte, så UTF-8-sekvensar som %C3%A6 gir dei to bytane til «æ». Ugyldig %-escape blir ståande
+# bokstavleg. «+» blir ikkje rørt. Teikn over 255 i inndata blir UTF-8-koda.
+funksjon _prosent_dekod(s: tekst) -> tekst {
+    hvis builtin.index_of(s, "%") < 0 { returner s }
+    la bytes: liste_heiltall = []
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        la ok = usann
+        hvis ch == "%" og i + 2 < lengde(s) {
+            la h1 = _hex_sifferverdi(builtin.slice(s, i + 1, i + 2))
+            la h2 = _hex_sifferverdi(builtin.slice(s, i + 2, i + 3))
+            hvis h1 >= 0 og h2 >= 0 {
+                legg_til(bytes, h1 * 16 + h2)
+                i = i + 3
+                ok = sann
+            }
+        }
+        hvis ikkje ok {
+            la b = _utf8(ch)
+            la k: heltall = 0
+            mens k < lengde(b) {
+                legg_til(bytes, b[k])
+                k = k + 1
+            }
+            i = i + 1
+        }
+    }
+    returner _frå_utf8(bytes, 0, lengde(bytes))
+}
+
+# DSN-verdi: sitert (key='…') når han har mellomrom, sitat eller backslash.
+funksjon _dsn_verdi(v: tekst) -> tekst {
+    hvis builtin.index_of(v, " ") < 0 og builtin.index_of(v, "'") < 0 og builtin.index_of(v, "\\") < 0 og builtin.index_of(v, "\t") < 0 og builtin.index_of(v, "\n") < 0 {
+        returner v
+    }
+    returner "'" + tekst_erstatt(tekst_erstatt(v, "\\", "\\\\"), "'", "\\'") + "'"
+}
+
 funksjon _url_til_dsn(url: tekst) -> tekst {
     // postgresql://brukar:passord@host:port/database
+    // Brukar, passord, databasenamn og query-verdiar blir prosent-dekoda (p%40ss -> p@ss).
     la u = tekst_erstatt(url, "postgresql://", "")
     u = tekst_erstatt(u, "postgres://", "")
     la at_idx = builtin.index_of(u, "@")
-    la kredential = builtin.slice(u, 0, at_idx)
-    la rest = builtin.slice(u, at_idx + 1, lengde(u))
+    la kredential = ""
+    la rest = u
+    hvis at_idx >= 0 {
+        kredential = builtin.slice(u, 0, at_idx)
+        rest = builtin.slice(u, at_idx + 1, lengde(u))
+    }
     la colon_idx = builtin.index_of(kredential, ":")
-    la brukar = builtin.slice(kredential, 0, colon_idx)
-    la passord = builtin.slice(kredential, colon_idx + 1, lengde(kredential))
+    la brukar = kredential
+    la passord = ""
+    hvis colon_idx >= 0 {
+        brukar = builtin.slice(kredential, 0, colon_idx)
+        passord = builtin.slice(kredential, colon_idx + 1, lengde(kredential))
+    }
+    # ?nøkkel=verdi&nøkkel=verdi (sslmode, sslrootcert, hostaddr …) blir DSN-par
+    la ekstra = ""
+    la spm_idx = builtin.index_of(rest, "?")
+    hvis spm_idx >= 0 {
+        la q = builtin.slice(rest, spm_idx + 1, lengde(rest))
+        rest = builtin.slice(rest, 0, spm_idx)
+        la par = builtin.split(q, "&")
+        la pi: heltall = 0
+        mens pi < lengde(par) {
+            la p = tekst(par[pi])
+            la peq = builtin.index_of(p, "=")
+            hvis peq > 0 {
+                ekstra = ekstra + " " + _prosent_dekod(builtin.slice(p, 0, peq)) + "=" + _dsn_verdi(_prosent_dekod(builtin.slice(p, peq + 1, lengde(p))))
+            } ellers hvis p != "" {
+                ekstra = ekstra + " " + p
+            }
+            pi = pi + 1
+        }
+    }
     la slash_idx = builtin.index_of(rest, "/")
-    la host_port = builtin.slice(rest, 0, slash_idx)
-    la database = builtin.slice(rest, slash_idx + 1, lengde(rest))
-    la port_idx = builtin.index_of(host_port, ":")
+    la host_port = rest
+    la database = ""
+    hvis slash_idx >= 0 {
+        host_port = builtin.slice(rest, 0, slash_idx)
+        database = builtin.slice(rest, slash_idx + 1, lengde(rest))
+    }
     la host = host_port
-    hvis port_idx >= 0 {
-        host = builtin.slice(host_port, 0, port_idx)
-    }
     la port = "5432"
-    hvis port_idx >= 0 {
-        port = builtin.slice(host_port, port_idx + 1, lengde(host_port))
+    hvis builtin.starts_with(host_port, "[") og builtin.index_of(host_port, "]") > 0 {
+        # Bracketed IPv6: [::1]:5432 — berre kolon etter ] er portskiljar.
+        la slutt = builtin.index_of(host_port, "]")
+        host = builtin.slice(host_port, 1, slutt)
+        la etter = builtin.slice(host_port, slutt + 1, lengde(host_port))
+        hvis builtin.starts_with(etter, ":") og lengde(etter) > 1 {
+            port = builtin.slice(etter, 1, lengde(etter))
+        }
+    } ellers {
+        la port_idx = builtin.index_of(host_port, ":")
+        hvis port_idx >= 0 {
+            host = builtin.slice(host_port, 0, port_idx)
+            port = builtin.slice(host_port, port_idx + 1, lengde(host_port))
+        }
     }
-    returner "host=" + host + " port=" + port + " dbname=" + database + " user=" + brukar + " password=" + passord
+    returner "host=" + _dsn_verdi(_prosent_dekod(host)) + " port=" + port + " dbname=" + _dsn_verdi(_prosent_dekod(database)) + " user=" + _dsn_verdi(_prosent_dekod(brukar)) + " password=" + _dsn_verdi(_prosent_dekod(passord)) + ekstra
 }
 
 funksjon _esc(s: tekst) -> tekst {
     returner tekst_erstatt(s, "'", "''")
+}
+
+# ─── Typa resultat (H4) ───────────────────────────────────────────────────────
+
+# Dekod resultatet frå _samle til typa rader: SQL NULL → null, bool → boolsk, int2/4/8/oid → heltall,
+# float4/8 → desimaltall, bytea → liste_heiltall, arrayar → lister; numeric, dato/tid, uuid og json
+# beheld tekstforma (taplaus). Binærkolonnar (format 1) blir avkoda frå binærformatet.
+funksjon _typa_rader(r: ordbok_tekst) -> liste<ordbok_tekst> {
+    la raa = r["raa"]
+    la kol = r["kolonnar"]
+    la typar = r["typar"]
+    la fmt = r["format"]
+    la ut = []
+    la i: heltall = 0
+    mens i < lengde(raa) {
+        la rad = {}
+        la celle_rad = raa[i]
+        la k: heltall = 0
+        mens k < lengde(kol) {
+            la c = celle_rad[k]
+            hvis c == null {
+                rad[kol[k]] = null
+            } ellers hvis fmt[k] == 1 {
+                rad[kol[k]] = w.dekod_binar(typar[k], c)
+            } ellers {
+                rad[kol[k]] = w.dekod_tekst(typar[k], c)
+            }
+            k = k + 1
+        }
+        legg_til(ut, rad)
+        i = i + 1
+    }
+    returner ut
+}
+
+# Som query(), men med SQL NULL som null og typa verdiar (sjå _typa_rader).
+funksjon query_typa(conn: tekst, sql: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
+    returner _typa_rader(_kor(conn, sql, params))
+}
+
+# Som query_typa(), men ber tenaren om binært format for alle kolonnar (utvida protokoll).
+# Gir same verdiar som query_typa for dei typane begge støttar; bytea, tidsstempel og numeric
+# kjem utan tekstparsing.
+funksjon query_binar(conn: tekst, sql: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
+    returner _typa_rader(_kor_binar(conn, sql, params))
+}
+
+funksjon _kor_binar(conn: tekst, sql: tekst, params: liste<tekst>) -> ordbok_tekst {
+    prøv {
+        returner _kjor_utv(conn, "", sql, params, sann)
+    } fang (e) {
+        hvis builtin.index_of(tekst(e), "SQLSTATE") < 0 og builtin.index_of(tekst(e), "ingen open tilkopling") < 0 {
+            _forkast(conn)
+        }
+        kast e
+    }
+    returner {}
+}
+
+# Resultatet som tekst: kolonnar skilde med «|», rader med linjeskift (som std.db.query_rader).
+funksjon rader_tekst(conn: tekst, sql: tekst, params: liste<tekst>) -> tekst {
+    la r = _kor(conn, sql, params)
+    la linjer: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(r["celler"]) {
+        legg_til(linjer, builtin.join(r["celler"][i], "|"))
+        i = i + 1
+    }
+    returner builtin.join(linjer, "\n")
+}
+
+# ─── COPY (tekstformat) ───────────────────────────────────────────────────────
+
+# Kod éi verdi for COPY-tekstformat: \ → \\, tab → \t, linjeskift → \n, NULL → \N.
+funksjon _copy_kod(v: tekst) -> tekst {
+    hvis v == sql_null() { returner "\\N" }
+    la ut = tekst_erstatt(v, "\\", "\\\\")
+    ut = tekst_erstatt(ut, "\t", "\\t")
+    ut = tekst_erstatt(ut, "\n", "\\n")
+    ut = tekst_erstatt(ut, "\r", "\\r")
+    returner ut
+}
+
+# Avkod éi COPY-tekstformat-celle (PostgreSQL-escapes): \b \f \n \r \t \v, \\, oktal \ooo (1-3 siffer),
+# hex \xHH (1-2 siffer); «\N» som heilt felt gir sql_null(). Anna teikn etter backslash gir teiknet sjølv
+# (\x utan hex-siffer gir «x»). Oktal/hex gir éi rå byte (same bytestreng-modell som resten av modulen).
+funksjon _copy_avkod(v: tekst) -> tekst {
+    hvis v == "\\N" { returner sql_null() }
+    hvis builtin.index_of(v, "\\") < 0 { returner v }
+    la ut: liste_tekst = []
+    la i: heltall = 0
+    la lengd = lengde(v)
+    mens i < lengd {
+        la ch = builtin.slice(v, i, i + 1)
+        hvis ch == "\\" og i + 1 < lengd {
+            la n = builtin.slice(v, i + 1, i + 2)
+            la nc = builtin.char_code(n)
+            hvis n == "b" { legg_til(ut, builtin.chr(8)) i = i + 2 }
+            ellers hvis n == "f" { legg_til(ut, builtin.chr(12)) i = i + 2 }
+            ellers hvis n == "n" { legg_til(ut, "\n") i = i + 2 }
+            ellers hvis n == "r" { legg_til(ut, "\r") i = i + 2 }
+            ellers hvis n == "t" { legg_til(ut, "\t") i = i + 2 }
+            ellers hvis n == "v" { legg_til(ut, builtin.chr(11)) i = i + 2 }
+            ellers hvis nc >= 48 og nc <= 55 {
+                la verdi: heltall = nc - 48
+                la k: heltall = i + 2
+                mens k < lengd og k < i + 4 {
+                    la dc = builtin.char_code(builtin.slice(v, k, k + 1))
+                    hvis dc < 48 eller dc > 55 { bryt }
+                    verdi = verdi * 8 + (dc - 48)
+                    k = k + 1
+                }
+                legg_til(ut, builtin.chr(verdi & 255))
+                i = k
+            } ellers hvis n == "x" og i + 2 < lengd og _hex_sifferverdi(builtin.slice(v, i + 2, i + 3)) >= 0 {
+                la verdi: heltall = _hex_sifferverdi(builtin.slice(v, i + 2, i + 3))
+                la k: heltall = i + 3
+                hvis k < lengd og _hex_sifferverdi(builtin.slice(v, k, k + 1)) >= 0 {
+                    verdi = verdi * 16 + _hex_sifferverdi(builtin.slice(v, k, k + 1))
+                    k = k + 1
+                }
+                legg_til(ut, builtin.chr(verdi))
+                i = k
+            } ellers {
+                legg_til(ut, n)
+                i = i + 2
+            }
+        } ellers {
+            legg_til(ut, ch)
+            i = i + 1
+        }
+    }
+    returner builtin.join(ut, "")
+}
+# COPY … FROM STDIN med ferdig kodå linjer (utan linjeskift). Gir tal på kopierte rader.
+funksjon _copy_inn_linjer(conn: tekst, copy_sql: tekst, linjer: liste<tekst>) -> heltall {
+    la h = _tilstand(conn)["h"]
+    _send(h, _melding("Q", _cstr(copy_sql)))
+    la buf: liste_heiltall = []
+    la st: liste_heiltall = [0]
+    la feil = ""
+    la tag = ""
+    la ferdig = usann
+    mens ikkje ferdig {
+        la m = _les_melding(h, buf, st)
+        hvis m[0] == 71 {
+            # CopyInResponse: send alle linjene, så CopyDone
+            la i: heltall = 0
+            mens i < lengde(linjer) {
+                _send(h, _melding("d", _utf8(linjer[i] + "\n")))
+                i = i + 1
+            }
+            _send(h, _melding("c", []))
+        } ellers hvis m[0] == 69 {
+            hvis feil == "" { feil = _feiltekst(buf, m[1], m[2]) }
+        } ellers hvis m[0] == 67 {
+            tag = _frå_utf8(buf, m[1], _nul(buf, m[1]))
+        } ellers hvis m[0] == 90 {
+            ferdig = sann
+        }
+    }
+    hvis feil != "" { _kast_server(feil) }
+    returner _tag_tal(tag)
+}
+
+# COPY … FROM STDIN (tekstformat): send radene (liste av liste<tekst>, sql_null() for NULL) til tenaren.
+# `copy_sql` er t.d. "COPY tabell (a, b) FROM STDIN". Gir tal på kopierte rader.
+funksjon copy_inn(conn: tekst, copy_sql: tekst, rader: liste<liste<tekst>>) -> heltall {
+    la linjer: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        la celler: liste_tekst = []
+        la j: heltall = 0
+        mens j < lengde(rader[i]) {
+            legg_til(celler, _copy_kod(rader[i][j]))
+            j = j + 1
+        }
+        legg_til(linjer, builtin.join(celler, "\t"))
+        i = i + 1
+    }
+    returner _copy_inn_linjer(conn, copy_sql, linjer)
+}
+
+# COPY … FROM STDIN WITH (FORMAT csv, HEADER, DELIMITER, QUOTE, ESCAPE, NULL): vilkåra blir lesne frå `copy_sql`.
+# Med HEADER er første rad i `rader` overskriftsrada (ho blir sendt som ho er og hoppa over av tenaren).
+funksjon copy_inn_csv(conn: tekst, copy_sql: tekst, rader: liste<liste<tekst>>) -> heltall {
+    la v = csv.valg(copy_sql)
+    hvis ikkje v["csv"] { _feil("copy_inn_csv krev FORMAT csv i COPY-setninga") }
+    la linjer: liste_tekst = []
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        legg_til(linjer, csv.kod_rad(rader[i], v))
+        i = i + 1
+    }
+    returner _copy_inn_linjer(conn, copy_sql, linjer)
+}
+
+# COPY … TO STDOUT: gir heile utdata som tekst (CopyData-bitane limt saman).
+funksjon _copy_ut_data(conn: tekst, copy_sql: tekst) -> tekst {
+    la h = _tilstand(conn)["h"]
+    _send(h, _melding("Q", _cstr(copy_sql)))
+    la buf: liste_heiltall = []
+    la st: liste_heiltall = [0]
+    la feil = ""
+    la delar: liste_tekst = []
+    la ferdig = usann
+    mens ikkje ferdig {
+        la m = _les_melding(h, buf, st)
+        hvis m[0] == 100 {
+            legg_til(delar, _frå_utf8(buf, m[1], m[2]))
+        } ellers hvis m[0] == 69 {
+            hvis feil == "" { feil = _feiltekst(buf, m[1], m[2]) }
+        } ellers hvis m[0] == 90 {
+            ferdig = sann
+        }
+    }
+    hvis feil != "" { _kast_server(feil) }
+    returner builtin.join(delar, "")
+}
+
+# COPY … TO STDOUT (tekstformat): gir radene som liste av liste<tekst> (sql_null() for NULL).
+funksjon copy_ut(conn: tekst, copy_sql: tekst) -> liste<liste<tekst>> {
+    la data = _copy_ut_data(conn, copy_sql)
+    la ut = []
+    la linjer = builtin.split(data, "\n")
+    la i: heltall = 0
+    mens i < lengde(linjer) {
+        hvis ikkje (linjer[i] == "" og i == lengde(linjer) - 1) {
+            la celler = builtin.split(linjer[i], "\t")
+            la rad: liste_tekst = []
+            la j: heltall = 0
+            mens j < lengde(celler) {
+                legg_til(rad, _copy_avkod(celler[j]))
+                j = j + 1
+            }
+            legg_til(ut, rad)
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# COPY … TO STDOUT WITH (FORMAT csv, …): radene som liste av liste<tekst> (sql_null() for NULL).
+# Overskriftsrada (HEADER) blir med som første rad; bruk copy_ut_csv_utan_overskrift for berre data.
+funksjon copy_ut_csv(conn: tekst, copy_sql: tekst) -> liste<liste<tekst>> {
+    la v = csv.valg(copy_sql)
+    hvis ikkje v["csv"] { _feil("copy_ut_csv krev FORMAT csv i COPY-setninga") }
+    returner csv.les_data(_copy_ut_data(conn, copy_sql), v)
+}
+
+funksjon copy_ut_csv_utan_overskrift(conn: tekst, copy_sql: tekst) -> liste<liste<tekst>> {
+    la v = csv.valg(copy_sql)
+    la alle = copy_ut_csv(conn, copy_sql)
+    hvis ikkje v["header"] { returner alle }
+    la ut = []
+    la i: heltall = 1
+    mens i < lengde(alle) { legg_til(ut, alle[i]); i = i + 1 }
+    returner ut
+}
+
+# ─── Førebudde setningar (namngjevne Parse/Bind) ──────────────────────────────
+
+# Identifikator i SQL: «namn» → "namn" (dobbelsitat, med " dobla).
+funksjon ident(namn: tekst) -> tekst {
+    returner "\"" + tekst_erstatt(namn, "\"", "\"\"") + "\""
+}
+
+# Førebu ei namngjeven setning ($1, $2, …). Gir {"namn", "param_oidar", "kolonnar", "typar"}.
+# Namnet gjeld for denne tilkoplinga til lukk_prep() eller close().
+funksjon prepare(conn: tekst, namn: tekst, sql: tekst) -> ordbok {
+    hvis namn == "" { _feil("prepare krev eit namn (unnamed setning er internt)") }
+    la h = _tilstand(conn)["h"]
+    la alt: liste_heiltall = w.parse(namn, sql, [])
+    _legg_til_alle(alt, w.describe("S", namn))
+    _legg_til_alle(alt, w.sync())
+    prøv {
+        _send(h, alt)
+        la r = _samle(h)
+        returner {"namn": namn, "param_oidar": r["param_oidar"], "kolonnar": r["kolonnar"], "typar": r["typar"]}
+    } fang (e) {
+        hvis builtin.index_of(tekst(e), "SQLSTATE") < 0 { _forkast(conn) }
+        kast e
+    }
+    returner {}
+}
+
+funksjon _kor_prep(conn: tekst, namn: tekst, params: liste<tekst>, binar: boolsk) -> ordbok_tekst {
+    prøv {
+        returner _kjor_utv(conn, namn, "", params, binar)
+    } fang (e) {
+        hvis builtin.index_of(tekst(e), "SQLSTATE") < 0 og builtin.index_of(tekst(e), "ingen open tilkopling") < 0 {
+            _forkast(conn)
+        }
+        kast e
+    }
+    returner {}
+}
+
+# Køyr ei førebudd setning. query_prep gir typa rader (binærformat med binar=sann), execute_prep radtalet.
+funksjon query_prep(conn: tekst, namn: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
+    returner _typa_rader(_kor_prep(conn, namn, params, usann))
+}
+
+funksjon query_prep_binar(conn: tekst, namn: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
+    returner _typa_rader(_kor_prep(conn, namn, params, sann))
+}
+
+funksjon execute_prep(conn: tekst, namn: tekst, params: liste<tekst>) -> heltall {
+    returner _tag_tal(_kor_prep(conn, namn, params, usann)["tag"])
+}
+
+funksjon lukk_prep(conn: tekst, namn: tekst) -> heltall {
+    la h = _tilstand(conn)["h"]
+    la alt: liste_heiltall = w.lukk_melding("S", namn)
+    _legg_til_alle(alt, w.sync())
+    _send(h, alt)
+    _samle(h)
+    returner 0
+}
+
+# Fleire setningar i éin enkel spørring («SELECT 1; SELECT 2»): eitt resultat per kommando.
+# Gir liste av {"kolonnar", "rader" (tekst-ordbøker), "tag"}.
+funksjon query_fleire(conn: tekst, sql: tekst) -> liste<ordbok_tekst> {
+    la r = _kjor(conn, sql)
+    la ut = []
+    la i: heltall = 0
+    mens i < lengde(r["sett"]) {
+        la sk = r["sett"][i]
+        la rader = []
+        la j: heltall = sk["start"]
+        mens j < sk["slutt"] {
+            legg_til(rader, r["rader"][j])
+            j = j + 1
+        }
+        legg_til(ut, {"kolonnar": sk["kolonnar"], "rader": rader, "tag": sk["tag"]})
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Tilkoplingstilstand: transaksjonsstatus, notisar, parametrar, avbryt ────
+
+# Transaksjonsstatus frå siste ReadyForQuery: «I» (utanfor transaksjon), «T» (i transaksjon),
+# «E» (feila transaksjon; berre ROLLBACK er lov). Tom tekst utan open tilkopling.
+funksjon tx_status(conn: tekst) -> tekst {
+    hvis ikkje er_tilkopla(conn) { returner "" }
+    la h = _TILK[conn]["h"]
+    hvis ikkje har_nokkel(h, "status") { returner "" }
+    returner h["status"]
+}
+
+funksjon i_transaksjon(conn: tekst) -> boolsk {
+    la s = tx_status(conn)
+    returner s == "T" eller s == "E"
+}
+
+# Hent og tøm NoticeResponse-meldingane som har kome (liste av felt-ordbøker: S, C, M, D, H …).
+funksjon notisar(conn: tekst) -> liste<ordbok_tekst> {
+    la h = _tilstand(conn)["h"]
+    hvis ikkje har_nokkel(h, "notiser") { returner [] }
+    la l = h["notiser"]
+    h["notiser"] = []
+    returner l
+}
+
+# Hent og tøm NOTIFY-meldingar (LISTEN): liste av {"pid", "kanal", "nyttelast"}. Dei blir lesne
+# med neste spørring på tilkoplinga (køyr t.d. «SELECT 1» for å hente ventande varsel).
+funksjon varsel(conn: tekst) -> liste<ordbok> {
+    la h = _tilstand(conn)["h"]
+    hvis ikkje har_nokkel(h, "varsel") { returner [] }
+    la l = h["varsel"]
+    h["varsel"] = []
+    returner l
+}
+
+funksjon lytt(conn: tekst, kanal: tekst) -> heltall {
+    returner execute_raw(conn, "LISTEN " + ident(kanal))
+}
+
+funksjon varsle(conn: tekst, kanal: tekst, nyttelast: tekst) -> tekst {
+    returner query_verdi(conn, "SELECT pg_notify($1, $2)", [kanal, nyttelast])
+}
+
+# Tenarparameter frå ParameterStatus (server_version, client_encoding, TimeZone, …). Tom tekst om ukjend.
+funksjon parameter(conn: tekst, namn: tekst) -> tekst {
+    la h = _tilstand(conn)["h"]
+    hvis ikkje har_nokkel(h, "params") { returner "" }
+    la ps = h["params"]
+    hvis ikkje har_nokkel(ps, namn) { returner "" }
+    returner ps[namn]
+}
+
+funksjon backend_pid(conn: tekst) -> heltall {
+    la h = _tilstand(conn)["h"]
+    hvis ikkje har_nokkel(h, "pid") { returner 0 }
+    returner h["pid"]
+}
+
+# Be tenaren avbryte spørringa som køyrer på tilkoplinga (CancelRequest på ei ny sokkel).
+# Kallast frå anna kontekst enn den som ventar på svaret (t.d. ein ventekrok eller ein annan tråd).
+funksjon avbryt(conn: tekst) -> boolsk {
+    la c = _tilstand(conn)
+    la h = c["h"]
+    hvis ikkje har_nokkel(h, "pid") { returner usann }
+    la rh = sok.native_tilkoble(c["vert"], c["port"])
+    la t = {"r": rh}
+    la st = tekst(rh["status"])
+    hvis st == "ventende" eller st == "connecting" {
+        hvis ikkje _vent(t, 2) {
+            sok.native_lukk(rh)
+            returner usann
+        }
+    } ellers hvis st == "feil" eller st == "error" {
+        returner usann
+    }
+    prøv { _send_rå(t, _til_hex(w.cancel_request(h["pid"], h["nokkel"]))) } fang (e) { sok.native_lukk(rh) returner usann }
+    sok.native_lukk(rh)
+    returner sann
+}
+
+# ─── Transaksjonshjelpar ──────────────────────────────────────────────────────
+
+# Køyr f(conn) i ein transaksjon: COMMIT ved normal retur, ROLLBACK og vidarekasting ved unntak.
+funksjon med_transaksjon(conn: tekst, f) {
+    begin(conn)
+    la resultat = null
+    prøv {
+        resultat = f(conn)
+    } fang (e) {
+        prøv { rollback(conn) } fang (e2) { }
+        kast e
+    }
+    commit(conn)
+    returner resultat
+}
+
+# ─── Feil (SQLSTATE) ──────────────────────────────────────────────────────────
+
+# SQLSTATE-koden i ei feilmelding frå tenaren («… (SQLSTATE 23505)» → «23505»); tom tekst utan kode.
+funksjon feil_sqlstate(e) -> tekst {
+    la t = tekst(e)
+    la i = builtin.index_of(t, "(SQLSTATE ")
+    hvis i < 0 { returner "" }
+    returner builtin.slice(t, i + 10, i + 15)
+}
+
+# SQLSTATE-klassa (dei to første teikna): «23» integritetsbrot, «42» syntaks/tilgang, «40» transaksjonskonflikt …
+funksjon feil_klasse(e) -> tekst {
+    la k = feil_sqlstate(e)
+    hvis lengde(k) < 2 { returner "" }
+    returner builtin.slice(k, 0, 2)
+}
+
+funksjon er_server_feil(e) -> boolsk {
+    returner builtin.starts_with(tekst(e), "PgServerFeil:")
+}
+
+funksjon er_unik_brot(e) -> boolsk { returner feil_sqlstate(e) == "23505" }
+funksjon er_fremmednokkel_brot(e) -> boolsk { returner feil_sqlstate(e) == "23503" }
+funksjon er_vranglas(e) -> boolsk { returner feil_sqlstate(e) == "40P01" }
+funksjon er_serialiseringsfeil(e) -> boolsk { returner feil_sqlstate(e) == "40001" }
+
+# Alle felt frå siste ErrorResponse frå tenaren (S alvor, C kode, M melding, D detalj, H tips, P posisjon,
+# W kontekst, s skjema, t tabell, c kolonne, d datatype, n constraint). Tom ordbok om ingen feil har skjedd.
+funksjon feil_felt() -> ordbok_tekst {
+    returner _SISTE["felt"]
+}
+
+# ─── Tilkoplingspool ──────────────────────────────────────────────────────────
+
+la _POOL = {}
+la _POOLTELJAR = {"n": 0}
+
+# Pool med inntil `maks` tilkoplingar mot same DSN. Tilkoplingar blir opna ved behov.
+funksjon pool_ny(dsn: tekst, maks: heltall) -> tekst {
+    hvis maks < 1 { _feil("pool: maks må vere minst 1") }
+    _POOLTELJAR["n"] = _POOLTELJAR["n"] + 1
+    la id = "pgpool:" + tekst_fra_heltall(_POOLTELJAR["n"])
+    _POOL[id] = {"dsn": dsn, "maks": maks, "ledige": [], "ute": [], "opna": 0}
+    returner id
+}
+
+funksjon _pool(id: tekst) -> ordbok {
+    hvis ikkje har_nokkel(_POOL, id) { _feil("ukjend eller lukka pool") }
+    returner _POOL[id]
+}
+
+# Ta ei tilkopling frå poolen (ledig eller ny). Kastar «PG-feil: pool er full» når alle `maks` er i bruk.
+funksjon pool_hent(id: tekst) -> tekst {
+    la p = _pool(id)
+    la ledige = p["ledige"]
+    mens lengde(ledige) > 0 {
+        la c = ledige[lengde(ledige) - 1]
+        la nye = []
+        la i: heltall = 0
+        mens i < lengde(ledige) - 1 { legg_til(nye, ledige[i]) i = i + 1 }
+        ledige = nye
+        p["ledige"] = ledige
+        hvis er_tilkopla(c) {
+            la ute = p["ute"]
+            legg_til(ute, c)
+            p["ute"] = ute
+            returner c
+        }
+        p["opna"] = p["opna"] - 1
+    }
+    hvis p["opna"] >= p["maks"] { _feil("pool er full (" + tekst_fra_heltall(p["maks"]) + " tilkoplingar i bruk)") }
+    la c = open(p["dsn"])
+    p["opna"] = p["opna"] + 1
+    la ute2 = p["ute"]
+    legg_til(ute2, c)
+    p["ute"] = ute2
+    returner c
+}
+
+# Gi tilkoplinga tilbake. Ei tilkopling midt i ein transaksjon blir rulla tilbake; ei broten blir kasta.
+funksjon pool_slepp(id: tekst, conn: tekst) {
+    la p = _pool(id)
+    la ute = p["ute"]
+    la nye_ute = []
+    la funne = usann
+    la i: heltall = 0
+    mens i < lengde(ute) {
+        hvis ute[i] == conn og ikkje funne { funne = sann } ellers { legg_til(nye_ute, ute[i]) }
+        i = i + 1
+    }
+    hvis ikkje funne { _feil("pool: tilkoplinga høyrer ikkje til denne poolen eller er alt gitt tilbake") }
+    p["ute"] = nye_ute
+    la ok = er_tilkopla(conn)
+    hvis ok og i_transaksjon(conn) {
+        prøv { rollback(conn) } fang (e) { ok = usann }
+    }
+    hvis ok og tx_status(conn) != "I" { ok = usann }
+    hvis ok {
+        la ledige = p["ledige"]
+        legg_til(ledige, conn)
+        p["ledige"] = ledige
+    } ellers {
+        close(conn)
+        p["opna"] = p["opna"] - 1
+    }
+}
+
+funksjon pool_stat(id: tekst) -> ordbok {
+    la p = _pool(id)
+    returner {"maks": p["maks"], "opna": p["opna"], "ledige": lengde(p["ledige"]), "i_bruk": lengde(p["ute"])}
+}
+
+# Steng alle tilkoplingar (òg dei som framleis er utlånte) og fjern poolen.
+funksjon pool_lukk(id: tekst) -> heltall {
+    la p = _pool(id)
+    la ledige = p["ledige"]
+    la i: heltall = 0
+    mens i < lengde(ledige) { close(ledige[i]) i = i + 1 }
+    la ute = p["ute"]
+    i = 0
+    mens i < lengde(ute) { close(ute[i]) i = i + 1 }
+    _POOL[id] = null
+    _POOL = _utan(_POOL, id)
+    returner 0
+}
+
+funksjon _utan(d: ordbok, nokkel: tekst) -> ordbok {
+    la ut = {}
+    la nk = nøkler(d)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        hvis nk[i] != nokkel { ut[nk[i]] = d[nk[i]] }
+        i = i + 1
+    }
+    returner ut
 }

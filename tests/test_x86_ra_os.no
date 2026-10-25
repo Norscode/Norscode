@@ -1,0 +1,155 @@
+// rA-os (punkt 6, 7, 8, 9, 10): x86-fiksturar bygde med codegen-ELF-en og køyrde på Linux x86-64.
+//   • aot_x86_klokke        tid_ms()/now_ms()/mono_ms() verkar (exit 42). Feilsti (−errno ved nekta
+//                           clock_gettime) er verifisert manuelt: byte-patcha syscall-nummer → −38,
+//                           og byte-eksakt i tests/test_norscodeos_x86_64_encoder.no.
+//   • aot_x86_socket_prov   socket_prøv_recv/send/aksepter: RST, EPIPE, EBADF, tidsavbrot → verdi (exit 42).
+//   • aot_x86_prosess_start prosess_start/vent_ikkje_blokkerande/drep (fork+dup2+execve) (exit 42).
+//   • ukjent kall           norscodeos-x86_64: byggjefeil med funksjonsnamn; NC_UKJENT_KALL=null gjev
+//                           gammal åtferd; linux-x86_64 er uendra (åtvaring + null-fallback).
+//   • nos_x86/prosess_start NorscodeOS-fiksturen bygger (spawn 4097 + wait4 + kill 62 i sys6-porten).
+// Codegen-ELF: NC_NOS_CODEGEN, elles bootstrap/native_codegen_x86_64.elf. Er han eldre enn rA-os-fiksane,
+// feilar testen med vilje (kill 62 manglar i sys6-porten); berre ukjent-kall-delen hoppar over med melding.
+// Berre Linux x86-64-vert (elles hoppa over). Manuelt: NC_NOS_CODEGEN=<ny cg>, NORSCODE_NATIVE_BIN=<linux-seed>.
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = ""
+    la maskin = ""
+    prøv {
+        la info = builtin.system_info()
+        system = tekst(info["system"])
+        maskin = tekst(info["machine"])
+    } fang (e) {}
+    returner system == "Linux" og (maskin == "x86_64" eller maskin == "amd64")
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la m: ordbok_tekst = {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la nokkel = nøkler(miljø)
+    la i: heiltall = 0
+    mens i < lengde(nokkel) { m[nokkel[i]] = miljø[nokkel[i]]  i = i + 1 }
+    returner prosess.køyr(executable, argv, root, m, timeout_ms)
+}
+
+funksjon krev_exit(resultat: ordbok_tekst, kode: heiltall) -> heiltall {
+    hvis tekst(resultat["status"]) != "ferdig" eller heltall_fra_tekst(tekst(resultat["exit_code"])) != kode {
+        prosess.skriv_resultat(resultat)
+        assert_eq(tekst(resultat["status"]) + "/" + tekst(resultat["exit_code"]), "ferdig/" + tekst_fra_heltall(kode))
+    }
+    returner 0
+}
+
+funksjon inneheld(b: liste, sek: liste_heiltall) -> boolsk {
+    la n = lengde(sek)
+    la i: heiltall = 0
+    la slutt = lengde(b) - n
+    mens i <= slutt {
+        hvis b[i] == sek[0] {
+            la lik = sann
+            la k: heiltall = 1
+            mens k < n { hvis b[i + k] != sek[k] { lik = usann  k = n }  k = k + 1 }
+            hvis lik { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon bygg_elf(runtime_sti: tekst, cg: tekst, root: tekst, fiksstur: tekst, mal: tekst, merke: tekst, miljo: ordbok_tekst) -> ordbok_tekst {
+    la ncb = "/tmp/norscode_x86_ra_os_" + merke + ".ncb.json"
+    krev_exit(køyr(runtime_sti, ["bundle", "--output", ncb, root + "/tests/fixtures/" + fiksstur], root, {}, 300000), 0)
+    la elf = "/tmp/norscode_x86_ra_os_" + merke + ".elf"
+    la m: ordbok_tekst = {"NC_TARGET": mal, "NC_INPUT": ncb, "NC_OUTPUT": elf, "NORSCODE_GC_ALLOC": ""}
+    la nokkel = nøkler(miljo)
+    la i: heiltall = 0
+    mens i < lengde(nokkel) { m[nokkel[i]] = miljo[nokkel[i]]  i = i + 1 }
+    la r = køyr(cg, [], root, m, 600000)
+    filops.slett_fil(ncb)
+    r["elf"] = elf
+    returner r
+}
+
+funksjon kjor_fikstur(rt: tekst, cg: tekst, root: tekst, fiksstur: tekst, venta_tekst: tekst) -> heiltall {
+    la merke = builtin.random_hex(8)
+    la b = bygg_elf(rt, cg, root, fiksstur, "linux-x86_64", merke, {})
+    krev_exit(b, 0)
+    assert(builtin.fil_sett_kjorbar(tekst(b["elf"])))
+    la r = køyr(tekst(b["elf"]), [], root, {}, 120000)
+    krev_exit(r, 42)
+    assert(builtin.contains(tekst(r["stdout"]), venta_tekst))
+    filops.slett_fil(tekst(b["elf"]))
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje vert_linux_x86_64() {
+        skriv("test_x86_ra_os: hoppa over (ikkje Linux x86-64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la cg = miljo_hent("NC_NOS_CODEGEN")
+    hvis cg == "" { cg = root + "/bootstrap/native_codegen_x86_64.elf" }
+    la rt = runtime(root)
+
+    kjor_fikstur(rt, cg, root, "aot_x86_klokke.no", "mono_ms=")
+    kjor_fikstur(rt, cg, root, "aot_x86_socket_prov.no", "aot_x86_socket_prov OK")
+    kjor_fikstur(rt, cg, root, "aot_x86_prosess_start.no", "aot_x86_prosess_start OK")
+
+    // NorscodeOS-fiksturen med prosess_start byggjer og har kill (62) og spawn (4097) i sys6-porten
+    // (cmp rax,imm32; je …). Køyring under Linux: spawn gjev −38 → exit 41.
+    la m1 = builtin.random_hex(8)
+    la nb = bygg_elf(rt, cg, root, "nos_x86/prosess_start.no", "norscodeos-x86_64", m1, {})
+    krev_exit(nb, 0)
+    la bytar = builtin.fil_les_binær(tekst(nb["elf"]))
+    assert(inneheld(bytar, [0x48, 0x3D, 0x3E, 0x00, 0x00, 0x00, 0x0F, 0x84]))
+    assert(inneheld(bytar, [0x48, 0x3D, 0x01, 0x10, 0x00, 0x00, 0x0F, 0x84]))
+    assert(builtin.fil_sett_kjorbar(tekst(nb["elf"])))
+    krev_exit(køyr(tekst(nb["elf"]), [], root, {}, 60000), 41)
+    filops.slett_fil(tekst(nb["elf"]))
+
+    // Punkt 9: ukjent builtin-kall.
+    la m2 = builtin.random_hex(8)
+    la uk = bygg_elf(rt, cg, root, "aot_x86_ukjent_kall.no", "norscodeos-x86_64", m2, {})
+    hvis tekst(uk["status"]) == "ferdig" og heltall_fra_tekst(tekst(uk["exit_code"])) == 0 {
+        skriv("test_x86_ra_os: HOPPA OVER ukjent-kall på norscodeos — codegen-ELF-en er eldre enn punkt 9 (installer ny ELF; sjå docs/NORSCODEOS_X86_64.md §8): " + cg + "\n")
+        filops.slett_fil(tekst(uk["elf"]))
+    } ellers {
+        la ut = tekst(uk["stdout"]) + tekst(uk["stderr"])
+        assert(builtin.contains(ut, "ukjent kall builtin.finst_ikkje_xyz/1"))
+        assert(builtin.contains(ut, "__main__.start"))
+        assert(ikkje fil_finnes(tekst(uk["elf"])))
+        // NC_UKJENT_KALL=null: gammal åtferd.
+        la m3 = builtin.random_hex(8)
+        la gammal = bygg_elf(rt, cg, root, "aot_x86_ukjent_kall.no", "norscodeos-x86_64", m3, {"NC_UKJENT_KALL": "null"})
+        krev_exit(gammal, 0)
+        filops.slett_fil(tekst(gammal["elf"]))
+    }
+    // linux-x86_64: uendra (åtvaring, null-fallback, ELF skriven).
+    la m4 = builtin.random_hex(8)
+    la lin = bygg_elf(rt, cg, root, "aot_x86_ukjent_kall.no", "linux-x86_64", m4, {})
+    krev_exit(lin, 0)
+    assert(builtin.contains(tekst(lin["stdout"]) + tekst(lin["stderr"]), "ukjent kall builtin.finst_ikkje_xyz/1"))
+    filops.slett_fil(tekst(lin["elf"]))
+    skriv("test_x86_ra_os OK\n")
+    returner 0
+}
