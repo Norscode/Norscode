@@ -1,0 +1,214 @@
+// Avgrensa CDP-klient for ein lokal Chrome-prosess eigd av testbenken.
+// Protokoll: https://chromedevtools.github.io/devtools-protocol/tot/Runtime/
+bruk std.socket som sok
+bruk std.sha1 som sha1
+bruk std.base64 som base64
+
+funksjon digit(n: heiltall) -> tekst { returner builtin.slice("0123456789abcdef", n, n + 1) }
+funksjon bytehex(n: heiltall) -> tekst { returner digit((n >> 4) & 15) + digit(n & 15) }
+funksjon tal(h: tekst) -> heiltall {
+    la n = 0
+    for c i builtin.split(builtin.lower(h), "") {
+        la v = builtin.index_of("0123456789abcdef", c)
+        hvis v < 0 { kast "CDP: ugyldig hex" }
+        n = n * 16 + v
+    }
+    returner n
+}
+funksjon teksthex(t: tekst) -> tekst {
+    la h = ""
+    la i = 0
+    mens i < lengde(t) { h = h + bytehex(builtin.char_code(builtin.slice(t, i, i + 1)) & 255) i = i + 1 }
+    returner h
+}
+funksjon hextekst(h: tekst) -> tekst {
+    la b = []
+    la i = 0
+    mens i < lengde(h) { legg_til(b, tal(builtin.slice(h, i, i + 2))) i = i + 2 }
+    returner builtin.bytes_to_text(builtin.bytes_from_list(b))
+}
+funksjon les(h, frist: heiltall) -> tekst {
+    mens builtin.tid_ms() < frist {
+        sok.native_poll_vent(h, 1, 50)
+        la r = sok.native_les_hex(h, 65536)
+        hvis r["status"] == "ok" {
+            hvis r["data_hex"] == "" { kast "CDP: tilkopling lukka" }
+            returner r["data_hex"]
+        }
+        hvis r["status"] != "ventende" { kast "CDP: lesefeil " + builtin.json_skriv(r) }
+    }
+    kast "CDP: tidsavbrot"
+}
+funksjon skriv(h, data: tekst, frist: heiltall) -> heiltall {
+    mens data != "" og builtin.tid_ms() < frist {
+        la r = sok.native_skriv_hex(h, data)
+        hvis r["status"] == "ok" {
+            la n = heiltall_fra_tekst(tekst(r["value"]))
+            hvis n <= 0 { kast "CDP: inga skriveframdrift" }
+            data = builtin.slice(data, n * 2, lengde(data))
+        } ellers hvis r["status"] == "ventende" { sok.native_poll_vent(h, 2, 50) }
+        ellers { kast "CDP: skrivefeil" }
+    }
+    hvis data != "" { kast "CDP: skrivetidsavbrot" }
+    returner 0
+}
+funksjon ramme(data: tekst, op: heiltall, maske: tekst) -> tekst {
+    hvis lengde(maske) != 8 { kast "CDP: ugyldig maskelengd" }
+    hvis lengde(data) % 2 != 0 { kast "CDP: ufullstendig byte" }
+    la n = lengde(data) / 2
+    la ut = bytehex(128 | op)
+    hvis n < 126 { ut = ut + bytehex(128 | n) }
+    ellers hvis n < 65536 { ut = ut + "fe" + bytehex(n >> 8) + bytehex(n & 255) }
+    ellers { kast "CDP: for stor førespurnad" }
+    ut = ut + maske
+    la i = 0
+    mens i < n {
+        ut = ut + bytehex(tal(builtin.slice(data, i * 2, i * 2 + 2)) ^ tal(builtin.slice(maske, (i % 4) * 2, (i % 4) * 2 + 2)))
+        i = i + 1
+    }
+    returner ut
+}
+funksjon send(c, data: tekst, op: heiltall, frist: heiltall) -> heiltall {
+    returner skriv(c["socket"], ramme(data, op, builtin.random_hex(4)), frist)
+}
+funksjon hovudfelt(raw: tekst, status: tekst) {
+    la linjer = builtin.split(raw, "\r\n")
+    hvis ikkje builtin.starts_with(linjer[0], "HTTP/1.1 " + status + " ") { kast "CDP: HTTP-statusfeil" }
+    la felt = {}
+    la i = 1
+    mens i < lengde(linjer) {
+        la p = builtin.index_of(linjer[i], ":")
+        hvis p <= 0 { kast "CDP: ugyldig HTTP-hovud" }
+        la namn = builtin.lower(builtin.slice(linjer[i], 0, p))
+        hvis har_nokkel(felt, namn) { kast "CDP: tvitydig HTTP-hovud" }
+        felt[namn] = builtin.trim(builtin.slice(linjer[i], p + 1, lengde(linjer[i])))
+        i = i + 1
+    }
+    returner felt
+}
+funksjon oppgradering(raw: tekst, aksept: tekst) -> heiltall {
+    la felt = hovudfelt(raw, "101")
+    hvis ikkje har_nokkel(felt, "sec-websocket-accept") eller felt["sec-websocket-accept"] != aksept { kast "CDP: ugyldig WebSocket-handtrykk" }
+    hvis ikkje har_nokkel(felt, "upgrade") eller builtin.lower(felt["upgrade"]) != "websocket" { kast "CDP: manglar WebSocket-oppgradering" }
+    la oppgrader = usann
+    hvis har_nokkel(felt, "connection") {
+        for token i builtin.split(felt["connection"], ",") { hvis builtin.lower(builtin.trim(token)) == "upgrade" { oppgrader = sann } }
+    }
+    hvis ikkje oppgrader { kast "CDP: manglar Connection upgrade" }
+    returner 0
+}
+// Chrome sitt lokale discovery-endepunkt har ein avgrensa Content-Length-respons.
+funksjon sider(port: heiltall, frist: heiltall) {
+    hvis port <= 0 eller port > 65535 { kast "CDP: ugyldig port" }
+    la h = sok.native_tilkoble("127.0.0.1", port)
+    hvis h["status"] != "connected" { kast "CDP: discovery-tilkopling feila" }
+    utsett { sok.native_lukk(h) }
+    skriv(h, teksthex("GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:" + tekst(port) + "\r\nConnection: close\r\n\r\n"), frist)
+    la inn = ""
+    mens builtin.index_of(inn, "0d0a0d0a") < 0 {
+        inn = inn + les(h, frist)
+        hvis lengde(inn) > 32768 { kast "CDP: for stort discovery-hovud" }
+    }
+    la p = builtin.index_of(inn, "0d0a0d0a")
+    la felt = hovudfelt(hextekst(builtin.slice(inn, 0, p)), "200")
+    hvis ikkje har_nokkel(felt, "content-length") { kast "CDP: manglar discovery-lengd" }
+    la lengdetekst = felt["content-length"]
+    hvis lengdetekst == "" eller lengde(lengdetekst) > 7 { kast "CDP: ugyldig discovery-lengd" }
+    for teikn i builtin.split(lengdetekst, "") { hvis builtin.index_of("0123456789", teikn) < 0 { kast "CDP: ugyldig discovery-lengd" } }
+    la n = heiltall_fra_tekst(lengdetekst)
+    hvis n < 0 eller n > 4194304 { kast "CDP: ugyldig discovery-lengd" }
+    la slutt = p + 8 + n * 2
+    mens lengde(inn) < slutt { inn = inn + les(h, frist) }
+    returner builtin.json_parse_raw(hextekst(builtin.slice(inn, p + 8, slutt)))
+}
+funksjon kople(port: heiltall, sti: tekst, frist: heiltall) {
+    hvis port <= 0 eller port > 65535 eller ikkje builtin.starts_with(sti, "/devtools/page/") eller builtin.contains(sti, "\r") eller builtin.contains(sti, "\n") {
+        kast "CDP: ugyldig lokalt mål"
+    }
+    la h = sok.native_tilkoble("127.0.0.1", port)
+    hvis h["status"] != "connected" { kast "CDP: kunne ikkje kople til Chrome" }
+    prøv {
+        la nonce_hex = builtin.random_hex(16)
+        la nonce_bytes = []
+        la i = 0
+        mens i < lengde(nonce_hex) { legg_til(nonce_bytes, tal(builtin.slice(nonce_hex, i, i + 2))) i = i + 2 }
+        la nonce = base64.kod_bytes(nonce_bytes)
+        skriv(h, teksthex("GET " + sti + " HTTP/1.1\r\nHost: 127.0.0.1:" + tekst(port) + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + nonce + "\r\n\r\n"), frist)
+        la inn = ""
+        mens builtin.index_of(inn, "0d0a0d0a") < 0 {
+            inn = inn + les(h, frist)
+            hvis lengde(inn) > 32768 { kast "CDP: for stort handtrykk" }
+        }
+        la p = builtin.index_of(inn, "0d0a0d0a")
+        la aksept = base64.kod_bytes(sha1.hash_raw_tekst(nonce + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+        oppgradering(hextekst(builtin.slice(inn, 0, p)), aksept)
+        returner {"socket": h, "buffer": builtin.slice(inn, p + 8, lengde(inn)), "id": 0, "events": ""}
+    } fang (e) { sok.native_lukk(h) kast e }
+}
+// Ei full ramme, eller null medan transporten framleis er ufullstendig.
+funksjon ta_ramme(c) {
+    la b = c["buffer"]
+    hvis lengde(b) < 4 { returner null }
+    la a = tal(builtin.slice(b, 0, 2))
+    la z = tal(builtin.slice(b, 2, 4))
+    hvis (a & 112) != 0 eller (z & 128) != 0 { kast "CDP: ugyldig serverramme" }
+    la n = z & 127
+    la pos = 4
+    hvis n == 126 {
+        hvis lengde(b) < 8 { returner null }
+        n = tal(builtin.slice(b, 4, 8))
+        hvis n < 126 { kast "CDP: ikkje-minimal rammelengd" }
+        pos = 8
+    } ellers hvis n == 127 {
+        hvis lengde(b) < 20 { returner null }
+        hvis builtin.slice(b, 4, 12) != "00000000" { kast "CDP: for stor ramme" }
+        n = tal(builtin.slice(b, 12, 20))
+        hvis n < 65536 { kast "CDP: ikkje-minimal rammelengd" }
+        pos = 20
+    }
+    hvis n > 4194304 { kast "CDP: for stor ramme" }
+    hvis (a & 15) >= 8 og ((a & 128) == 0 eller n > 125) { kast "CDP: ugyldig kontrollramme" }
+    hvis lengde(b) < pos + n * 2 { returner null }
+    c["buffer"] = builtin.slice(b, pos + n * 2, lengde(b))
+    returner {"op": a & 15, "fin": (a & 128) != 0, "data": builtin.slice(b, pos, pos + n * 2)}
+}
+funksjon melding(c, frist: heiltall) -> tekst {
+    la data = ""
+    la starta = usann
+    mens builtin.tid_ms() < frist {
+        la r = ta_ramme(c)
+        hvis r == null { c["buffer"] = c["buffer"] + les(c["socket"], frist) }
+        ellers {
+            la op = r["op"]
+            hvis op == 8 { kast "CDP: Chrome lukka WebSocket" }
+            ellers hvis op == 9 { send(c, r["data"], 10, frist) }
+            ellers hvis op == 10 { }
+            ellers {
+                hvis (op == 0 og ikkje starta) eller (op == 1 og starta) eller (op != 0 og op != 1) { kast "CDP: ugyldig meldingsrekkje" }
+                starta = sann
+                data = data + r["data"]
+                hvis lengde(data) > 8388608 { kast "CDP: for stor melding" }
+                hvis r["fin"] { returner hextekst(data) }
+            }
+        }
+    }
+    kast "CDP: meldings-tidsavbrot"
+}
+funksjon kall(c, metode: tekst, params, frist: heiltall) {
+    c["id"] = c["id"] + 1
+    la id = c["id"]
+    send(c, teksthex(builtin.json_skriv({"id": id, "method": metode, "params": params})), 1, frist)
+    mens builtin.tid_ms() < frist {
+        la r = builtin.json_parse_raw(melding(c, frist))
+        hvis har_nokkel(r, "id") og r["id"] == id {
+            hvis har_nokkel(r, "error") { kast "CDP: " + builtin.json_skriv(r["error"]) }
+            returner r["result"]
+        }
+        hvis har_nokkel(r, "method") og r["method"] == "Runtime.exceptionThrown" {
+            c["events"] = c["events"] + builtin.json_skriv(r) + "\n"
+            hvis lengde(c["events"]) > 4194304 { kast "CDP: for mange unnatakshendingar" }
+        }
+    }
+    kast "CDP: svartidsavbrot"
+}
+funksjon lukk(c) -> heiltall { sok.native_lukk(c["socket"]) returner 0 }
