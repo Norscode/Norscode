@@ -8,7 +8,9 @@
 # ReentrantReadWriteLock        sm.ny_rwlås(), rwlås_les/_les_opp, rwlås_skriv/_skriv_opp
 # ReentrantLock                 sm.ny_lås(), lås_skaff/_straks/_innan, lås_slepp
 # ThreadLocal(.withInitial)     sm.ny_trådlokal(v) / ny_trådlokal_med(lag), trådlokal_hent/_set/_fjern
-# new Thread(() -> …) / join    sm.tråd_start(fun() -> …), tråd_join(t), tråd_join_innan(t, ms)
+# new Thread(() -> …) / join    sm.tråd_start(fun() -> …) (kort: sm.tråd(f)), tråd_join(t), tråd_join_innan(t, ms)
+#                               t.join() / t.avbryt() / t.avbrote() (metodar på trådobjektet)
+# Thread.interrupt()            sm.tråd_avbryt(t) / t.avbryt(); sm.avbrote() i tråden → AvbruttFeil
 # Object monitor / Condition    sm.ny_monitor(), monitor_lås/_opp/_vent/_signal_alle
 # BlockingQueue (kapasitet)     sjå std/kanal.no: ny_blokkerande_kanal(k), send_vent, motta_vent, lukk
 # parallelStream over prosessar sjå std/multiprocessing.no: prosess_map(f, verdiar, n, kommando)
@@ -22,6 +24,9 @@
 #     kontrollen i staden for å blokkere OS-tråden. Ventande trådar blokkerer
 #     ikkje kvarandre. Ingen ekte parallellisme (sjå std.multiprocessing.prosess_map
 #     for fleire kjerner).
+# AOT linux-x86_64 / norscodeos-x86_64 (F37, docs/AOT_TRADAR.md): grøne trådar (kooperative, éin
+#     OS-tråd) i std.native_gap. thread_pool-proben svarer, so backend() gjev «vm-green» òg her;
+#     trådane byter berre ved join/sov/lås-/condition-venting/thread_sync «yield» (ingen preemption).
 # backend() == "eintråda"  — AOT (bygg-native, linux-x86_64 og macos-arm64) i dag:
 #     ingen brukartrådar finst (x86 AOT: thread_pool/thread_spawn svarar null eller
 #     «støttar berre thread.*-primitiv»; macOS AOT: NATIV-GAP). Då kan ingen annan
@@ -180,10 +185,27 @@ funksjon _vent(m: ordbok, frist: heiltall, op: tekst) -> boolsk {
     hvis bit < 1 { bit = 1 }
     la r = _sync("condition_wait", m["_cond"], m["_mutex"], bit)
     la st = _status(r)
+    hvis st == "interrupted" {
+        // F35: tråden er avbroten (tråd_avbryt). Mutexen er teken att, so alle
+        // kallarar kan frigjere han i ein fang-blokk (som Java InterruptedException).
+        kast "AvbruttFeil: avbrote under venting (" + op + ")"
+    }
     hvis st != "ready" og st != "timeout" {
         kast "SamtidFeil: condition_wait feila i " + op + ": " + _feiltekst(r)
     }
     returner sann
+}
+
+# _vent som frigjer mutexen når venting blir avbroten (for kallarar utan eigen fang).
+funksjon _vent_frigje(m: ordbok, frist: heiltall, op: tekst) -> boolsk {
+    la vidare = usann
+    prøv {
+        vidare = _vent(m, frist, op)
+    } fang (e) {
+        _opp(m)
+        kast e
+    }
+    returner vidare
 }
 
 funksjon monitor_lås(m: ordbok) -> heiltall { returner _laas(m) }
@@ -218,7 +240,7 @@ funksjon _semafor_skaff(s: ordbok, n: heiltall, timeout_ms: heiltall, op: tekst)
     la frist = frist_om(timeout_ms)
     _laas(s)
     mens s["loyve"] < n {
-        hvis ikkje _vent(s, frist, op) {
+        hvis ikkje _vent_frigje(s, frist, op) {
             _opp(s)
             returner usann
         }
@@ -305,7 +327,7 @@ funksjon _nedteljar_vent(l: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
     la frist = frist_om(timeout_ms)
     _laas(l)
     mens l["tal"] > 0 {
-        hvis ikkje _vent(l, frist, op) {
+        hvis ikkje _vent_frigje(l, frist, op) {
             _opp(l)
             returner usann
         }
@@ -492,7 +514,7 @@ funksjon _laas_skaff(l: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
         returner sann
     }
     mens l["eigar"] != "" {
-        hvis ikkje _vent(l, frist, op) {
+        hvis ikkje _vent_frigje(l, frist, op) {
             _opp(l)
             returner usann
         }
@@ -570,7 +592,7 @@ funksjon _rw_les(rw: ordbok, timeout_ms: heiltall, op: tekst) -> boolsk {
     // Skrivaren kan ta lese-låsen (nedgradering); ein lesar kan ta han att.
     // Elles ventar nye lesarar på aktive OG ventande skrivarar (skrivar-prioritet).
     mens ikkje (rw["skrivar"] == meg eller (rw["skrivar"] == "" og (rw["ventande_skrivarar"] == 0 eller _rw_mine_les(rw, meg) > 0))) {
-        hvis ikkje _vent(rw, frist, op) {
+        hvis ikkje _vent_frigje(rw, frist, op) {
             _opp(rw)
             returner usann
         }
@@ -739,6 +761,8 @@ funksjon trådlokal_fjern(tl: ordbok) -> heiltall {
 
 # Trådkropp: køyrer boks.f() og legg resultat eller unntak i boksen, so
 # tråd_join kan gi tilbake den typa verdien (thread_join sjølv gjer alt til tekst).
+# Eit unntak blir lagra med stakksporet (R4/F34) so join kan kaste det på nytt
+# med e.stakk frå TRÅDEN, ikkje frå join-staden.
 funksjon _trad_kropp(args) -> tekst {
     la boks = args["boks"]
     la f = boks["f"]
@@ -746,30 +770,53 @@ funksjon _trad_kropp(args) -> tekst {
         boks["verdi"] = f()
         boks["status"] = "ferdig"
     } fang (e) {
+        # Stakksporet følgjer med til join. Eldre VM-ar utan unntak_pakk/unntak_sett_stakk
+        # (committa seed før R4) gjev berre eit unntak utan spor.
+        prøv {
+            la pakka = builtin.unntak_pakk(e)
+            boks["stakk"] = pakka["stakk"]
+        } fang (ingen_stakk) { }
         boks["feil"] = e
         boks["status"] = "feil"
     }
     returner ""
 }
 
-# new Thread(f).start(): f er ein lambda utan parameter, t.d. fun() -> arbeid(x).
+# new Thread(f).start(): f er ein lambda utan parameter, t.d. fun() -> arbeid(x)
+# eller funksjon() { … }. Closures fangar variablane sine (delt, ikkje kopiert).
+# Returnerer eit trådobjekt med metodane t.join(), t.join_innan(ms), t.avbryt(),
+# t.avbrote(), t.ferdig() og t.resultat() (og same funksjonane som tråd_*(t)).
 funksjon tråd_start(f) -> ordbok {
     hvis backend() != "vm-green" {
         kast "SamtidFeil: trådar er ikkje tilgjengelege på denne plattforma (backend " + backend() + ")"
     }
-    la boks = {"f": f, "verdi": null, "feil": null, "status": "køyrer"}
+    la boks = {"f": f, "verdi": null, "feil": null, "stakk": [], "status": "køyrer", "joina": usann}
     la r = builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
         "fn": "std.samtid._trad_kropp", "args": {"boks": boks}, "name": "samtid", "stack_bytes": "65536"})
     hvis _status(r) != "started" {
         kast "SamtidFeil: tråd_start feila: " + _feiltekst(r)
     }
-    returner {"_type": "traad", "handle": tekst(r["handle"]), "thread_id": tekst(r["thread_id"]),
-              "boks": boks, "joina": usann}
+    # d er dataposten metodane fangar (ingen sirkel: d har ingen closures).
+    la d = {"_type": "traad", "handle": tekst(r["handle"]), "thread_id": tekst(r["thread_id"]), "boks": boks}
+    la t = {"_type": "traad", "handle": tekst(r["handle"]), "thread_id": tekst(r["thread_id"]), "boks": boks}
+    t["join"] = fun() -> tråd_join(d)
+    t["join_innan"] = fun(ms) -> tråd_join_innan(d, ms)
+    t["avbryt"] = fun() -> tråd_avbryt(d)
+    t["avbrote"] = fun() -> tråd_avbrote(d)
+    t["ferdig"] = fun() -> tråd_ferdig(d)
+    t["resultat"] = fun() -> tråd_resultat(d)
+    returner t
+}
+
+# tråd(f): kort namn for tråd_start (tråd(fun() -> … ) eller tråd(funksjon() { … })).
+funksjon tråd(f) -> ordbok {
+    returner tråd_start(f)
 }
 
 funksjon _trad_join(t: ordbok, timeout_ms: heiltall) -> boolsk {
     _krev(t, "traad")
-    hvis ikkje t["joina"] {
+    la boks = t["boks"]
+    hvis ikkje boks["joina"] {
         la r = builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
             "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": tekst(timeout_ms)})
         la st = _status(r)
@@ -777,8 +824,7 @@ funksjon _trad_join(t: ordbok, timeout_ms: heiltall) -> boolsk {
         hvis st != "finished" og st != "error" {
             kast "SamtidFeil: tråd_join feila: " + _feiltekst(r)
         }
-        t["joina"] = sann
-        la boks = t["boks"]
+        boks["joina"] = sann
         hvis st == "error" og boks["status"] == "køyrer" {
             boks["status"] = "feil"
             boks["feil"] = "SamtidFeil: tråden feila: " + _feiltekst(r)
@@ -788,7 +834,8 @@ funksjon _trad_join(t: ordbok, timeout_ms: heiltall) -> boolsk {
 }
 
 # join(): ventar på tråden og returnerer verdien f() gav (typa). Kasta f eit
-# unntak, blir det same unntaket kasta her (som Future.get, men utan innpakking).
+# unntak, blir det same unntaket kasta her (som Future.get, men utan innpakking),
+# med stakksporet frå tråden (e.stakk etter unntak_pakk(e)).
 funksjon tråd_join(t: ordbok) {
     _trad_join(t, -1)
     returner tråd_resultat(t)
@@ -803,7 +850,14 @@ funksjon tråd_join_innan(t: ordbok, timeout_ms: heiltall) -> boolsk {
 funksjon tråd_resultat(t: ordbok) {
     _krev(t, "traad")
     la boks = t["boks"]
-    hvis boks["status"] == "feil" { kast boks["feil"] }
+    hvis boks["status"] == "feil" {
+        hvis lengde(boks["stakk"]) > 0 {
+            prøv {
+                builtin.unntak_sett_stakk(boks["feil"], boks["stakk"])
+            } fang (ingen_stakk) { }
+        }
+        kast boks["feil"]
+    }
     hvis boks["status"] != "ferdig" { kast "SamtidFeil: tråden er ikkje ferdig" }
     returner boks["verdi"]
 }
@@ -812,4 +866,30 @@ funksjon tråd_ferdig(t: ordbok) -> boolsk {
     _krev(t, "traad")
     la boks = t["boks"]
     returner boks["status"] != "køyrer"
+}
+
+# ─── Avbrot (Thread.interrupt) ────────────────────────────────────────────────
+
+# tråd.avbryt(): set avbrotsflagget til tråden. Neste blokkerande operasjon i
+# tråden (sov, join, vent på ei future, venting på kanal/lås/semafor/monitor/
+# barriere) kastar AvbruttFeil; flagget blir då nullstilt. Ein tråd som ikkje
+# blokkerer ser det via avbrote(). Ingen effekt på ein tråd som er ferdig.
+funksjon tråd_avbryt(t: ordbok) -> heiltall {
+    _krev(t, "traad")
+    _sync("interrupt", t["handle"], "", 0)
+    returner 0
+}
+
+# Er tråden avbroten (flagget sett, ikkje enno konsumert av ein AvbruttFeil)?
+funksjon tråd_avbrote(t: ordbok) -> boolsk {
+    _krev(t, "traad")
+    la r = _sync("interrupted", t["handle"], "", 0)
+    returner _status(r) == "ready" og tekst(r["value"]) == "1"
+}
+
+# avbrote(): er tråden som kallar avbroten? (Hovudtråden er aldri avbroten.)
+funksjon avbrote() -> boolsk {
+    hvis backend() != "vm-green" { returner usann }
+    la r = _sync("interrupted", "", "", 0)
+    returner _status(r) == "ready" og tekst(r["value"]) == "1"
 }

@@ -1,0 +1,110 @@
+// AOT-fikstur (rA-os punkt 10): socket_prøv_recv/send/aksepter gjev verdi i staden for å kaste.
+// Tenar og klientar i same prosess over loopback. Dekkjer: normal flyt, tidsavbrot (−EAGAIN),
+// klient som lukkar med RST (SO_LINGER 1/0 → −ECONNRESET), send mot lukka peer (−EPIPE/−ECONNRESET),
+// accept på ugyldig fd (−EBADF), og at tenaren lever og tek imot ei ny tilkopling etterpå.
+// Kontrollen: dei gamle socket_recv/socket_send kastar framleis i same situasjon (uendra kontrakt).
+// Exit 42 = alt OK; 2..30 = steg som feila.
+bruk std.native_gap
+
+funksjon feil(kode: heiltall, m: tekst) -> heiltall {
+    skriv("aot_x86_socket_prov FEIL " + tekst_fra_heltall(kode) + ": " + m + "\n")
+    returner kode
+}
+
+// SO_LINGER {l_onoff=1, l_linger=0}: close() sender RST i staden for FIN.
+funksjon rst_ved_lukking(fd: heiltall) -> heiltall {
+    la a = builtin.sys6(9, 0, 4096, 3, 34, -1, 0)
+    builtin.raw_store64(a, 1)
+    returner builtin.sys6(54, fd, 1, 13, a, 8, 0)
+}
+
+funksjon koble(srv: heiltall, port: heiltall) {
+    la kli = socket_new(2, 1)
+    hvis socket_connect(kli, "127.0.0.1", port) != 0 { returner {"kli": -1, "c": -1} }
+    la a = socket_prøv_aksepter(srv)
+    hvis a["feil"] != 0 { returner {"kli": kli, "c": -1} }
+    returner {"kli": kli, "c": a["fd"]}
+}
+
+funksjon start() -> heiltall {
+    la srv = socket_new(2, 1)
+    socket_setsockopt(srv, 1, 2, 1)
+    hvis socket_bind(srv, "127.0.0.1", 0) != 0 { returner feil(2, "bind") }
+    hvis socket_listen(srv, 8) != 0 { returner feil(3, "listen") }
+    la port = socket_getsockname(srv)
+
+    // 1. Normal flyt.
+    la p1 = koble(srv, port)
+    hvis p1["c"] < 0 { returner feil(4, "aksepter") }
+    la s1 = socket_prøv_send(p1["kli"], "hei æøå")
+    hvis s1["feil"] != 0 eller s1["n"] != lengde("hei æøå") { returner feil(5, "send") }
+    la r1 = socket_prøv_recv(p1["c"], 4096)
+    hvis r1["feil"] != 0 eller r1["data"] != "hei æøå" { returner feil(6, "recv") }
+    // liste-heiltal som data
+    la s1b = socket_prøv_send(p1["kli"], [104, 105, 0, 255])
+    hvis s1b["feil"] != 0 eller s1b["n"] != 4 { returner feil(7, "send liste") }
+    la r1b = socket_prøv_recv(p1["c"], 4096)
+    hvis lengde(r1b["data"]) != 4 { returner feil(8, "recv liste") }
+
+    // 2. Tidsavbrot: ingen data, SO_RCVTIMEO 50 ms → −EAGAIN (11), data "".
+    socket_settimeout(p1["c"], 50)
+    la r2 = socket_prøv_recv(p1["c"], 4096)
+    hvis r2["feil"] != -11 eller r2["data"] != "" { returner feil(9, "tidsavbrot feil=" + tekst_fra_heltall(r2["feil"])) }
+
+    // 3. EOF: peer lukkar pent → feil 0, data "".
+    socket_close(p1["kli"])
+    la r3 = socket_prøv_recv(p1["c"], 4096)
+    hvis r3["feil"] != 0 eller r3["data"] != "" { returner feil(10, "EOF feil=" + tekst_fra_heltall(r3["feil"])) }
+    socket_close(p1["c"])
+
+    // 4. RST frå klienten: prøv_recv gjev −ECONNRESET (−104), den gamle socket_recv kastar.
+    la p4 = koble(srv, port)
+    hvis p4["c"] < 0 { returner feil(11, "aksepter 4") }
+    hvis rst_ved_lukking(p4["kli"]) != 0 { returner feil(12, "SO_LINGER") }
+    socket_close(p4["kli"])
+    vent.sov(50)
+    la r4 = socket_prøv_recv(p4["c"], 4096)
+    hvis r4["feil"] != -104 { returner feil(13, "RST feil=" + tekst_fra_heltall(r4["feil"])) }
+    socket_close(p4["c"])
+    la p4b = koble(srv, port)
+    rst_ved_lukking(p4b["kli"])
+    socket_close(p4b["kli"])
+    vent.sov(50)
+    la kasta = usann
+    prøv { socket_recv(p4b["c"], 4096) } fang (e) { kasta = sann }
+    hvis ikkje kasta { returner feil(14, "gamle socket_recv kasta ikkje ved RST") }
+    socket_close(p4b["c"])
+
+    // 5. Send mot lukka peer: før eller sidan −EPIPE (−32) eller −ECONNRESET (−104), utan å drepe prosessen.
+    la p5 = koble(srv, port)
+    socket_close(p5["kli"])
+    vent.sov(50)
+    la sist = 0
+    la totalt = 0
+    la runde = 0
+    mens runde < 10 og sist == 0 {
+        la s5 = socket_prøv_send(p5["c"], "x")
+        sist = s5["feil"]
+        totalt = totalt + s5["n"]
+        vent.sov(20)
+        runde = runde + 1
+    }
+    hvis sist != -32 og sist != -104 { returner feil(15, "send mot lukka peer feil=" + tekst_fra_heltall(sist)) }
+    socket_close(p5["c"])
+
+    // 6. Accept på ugyldig fd → −EBADF (−9) som verdi.
+    la a6 = socket_prøv_aksepter(9999)
+    hvis a6["feil"] != -9 eller a6["fd"] != -1 { returner feil(16, "aksepter 9999 feil=" + tekst_fra_heltall(a6["feil"])) }
+
+    // 7. Tenaren lever: ei ny tilkopling går fint gjennom etter alle feila.
+    la p7 = koble(srv, port)
+    hvis p7["c"] < 0 { returner feil(17, "aksepter etter feil") }
+    socket_prøv_send(p7["kli"], "ok")
+    la r7 = socket_prøv_recv(p7["c"], 16)
+    hvis r7["data"] != "ok" { returner feil(18, "echo etter feil") }
+    socket_close(p7["kli"])
+    socket_close(p7["c"])
+    socket_close(srv)
+    skriv("aot_x86_socket_prov OK rst=" + tekst_fra_heltall(r4["feil"]) + " send_lukka=" + tekst_fra_heltall(sist) + " ebadf=" + tekst_fra_heltall(a6["feil"]) + "\n")
+    returner 42
+}

@@ -1,0 +1,413 @@
+// tools/nc_dev.no — `nc serve <fil.no> --reload` og `nc dev <fil.no>` (5b).
+//
+// Utviklingsløkke i rein Norscode over prosess-ABI-en (async spawn/wait/read/signal):
+//   1. Finn kjeldefilene (inngangsfila + lokale `bruk`-modular rekursivt; std./selfhost.
+//      blir ikkje overvaka; `--watch <fil|mappe>` legg til meir).
+//   2. Sjekk at programmet kompilerer (`nc check`); start `nc serve` som barn.
+//   3. Poll filene med fast intervall (innhaldssamanlikning: lengd + tekst, ingen
+//      OS-spesifikke API). Endring → debounce til filene har vore stille i ein periode
+//      → `nc check`. Vellukka: SIGTERM til barnet (tenaren drenerer sjølv), vent på
+//      utgang (SIGKILL etter frist), start ny tenar. Feil: skriv feilen, behald den
+//      gamle tenaren til neste vellukka endring.
+//   4. Barnet sin stdout/stderr blir vidaresendt; tenaren som stoppar av seg sjølv
+//      (krasj) blir meldt, og me ventar på neste endring.
+//
+// Argument frå NC_VERKTOY_ARGV (linjeskild): <fil.no> [--port P] [--host H] [--workers N]
+//   [--watch STI]... [--intervall MS] [--debounce MS].
+// Testknappar: NC_DEV_MAKS_MS (avslutt etter så mange ms, 0 = aldri) og NC_DEV_STOPPFIL
+// (avslutt, med ryddig stopp av tenaren, når fila finst).
+
+bruk std.runtime_filesystem som native_fs
+bruk std.runtime.process_abi som process_abi
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon args() -> liste_tekst {
+    la rå = env("NC_VERKTOY_ARGV")
+    la ut: liste_tekst = []
+    hvis rå == "" { returner ut }
+    la delar = builtin.split(rå, "\n")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis delar[i] != "" { legg_til(ut, delar[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon logg(melding: tekst) -> heiltall {
+    skriv("[dev] " + melding + "\n")
+    returner 0
+}
+
+// ── Kjeldefiler ────────────────────────────────────────────────────────────────
+
+funksjon katalog_av(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    hvis lengde(delar) <= 1 { returner "." }
+    la ut = ""
+    la i = 0
+    mens i < lengde(delar) - 1 {
+        hvis i > 0 { ut = ut + "/" }
+        ut = ut + delar[i]
+        i = i + 1
+    }
+    hvis ut == "" { returner "/" }
+    returner ut
+}
+
+// Modulnamnet frå ei `bruk`-linje, eller "" (bruk X som Y / bruk X).
+funksjon bruk_modul(linje: tekst) -> tekst {
+    la t = builtin.trim(linje)
+    hvis ikkje builtin.starts_with(t, "bruk ") { returner "" }
+    la rest = builtin.trim(builtin.slice(t, 5, lengde(t)))
+    la sp = builtin.index_of(rest, " ")
+    hvis sp >= 0 { rest = builtin.slice(rest, 0, sp) }
+    returner rest
+}
+
+funksjon er_systemmodul(modul: tekst) -> bool {
+    returner builtin.starts_with(modul, "std.") eller builtin.starts_with(modul, "selfhost.") eller modul == "builtin"
+}
+
+// Løys eit modulnamn til ei fil (prosjektrot eller katalogen til importøren), eller "".
+funksjon løys_modul(modul: tekst, root: tekst, katalog: tekst) -> tekst {
+    la rel = builtin.replace(modul, ".", "/") + ".no"
+    hvis builtin.fil_finnes(root + "/" + rel) { returner root + "/" + rel }
+    hvis builtin.fil_finnes(katalog + "/" + rel) { returner katalog + "/" + rel }
+    returner ""
+}
+
+funksjon inneheld(liste: liste_tekst, x: tekst) -> bool {
+    la i = 0
+    mens i < lengde(liste) {
+        hvis liste[i] == x { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Inngangsfila + lokale modular (rekursivt). Filer som ikkje finst blir hoppa over.
+funksjon finn_kjeldefiler(inngang: tekst, root: tekst) -> liste_tekst {
+    la filer: liste_tekst = [inngang]
+    la i = 0
+    mens i < lengde(filer) {
+        la fil = filer[i]
+        hvis builtin.fil_finnes(fil) {
+            la linjer = builtin.split(builtin.fil_les(fil), "\n")
+            la kat = katalog_av(fil)
+            la li = 0
+            mens li < lengde(linjer) {
+                la modul = bruk_modul(linjer[li])
+                hvis modul != "" og ikkje er_systemmodul(modul) {
+                    la sti = løys_modul(modul, root, kat)
+                    hvis sti != "" og ikkje inneheld(filer, sti) { legg_til(filer, sti) }
+                }
+                li = li + 1
+            }
+        }
+        i = i + 1
+    }
+    returner filer
+}
+
+// --watch <fil|mappe>: ei mappe blir utvida til alle .no-filer under henne.
+funksjon utvid_watch(sti: tekst, root: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis builtin.ends_with(sti, ".no") {
+        legg_til(ut, sti)
+        returner ut
+    }
+    la walk = native_fs.native_walk_files_med_suffiks(root, sti, ".no")
+    hvis walk["status"] != "ok" { returner ut }
+    la fl = builtin.split(walk["data"], "\n")
+    la i = 0
+    mens i < lengde(fl) {
+        la f = builtin.trim(fl[i])
+        hvis f != "" { legg_til(ut, root + "/" + f) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon samle_filer(fil: tekst, root: tekst, ekstra: liste_tekst) -> liste_tekst {
+    la filer = finn_kjeldefiler(fil, root)
+    la ei = 0
+    mens ei < lengde(ekstra) {
+        la utv = utvid_watch(ekstra[ei], root)
+        la ui = 0
+        mens ui < lengde(utv) {
+            hvis ikkje inneheld(filer, utv[ui]) { legg_til(filer, utv[ui]) }
+            ui = ui + 1
+        }
+        ei = ei + 1
+    }
+    returner filer
+}
+
+// Unionen av to fillister (rekkjefølgje: a, så nye frå b).
+funksjon slå_saman(a: liste_tekst, b: liste_tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(a) {
+        hvis ikkje inneheld(ut, a[i]) { legg_til(ut, a[i]) }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(b) {
+        hvis ikkje inneheld(ut, b[i]) { legg_til(ut, b[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Øyeblikksbilete og diff ──────────────────────────────────────────────────────
+
+// fil → "<lengd>:<innhald>" ("-" viss fila manglar). Innhaldssamanlikning er robust
+// mot låg tidsstempelgranularitet, og krev ingen OS-spesifikk stat.
+funksjon øyeblikk(filer: liste_tekst) {
+    la kart = {}
+    la i = 0
+    mens i < lengde(filer) {
+        la f = filer[i]
+        hvis builtin.fil_finnes(f) {
+            la t = builtin.fil_les(f)
+            kart[f] = tekst_fra_heltall(lengde(t)) + ":" + t
+        } ellers {
+            kart[f] = "-"
+        }
+        i = i + 1
+    }
+    returner kart
+}
+
+// Namna på filene som skil seg mellom to øyeblikksbilete (fil som kom til/forsvann tel med).
+funksjon endra_filer(a, b, filer: liste_tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(filer) {
+        la f = filer[i]
+        la va = "-"
+        la vb = "-"
+        hvis finnes_nøkkel(a, f) { va = tekst(a[f]) }
+        hvis finnes_nøkkel(b, f) { vb = tekst(b[f]) }
+        hvis va != vb { legg_til(ut, f) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon kort_namn(f: tekst) -> tekst {
+    la d = builtin.split(f, "/")
+    returner d[lengde(d) - 1]
+}
+
+funksjon namnliste(filer: liste_tekst) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < lengde(filer) {
+        hvis i > 0 { ut = ut + ", " }
+        ut = ut + kort_namn(filer[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Barneprosess ──────────────────────────────────────────────────────────────
+
+funksjon nc_sti(root: tekst) -> tekst {
+    la n = env("NC_NATIVE")
+    hvis n != "" { returner n }
+    returner root + "/bin/nc"
+}
+
+// Kompilerer programmet? → [ok, melding]. Bruker `nc check` i barneprosess.
+funksjon sjekk(nc: tekst, fil: tekst, root: tekst) -> liste_tekst {
+    la r = prosess.køyr_liste(nc, ["check", fil], root, {}, 120000)
+    la melding = builtin.trim(r[1] + r[2])
+    hvis r[0] == "0" { returner ["1", melding] }
+    returner ["0", melding]
+}
+
+funksjon start_tenar(nc: tekst, serve_args: liste_tekst, root: tekst) -> tekst {
+    la argv: liste_tekst = ["serve"]
+    la i = 0
+    mens i < lengde(serve_args) {
+        legg_til(argv, serve_args[i])
+        i = i + 1
+    }
+    la areq = process_abi.async_spawn_request(nc, argv, root, "", 2000000000, 67108864)
+    areq = process_abi.sett_sandbox(areq, "none", 4294967296, 1024, sann)
+    // argv skal vinne: nullstill arva kommandokontrakt (som process_runner.køyr_liste).
+    areq = process_abi.sett_environment(areq, {"NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "", "NORSCODE_RUN_CMD": "", "NORSCODE_RUN_FILE": ""})
+    la h = {}
+    prøv { h = builtin.process_operation(areq) } fang (e) { h = {"status": "feil", "error": tekst(e)} }
+    hvis finnes_nøkkel(h, "status") og tekst(h["status"]) == "kjorer" { returner tekst(h["handle"]) }
+    logg("kunne ikkje starte tenaren: " + tekst(h))
+    returner ""
+}
+
+// Vidaresend ny utdata frå barnet.
+funksjon pump(h: tekst) -> heiltall {
+    la bit = builtin.process_operation(process_abi.async_operation("read", h))
+    hvis finnes_nøkkel(bit, "stdout") og tekst(bit["stdout"]) != "" { skriv(tekst(bit["stdout"])) }
+    hvis finnes_nøkkel(bit, "stderr") og tekst(bit["stderr"]) != "" { skriv(tekst(bit["stderr"])) }
+    returner 0
+}
+
+// Kor mange ms å vente på ein tenar som stoppar (SIGTERM → drenering) før SIGKILL.
+funksjon stopp_tenar(h: tekst, frist_ms: heiltall) -> heiltall {
+    builtin.process_operation(process_abi.async_signal_request(h, 15))
+    la brukt = 0
+    la st = builtin.process_operation(process_abi.async_wait_request(h, 200))
+    mens tekst(st["status"]) == "kjorer" og brukt < frist_ms {
+        pump(h)
+        brukt = brukt + 200
+        st = builtin.process_operation(process_abi.async_wait_request(h, 200))
+    }
+    hvis tekst(st["status"]) == "kjorer" {
+        logg("tenaren stansa ikkje på SIGTERM innan " + tekst_fra_heltall(frist_ms) + " ms — SIGKILL")
+        builtin.process_operation(process_abi.async_signal_request(h, 9))
+        builtin.process_operation(process_abi.async_wait_request(h, 2000))
+    }
+    pump(h)
+    prøv { builtin.process_operation(process_abi.async_operation("close", h)) } fang (e) { }
+    returner 0
+}
+
+// Er barnet framleis i live?
+funksjon kjører(h: tekst) -> bool {
+    hvis h == "" { returner usann }
+    la st = builtin.process_operation(process_abi.async_wait_request(h, 1))
+    returner tekst(st["status"]) == "kjorer"
+}
+
+// ── Hovudløkke ────────────────────────────────────────────────────────────────
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la a = args()
+    la fil = ""
+    la serve_args: liste_tekst = []
+    la ekstra: liste_tekst = []
+    la intervall = 300
+    la debounce = 250
+    la i = 0
+    mens i < lengde(a) {
+        hvis (a[i] == "--port" eller a[i] == "-p" eller a[i] == "--host" eller a[i] == "-H" eller a[i] == "--workers" eller a[i] == "-w") og i + 1 < lengde(a) {
+            legg_til(serve_args, a[i])
+            legg_til(serve_args, a[i + 1])
+            i = i + 1
+        } ellers hvis a[i] == "--watch" og i + 1 < lengde(a) {
+            legg_til(ekstra, a[i + 1])
+            i = i + 1
+        } ellers hvis a[i] == "--intervall" og i + 1 < lengde(a) {
+            intervall = heltall_fra_tekst(a[i + 1])
+            i = i + 1
+        } ellers hvis a[i] == "--debounce" og i + 1 < lengde(a) {
+            debounce = heltall_fra_tekst(a[i + 1])
+            i = i + 1
+        } ellers hvis builtin.starts_with(a[i], "--") {
+            skriv("nc dev: ukjend opsjon " + a[i] + "\n")
+            returner 2
+        } ellers {
+            fil = a[i]
+        }
+        i = i + 1
+    }
+    hvis fil == "" eller ikkje builtin.fil_finnes(fil) {
+        skriv("bruk: nc dev <fil.no> [--port P] [--host H] [--workers N] [--watch STI] [--intervall MS] [--debounce MS]\n")
+        skriv("     nc serve <fil.no> --reload [...]\n")
+        returner 2
+    }
+    hvis intervall < 20 { intervall = 20 }
+    la maks_ms = 0
+    hvis env("NC_DEV_MAKS_MS") != "" { maks_ms = heltall_fra_tekst(env("NC_DEV_MAKS_MS")) }
+    la stoppfil = env("NC_DEV_STOPPFIL")
+    la nc = nc_sti(root)
+    // Tenaren får fila først, så portvala.
+    la barne_args: liste_tekst = [fil]
+    la sai = 0
+    mens sai < lengde(serve_args) {
+        legg_til(barne_args, serve_args[sai])
+        sai = sai + 1
+    }
+
+    la filer = samle_filer(fil, root, ekstra)
+    logg("overvaker " + tekst_fra_heltall(lengde(filer)) + " fil(er): " + namnliste(filer))
+    la bilete = øyeblikk(filer)
+    la start_ms = builtin.tid_ms()
+
+    la h = ""
+    la s0 = sjekk(nc, fil, root)
+    hvis s0[0] == "1" {
+        h = start_tenar(nc, barne_args, root)
+    } ellers {
+        skriv(s0[1] + "\n")
+        logg("kompileringsfeil — ventar på endring")
+    }
+    la meldt_stopp = usann
+
+    mens sann {
+        // Vent eitt intervall: på barnet viss det køyrer (gjev òg utdata fortløpande), elles søv.
+        hvis h != "" {
+            builtin.process_operation(process_abi.async_wait_request(h, intervall))
+            pump(h)
+            hvis ikkje kjører(h) og ikkje meldt_stopp {
+                pump(h)
+                logg("tenaren stoppa — ventar på endring")
+                prøv { builtin.process_operation(process_abi.async_operation("close", h)) } fang (e) { }
+                h = ""
+                meldt_stopp = sann
+            }
+        } ellers {
+            builtin.sov(intervall)
+        }
+        hvis (maks_ms > 0 og builtin.tid_ms() - start_ms > maks_ms) eller (stoppfil != "" og builtin.fil_finnes(stoppfil)) {
+            hvis h != "" { stopp_tenar(h, 10000) }
+            logg("avslutta (NC_DEV_MAKS_MS / NC_DEV_STOPPFIL)")
+            returner 0
+        }
+
+        // Ekspander overvaka mapper på nytt kvar runde: nye/sletta filer utløyser restart.
+        la alle = slå_saman(filer, samle_filer(fil, root, ekstra))
+        la ny = øyeblikk(alle)
+        la endra = endra_filer(bilete, ny, alle)
+        hvis lengde(endra) > 0 {
+            // Debounce: vent til filene har vore uendra i ei heil debounce-periode.
+            la stabil = ny
+            la endra_sist = endra
+            la roleg = usann
+            mens ikkje roleg {
+                builtin.sov(debounce)
+                alle = slå_saman(alle, samle_filer(fil, root, ekstra))
+                la neste = øyeblikk(alle)
+                la d2 = endra_filer(stabil, neste, alle)
+                hvis lengde(d2) == 0 { roleg = sann } ellers { stabil = neste  endra_sist = d2 }
+            }
+            la samla_endra = endra_filer(bilete, stabil, alle)
+            // Ny `bruk` eller nye/sletta filer i overvaka mapper: oppdater fillista.
+            filer = samle_filer(fil, root, ekstra)
+            bilete = stabil
+            hvis lengde(samla_endra) > 0 {
+                logg("endra: " + namnliste(samla_endra) + " → startar på nytt")
+                la s = sjekk(nc, fil, root)
+                hvis s[0] == "1" {
+                    hvis h != "" { stopp_tenar(h, 10000) }
+                    h = start_tenar(nc, barne_args, root)
+                    meldt_stopp = usann
+                } ellers {
+                    skriv(s[1] + "\n")
+                    hvis h != "" { logg("kompileringsfeil — den gamle tenaren held fram til neste vellukka endring") }
+                    ellers { logg("kompileringsfeil — ventar på endring") }
+                }
+            }
+        }
+    }
+    returner 0
+}
