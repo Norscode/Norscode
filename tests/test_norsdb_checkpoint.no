@@ -96,14 +96,92 @@ funksjon start() -> heltall {
     assert_eq(sql.query_text(db8, "SELECT COUNT(*) FROM t WHERE v = 'søppel'"), "0")
 
     // ── Attverande .cp2 (krasj etter .cp2, før .cp vart skriven om) ──
-    la full = builtin.fil_les(sti + ".cp")
-    builtin.fil_skriv(sti + ".cp2", full)
+    // Ei ekte kompaktering skriv eitt sjølvstendig base-segment i .cp2.
+    // Den eksisterande .cp kan innehalde fleire delta-segment, og må ikkje
+    // brukast som ei simulert fullkompaktering.
+    motor.db_backup(db8, sti + ".cp2")
     builtin.fil_skriv(sti + ".cp", "NORSDB2" + builtin.chr(30) + "S" + builtin.chr(31) + "1")
     la db9 = sql.opne(sti)
     assert_eq(sql.query_int(db9, "SELECT COUNT(*) FROM t"), 153)
     assert(builtin.fil_finnes(sti + ".cp2") == usann)
     // Constraints overlever kompaktering og gjenoppretting.
     assert_eq(sql.exec(db9, "INSERT INTO t (v) VALUES ('heil')"), -1)
+
+    // ── Gammal .cp2 skal ALDRI overskrive nyare checkpoint ─────────
+    // Simuler ein attliggjande kompakteringsfil, der nye commit-ar sidan har
+    // vorte checkpointa til .cp som eit seinare delta-segment.
+    _rydd(sti)
+    la d_old = sql.opne(sti)
+    sql.exec(d_old, "CREATE TABLE versjon (id INTEGER PRIMARY KEY, verdi TEXT)")
+    sql.exec(d_old, "INSERT INTO versjon (verdi) VALUES ('gammal')")
+    motor.db_checkpoint(d_old)
+    la cp_gammal = builtin.fil_les(sti + ".cp")
+    sql.exec(d_old, "INSERT INTO versjon (verdi) VALUES ('nyare')")
+    motor.db_checkpoint(d_old)
+    assert_eq(sql.query_int(sql.opne(sti), "SELECT COUNT(*) FROM versjon"), 2)
+    builtin.fil_skriv(sti + ".cp2", cp_gammal)
+    la d_ny = sql.opne(sti)
+    assert_eq(sql.query_int(d_ny, "SELECT COUNT(*) FROM versjon"), 2)
+    assert_eq(sql.query_text(d_ny, "SELECT verdi FROM versjon WHERE id = 2"), "nyare")
+    assert(builtin.fil_finnes(sti + ".cp2") == usann)
+
+    // Ufullstendig .cp2 (eit heilt base-segment utan avsluttande Z)
+    // skal heller ikkje overskrive eit gyldig checkpoint.
+    builtin.fil_skriv(sti + ".cp2", "NORSDB2" + builtin.chr(30) + "S" + builtin.chr(31) + "999" + builtin.chr(30) + "I")
+    la d_ufull = sql.opne(sti)
+    assert_eq(sql.query_int(d_ufull, "SELECT COUNT(*) FROM versjon"), 2)
+    assert(builtin.fil_finnes(sti + ".cp2") == usann)
+
+    // ── cp2 med ekstra post etter siste Z er ikkje ei full kompaktering ─
+    // Ein siste Z ein stad i fila er ikkje nok; cp2 må slutte nøyaktig der.
+    builtin.fil_skriv(sti + ".cp2", cp_gammal + "I" + builtin.chr(31) + "versjon" + builtin.chr(30))
+    la d_ekstra = sql.opne(sti)
+    assert_eq(sql.query_int(d_ekstra, "SELECT COUNT(*) FROM versjon"), 2)
+    assert(builtin.fil_finnes(sti + ".cp2") == usann)
+
+    // ── Korrupt primær-checkpoint må feile lukka, ikkje bli tom database ─
+    la god_cp = builtin.fil_les(sti + ".cp")
+    la rs = builtin.chr(30)
+    la us = builtin.chr(31)
+    builtin.fil_skriv(sti + ".cp", "NORSDB2" + rs + "S" + us + "999" + rs + "I")
+    la stoppa = usann
+    prøv { motor.db_åpne(sti) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    // Ugyldig avslutningsmarkør utan S skal heller ikkje gje tom DB.
+    builtin.fil_skriv(sti + ".cp", "NORSDB2" + rs + "Z" + us + "999" + rs)
+    stoppa = usann
+    prøv { motor.db_åpne(sti) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    builtin.fil_skriv(sti + ".cp", god_cp)
+    assert_eq(sql.query_int(sql.opne(sti), "SELECT COUNT(*) FROM versjon"), 2)
+
+    // ── Mislykka checkpoint-skriving skal ikkje late som suksess ─────
+    // .cp er ei fil, ikkje ei mappe. Ein sti under henne kan ikkje skrivast.
+    la ugyldig_sti = sti + ".cp/ikkje_ei_mappe"
+    la feil_db = motor.db_ny(ugyldig_sti)
+    stoppa = usann
+    prøv { motor.db_checkpoint_full(feil_db) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    assert_eq(feil_db["_absorbert"], 0)
+
+    // ── CRC32 fangar byte-korrupsjon utan storleiksforskjell ─────────
+    _rydd(sti)
+    la crc_db = sql.opne(sti)
+    sql.exec(crc_db, "CREATE TABLE crc_tab (id INTEGER PRIMARY KEY, verdi TEXT)")
+    sql.exec(crc_db, "INSERT INTO crc_tab (verdi) VALUES ('kontrollverdi')")
+    motor.db_checkpoint_full(crc_db)
+    la rett_cp = builtin.fil_les(sti + ".cp")
+    la pos = builtin.index_of(rett_cp, "kontrollverdi")
+    assert(pos > 0)
+    // Byte-erstattinga beheld eksakt filstorleik.
+    la skadd = builtin.slice(rett_cp, 0, pos) + "X" + builtin.slice(rett_cp, pos + 1, lengde(rett_cp))
+    assert_eq(lengde(skadd), lengde(rett_cp))
+    builtin.fil_skriv(sti + ".cp", skadd)
+    stoppa = usann
+    prøv { motor.db_åpne(sti) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    builtin.fil_skriv(sti + ".cp", rett_cp)
+    assert_eq(sql.query_text(sql.opne(sti), "SELECT verdi FROM crc_tab WHERE id = 1"), "kontrollverdi")
 
     // ── Gammalt NORSDB1-format (binært) blir lese og skrive om ───────
     _rydd(sti)
