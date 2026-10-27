@@ -11,7 +11,7 @@ Dette er **ekte kildefiler i Norscode-repositoriet**, ikke oppdiktede «Hello wo
 
 ## Kontrollpunkter før upstream-PR
 
-1. Kontroller lisens for **hver** sample mot repoets lisens og bekreft at den kan brukes i GitHub Linguist. Ikke anta at en offentlig fil gir fri rett til kopiering.
+1. Repoets rotfil [`LICENSE`](../../LICENSE) inneholder **Apache License 2.0** (kontrollert). De fire sample-kandidatene kommer fra dette repoet. Før kopiering må eventuelle særskilte filoverskrifter/NOTICE og korrekt attribusjon kontrolleres. Dette er ikke det samme som godkjent innsendelse.
 2. Vurder syntaksvariasjon (blokker med `{}` kontra `slutt`) og at grammatikken faktisk dekker eksemplene.
 3. Test TextMate-grammatikken og importer den med Linguists `script/add-grammar`; GitHub krever en grammatikkilde med kompatibel lisens.
 4. Gjennomfør GitHub-kodesøk etter faktisk `.no`-bruk. Dokumenter antallet indekserte filer fra siste år, uten forks, og fordeling mellom uavhengige eiere/repositorier. Ikke oppgi et anslått tall som verifisert.
@@ -20,4 +20,11 @@ Dette er **ekte kildefiler i Norscode-repositoriet**, ikke oppdiktede «Hello wo
 
 **Kilde:** https://github.com/github-linguist/linguist/blob/main/CONTRIBUTING.md
 
-**Status:** Kandidater identifisert og lest. Lisens, telling, heuristikk og upstream-test er **ikke verifisert**.
+**Status:** Kandidater identifisert og lest. Rotlisensen (Apache-2.0) er verifisert. Filspesifikke rettigheter, brukstelling, heuristikk og upstream-test er **ikke verifisert**.
+
+## Konkrete søk for bruk i GitHub
+
+- [GitHub-kodesøk: Norscode-filer](https://github.com/search?q=path%3A*.no+%22funksjon%22+%22returner%22&type=code)
+- [GitHub-kodesøk: andre eiere enn Norscode](https://github.com/search?q=path%3A*.no+%22funksjon%22+%22returner%22+-user%3ANorscode&type=code)
+
+**Viktig:** Søkene er bare innganger til manuell kontroll, ikke verifiserte tall. Tellekravet gjelder indekserte filer siste år uten forks, og distribusjon på uavhengige brukere. Skillet mellom dato for filindeksering og sist oppdatert repository må vurderes etter GitHubs egen metodikk.
