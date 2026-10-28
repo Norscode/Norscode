@@ -37,3 +37,13 @@ Alle disse er faktisk observert i de oppgitte kildefilene. Ingen kildekode er ko
 **Avgrensning:** Dette er en lokal Norscode-prototype og kun et første datasett. Den kan gi både falske positive og falske negative for andre kilder, støtter ikke Linguists faktiske heuristikk-format og endrer ikke GitHubs klassifisering. Flere ekte uavhengige positive og negative kilder og upstream-kryssvalidering trengs.
 
 **Status per CI #2022 (commit `09325cf`):** både metadata-test og den første prototypetesten er bekreftet grønne. Prototypen er siden utvidet med ekstra negative tilfeller og linjebasert deteksjon; denne nye versjonen har ikke verifisert CI-resultat ennå.
+
+## Direkte test av foreslått Linguist-regex
+
+- `tests/test_github_linguist_heuristic_regex.no` kontrollerer de **samme tre mønstrene som ligger i** `linguist-proposal/norscode-heuristics.yml` (strenglikhet mot YAML-innholdet).
+- Den kjører hver regexp med `std.regex` og multiline-flagg mot tre positive kodeeksempler og åtte negative eksempler. Resultatet blir en reell feilreturkode ved regresjon, ikke bare `assert`.
+- Testen er koblet til GitHub Actions `format-lint-check` via `./bin/nc run tests/test_github_linguist_heuristic_regex.no`.
+- Mønstrene benytter bare ASCII-klasser for å kunne testes i både Norscodes regex-motor og Ruby-regex. Navn som bare kan beskrives med andre Unicode-bokstaver er en kjent falsk-negativ risiko.
+- Uavhengig lokal Ruby-regex-kontroll av tilsvarende mønster med tre positive og seks negative eksempler ble gjennomført. **Dette er ikke** `github-linguist/linguist` sin testpakke eller distribuerte GitHub-detektering.
+
+**Obs:** `std.regex` støtter `(?m)` eksplisitt for flerlinjeankre. Ruby bruker sine egne ankerregler. Full upstream `script/check-regex-compatibility`, samples, deteksjon og kryssvalidering gjenstår. 
