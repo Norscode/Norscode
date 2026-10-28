@@ -32,8 +32,8 @@ Alle disse er faktisk observert i de oppgitte kildefilene. Ingen kildekode er ko
 
 ## Lokal prototype
 
-`tests/test_github_linguist_detector_prototype.no` sjekker de fire ekte positive kildefilene over og seks negative norske tekststrenger. Den bruker en bevisst konservativ sjekk: funksjonssignatur + kodeblokk + `returner`. Den er integrert som eget obligatorisk steg i `format-lint-check` i `.github/workflows/ci.yml` og kjøres med `./bin/nc run tests/test_github_linguist_detector_prototype.no`.
+`tests/test_github_linguist_detector_prototype.no` sjekker fire ekte positive kildefiler og to kompakte positive kodeeksempler, samt elleve negative tekst-/kodefragmenter. Den sjekker linjer og ignorerer linjer som starter med kommentarer eller anførselstegn. Den krever funksjonsdeklarasjon med parenteser, kodeblokk og retursetning på en kodelinje. Metoden er bevisst konservativ og kan overse gyldig Norscode som ikke bruker `returner`. Den er integrert som eget obligatorisk steg i `format-lint-check` i `.github/workflows/ci.yml` og kjøres med `./bin/nc run tests/test_github_linguist_detector_prototype.no`.
 
 **Avgrensning:** Dette er en lokal Norscode-prototype og kun et første datasett. Den kan gi både falske positive og falske negative for andre kilder, støtter ikke Linguists faktiske heuristikk-format og endrer ikke GitHubs klassifisering. Flere ekte uavhengige positive og negative kilder og upstream-kryssvalidering trengs.
 
-**Status:** Prototypen er implementert og koblet til CI. CI-resultatet for den nye commiten er ikke verifisert ennå.
+**Status per CI #2022 (commit `09325cf`):** både metadata-test og den første prototypetesten er bekreftet grønne. Prototypen er siden utvidet med ekstra negative tilfeller og linjebasert deteksjon; denne nye versjonen har ikke verifisert CI-resultat ennå.
