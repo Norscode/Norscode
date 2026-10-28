@@ -30,4 +30,10 @@ Alle disse er faktisk observert i de oppgitte kildefilene. Ingen kildekode er ko
 4. Ingen endring i eksisterende `Text`-deteksjon for vanlige `.no`-filer.
 5. Upstream Linguist-testene må passere, og testdekningen må vise både positive og negative tilfeller.
 
-**Status:** Testvektorer og akseptansekriterier dokumentert, **ikke kjørt**.
+## Lokal prototype
+
+`tests/test_github_linguist_detector_prototype.no` sjekker de fire ekte positive kildefilene over og seks negative norske tekststrenger. Den bruker en bevisst konservativ sjekk: funksjonssignatur + kodeblokk + `returner`. Den er integrert som eget obligatorisk steg i `format-lint-check` i `.github/workflows/ci.yml` og kjøres med `./bin/nc run tests/test_github_linguist_detector_prototype.no`.
+
+**Avgrensning:** Dette er en lokal Norscode-prototype og kun et første datasett. Den kan gi både falske positive og falske negative for andre kilder, støtter ikke Linguists faktiske heuristikk-format og endrer ikke GitHubs klassifisering. Flere ekte uavhengige positive og negative kilder og upstream-kryssvalidering trengs.
+
+**Status:** Prototypen er implementert og koblet til CI. CI-resultatet for den nye commiten er ikke verifisert ennå.
