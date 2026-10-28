@@ -30,3 +30,14 @@ GitHub bruker [github-linguist](https://github.com/github-linguist/linguist) for
 ## Bekreftet konflikt med GitHub Linguist
 
 Per 27. oktober 2026 er `.no` registrert som `Text` i [Linguists languages.yml](https://github.com/github-linguist/linguist/blob/main/lib/linguist/languages.yml). `Norscode` finnes ikke i dette registeret. Før upstream-PR må vi derfor ta høyde for både eksisterende tekstfiler og nye Norscode-kildefiler. Linguists retningslinjer ber om minst to representanter for hvert språk som deler endelsen og eventuelt en heuristikk når innholdet kan skilles. Norscode-kjennetegn kan være `funksjon`, `returner`, `pakke`, `bruk`, `la`, `heiltall`, `slutt`; én enkelt forekomst bør ikke automatisk gi positiv klassifisering. Ingen heuristikk er skrevet eller testet mot upstream ennå.
+
+
+## Konkrete upstream-forslag i denne PR-en
+
+- [norscode-language.yml](linguist-proposal/norscode-language.yml): foreslått `Norscode`-oppføring til `lib/linguist/languages.yml`; `language_id` skal opprettes med Linguists `script/update-ids`.
+- [norscode-heuristics.yml](linguist-proposal/norscode-heuristics.yml): forslag til `.no`-regel i `lib/linguist/heuristics.yml`. Finner funksjonssignatur, innrykket `returner` og avslutning med `}` eller `slutt`; beholder `Text` som reserveutfall.
+- Reglene er prøvd mot representative positive og negative utdrag med en lokal YAML/regex-kontroll, **ikke** mot Linguists offisielle testpakke eller GitHub.com.
+- GitHub Linguist sin [lisensliste](https://github.com/github-linguist/linguist/blob/main/vendor/licenses/config.yml) har `apache-2.0` som tillatt grammatikklisens. Rotlisensen til Norscode er Apache-2.0, men `script/add-grammar` og eventuelle særskilte filnotiser må fortsatt verifiseres.
+- Verken språkregisteret, heuristikkene eller grammatikken er oppdatert hos github-linguist ennå. **Ikke send upstream PR før bevis for GitHub-bruk på uavhengige kontoer og kildegrunnlag er kontrollert.**
+
+Når bruken er dokumentert, må fragmentene flettes inn i deres faktiske YAML-filer i korrekt alfabetisk rekkefølge, grammatikken legges inn via `script/add-grammar`, `script/update-ids` kjøres, det legges inn representative samples og minst to eksempler for hvert språk som deler `.no`, og deres egne `test/test_blob.rb`-/heuristikk- og kryssvalideringstester kjøres. Dette er krav til *ekstern Linguist-integrasjon*, ikke nye runtime-avhengigheter for Norscode.
