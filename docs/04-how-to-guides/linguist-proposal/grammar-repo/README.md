@@ -1,22 +1,46 @@
-# Norscode Grammar — publication staging package
+# Norscode TextMate Grammar — export instructions
 
-This directory is an **exportable template** for a dedicated public Git repository to hold Norscode's TextMate grammar. It is not an already published grammar repository.
+This is an **export plan**, not a published repository. No generated JSON or duplicate
+license is stored in this tracked documentation directory.
 
-- Official source extension: `.no`
-- TextMate scope: `source.norscode`
-- License: Apache License 2.0, see `LICENSE`
-- Canonical source: [Norscode VS Code grammar](https://github.com/Norscode/Norscode/blob/main/vscode-norscode/syntaxes/norscode.tmLanguage.json)
-- Main development PR: [Norscode #274](https://github.com/Norscode/Norscode/pull/274)
+## Generate the standalone grammar package
 
-## Publication procedure
+From the root of a checkout of `Norscode/Norscode`:
 
-1. Wait for PR #274 to be reviewed and validated. Do not merge to main automatically.
-2. Publish **the contents of this directory** at the root of a new public Git repository (not this monorepo). Confirm proper ownership and licensing before publication.
-3. Verify `package.json` refers to the grammar path and that the grammar `scopeName` is `source.norscode`.
-4. In a separate checkout of `github-linguist/linguist`, run `script/add-grammar https://github.com/<owner>/<grammar-repo>` **only when GitHub Linguist's independent-usage admission criteria are met**.
-5. Run `script/update-ids`, `script/check-regex-compatibility lib/linguist/heuristics.yml`, sample and `test/test_blob.rb` checks, and cross-validation as appropriate in the Linguist repository.
-6. Do not claim GitHub supports Norscode until an upstream PR has been accepted and GitHub.com has rolled out the change.
+```sh
+./bin/nc run tools/eksporter_linguist_grammatikk.no
+```
 
-**Sync invariant:** `tests/test_github_linguist_metadata.no` checks that the staged grammar and `LICENSE` are exact copies of their canonical counterparts, so future grammar changes cannot silently diverge within this PR.
+The command is written in Norscode. It creates these **generated** files under
+`build/norscode-linguist-grammar/`:
 
-**Important:** A new Git repository has **not** been created by this package, and no upstream Linguist files have been modified.
+- `package.json`: small VS Code/TextMate grammar manifest
+- `syntaxes/norscode.tmLanguage.json`: copied from `vscode-norscode/syntaxes/norscode.tmLanguage.json`
+- `LICENSE`: copied from the repository's Apache-2.0 root license
+- `README.md`: copied from this document
+
+The exporter performs read-back comparisons and returns a non-zero exit code
+if the generated grammar or license differs from the canonical originals.
+GitHub CI runs this Norscode exporter on pull requests.
+
+## Publishing the resulting folder
+
+1. Inspect the generated package and its license.
+2. When Norscode meets GitHub Linguist's independent usage/admission criteria,
+   publish **the contents of** `build/norscode-linguist-grammar/` as the root of
+   a *separate* public repository. This step has **not** been done.
+3. From a separate checkout of `github-linguist/linguist` run
+   `script/add-grammar https://github.com/<owner>/<grammar-repo>`.
+   This imports a Git submodule, so passing the entire Norscode repository is incorrect.
+4. Add `languages.yml` and `heuristics.yml` definitions, real samples and
+   attribution; execute `script/update-ids`,
+   `script/check-regex-compatibility lib/linguist/heuristics.yml`,
+   `bundle exec rake test` and `bundle exec script/cross-validation --test`.
+5. Submit an upstream PR only with independently verified Norscode adoption
+   and required sample/grammar evidence.
+
+**Scope:** `source.norscode`, **extension:** `.no`,
+**license:** Apache-2.0.
+
+Official recognition in GitHub does not occur until the Linguist maintainers
+accept a change and GitHub.com deploys the relevant Linguist release.
