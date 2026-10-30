@@ -42,15 +42,20 @@ Per 27. oktober 2026 er `.no` registrert som `Text` i [Linguists languages.yml](
 
 Når bruken er dokumentert, må fragmentene flettes inn i deres faktiske YAML-filer i korrekt alfabetisk rekkefølge, grammatikken legges inn via `script/add-grammar`, `script/update-ids` kjøres, det legges inn representative samples og minst to eksempler for hvert språk som deler `.no`, og deres egne `test/test_blob.rb`-/heuristikk- og kryssvalideringstester kjøres. Dette er krav til *ekstern Linguist-integrasjon*, ikke nye runtime-avhengigheter for Norscode.
 
-## Separat grammatikkpakke klar for publisering (30. oktober 2026)
+## Generert grammatikkpakke utan JSON-ratchet-brot (30. oktober 2026)
 
-GitHub Linguist sitt `script/add-grammar` legg til eit **Git-repositorium som submodul** (`vendor/grammars/<repo>`) og krev Docker, Git, Ruby, Bundler og lisensverifisering. Å gje skriptet URL-en til heile Norscode-monorepoet ville derfor importera feil pakke/for mykje materiale.
+GitHub Linguist sitt `script/add-grammar` importerer eit **eige Git-repositorium som submodul**, ikkje berre ei undermappe frå Norscode. Opphavleg staging under `linguist-proposal/grammar-repo` la til to nye JSON-filer som fekk Norscode sitt F0.1-gate til å feile: **60 spora JSON-filer mot taket 58** i CI #2044, jobb «Driftsvakt». Dette var ein faktisk gate-feil, ikkje ein feil i Linguist-regex-testane.
 
-Det er no oppretta ei **eksporterbar staging-pakke** under [linguist-proposal/grammar-repo](linguist-proposal/grammar-repo/README.md). Pakka inneheld:
+Løysinga er **ikkje å auke ratchet-taket**. Begge dei dupliserte JSON-filene og den dupliserte lisensen er fjerna frå Git-indeksen. I staden køyrer ein:
 
-- `package.json` med `.no` og `source.norscode` samt peikar til TextMate-grammatikken
-- `syntaxes/norscode.tmLanguage.json` som **eksakt kopi** av den eksisterande VS Code-grammatikken
-- `LICENSE` som **eksakt kopi** av Apache-2.0-lisensen i rotkatalogen
-- `README.md` med publisering og upstream-teststeg
+```sh
+./bin/nc run tools/eksporter_linguist_grammatikk.no
+```
 
-`tests/test_github_linguist_metadata.no` verifiserer at desse to kopiane er **byte-/tekstidentiske** med kanonisk grammatikk og rotlisens, og sjekkar `package.json`. Pakka er ikkje publisert som eit eige GitHub-repo, og ho gjev ikkje offisiell GitHub Linguist-støtte åleine. **Ikkje importer henne upstream før dei dokumenterte brukskrava er oppfylte.**
+Dette Norscode-programmet lagar ein fullstendig, separat eksport i den genererte katalogen `build/norscode-linguist-grammar/` med `package.json`, `syntaxes/norscode.tmLanguage.json`, `LICENSE` og `README.md`. Det les den **kanoniske** VS Code-grammatikken og rotlisensen, og validerer ved å lese eksporten tilbake. `.json`-filene i `build/` er genererte, ikkje nye spora kjelder.
+
+- [Eksportinstruksjonar](linguist-proposal/grammar-repo/README.md)
+- `tests/test_github_linguist_metadata.no` kontrollerer at eksportprogrammet og kjeldefilene har rett identitet, medan eksportprogrammet sjølv kontrollerer faktisk utdata.
+- Eige steg i `.github/workflows/ci.yml` køyrer eksportprogrammet utan Python/C/shell for sjølve eksporten.
+
+**Status:** Rettelsen er committta, men nyaste CI/Krypto må stadfestast separat. Det er ikkje oppretta noko eksternt grammatikklager. Oppfyll uavhengige brukskrav og køyr Linguist sine eigne testar før upstream-PR.
