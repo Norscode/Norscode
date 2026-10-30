@@ -41,3 +41,16 @@ Per 27. oktober 2026 er `.no` registrert som `Text` i [Linguists languages.yml](
 - Verken språkregisteret, heuristikkene eller grammatikken er oppdatert hos github-linguist ennå. **Ikke send upstream PR før bevis for GitHub-bruk på uavhengige kontoer og kildegrunnlag er kontrollert.**
 
 Når bruken er dokumentert, må fragmentene flettes inn i deres faktiske YAML-filer i korrekt alfabetisk rekkefølge, grammatikken legges inn via `script/add-grammar`, `script/update-ids` kjøres, det legges inn representative samples og minst to eksempler for hvert språk som deler `.no`, og deres egne `test/test_blob.rb`-/heuristikk- og kryssvalideringstester kjøres. Dette er krav til *ekstern Linguist-integrasjon*, ikke nye runtime-avhengigheter for Norscode.
+
+## Separat grammatikkpakke klar for publisering (30. oktober 2026)
+
+GitHub Linguist sitt `script/add-grammar` legg til eit **Git-repositorium som submodul** (`vendor/grammars/<repo>`) og krev Docker, Git, Ruby, Bundler og lisensverifisering. Å gje skriptet URL-en til heile Norscode-monorepoet ville derfor importera feil pakke/for mykje materiale.
+
+Det er no oppretta ei **eksporterbar staging-pakke** under [linguist-proposal/grammar-repo](linguist-proposal/grammar-repo/README.md). Pakka inneheld:
+
+- `package.json` med `.no` og `source.norscode` samt peikar til TextMate-grammatikken
+- `syntaxes/norscode.tmLanguage.json` som **eksakt kopi** av den eksisterande VS Code-grammatikken
+- `LICENSE` som **eksakt kopi** av Apache-2.0-lisensen i rotkatalogen
+- `README.md` med publisering og upstream-teststeg
+
+`tests/test_github_linguist_metadata.no` verifiserer at desse to kopiane er **byte-/tekstidentiske** med kanonisk grammatikk og rotlisens, og sjekkar `package.json`. Pakka er ikkje publisert som eit eige GitHub-repo, og ho gjev ikkje offisiell GitHub Linguist-støtte åleine. **Ikkje importer henne upstream før dei dokumenterte brukskrava er oppfylte.**
