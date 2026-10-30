@@ -47,3 +47,20 @@ Alle disse er faktisk observert i de oppgitte kildefilene. Ingen kildekode er ko
 - Uavhengig lokal Ruby-regex-kontroll av tilsvarende mønster med tre positive og seks negative eksempler ble gjennomført. **Dette er ikke** `github-linguist/linguist` sin testpakke eller distribuerte GitHub-detektering.
 
 **Obs:** `std.regex` støtter `(?m)` eksplisitt for flerlinjeankre. Ruby bruker sine egne ankerregler. Full upstream `script/check-regex-compatibility`, samples, deteksjon og kryssvalidering gjenstår. 
+
+## Utvida Linguist-heuristikk og tverrprosjektkontroll (30. oktober 2026)
+
+Heuristikkforslaget i `linguist-proposal/norscode-heuristics.yml` har no **to Norscode-reglar**: ei for kompakte funksjonar på éi line, og ei for funksjonssignatur + innrykka `returner` + blokkslutt. Begge krev at filinnhaldet ikkje har ei line som startar med `\`\`\`` (kodegjerde, ofte brukt i dokumentasjon), og `Text` står sist som reserveutfall.
+
+`tests/test_github_linguist_heuristic_regex.no` kontrollerer no **5 positive og 11 negative kode-/teksttilfelle**, inkludert kompakte funksjonar og `.no`-tekst med inngjerda kode. Den verifiserer òg at desse regex-strengane finst i YAML-utkastet. Ein separat kontroll av dei 16 tilfella mot JavaScript-regex ga ingen avvik; **CI på den nyaste endringa må verifiserast separat**.
+
+Eg kontrollerte òg funksjons-, retur- og blokksluttmønstra mot 10 faktiske, offentlege Norscode-kildefiler fordelt over fire andre prosjekt under **same eigar**:
+
+- `Norscode/NorscodeOS`: `m1.no`, `vev.no`, `sntp.no`
+- `Norscode/NorscodeStudio-v39`: `studio-core/studio_core.no`
+- `Norscode/NorscodeAI-Gen3`: `app.no`, `src/chat.no`, `src/nett.no`
+- `Norscode/Delekatalog-Norscode`: `kjor.no`, `publiser.no`, `verktoy/importer.no`
+
+Alle ti hadde treff på dei tre fleirlinjemønstra. Dette er **intern tverrprosjektdekning, ikkje uavhengig adopsjon**; filene er heller ikkje kopierte inn i prøvesamlinga. Å kontrollere positive og negative eksempel mot Ruby/Linguist sine eigen testar står framleis att.
+
+**Kjende avgrensingar:** Eit Norscode-program utan `returner` eller berre med uttrykksbasert kontrollflyt kan bli feilklassifisert som tekst. Eit Norscode-program med kodegjerde i ein streng eller kommentar kan bli feilklassifisert som tekst. Desse tiltaka prioriterer å unngå falske positive, men krev vidare validering før upstream-innsending.
