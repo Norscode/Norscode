@@ -36,12 +36,12 @@ Alle disse er faktisk observert i de oppgitte kildefilene. Ingen kildekode er ko
 
 **Avgrensning:** Dette er en lokal Norscode-prototype og kun et første datasett. Den kan gi både falske positive og falske negative for andre kilder, støtter ikke Linguists faktiske heuristikk-format og endrer ikke GitHubs klassifisering. Flere ekte uavhengige positive og negative kilder og upstream-kryssvalidering trengs.
 
-**Status per CI #2022 (commit `09325cf`):** både metadata-test og den første prototypetesten er bekreftet grønne. Prototypen er siden utvidet med ekstra negative tilfeller og linjebasert deteksjon; denne nye versjonen har ikke verifisert CI-resultat ennå.
+**Verifisering:** CI #2051 og Krypto-smoke #750 fullførte med `success` på commit `9bc01a4`. Metadata-, regex- og deteksjonsprototypetesten bestod.
 
 ## Direkte test av foreslått Linguist-regex
 
-- `tests/test_github_linguist_heuristic_regex.no` kontrollerer de **samme tre mønstrene som ligger i** `linguist-proposal/norscode-heuristics.yml` (strenglikhet mot YAML-innholdet).
-- Den kjører hver regexp med `std.regex` og multiline-flagg mot tre positive kodeeksempler og åtte negative eksempler. Resultatet blir en reell feilreturkode ved regresjon, ikke bare `assert`.
+- `tests/test_github_linguist_heuristic_regex.no` kontrollerer de **samme mønstrene som ligger i** `linguist-proposal/norscode-heuristics.yml` (strenglikhet mot YAML-innholdet).
+- Den kjører hver regexp med `std.regex` og multiline-flagg mot fem positive kodeeksempler og elleve negative eksempler. Resultatet blir en reell feilreturkode ved regresjon, ikke bare `assert`.
 - Testen er koblet til GitHub Actions `format-lint-check` via `./bin/nc run tests/test_github_linguist_heuristic_regex.no`.
 - Mønstrene benytter bare ASCII-klasser for å kunne testes i både Norscodes regex-motor og Ruby-regex. Navn som bare kan beskrives med andre Unicode-bokstaver er en kjent falsk-negativ risiko.
 - Uavhengig lokal Ruby-regex-kontroll av tilsvarende mønster med tre positive og seks negative eksempler ble gjennomført. **Dette er ikke** `github-linguist/linguist` sin testpakke eller distribuerte GitHub-detektering.
@@ -64,3 +64,15 @@ Eg kontrollerte òg funksjons-, retur- og blokksluttmønstra mot 10 faktiske, of
 Alle ti hadde treff på dei tre fleirlinjemønstra. Dette er **intern tverrprosjektdekning, ikkje uavhengig adopsjon**; filene er heller ikkje kopierte inn i prøvesamlinga. Å kontrollere positive og negative eksempel mot Ruby/Linguist sine eigen testar står framleis att.
 
 **Kjende avgrensingar:** Eit Norscode-program utan `returner` eller berre med uttrykksbasert kontrollflyt kan bli feilklassifisert som tekst. Eit Norscode-program med kodegjerde i ein streng eller kommentar kan bli feilklassifisert som tekst. Desse tiltaka prioriterer å unngå falske positive, men krev vidare validering før upstream-innsending.
+
+## Heuristics YAML-kontrakt (30. oktober 2026)
+
+GitHub Linguist si [`Heuristics.load`-implementering](https://github.com/github-linguist/linguist/blob/main/lib/linguist/heuristics.rb) les `data['named_patterns'].map` før ho går gjennom `disambiguations`. Eit isolert YAML-forslag utan `named_patterns` er derfor ikkje ein komplett, lastbar heuristikk-konfigurasjon. Utkastet inneheld no den tomme mappa `named_patterns: {}`.
+
+`tests/test_github_linguist_yaml_contract.no` er ein ny **obligatorisk Norscode CI-test** som sjekkar:
+
+- `named_patterns: {}` og `disambiguations` i korrekt rekkefølgje
+- Nøyaktig éi `.no`-gruppe, to Norscode-reglar med `and`, og éin avsluttande `Text`-fallback
+- Fire positive regex-mønster og to `negative_pattern`-reglar, ein for kvar Norscode-regel
+
+Testen er medvite avgrensa til den kjende forslagsstrukturen og er **ikkje** ein full YAML-parser. `tests/test_github_linguist_heuristic_regex.no` kontrollerer i tillegg dei konkrete mønsterstrengane og positive/negative innhaldseksempel. Ekte `github-linguist/linguist`-testar, mellom anna `test/test_heuristics.rb`, er ikkje køyrde mot ein upstream-endring. Ingen Github-språkregistrering er publisert.
