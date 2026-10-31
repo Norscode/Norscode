@@ -1581,6 +1581,107 @@ funksjon _pg_win_quote(s: tekst) -> tekst {
     returner s
 }
 
+// Win64: bygg ein eksplisitt, dobbelt-NUL-terminert UTF-8 miljøblokk for
+// CreateProcessW. OSTAB 501 konverterer blokka til UTF-16 og set
+// CREATE_UNICODE_ENVIRONMENT. Utan eksplisitt miljø og med inherit_env=1
+// brukar vi NULL, slik at Windows arvar forelderens miljø direkte.
+funksjon _pg_win_env_entries(miljø, arv: boolsk) -> liste_tekst {
+    la ut: liste_tekst = []
+    la keys = nøkler(miljø)
+    la i: heiltall = 0
+    mens i < lengde(keys) {
+        la namn = tekst(keys[i])
+        hvis namn == "" eller builtin.index_of(namn, "=") >= 0 eller
+           builtin.index_of(namn, "\u0000") >= 0 eller
+           builtin.index_of(tekst(miljø[namn]), "\u0000") >= 0 {
+            returner []
+        }
+        legg_til(ut, namn + "=" + tekst(miljø[namn]))
+        i = i + 1
+    }
+    hvis arv {
+        // Windows _start har alt konvertert GetEnvironmentStringsW til
+        // native_envp() UTF-8. Behald alle arva variablar unnateke dei
+        // som request-en uttrykkeleg overstyrer (Windows er case-insensitive).
+        la envp = builtin.native_envp()
+        hvis envp != 0 {
+            la ei: heiltall = 0
+            mens ei < 1024 {
+                la ptr = builtin.raw_load64(envp + ei * 8)
+                hvis ptr == 0 { bryt }
+                la b: liste_tekst = []
+                la j: heiltall = 0
+                mens j < 32768 og builtin.raw_load8(ptr + j) != 0 {
+                    legg_til(b, builtin.chr(builtin.raw_load8(ptr + j)))
+                    j = j + 1
+                }
+                hvis j >= 32768 { returner [] }
+                la entry = builtin.join(b, "")
+                la eq = builtin.index_of(entry, "=")
+                // Windows kan ha skjulte =C:-oppføringar. Dei er ikkje
+                // normaliserte miljønamn og blir ikkje endra eller sendte.
+                hvis eq > 0 {
+                    la arva_namn = builtin.lower(builtin.slice(entry, 0, eq))
+                    la overstyrt = usann
+                    i = 0
+                    mens i < lengde(keys) og ikkje overstyrt {
+                        hvis builtin.lower(tekst(keys[i])) == arva_namn { overstyrt = sann }
+                        i = i + 1
+                    }
+                    hvis ikkje overstyrt { legg_til(ut, entry) }
+                }
+                ei = ei + 1
+            }
+        }
+    }
+    // Windows sitt miljøblokkformat krev alfabetisk rekkefølgje.
+    la a: heiltall = 1
+    mens a < lengde(ut) {
+        la verdi = ut[a]
+        la k = a
+        mens k > 0 og builtin.lower(ut[k - 1]) > builtin.lower(verdi) {
+            ut[k] = ut[k - 1]
+            k = k - 1
+        }
+        ut[k] = verdi
+        a = a + 1
+    }
+    returner ut
+}
+
+funksjon _pg_win_env_pack(req, adr: heiltall, maks: heiltall) -> heiltall {
+    la miljø = {}
+    hvis finnes_nøkkel(req, "environment") {
+        hvis builtin.type(req["environment"]) != "ordbok" { returner -1 }
+        miljø = req["environment"]
+    }
+    la arv = sann
+    hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
+    hvis lengde(nøkler(miljø)) == 0 og arv { returner 0 }
+    la entries = _pg_win_env_entries(miljø, arv)
+    hvis lengde(entries) == 0 og lengde(nøkler(miljø)) > 0 { returner -1 }
+    // [u64 bytecount][UTF-8 KEY=VALUE NUL... NUL]. Dobbelt NUL
+    // konverterast byte-eksakt av MultiByteToWideChar med eksplisitt lengde.
+    la n: heiltall = 8
+    la i: heiltall = 0
+    mens i < lengde(entries) {
+        la e = tekst(entries[i])
+        hvis n + lengde(e) + 3 > maks { returner -1 }
+        n = _pg_cstr(adr + n, e) - adr
+        i = i + 1
+    }
+    hvis n + 2 > maks { returner -1 }
+    builtin.raw_store8(adr + n, 0)
+    n = n + 1
+    hvis lengde(entries) == 0 {
+        // Tomt miljø treng to NUL i staden for éin.
+        builtin.raw_store8(adr + n, 0)
+        n = n + 1
+    }
+    builtin.raw_store64(adr, n - 8)
+    returner n
+}
+
 // Synkron Windows-spawn: byggjer CreateProcessW-kommandolinja (exe + args, kvar token
 // sitert ved mellomrom) i mmap-scratch (VirtualAlloc via os_mmap), gjev os_win_spawn
 // (OSTAB 501) eit fang-buffer, og les stdout+stderr attende (chr(raw_load8) → join).
@@ -1590,6 +1691,15 @@ funksjon _pg_windows_spawn_synkron(req) {
     la exe = ""
     hvis finnes_nøkkel(req, "executable") { exe = tekst(req["executable"]) }
     hvis exe == "" { returner _pg_synkron_feil("tom executable") }
+    // W6.3: Denne CRT-frie CreateProcessW-vegen har enno ikkje Job Object/
+    // AppContainer. Aldri start ein prosess som bad om sandbox utan isolasjon.
+    // Ogsaa manglande profil blir avvist, ikkje tolka som "none".
+    hvis ikkje finnes_nøkkel(req, "sandbox") {
+        returner _pg_synkron_feil("Windows sandbox profile manglar")
+    }
+    hvis tekst(req["sandbox"]) != "none" {
+        returner _pg_synkron_feil("AppContainer/Job Object sandbox ikkje implementert i CRT-fri Windows-runtime")
+    }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
     la cmd = _pg_win_quote(exe)
@@ -1597,6 +1707,12 @@ funksjon _pg_windows_spawn_synkron(req) {
     mens i < lengde(args) { cmd = cmd + " " + _pg_win_quote(tekst(args[i]))  i = i + 1 }
     la cwd = ""
     hvis finnes_nøkkel(req, "cwd") { cwd = tekst(req["cwd"]) }
+    // CRT-fri Windows har enno ikkje Job Object/AppContainer-sandbox.
+    // Aldri start eit ubeskytta barn med requested security profile.
+    la profil = _pg_sandbox_profil(req)
+    hvis profil != "" {
+        returner _pg_synkron_feil("Windows freestanding manglar Job Object/AppContainer for sandbox: " + profil)
+    }
     // scratch via os_mmap (OSTAB 9 = VirtualAlloc) — IKKJE _sys_mmap_rw/nsys, som manglar
     // windows-tabell. VirtualAlloc-området blir ikkje frigjort enno (W6.1b); OK for synkron
     // kortlevd bruk.
@@ -1613,12 +1729,18 @@ funksjon _pg_windows_spawn_synkron(req) {
         cwd_adr = fri
         fri = _pg_cstr(fri, cwd)
     }
+    // Miljøblokka ligg etter argv/cwd i det same 60 KiB strengområdet,
+    // med grense før fang-bufferet. Null betyr OS-arva miljø.
+    la miljø_adr: heiltall = 0
+    la blokk_lengd = _pg_win_env_pack(req, fri, str_slutt - fri)
+    hvis blokk_lengd < 0 { returner _pg_synkron_feil("Windows miljøblokk er ugyldig eller for stor") }
+    hvis blokk_lengd > 0 { miljø_adr = fri }
     // Fang-buffer etter streng-området: out_buf .. out_len_ptr i same scratch.
     la out_buf: heiltall = scratch + _PG_STR_SLUTT()
     la out_len_ptr: heiltall = scratch + _PG_SCRATCH() - 8
     la out_cap: heiltall = out_len_ptr - out_buf - 8
     builtin.raw_store64(out_len_ptr, 0)
-    la exit_kode = builtin.sys6(_PG_NR_WIN_SPAWN(), cmd_adr, cwd_adr, out_buf, out_cap, out_len_ptr, 0)
+    la exit_kode = builtin.sys6(_PG_NR_WIN_SPAWN(), cmd_adr, cwd_adr, out_buf, out_cap, out_len_ptr, miljø_adr)
     hvis exit_kode < 0 { returner _pg_synkron_feil("CreateProcessW feila") }
     // Les fanga stdout+stderr (byte-eksakt, som _pg_dren): chr(raw_load8) → join.
     la ut = ""
