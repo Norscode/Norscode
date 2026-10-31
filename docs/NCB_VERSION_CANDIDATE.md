@@ -11,14 +11,48 @@ JSON er framleis normalformatet. Kandidatrettinga avviser ukjend versjon og mang
 - Desse kodegeneratorkandidatane rapporterer uløyste=0, men stubba=7 for eksisterande macOS-runtimeoperasjonar. Dette er eit avgrensa kodegenereringsfikspunkt, ikkje full runtime-attestasjon.
 - Kandidaten bygde den nye versjonsregresjonen til Mach-O: uløyste=0 stubba=0. Faktisk native køyring returnerte 0 og test_ncb_serde_version OK.
 
-## Opne feil funne under utvida native kontroll
+## Oppdatert verifikasjon 2026-10-31
 
-Den native test_ncb_bin_tekstveg feilar på desimaltalsdekoding: 3.5 blir heiltalsbitane 4615063718147915776. Same feil er reprodusert med uendra ncb_serde-kjelde og den pinna macOS-kodegeneratoren, og med kandidaten. VM-køyringa består. Dette er ein eksisterande plattformmangel; han er ikkje retta eller rekna som PASS her.
+Dei seks committa kodegeneratorane er no bygde frå PR-kjelda, saman med
+kjelde-/avhengnadshashar, kryss-proveniens og godkjende binærpinnar. Ingen port er
+svekt. Linux x86_64 og macOS ARM64 vert-generatorar gav kvar tre byte-identiske
+generasjonar:
 
-Den offisielle test_native_codegen_srchash består før kjeldeendringa, men feilar etterpå med stale .srchash som venta. Ingen hashport er svekt.
+- Linux x86_64: `6e2f13873e26bf20fc6a56cf126afbe44336add221e26ee2600323e4f1da5209`
+- macOS ARM64: `7e6b018fe48d31f0456a359f62d61bb3408ab26037e37faf8f52f48665ca87d5`
+
+`tools/build_cross_codegen.no` bygde Linux-/macOS-ARM64 på Linux x86_64 og
+Linux-/NorscodeOS-x86_64 på macOS ARM64. Den eksisterande Mac-vert-generatoren
+rapporterer framleis sju stubba operasjonar; dette arbeidet er ikkje full
+runtime-attestasjon eller løysing av filmodus-ABI-mangelen.
+
+Samla Linux x86_64-køyring gjennom `tools/nc_test.no` bestod 6/6 utan skip:
+`test_ncb_serde_version`, `test_ncb_bin_edgecases`, `test_ncb_bin_tekstveg`,
+`test_ncb_serde_dualformat`, `test_native_codegen_srchash` og
+`test_arm64_kryss_codegen`. Hashporten bestod òg på macOS.
+
+Dei fire formatregresjonane bestod som faktiske macOS ARM64-program bygde gjennom
+`nc bygg-native --target macos-arm64` frå kjelde med GC aktivert. Versjons- og
+tekstveg-testane bestod òg som Linux x86_64-ELF, kryssbygde gjennom Mac-verten sin
+oppdaterte generator og faktisk køyrde på Linux.
+
+Den gamle råkodegen-proben viste bitmønsteret i `tekst(3.5)`, ikkje prov på at
+dekodinga endra den numeriske verdien: direkte type- og verdikontroll er korrekt.
+Rå NCB frå `nc build` manglar den implisitte desimalformateraren som vanleg
+`bygg-native` frå kjelde tek med. Den gamle observasjonen skal difor ikkje lenger
+stå som ein stadfesta feil i desimaldekoding. Begge native tekstveg-testane består
+gjennom den normale byggestien.
+
+Native testutdata fekk unike filnamn. Ei innleiande omkøyring på overskriven
+Mach-O-sti vart avslutta med signal; same binær på fersk fil bestod. Det vart ikkje
+gjort ei runtime-endring på grunnlag av denne testharness-observasjonen.
+
+Feature-check for serde og versjonsregresjonen, samt diff-kontroll, bestod.
 
 ## Påkravd før innfletting
 
-Endringa i selfhost/ncb_serde.no gjer dei eksisterande kodegenerator-hashane utdaterte. Ferskheitsporten skal feile; gamle hashar må ikkje skrivast om for å få grønt resultat. Ingen bootstrap-binær, hash, godkjend-binær-pin eller stage-0-seed er endra her.
-
-Før innfletting må isolerte kandidatar byggjast og testast for alle støtta vert-/mål-kombinasjonar, inkludert Linux-fikspunkt, formatregresjonar og eksisterande attestasjonar. Eventuell erstatning av pinna kodegeneratorar krev særskild gjennomgang og godkjenning. Denne kjeldeendringa er ikkje klar for innfletting før det er gjort.
+Full GitHub CI må vurderast på den nye PR-tippen. Stage0-seedane er ikkje oppdaterte
+i denne kodegeneratoromgangen; kjelde-/seed-likskap og dekning gjennom distribuert
+runtime må framleis vurderast. JSON er normalformatet, og ingen main-merge eller
+release-aktivering er utført. Binærane og testbevisa ligg i den eksisterande PR-en
+for gjennomgang før eventuell innfletting.
