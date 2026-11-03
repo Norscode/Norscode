@@ -69,3 +69,25 @@ sample/heuristics tests.
 **These four files are all controlled by the same Norscode project and do
 not provide evidence for independent public adoption.** They are regression
 and classification samples only.
+
+## Downloading the CI-generated package
+
+The `Format og Lint (Python-fri)` job uploads the two exported folders as
+one GitHub Actions artifact named **`norscode-linguist-proposal`**.
+Open the successful CI run for PR #274, select that job's workflow run,
+and download the artifact from its **Artifacts** section.
+
+The artifact contains both `norscode-linguist-grammar/` and
+`norscode-linguist-upstream/` (including `SAMPLE_ORIGINS.md`).
+Artifacts are retained for **14 days**, not committed to the source tree.
+
+For pull requests, GitHub Actions sets `NORSCODE_LINGUIST_SOURCE_SHA` to
+`github.event.pull_request.head.sha` so the generated sample source URLs
+point to the actual **PR head commit**, not GitHub's temporary merge commit.
+The exporter refuses a CI run without a 40-character source SHA. For
+local export without that variable, `SAMPLE_ORIGINS.md` explicitly marks
+links as unpinned; supply a real source commit before publishing samples.
+
+A successful Norscode export and artifact upload do **not** mean upstream
+GitHub Linguist has accepted this language, nor that the independent-use
+threshold has been met.
