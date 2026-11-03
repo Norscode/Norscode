@@ -78,12 +78,16 @@ Open the successful CI run for PR #274, select that job's workflow run,
 and download the artifact from its **Artifacts** section.
 
 The artifact contains both `norscode-linguist-grammar/` and
-`norscode-linguist-upstream/` (including `SAMPLE_ORIGINS.md`).
+`norscode-linguist-upstream/` (including `SAMPLE_ORIGINS.md`, `norscode-language.yml` and `norscode-heuristics.yml`).
 Artifacts are retained for **14 days**, not committed to the source tree.
 
 For pull requests, GitHub Actions sets `NORSCODE_LINGUIST_SOURCE_SHA` to
 `github.event.pull_request.head.sha` so the generated sample source URLs
 point to the actual **PR head commit**, not GitHub's temporary merge commit.
+The exported YAML files are **fragments for later integration** into the actual
+Linguist `languages.yml` and `heuristics.yml`, not drop-in replacements for
+the full upstream registries. Keep the registry's other language entries intact.
+
 The exporter refuses a CI run without a 40-character source SHA. For
 local export without that variable, `SAMPLE_ORIGINS.md` explicitly marks
 links as unpinned; supply a real source commit before publishing samples.
