@@ -44,3 +44,28 @@ GitHub CI runs this Norscode exporter on pull requests.
 
 Official recognition in GitHub does not occur until the Linguist maintainers
 accept a change and GitHub.com deploys the relevant Linguist release.
+
+## Real Norscode samples for upstream
+
+The exporter also creates `build/norscode-linguist-upstream/` as a **separate**
+staging area for the future GitHub Linguist PR. Its
+`samples/Norscode/` subdirectory contains byte-identical copies of four real
+source files from this repository, renamed for clarity:
+
+- `compiler_runtime.no` from `compiler/compiler.no`
+- `toml_parser.no` from `std/tomllib.no`
+- `ghash.no` from `std/ghash.no`
+- `package_cache.no` from `toolchain/norspkg/cache.no`
+
+`SAMPLE_ORIGINS.md` records original source paths, repository links, and the
+Apache-2.0 repository license. Verify every file's own headers before
+submitting upstream, and attach an exact source commit and original links.
+
+Copy these files to `samples/Norscode/` in the separate **upstream Linguist
+checkout**, not into the standalone grammar Git repository. Add genuine
+`Text` examples for the shared `.no` extension when needed by Linguist's
+sample/heuristics tests.
+
+**These four files are all controlled by the same Norscode project and do
+not provide evidence for independent public adoption.** They are regression
+and classification samples only.
