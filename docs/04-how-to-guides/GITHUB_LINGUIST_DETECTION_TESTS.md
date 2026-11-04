@@ -85,15 +85,25 @@ GitHub Linguist sin faktiske [`Heuristics.call`](https://github.com/github-lingu
 
 **Status:** Endringa er sendt til arbeidsgrena. Ny CI og Krypto-smoke må bekreftast på eksakt head-commit før denne grense-regresjonen kan kallast grøn.
 
-## Eksporterte fixtures blir kontrollerte i CI (4. november 2026)
+## Eksporterte fixtures blir kontrollerte i eigen CI-jobbdel (5. november 2026)
 
-Regresjonen `tests/test_github_linguist_heuristic_regex.no` les no **dei faktiske genererte filene** i `build/norscode-linguist-upstream/`. Etter at `tools/eksporter_linguist_grammatikk.no` har køyrt, krev testen:
+**Kvifor to testar:** CI #2080 på `5de8333` hadde grønt `Format og Lint` og `Driftsvakt`, men feila i **Linux/macOS slow-tests shard 2**. Loggane viste `test_github_linguist_heuristic_regex` som prøvde å lese `build/norscode-linguist-upstream/samples/Norscode/compiler_runtime.no`. Dei sharda testjobbane hadde ikkje køyrt eksportøren først, og kravde derfor eit ikkje-eksisterande, generert build-artefakt. Dette var ein testisolasjon-regresjon.
 
-- At fire filer i `samples/Norscode/` er identiske med dei fire kanoniske `.no`-kjeldene og matchar dei foreslåtte Norscode-reglane.
-- At `test/fixtures/Generic/no/Text/plain_text.no` og `fenced_example.no` finst og ikkje matchar Norscode-reglane.
-- At `TEST_HEURISTICS_SNIPPET.txt` har `test_no_by_heuristics`, `assert_heuristics` og referanse til negative Text-fixtures.
-- At `SAMPLE_ORIGINS.md` blir eksportert med kildeproveniens.
+**Rettelse:** `tests/test_github_linguist_heuristic_regex.no` er gjenoppretta som ein sjølvstendig test av reelle Norscode-kjelder, positive/negative eksempler og 50 KiB-grensa. Han **treng ikkje** genererte filer og skal framleis køyre i alle vanlege test-shards.
 
-CI køyrer eksportøren **før** regresjonstesten og lastar berre opp pakken når desse kontrollane består. Ved manuell køyring av regresjonen må du først køyre `./bin/nc run tools/eksporter_linguist_grammatikk.no` frå rotkatalogen.
+Den nye `tools/verifiser_linguist_eksport.no` blir **berre** kalla frå `format-lint-check` i `.github/workflows/ci.yml`, direkte etter `tools/eksporter_linguist_grammatikk.no`. Verifiseringsverktøyet krev:
 
-Dette testar Norscode sin lokale modell mot dei faktiske eksporterte filene. **Det er framleis ikkje ein godkjend upstream GitHub Linguist-test**, og desse filene er ikkje bevis på uavhengig bruk.
+- Fire filer under `build/norscode-linguist-upstream/samples/Norscode/` som er identiske med dei kanoniske kjeldene, og matchar Norscode-reglane
+- To negative `.no`-filer under `test/fixtures/Generic/no/Text/` som blir klassifiserte som `Text`
+- `TEST_HEURISTICS_SNIPPET.txt` med upstream `test_no_by_heuristics`, `assert_heuristics` og Text-fixtures
+- `SAMPLE_ORIGINS.md` med kjeldeproveniens
+
+Køyr manuelt, frå rotkatalogen, i riktig rekkefølgje:
+
+```sh
+./bin/nc run tests/test_github_linguist_heuristic_regex.no
+./bin/nc run tools/eksporter_linguist_grammatikk.no
+./bin/nc run tools/verifiser_linguist_eksport.no
+```
+
+Eksporten ligg berre i `build/`; ingen ratchet-tak vert auka. **Ny CI på rettings-commit må framleis vere verifisert grøn.** Dette er framleis lokal Norscode-verifisering, ikkje ein køyrd upstream GitHub Linguist-klassifikator.
