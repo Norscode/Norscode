@@ -84,3 +84,16 @@ GitHub Linguist sin faktiske [`Heuristics.call`](https://github.com/github-lingu
 `tests/test_github_linguist_heuristic_regex.no` har no ei grense på 51 200 og testar begge retningar: eit gyldig Norscode-program **etter** grensa skal ikkje klassifiserast som Norscode, mens same gyldige program **før** ei 50 KiB utfylling skal gje treff. Prøvedata er ASCII, slik at bytegrensa er eintydig. Testen er framleis ein Norscode-basert modell av Linguist-heuristikk, **ikkje** ein faktisk oppstrøms klassifikasjonstest.
 
 **Status:** Endringa er sendt til arbeidsgrena. Ny CI og Krypto-smoke må bekreftast på eksakt head-commit før denne grense-regresjonen kan kallast grøn.
+
+## Eksporterte fixtures blir kontrollerte i CI (4. november 2026)
+
+Regresjonen `tests/test_github_linguist_heuristic_regex.no` les no **dei faktiske genererte filene** i `build/norscode-linguist-upstream/`. Etter at `tools/eksporter_linguist_grammatikk.no` har køyrt, krev testen:
+
+- At fire filer i `samples/Norscode/` er identiske med dei fire kanoniske `.no`-kjeldene og matchar dei foreslåtte Norscode-reglane.
+- At `test/fixtures/Generic/no/Text/plain_text.no` og `fenced_example.no` finst og ikkje matchar Norscode-reglane.
+- At `TEST_HEURISTICS_SNIPPET.txt` har `test_no_by_heuristics`, `assert_heuristics` og referanse til negative Text-fixtures.
+- At `SAMPLE_ORIGINS.md` blir eksportert med kildeproveniens.
+
+CI køyrer eksportøren **før** regresjonstesten og lastar berre opp pakken når desse kontrollane består. Ved manuell køyring av regresjonen må du først køyre `./bin/nc run tools/eksporter_linguist_grammatikk.no` frå rotkatalogen.
+
+Dette testar Norscode sin lokale modell mot dei faktiske eksporterte filene. **Det er framleis ikkje ein godkjend upstream GitHub Linguist-test**, og desse filene er ikkje bevis på uavhengig bruk.
