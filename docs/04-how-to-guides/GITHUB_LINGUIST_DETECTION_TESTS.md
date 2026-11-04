@@ -76,3 +76,11 @@ GitHub Linguist si [`Heuristics.load`-implementering](https://github.com/github-
 - Fire positive regex-mønster og to `negative_pattern`-reglar, ein for kvar Norscode-regel
 
 Testen er medvite avgrensa til den kjende forslagsstrukturen og er **ikkje** ein full YAML-parser. `tests/test_github_linguist_heuristic_regex.no` kontrollerer i tillegg dei konkrete mønsterstrengane og positive/negative innhaldseksempel. Ekte `github-linguist/linguist`-testar, mellom anna `test/test_heuristics.rb`, er ikkje køyrde mot ein upstream-endring. Ingen Github-språkregistrering er publisert.
+
+## GitHub Linguist les berre dei første 50 KiB (4. november 2026)
+
+GitHub Linguist sin faktiske [`Heuristics.call`](https://github.com/github-linguist/linguist/blob/main/lib/linguist/heuristics.rb) brukar `HEURISTICS_CONSIDER_BYTES = 50 * 1024` og evaluerer berre `blob.data[0...HEURISTICS_CONSIDER_BYTES]`. Lokal Norscode-testing skal derfor ikkje godkjenne ein kjeldekode-signatur som først står etter byte 51 200 i ei stor `.no`-fil.
+
+`tests/test_github_linguist_heuristic_regex.no` har no ei grense på 51 200 og testar begge retningar: eit gyldig Norscode-program **etter** grensa skal ikkje klassifiserast som Norscode, mens same gyldige program **før** ei 50 KiB utfylling skal gje treff. Prøvedata er ASCII, slik at bytegrensa er eintydig. Testen er framleis ein Norscode-basert modell av Linguist-heuristikk, **ikkje** ein faktisk oppstrøms klassifikasjonstest.
+
+**Status:** Endringa er sendt til arbeidsgrena. Ny CI og Krypto-smoke må bekreftast på eksakt head-commit før denne grense-regresjonen kan kallast grøn.
