@@ -95,3 +95,27 @@ links as unpinned; supply a real source commit before publishing samples.
 A successful Norscode export and artifact upload do **not** mean upstream
 GitHub Linguist has accepted this language, nor that the independent-use
 threshold has been met.
+
+## Upstream Text-regresjonsfiler og Linguist-test
+
+Eksportøren lager også et par negative `.no`-filer under
+`build/norscode-linguist-upstream/test/fixtures/Generic/no/Text/`:
+
+- `plain_text.no`: vanlige norske ord uten programmeringssyntaks
+- `fenced_example.no`: en tekstfil som gjengir Norscode-kode i Markdown-kodegjerde
+
+Begge skal klassifiseres som **Text**, mens de fire virkelige kildefilene
+under `samples/Norscode/` skal klassifiseres som **Norscode**.
+`TEST_HEURISTICS_SNIPPET.txt` inneholder et forslag til én
+`test_no_by_heuristics`-metode som bruker GitHub Linguists eksisterende
+`assert_heuristics`-hjelper og kan legges inn i
+`github-linguist/linguist/test/test_heuristics.rb`.
+
+**Dette er et eksportert testforslag, ikke en gjennomført upstream-test.**
+Etter opprettelse av en egen arbeidsgren i Linguist må språkregistrering,
+grammatikk og de aktuelle eksempelfilene importeres, testmetoden integreres,
+og den faktiske testpakken kjøres der. Disse eksemplene er kun regresjonsdata
+og må ikke brukes som dokumentasjon på uavhengig Norscode-bruk.
+
+All eksport skjer i Norscode. Ruby-utdraget er utelukkende ment for
+GitHub Linguists egen testpakke og utføres ikke av Norscodes runtime.
