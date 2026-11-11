@@ -1,11 +1,23 @@
 # Produksjonsplan — alt som manglar før hosting-produktet (#4/#5/#6)
 
-**Dato:** 2026-08-16
-**Grunnlag:** verifisert mot faktisk kjelde (ikkje berre STATUS.md). Sjå kjeldereferansar per punkt.
+**Historisk plan:** 2026-08-16. **Ny statuskontroll:** 2026-11-11.
+**Grunnlag:** Sjå gjeldande avgrensingar i `docs/STATUS.md`. Resultat under
+gjeld kandidatane og backendane frå dei opphavlege datoane.
 
-## Utgangspunkt: kva som IKKJE er problemet
+## Oppdatert utgangspunkt
 
-Sjølvstendigheita/språket er i praksis i mål: `selvstendighet L1–L6` BESTÅTT, Gen1/Gen2 byte-paritet, `runtime_status` 19/22 stabile, `stdlib_status` 57/61 stabile. **Du byggjer produkt oppå ei sjølvstendig kjerne — ikkje ferdig språket.**
+Registera deklarerer `runtime_status` 19/22 stabile og `stdlib_status` 62/66
+stabile. Sjølvhosting og byte-paritet viser eigarskap og reproduserbarheit;
+dei beviser ikkje korrekt TLS-tillit, transaksjonsgjenoppretting eller
+plattformisolasjon. Desse eigenskapane må ha eigne negative testar på den
+aktive kandidaten. Sluttporten er framleis raud med dei opne modulstatusane.
+
+Auditrettingane omfattar TLS-tillit og sikker entropi, NorsDB-transaksjonar,
+native minnegjenbruk, HTTP-query, NCB-versjon og Windows fail-closed. Den
+CRT-frie Windows-vegen manglar AppContainer/Job Object-implementasjon;
+det er ei kodeoppgåve, ikkje berre ei manglande attestasjon. Påstandane
+nedanfor om at berre produktarbeid eller ekstern attestasjon står att er
+derfor historiske og skal ikkje brukast som dagens ferdigkriterium.
 
 Tre ting i den opphavlege hòl-tabellen var utdaterte og er korrigerte her:
 - **`std.mail_server` er alt STABIL** (`std/stdlib_status.no:38`, `std/mail_server.no:530`) — ikkje eksperimentell.

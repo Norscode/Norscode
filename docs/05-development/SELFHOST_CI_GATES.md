@@ -95,9 +95,15 @@ som ei samla grønnliste før tag eller større rydding. Bruk
 
 `completion-gate --local` legg langtidsflata og den pakka brukarferda oppå den
 strenge grønnlista. `completion-gate --release` er den einaste globale
-ferdigporten og krev rein commit, 22/22 runtime, 61/61 standardbibliotek og
+ferdigporten og krev rein commit, full dekning av det eksplisitt godkjende
+runtime-/stdlib-omfanget i `tools/completion_status.no` (no 22 og 66 namn),
+stabil status for kvar einaste rad, ingen duplikat eller ukjende namn, og
 GitHub-signerte, commit- og runtimehashbundne attestasjonar frå macOS ARM64,
 Linux x86_64, Linux ARM64 og Windows x86_64.
+Rapportfelta `runtime_coverage` og `stdlib_coverage` viser manglande namn,
+duplikat, ukjende namn og ikkje-stabile modular. Dagens 19/22 og 62/66 gir
+raud sluttport; fleire registrerte modular kan ikkje gjere porten permanent
+raud på grunn av eit forelda, hardkoda totaltal eller falskt grøn ved å fjerne rader.
 Bruk `./bin/nc local-green --list` eller `./bin/nc local-green --strict --list`
 for å sjå stega med kommandoar utan å køyre dei.
 

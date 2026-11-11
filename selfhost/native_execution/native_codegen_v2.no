@@ -327,6 +327,157 @@ funksjon sett_rt_inngang(bytes, rt_va: heiltall, target: heiltall) {
 // gc_fix["gc"] == 1 betyr GC-modus (NORSCODE_GC_ALLOC=1).
 funksjon GC_FIX_NAMN() -> liste { returner ["int_boks", "str_payload", "str_boks", "join_raw", "join_boks"] }
 
+// x86 GC: same size classes as arm64_gc (small < 1 KiB, then 14 powers-of-two
+// ranges, the last >= 8 MiB). The old single 512-node walk repeatedly missed
+// large holes behind small boxes and drove repeated NCB serialization to OOM.
+// Each list first gets a 512-node fast pass. Before bump, a complete fallback
+// pass must also rule out a fit later in the request's own class. Its walk is
+// bounded by the heap's maximum number of disjoint 16-byte slots. Split
+// remainders are classified again immediately, never left in a larger class.
+// r8 = address of the class head; size is in rcx (modrm C1) or rdx (C2).
+funksjon emit_gc_class_slot(bytes, modrm: heiltall) {
+    copy(bytes, [0x4C, 0x0F, 0xBD, modrm])          // bsr r8,size
+    copy(bytes, [0x41, 0x83, 0xE8, 0x0A])         // sub r8d,10
+    copy(bytes, [0x41, 0x83, 0xF8, 0x0D])         // cmp r8d,13
+    copy(bytes, [0x41, 0xB9]) u32(bytes, 13)       // mov r9d,13
+    copy(bytes, [0x45, 0x0F, 0x47, 0xC1])         // cmova r8d,r9d
+    copy(bytes, [0x4E, 0x8D, 0x04, 0xC5])         // lea r8,[r8*8+classes]
+    u32(bytes, hl.GC_FREE_CLASSES_VA(X86_MAL()))
+}
+
+// Emitted only with GC enabled; the GC-off allocator is kept below. All raw
+// entrypoints preserve every register except the allocation result rax, plus
+// flags. gc_free_raw preserves all registers and flags and does not allocate.
+funksjon emit_gc_sizeclasses(bytes, atomics, oom_sites) {
+    la small: heiltall = hl.HEAP_VA(X86_MAL()) + 40
+    la classes: heiltall = hl.GC_FREE_CLASSES_VA(X86_MAL())
+    la classes_end: heiltall = classes + hl.GC_FREE_CLASS_COUNT() * 8
+    atomics["gc_free_raw"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x9C, 0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51])
+    copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
+    la free_short = emit_jcc_placeholder(bytes, 0x82)
+    // Sweep holes have exact byte boundaries. Keep only complete aligned slots,
+    // never write the header into a live neighbour or return an unaligned box.
+    copy(bytes, [0x48, 0x89, 0xC1, 0x48, 0x01, 0xD1]) // rcx = end
+    copy(bytes, [0x48, 0x83, 0xC0, 0x0F, 0x48, 0x83, 0xE0, 0xF0]) // align start
+    copy(bytes, [0x48, 0x29, 0xC1, 0x48, 0x83, 0xE1, 0xF0]) // round down usable size
+    copy(bytes, [0x48, 0x89, 0xCA])                // mov rdx,rcx
+    copy(bytes, [0x48, 0x83, 0xFA, 0x10])
+    la free_unaligned_short = emit_jcc_placeholder(bytes, 0x82)
+    copy(bytes, [0x41, 0xB8]) u32(bytes, small)    // r8 = &small_head
+    copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, 1024)
+    la free_small = emit_jcc_placeholder(bytes, 0x82)
+    emit_gc_class_slot(bytes, 0xC2)               // size = rdx
+    patch_jump(bytes, free_small, lengde(bytes))
+    copy(bytes, [0x4D, 0x8B, 0x08])               // mov r9,[r8]
+    copy(bytes, [0x4C, 0x89, 0x08])               // mov [rax],r9
+    copy(bytes, [0x48, 0x89, 0x50, 0x08])         // mov [rax+8],rdx
+    copy(bytes, [0x49, 0x89, 0x00])               // mov [r8],rax
+    patch_jump(bytes, free_short, lengde(bytes))
+    patch_jump(bytes, free_unaligned_short, lengde(bytes))
+    copy(bytes, [0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x58, 0x9D, 0xC3])
+
+    atomics["gc_alloc_var"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x9C, 0x51, 0x52, 0x56, 0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53])
+    copy(bytes, [0x48, 0x83, 0xC1, 0x0F])         // round16(size)
+    la size_overflow = emit_jcc_placeholder(bytes, 0x82)
+    copy(bytes, [0x48, 0x83, 0xE1, 0xF0])
+    copy(bytes, [0x48, 0x85, 0xC9])               // zero-sized request -> one slot
+    la size_nonzero = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0xB9]) u32(bytes, 16)
+    patch_jump(bytes, size_nonzero, lengde(bytes))
+    copy(bytes, [0x48, 0x81, 0xF9]) u32(bytes, hl.GC_HEAP_LIMIT(X86_MAL()))
+    la size_too_large = emit_jcc_placeholder(bytes, 0x83)
+    copy(bytes, [0x41, 0xB8]) u32(bytes, small)
+    copy(bytes, [0x48, 0x81, 0xF9]) u32(bytes, 1024)
+    la alloc_small = emit_jcc_placeholder(bytes, 0x82)
+    emit_gc_class_slot(bytes, 0xC1)               // size = rcx
+    patch_jump(bytes, alloc_small, lengde(bytes))
+    copy(bytes, [0x4C, 0x89, 0xC6])               // rsi = first eligible head slot
+    copy(bytes, [0xBF]) u32(bytes, 512)           // rdi = fast-pass node budget
+    la pass = lengde(bytes)
+    copy(bytes, [0x49, 0x8B, 0x00])               // rax = head
+    copy(bytes, [0x45, 0x31, 0xC9])               // r9 = previous
+    copy(bytes, [0x49, 0x89, 0xFB])               // r11 = node budget for this pass
+    la walk = lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xC0])
+    la empty = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x50, 0x08])         // rdx = block size
+    copy(bytes, [0x48, 0x39, 0xCA])               // cmp rdx,rcx
+    la found = emit_jcc_placeholder(bytes, 0x83)
+    copy(bytes, [0x49, 0xFF, 0xCB])               // dec r11
+    la capped = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x89, 0xC1, 0x48, 0x8B, 0x00]) // prev = block; block = next
+    la again = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, again, walk)
+
+    patch_jump(bytes, found, lengde(bytes))
+    copy(bytes, [0x4C, 0x8B, 0x10])               // r10 = next; unlink entire block
+    copy(bytes, [0x4D, 0x85, 0xC9])
+    la set_head = emit_je_placeholder(bytes)
+    copy(bytes, [0x4D, 0x89, 0x11])               // mov [r9],r10
+    la linked = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, set_head, lengde(bytes))
+    copy(bytes, [0x4D, 0x89, 0x10])               // mov [r8],r10
+    patch_jump(bytes, linked, lengde(bytes))
+    copy(bytes, [0x48, 0x29, 0xCA])               // rdx = remainder size
+    copy(bytes, [0x48, 0x83, 0xFA, 0x10])
+    la no_split = emit_jcc_placeholder(bytes, 0x82)
+    copy(bytes, [0x50, 0x48, 0x01, 0xC8])         // save result; rax = remainder
+    call_rel32(bytes, atomics["gc_free_raw"], TEXT_VA())
+    copy(bytes, [0x58])
+    la reused = emit_jmp_placeholder(bytes)
+
+    la next_class = lengde(bytes)
+    patch_jump(bytes, empty, next_class)
+    patch_jump(bytes, capped, next_class)
+    copy(bytes, [0x41, 0x81, 0xF8]) u32(bytes, small)
+    la from_small = emit_je_placeholder(bytes)
+    copy(bytes, [0x49, 0x83, 0xC0, 0x08])         // next class
+    copy(bytes, [0x41, 0x81, 0xF8]) u32(bytes, classes_end)
+    la another_class = emit_jcc_placeholder(bytes, 0x82)
+    patch_jump(bytes, another_class, pass)
+    la to_fallback = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, from_small, lengde(bytes))
+    copy(bytes, [0x41, 0xB8]) u32(bytes, classes)
+    la first_class = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, first_class, pass)
+
+    patch_jump(bytes, to_fallback, lengde(bytes))
+    // All eligible classes exhausted in the fast pass. Same-class nodes may
+    // still fit after node 512: do not grow bump (or report OOM) without looking.
+    copy(bytes, [0x81, 0xFF]) u32(bytes, 512)      // cmp edi,512
+    la to_bump = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0xBF])
+    u32(bytes, (hl.GC_HEAP_LIMIT(X86_MAL()) - hl.HEAP_ALLOC_START(X86_MAL())) >> 4)
+    copy(bytes, [0x49, 0x89, 0xF0])               // r8 = first eligible class again
+    la retry_full = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, retry_full, pass)
+    patch_jump(bytes, to_bump, lengde(bytes))
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, hl.HEAP_VA(X86_MAL()))
+    copy(bytes, [0x48, 0x83, 0xC0, 0x0F, 0x48, 0x83, 0xE0, 0xF0])
+    copy(bytes, [0x48, 0x8D, 0x14, 0x08])         // rdx = aligned bump + size
+    // The existing guard page is part of the 1-GiB cap, not allocatable payload.
+    copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)
+    la room = emit_jcc_placeholder(bytes, 0x86)    // jbe: exact end at guard is safe
+    patch_jump(bytes, size_overflow, lengde(bytes))
+    patch_jump(bytes, size_too_large, lengde(bytes))
+    copy(bytes, [0xE8]) u32(bytes, 0)
+    legg_til(oom_sites, lengde(bytes) - 4)
+    patch_jump(bytes, room, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0x14, 0x25]) u32(bytes, hl.HEAP_VA(X86_MAL()))
+    la done = lengde(bytes)
+    patch_jump(bytes, no_split, done)
+    patch_jump(bytes, reused, done)
+    copy(bytes, [0x48, 0x01, 0x0C, 0x25]) u32(bytes, hl.GC_ALLOC_BYTES_VA(X86_MAL()))
+    copy(bytes, [0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5F, 0x5E, 0x5A, 0x59, 0x9D, 0xC3])
+
+    atomics["gc_alloc16"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x51, 0xB9]) u32(bytes, 16)       // preserve rcx, set raw size
+    call_rel32(bytes, atomics["gc_alloc_var"], TEXT_VA())
+    copy(bytes, [0x59, 0xC3])
+}
+
 // movabs rax,<gc_alloc16>; call rax; nop×8 — 20 B, same lengd som 16 B-bump-prologen
 // (mov rax,[bump]; lea rcx,[rax+16]; mov [bump],rcx). gc_alloc16 klobrar berre rax.
 funksjon emit_gc_alloc16_kall(bytes, gc_fix, namn: tekst) {
@@ -6323,7 +6474,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // gc_oom blir emittert seinare → call rel32-placeholders patcha der. Berre GC-modus
     // (utan GC er heapen 2 GiB og desse allokatorane brukte av hasha map).
     la oom_sites: liste = []
+    hvis gc_mode == "1" { emit_gc_sizeclasses(bytes, atomics, oom_sites) }
     atomics["gc_alloc"] = TEXT_VA() + lengde(bytes)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x51, 0x48, 0x8B, 0x4F, 0x08]) // push rcx; unbox size
+        call_rel32(bytes, atomics["gc_alloc_var"], TEXT_VA())
+        copy(bytes, [0x59, 0x48, 0x89, 0xC7, 0x48, 0x83, 0xEC, 0x08])
+        call_rel32(bytes, RT_INT(), TEXT_VA())
+        copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+    } ellers {
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8]  (size)
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[moffs32] (head)
     u32(bytes, hl.HEAP_VA(X86_MAL()) + 40)
@@ -6354,18 +6513,25 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8 (align)
     call_rel32(bytes, RT_INT(), TEXT_VA())         // box rdi → rax
     copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])   // add rsp,8; ret
+    }
 
     // gc_free(addr, size) -> addr. Push fri-blokk: [addr]=old_head,[addr+8]=size,
     // head=addr. rdi=addr, rsi=size (boksa).
     atomics["gc_free"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8] (addr)
     copy(bytes, [0x48, 0x8B, 0x56, 0x08])          // mov rdx,[rsi+8] (size)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x83, 0xEC, 0x08])
+        call_rel32(bytes, atomics["gc_free_raw"], TEXT_VA())
+        copy(bytes, [0x48, 0x83, 0xC4, 0x08])
+    } ellers {
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[moffs32] (old head)
     u32(bytes, hl.HEAP_VA(X86_MAL()) + 40)
     copy(bytes, [0x4C, 0x89, 0x00])                // mov [rax],r8  (next=old head)
     copy(bytes, [0x48, 0x89, 0x50, 0x08])          // mov [rax+8],rdx (size)
     copy(bytes, [0x48, 0x89, 0x04, 0x25])          // mov [moffs32],rax (head=addr)
     u32(bytes, hl.HEAP_VA(X86_MAL()) + 40)
+    }
     copy(bytes, [0x48, 0x89, 0xF8, 0xC3])          // mov rax,rdi; ret
 
     // ── GC mark-fase (F5): allokeringsfri mark-bitmap i scratch @ 0x10400000 ──
@@ -6515,10 +6681,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, 0)
     la swp_pskip = lengde(bytes) - 4
     // free (r9=prev_end, rsi=gap) inline:
+    hvis gc_mode == "1" {
+        copy(bytes, [0x4C, 0x89, 0xC8, 0x48, 0x89, 0xF2]) // rax=prev_end; rdx=gap
+        call_rel32(bytes, atomics["gc_free_raw"], TEXT_VA())
+    } ellers {
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) copy(bytes, _heap_abs4(40)) // mov rax,[0x600028] (head)
     copy(bytes, [0x49, 0x89, 0x01])                // mov [r9],rax (next)
     copy(bytes, [0x49, 0x89, 0x71, 0x08])          // mov [r9+8],rsi (size)
     copy(bytes, [0x4C, 0x89, 0x0C, 0x25]) copy(bytes, _heap_abs4(40)) // mov [0x600028],r9 (head)
+    }
     copy(bytes, [0x49, 0xFF, 0xC3])                // inc r11 (freed)
     la swp_skip = lengde(bytes)                    // .skip:
     patch_jump(bytes, swp_pskip, swp_skip)
@@ -6553,6 +6724,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // rdi = boksa arg; rsi = rå verdi. Fyller [type=1][verdi]. INGEN RT_INT-kall.
     atomics["gc_box_int"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x77, 0x08])          // mov rsi,[rdi+8] (unbox verdi)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x83, 0xEC, 0x08])
+        call_rel32(bytes, atomics["gc_alloc16"], TEXT_VA())
+        copy(bytes, [0x48, 0x83, 0xC4, 0x08])
+        copy(bytes, [0x48, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00])
+        copy(bytes, [0x48, 0x89, 0x70, 0x08, 0xC3])
+    } ellers {
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[head]
     u32(bytes, hl.HEAP_VA(X86_MAL()) + 40)
     copy(bytes, [0x4D, 0x85, 0xC0])                // test r8,r8
@@ -6597,6 +6775,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00]) // mov q[rax],1 (type int)
     copy(bytes, [0x48, 0x89, 0x70, 0x08])          // mov [rax+8],rsi (verdi)
     copy(bytes, [0xC3])                            // ret
+    }
 
     // ── GC (iii): REGISTER-TRYGG rå 16B-allokator (mål for dei direkte GC-kalla i cache-fallbackane) ──
     // gc_alloc16() -> rax = 16B blokk (fri-liste head-fit >=16, elles bump). Fyller
@@ -6605,6 +6784,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // [bump],rcx`) og BEVARER flagg (pushfq/popfq) → trygt å kalle midt i frosen kode.
     // Klobrar BERRE rax (rcx/rdx via push/pop; rsi/rdi/flagg bevart) → trygt for BEGGE
     // 16B-prolog-variantane: rcx-variant (verdi i rsi) OG rdx-variant (verdi i rcx).
+    hvis gc_mode != "1" {
     atomics["gc_alloc16"] = TEXT_VA() + lengde(bytes)
     // 2026-09-04: FIRST-FIT-vandring (maks 512 blokkar) i staden for head-fit. Sweepen
     // prependar hol → hovudet er halen [siste levande, bump), som er bitte lite når ein
@@ -6821,6 +7001,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x59])                            // pop rcx (v4: opphavleg storleik attende)
     copy(bytes, [0x9D])                            // popfq
     copy(bytes, [0xC3])                            // ret
+    } // GC-off allocator; GC-on entrypoints are emitted by emit_gc_sizeclasses.
 
     // ── json_string_case KROPP (rdi=streng-NcVal → rax=JSON-streng-NcVal) ──
     // Den frosne rutinen @0x4028d2 escapa ikkje bakstrek. Sidan codegen DEKODAR escape-
@@ -7094,10 +7275,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x82])                      // jb skip
     u32(bytes, 0)
     la swf_pskip = lengde(bytes) - 4
+    hvis gc_mode == "1" {
+        copy(bytes, [0x4C, 0x89, 0xC8, 0x48, 0x89, 0xF2]) // rax=prev_end; rdx=gap
+        call_rel32(bytes, atomics["gc_free_raw"], TEXT_VA())
+    } ellers {
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) copy(bytes, _heap_abs4(40)) // mov rax,[head]
     copy(bytes, [0x49, 0x89, 0x01])                // mov [r9],rax (next)
     copy(bytes, [0x49, 0x89, 0x71, 0x08])          // mov [r9+8],rsi (size)
     copy(bytes, [0x4C, 0x89, 0x0C, 0x25]) copy(bytes, _heap_abs4(40)) // mov [head],r9
+    }
     copy(bytes, [0x49, 0xFF, 0xC3])                // inc r11 (freed)
     la swf_skip = lengde(bytes)                    // .skip:
     patch_jump(bytes, swf_pskip, swf_skip)
@@ -10813,6 +10999,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // vert frigjort to gonger (double-free → syklus i fri-lista → korrupsjon over mange
     // collects). Reset + full re-sweep gjev kvar garbage-blokk PÅ fri-lista nøyaktig éin gong.
     copy(bytes, [0x48, 0xC7, 0x04, 0x25]) copy(bytes, _heap_abs4(40)) copy(bytes, [0x00, 0x00, 0x00, 0x00]) // mov q[0x600028],0
+    hvis gc_mode == "1" {
+        // Clear EVERY class before rebuilding from the live map; retaining one
+        // old head here would double-free its blocks on the next collection.
+        copy(bytes, [0x31, 0xC0, 0xBF]) u32(bytes, hl.GC_FREE_CLASSES_VA(X86_MAL()))
+        copy(bytes, [0xB9]) u32(bytes, hl.GC_FREE_CLASS_COUNT())
+        copy(bytes, [0xF3, 0x48, 0xAB])             // rep stosq
+    }
     call_rel32(bytes, atomics["gc_mark_roots"], TEXT_VA()) // mark (side-effekt)
     copy(bytes, [0x48, 0x8B, 0x3C, 0x25]) copy(bytes, _heap_abs4(56)) // mov rdi,[0x600038] (n)
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8
