@@ -53,13 +53,82 @@ funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
     returner sann
 }
 
+// Kjeldebygde NCB-seedar nyttar [payload][NORSCODE_NCB_V1/V2][u64 LE-lengd],
+// medan committed app-seedar kan nytte NORSCODE_NCB_IMAGE_V1/TEXT_V1.
+// Lengdekontrollen er fail-closed; vi aksepterer ikkje berre ein laus magic-streng.
+funksjon har_native_seed_ncb_magic(bytes, magic: tekst) -> boolsk {
+    la total = lengde(bytes)
+    la trailer = lengde(magic) + 8
+    hvis total <= trailer { returner usann }
+    la magic_start = total - trailer
+    la i: heiltall = 0
+    mens i < lengde(magic) {
+        hvis (bytes[magic_start + i] & 255) != (builtin.char_code(magic[i]) & 255) {
+            returner usann
+        }
+        i = i + 1
+    }
+    // Les u64 little-endian med grensesjekk etter kvart byte, også for
+    // øydelagd/trunkert lengde. Hindrar negativ/overløpt payload-start.
+    la n: heiltall = 0
+    la j: heiltall = 7
+    mens j >= 0 {
+        n = n * 256 + (bytes[total - 8 + j] & 255)
+        hvis n > magic_start { returner usann }
+        j = j - 1
+    }
+    hvis n <= 0 { returner usann }
+    la payload_start = magic_start - n
+    // V2 er binær NCB, med 0x93 + NCB-magic. V1 er JSON-objekt.
+    hvis magic == "NORSCODE_NCB_V2" {
+        returner n >= 4 og (bytes[payload_start] & 255) == 147 og
+            (bytes[payload_start + 1] & 255) == 78 og
+            (bytes[payload_start + 2] & 255) == 67 og
+            (bytes[payload_start + 3] & 255) == 66
+    }
+    hvis magic == "NORSCODE_NCB_V1" {
+        returner (bytes[payload_start] & 255) == 123
+    }
+    returner usann
+}
+
+funksjon har_embedded_ncb_bytes(bytes) -> boolsk {
+    returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
+        sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1") eller
+        har_native_seed_ncb_magic(bytes, "NORSCODE_NCB_V2") eller
+        har_native_seed_ncb_magic(bytes, "NORSCODE_NCB_V1")
+}
+
 funksjon har_embedded_ncb(sti: tekst) -> boolsk {
     prøv {
-        la bytes = builtin.fil_les_binær(sti)
-        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
-            sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
+        returner har_embedded_ncb_bytes(builtin.fil_les_binær(sti))
     } fang (e) { returner usann }
     returner usann
+}
+
+// Committed stage0 brukar nc test / NC_TEST_FILE og blir halde uendra.
+// Fersk nc_main har på Windows ei direkte argv-flate: "run fil.no" fungerer,
+// men "test" utan eksplisitt argv-fil går til autodiscovery (som krev
+// native_list-ABI-en) og kan feile utan å prøve den tiltenkte testen.
+funksjon test_argv(root: tekst, namn: tekst, direkte: boolsk) -> liste_tekst {
+    hvis direkte { returner ["run", root + "/" + namn] }
+    returner ["test"]
+}
+
+funksjon test_markor(namn: tekst) -> tekst {
+    // Alle dei åtte Windows-fixturane skriv "test_<namn> OK" SIST,
+    // etter alle assert-kalla. Avslutningskode 0 aleine er ikkje attestasjon.
+    la delar = builtin.split(namn, "/")
+    la basenamn = tekst(delar[lengde(delar) - 1])
+    hvis ikkje builtin.ends_with(basenamn, ".no") { returner "" }
+    returner builtin.slice(basenamn, 0, lengde(basenamn) - 3) + " OK"
+}
+
+funksjon test_bestatt(resultat: ordbok_tekst, namn: tekst, direkte: boolsk) -> boolsk {
+    hvis ikkje prosess.ok(resultat) { returner usann }
+    hvis ikkje direkte { returner sann }
+    la markor = test_markor(namn)
+    returner markor != "" og builtin.contains(tekst(resultat["stdout"]), markor)
 }
 
 funksjon køyr(root: tekst, native: tekst, argv: liste_tekst,
@@ -78,10 +147,20 @@ funksjon køyr(root: tekst, native: tekst, argv: liste_tekst,
         miljø[nøklar[i]] = tekst(ekstra_miljø[nøklar[i]])
         i = i + 1
     }
-    la resultat = prosess.køyr(native, argv, root, miljø, 600000)
+    la direkte = env("NORSCODE_WINDOWS_FREESTANDING_ATTESTATION") == "1"
+    la argument = argv
+    hvis direkte {
+        argument = test_argv(root, namn, sann)
+        miljø["NORSCODE_CMD"] = "run"
+        miljø["NORSCODE_FILE"] = root + "/" + namn
+    }
+    la resultat = prosess.køyr(native, argument, root, miljø, 600000)
     prosess.skriv_resultat(resultat)
-    hvis ikkje prosess.ok(resultat) {
+    hvis ikkje test_bestatt(resultat, namn, direkte) {
         skriv("[FAIL] Windows-attestasjon " + namn + "\n")
+        hvis direkte og prosess.ok(resultat) {
+            skriv("[FAIL] Forventa sluttmarkor manglar: " + test_markor(namn) + "\n")
+        }
         returner usann
     }
     skriv("[OK] Windows-attestasjon " + namn + "\n")

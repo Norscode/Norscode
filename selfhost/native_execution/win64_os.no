@@ -73,7 +73,7 @@ funksjon os_importar_full() {
         // Windows. futex/clone/getdents er enosys, so dei (+ Find*/CreateThread) er fjerna.
         ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess",
             "VirtualProtect", "GetSystemTimePreciseAsFileTime",
-            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc",
+            "GetCommandLineW", "WideCharToMultiByte", "VirtualAlloc", "VirtualFree",
             "GetEnvironmentStringsW",
             "MultiByteToWideChar", "GetFileAttributesW", "CreateFileW",
             "CloseHandle", "SetFilePointerEx",
@@ -834,7 +834,8 @@ funksjon emit_mmap(a, slot, base: heiltall) -> heiltall {
 
 // ── OS-rutine (W6.1a+b): synkron prosess-spawn + stdout/stderr-fanging ────────
 // Inn (Linux-konvensjon): rdi = UTF-8 kommandolinje, rsi = UTF-8 cwd|0, rdx = out_buf,
-// r10 = out_cap, r8 = out_len_ptr. Ut: rax = exit-kode (0..) eller −1; *out_len_ptr =
+// r10 = out_cap, r8 = out_len_ptr, r9 = valfri UTF-8 miljøblokk [u64 byte-lengd][payload].
+// Ut: rax = exit-kode (0..) eller −1; *out_len_ptr =
 // fanga byte. Lagar eit røyr (CreatePipe, lese-enden ikkje-arveleg), koplar barnet sin
 // stdout+stderr til skrive-enden (STARTF_USESTDHANDLES), CreateProcessW(inherit=TRUE),
 // lukkar skrive-enden i forelderen, les røyret inn i out_buf (ReadFile-lykkje til EOF/
@@ -847,12 +848,16 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.push(a, asm.RBP())
     asm.mov(a, asm.RBP(), asm.RSP())
     asm.and_i(a, asm.RSP(), 0 - 16)
+    // Bruk den opphavlege 0x2300-stackramma. 64KiB UTF-16-env skal IKKJE
+    // liggje på stacken: Windows-peiken kan vere nær stack-grensa sjølv med
+    // guard-page probing. Bruk VirtualAlloc + VirtualFree i staden.
     asm.sub_i(a, asm.RSP(), 8960)                      // 0x2300
     asm.st(a, asm.RSP(), 8608, asm.RDI())              // cmdline
     asm.st(a, asm.RSP(), 8616, asm.RSI())              // cwd
     asm.st(a, asm.RSP(), 8632, asm.RDX())              // out_buf
     asm.st(a, asm.RSP(), 8640, asm.R10())              // out_cap
     asm.st(a, asm.RSP(), 8648, asm.R8())               // out_len_ptr
+    asm.st(a, asm.RSP(), 8704, asm.R9())               // UTF-8 envblock [u64 len][bytes] eller NULL
     asm.st_i(a, asm.RSP(), 8656, 0)                    // written = 0
     // widecmd = MultiByteToWideChar(65001, 0, cmdline, -1, &widecmd, 2048)
     asm.mov_i32(a, asm.RCX(), 65001)
@@ -879,6 +884,36 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.lea(a, asm.RAX(), asm.RSP(), 4352)
     asm.st(a, asm.RSP(), 8624, asm.RAX())
     asm.merk(a, "os_win_spawn_nocwd")
+    // UTF-8 envblokk frå sys6 sitt 6. argument (r9) → UTF-16.
+    // MultiByteToWideChar får eksplisitt lengde slik at NUL-skilja blir
+    // verna. NULL = OS-arva miljø. Alle allokeringar blir frigjorde.
+    asm.st_i(a, asm.RSP(), 8712, 0)                  // LPVOID lpEnvironment
+    asm.st_i(a, asm.RSP(), 8720, 0)                  // dwCreationFlags
+    asm.ld(a, asm.RAX(), asm.RSP(), 8704)
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_noenv")
+    // VirtualAlloc(NULL, 65536, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
+    asm.xor(a, asm.RCX(), asm.RCX())
+    asm.mov_i64(a, asm.RDX(), 65536)
+    asm.mov_i64(a, asm.R8(), 12288)
+    asm.mov_i64(a, asm.R9(), 4)
+    iat(a, slot, base, "KERNEL32.dll!VirtualAlloc")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_env_fail")
+    asm.st(a, asm.RSP(), 8712, asm.RAX())
+    asm.ld(a, asm.RAX(), asm.RSP(), 8704)
+    asm.ld(a, asm.R9(), asm.RAX(), 0)                // UTF-8-lengd frå header
+    asm.lea(a, asm.R8(), asm.RAX(), 8)               // inkl. NUL-separatorar
+    asm.mov_i32(a, asm.RCX(), 65001)
+    asm.xor(a, asm.RDX(), asm.RDX())
+    asm.ld(a, asm.RAX(), asm.RSP(), 8712)
+    asm.st(a, asm.RSP(), 32, asm.RAX())
+    asm.st_i(a, asm.RSP(), 40, 32768)                // UTF-16 code units
+    iat(a, slot, base, "KERNEL32.dll!MultiByteToWideChar")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_env_fail")
+    asm.st_i(a, asm.RSP(), 8720, 1024)               // CREATE_UNICODE_ENVIRONMENT
+    asm.merk(a, "os_win_spawn_noenv")
     // SECURITY_ATTRIBUTES @0x21E8: nLength=24, lpSD=0, bInheritHandle=1
     asm.st_i(a, asm.RSP(), 8680, 24)
     asm.st_i(a, asm.RSP(), 8688, 0)
@@ -916,8 +951,10 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     asm.xor(a, asm.R8(), asm.R8())
     asm.xor(a, asm.R9(), asm.R9())
     asm.st_i(a, asm.RSP(), 32, 1)                      // bInheritHandles = TRUE
-    asm.st_i(a, asm.RSP(), 40, 0)
-    asm.st_i(a, asm.RSP(), 48, 0)
+    asm.ld(a, asm.RAX(), asm.RSP(), 8720)
+    asm.st(a, asm.RSP(), 40, asm.RAX())              // dwCreationFlags
+    asm.ld(a, asm.RAX(), asm.RSP(), 8712)
+    asm.st(a, asm.RSP(), 48, asm.RAX())              // lpEnvironment (UTF-16, or NULL)
     asm.ld(a, asm.RAX(), asm.RSP(), 8624)
     asm.st(a, asm.RSP(), 56, asm.RAX())                // cwd
     asm.lea(a, asm.RAX(), asm.RSP(), 8448)
@@ -977,9 +1014,23 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
     iat(a, slot, base, "KERNEL32.dll!CloseHandle")
     asm.ld32(a, asm.RAX(), asm.RSP(), 8592)            // exit-kode
     asm.jmp(a, "os_win_spawn_ut")
+    asm.merk(a, "os_win_spawn_env_fail")
+    asm.mov_is(a, asm.RAX(), 0 - 1)
+    asm.jmp(a, "os_win_spawn_ut")
     asm.merk(a, "os_win_spawn_fail")
     asm.mov_is(a, asm.RAX(), 0 - 1)
     asm.merk(a, "os_win_spawn_ut")
+    // VirtualFree kan endre RAX. Bevar exit-/feilkoden separat medan
+    // det allokerte UTF-16-miljøet blir frigjort (òg på alle feilvegar).
+    asm.st(a, asm.RSP(), 8736, asm.RAX())
+    asm.ld(a, asm.RCX(), asm.RSP(), 8712)
+    asm.tst(a, asm.RCX(), asm.RCX())
+    asm.jcc(a, asm.CC_E(), "os_win_spawn_cleanup_done")
+    asm.xor(a, asm.RDX(), asm.RDX())                 // dwSize=0 med MEM_RELEASE
+    asm.mov_i32(a, asm.R8(), 32768)                  // MEM_RELEASE = 0x8000
+    iat(a, slot, base, "KERNEL32.dll!VirtualFree")
+    asm.merk(a, "os_win_spawn_cleanup_done")
+    asm.ld(a, asm.RAX(), asm.RSP(), 8736)
     asm.mov(a, asm.RSP(), asm.RBP())
     asm.pop(a, asm.RBP())
     asm.ret(a)
