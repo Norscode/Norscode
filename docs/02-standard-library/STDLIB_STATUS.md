@@ -1,12 +1,14 @@
 # Standardbibliotekstatus
 
-> Sist oppdatert: 15. juli 2026
+> Registertal kontrollert: 11. november 2026
 > Omfang: `std/` og dei nært tilknytte `selfhost/std/`-modulane
 
 Dette dokumentet er ei praktisk statusliste for standardbiblioteket i Norscode.
 Målet er å skilje mellom moduler som verkar modne, moduler som er nyttige men ujamne, og moduler som treng meir standardisering før dei kan kallast stabile.
 
-Den maskinlesbare statusmatrisa i `std/stdlib_status.no` har no 61 registrerte modular: 57 stabile, 4 eksperimentelle og 0 stubbar. Dette er om lag 93 % stabil dekning. Dei fire opne radene er `sikkerheit`, `dns`, `tls_acme` og `domenehost`. `dns` og `tls_acme` har no full Pebble-utstedelse med Norscode-eigd autoritativ DNS/TCP i ein fastlåst Linux CI-gate, men ventar framleis på den signerte ekte Windows-attestasjonen; dei andre opne radene krev tilsvarande ekstern leverandør- eller plattformattestasjon og skal ikkje presenterast som stabile enno.
+Den maskinlesbare statusmatrisa i `std/stdlib_status.no` har 66 registrerte modular: 62 stabile, 4 eksperimentelle og 0 stubbar (om lag 94 %). Dei fire opne radene er `sikkerheit`, `dns`, `tls_acme` og `domenehost`. Dette er deklarert API-status, ikkje eit sjølvstendig bevis på produksjonstryggleik. Aktiv transport, tillitskontroll, krasjgjenoppretting og plattformstøtte må verifiserast mot den konkrete kandidaten.
+
+Sluttporten i `tools/completion_status.no` kontrollerer alle godkjende modulnamn, avviser manglande/dupliserte/ukjende rader og krev `stabil` på kvar rad. Han er framleis raud med dagens fire eksperimentelle modular. Klassifiseringa under er eldre rettleiing; registeret er autoritativt for modulstatus, og ei grøn sluttport krev i tillegg testar og plattformattestasjonar.
 
 ## Kort vurdering
 

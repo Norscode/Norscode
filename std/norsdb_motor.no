@@ -922,6 +922,7 @@ funksjon sorter_tal(l) -> liste {
 //   P navn next_rowid            rowid-teljar          A navn tag kol fyll   ADD COLUMN
 //   R navn gammal ny             RENAME COLUMN         Q navn kol            DROP COLUMN
 //   T gammal ny                  RENAME TABLE          E epoke               WAL-hovud
+//   B 1 tal crc kropp            atomisk transaksjon (escapa postar i kropp)
 //   S epoke / Z epoke            segment-start/-slutt i checkpoint-fila
 // Kontrollteikna chr(29..31) i verdiar blir escapa (chr(29)+a/b/c).
 // Strengar i denne runtimen er bytesekvensar, så fil_les/fil_append er byte-eksakte.
@@ -1136,19 +1137,60 @@ funksjon _rad_verdiar(t, rad) -> liste {
 }
 
 // ── WAL-skriving ─────────────────────────────────────────────────────
-// Kvar endring blir lagd til WAL-fila (durable append). Første post i ei ny WAL
+// Utanfor transaksjonar blir kvar endring lagd til WAL-fila. Første post i ei ny WAL
 // er E <epoke>; checkpoint-fila hugsar kva epoke ho har absorbert, så ei WAL som
 // alt er med i checkpointet (krasj midt i checkpoint) blir hoppa over ved open.
-funksjon _wal(db, post: tekst) {
+// fil_append lukkar fila, men native_flush er ikkje fsync. Dette gjev atomisk
+// gjenoppretting etter prosessavbrot, ikkje ei lovnad om varigheit ved straumbrot.
+funksjon db_sjekk_skrivbar(db) {
+    hvis finnes_nøkkel(db, "_wal_feil") {
+        kast "NorsDB: usikker lagring; opne databasen på nytt: " + db["_wal_feil"]
+    }
+    returner 0
+}
+
+funksjon _wal_bryt(db, feil: tekst) {
+    db["_wal_feil"] = feil
+    kast "NorsDB: " + feil + "; opne databasen på nytt"
+}
+
+funksjon _utan_aktiv_tx(db) {
+    db_sjekk_skrivbar(db)
+    hvis db_tx_aktiv(db) { kast "NorsDB: checkpoint/backup krev avslutta transaksjon" }
+    returner 0
+}
+
+funksjon _wal_append(db, post: tekst) {
+    db_sjekk_skrivbar(db)
     hvis db["sti"] == "" { returner 0 }
+    la sti = db["sti"] + ".wal"
+    la før = 0
+    prøv { hvis builtin.fil_finnes(sti) { før = filops.fil_storleik(sti) } }
+    fang (e) { _wal_bryt(db, "kan ikkje lese WAL-storleik: " + sti) }
+    hvis før != db["_wal_bytes"] { _wal_bryt(db, "WAL-storleik endra utanfor handelen: " + sti) }
     la rs = builtin.chr(30)
     la ut = post + rs
     hvis ikke db["_wal_hovud"] {
         ut = "E" + builtin.chr(31) + tekst_fra_heltall(db["_epoke"]) + rs + ut
-        db["_wal_hovud"] = sann
     }
-    builtin.fil_append(db["sti"] + ".wal", ut)
-    db["_wal_bytes"] = db["_wal_bytes"] + lengde(ut)
+    prøv { builtin.fil_append(sti, ut) }
+    fang (e) { _wal_bryt(db, "WAL-append feila: " + sti) }
+    hvis filops.fil_storleik(sti) != før + lengde(ut) {
+        _wal_bryt(db, "ufullstendig WAL-append: " + sti)
+    }
+    db["_wal_hovud"] = sann
+    db["_wal_bytes"] = før + lengde(ut)
+    returner 0
+}
+
+funksjon _wal(db, post: tekst) {
+    db_sjekk_skrivbar(db)
+    hvis db["sti"] == "" { returner 0 }
+    hvis db_tx_aktiv(db) {
+        legg_til(db["_tx_wal"], post)
+        returner 0
+    }
+    _wal_append(db, post)
     returner 0
 }
 
@@ -1671,12 +1713,16 @@ funksjon db_rename_tabell(db, gammal: tekst, ny: tekst) {
 
 // ── Transaksjonar: angre-logg ────────────────────────────────────────
 // begin lagar ein tom angre-logg; kvar mutasjon legg inn korleis han blir
-// reversert (gamal rad, gamal metadata, kopi av tabellen før ALTER …). commit
-// kastar loggen; rollback spelar han baklengs. Kostnaden er proporsjonal med
+// reversert (gamal rad, gamal metadata, kopi av tabellen før ALTER …). WAL-postane
+// blir haldne i minnet til commit skriv éin CRC-kontrollert B-post. Rollback
+// kastar dei og spelar angre-loggen baklengs. Kostnaden er proporsjonal med
 // endringane i transaksjonen — ikkje med databasestorleiken (før: heile
 // databasen vart serialisert ved kvar begin).
 funksjon db_tx_start(db) {
+    db_sjekk_skrivbar(db)
+    hvis db_tx_aktiv(db) { kast "NorsDB: transaksjon er alt aktiv" }
     db["_undo"] = []
+    db["_tx_wal"] = []
 }
 
 funksjon db_tx_aktiv(db) -> boolsk {
@@ -1684,7 +1730,18 @@ funksjon db_tx_aktiv(db) -> boolsk {
 }
 
 funksjon db_tx_slutt(db) {
-    hvis finnes_nøkkel(db, "_undo") { fjern_nokkel(db, "_undo") }
+    db_sjekk_skrivbar(db)
+    hvis ikke db_tx_aktiv(db) { kast "NorsDB: ingen aktiv transaksjon" }
+    la postar = db["_tx_wal"]
+    hvis lengde(postar) > 0 {
+        la kropp = builtin.join(postar, builtin.chr(30)) + builtin.chr(30)
+        // Dei indre RS-teikna blir escapa av _post: den einaste ytre RS-en
+        // kjem ETTER heile transaksjonen. Ein trunkert append publiserer ingen rad.
+        _wal_append(db, _post(["B", "1", tekst_fra_heltall(lengde(postar)),
+            tekst_fra_heltall(png.crc32(kropp)), kropp]))
+    }
+    fjern_nokkel(db, "_tx_wal")
+    fjern_nokkel(db, "_undo")
 }
 
 funksjon _angre_legg(db, post) {
@@ -1729,12 +1786,14 @@ funksjon _ugyldig_cache(t) {
     }
 }
 
-// Rull attende alle endringar sidan db_tx_start (i minnet; kallaren skriv så ein
-// full checkpoint, sidan WAL-en inneheld dei attenderulla endringane).
+// Rull attende alle endringar sidan db_tx_start. Ingen av desse postane er
+// skrivne til WAL, så rollback treng ikkje checkpoint eller anna filskriving.
 funksjon db_tx_angre(db) {
+    db_sjekk_skrivbar(db)
     hvis ikke finnes_nøkkel(db, "_undo") { returner 0 }
     la u = db["_undo"]
     fjern_nokkel(db, "_undo")
+    fjern_nokkel(db, "_tx_wal")
     la i = lengde(u) - 1
     mens i >= 0 {
         la e = u[i]
@@ -1849,10 +1908,51 @@ funksjon db_serialiser(db) -> tekst {
     returner builtin.join(deler, rs) + rs
 }
 
+// Kontroller heile transaksjonen FØR nokon av postane blir brukte. B-postar
+// kan liggje både i WAL og i eit inkrementelt checkpoint. Gamle einskildpostar
+// treng ingen konvertering; berre nye eksplisitte transaksjonar brukar B.
+funksjon _tx_postar(f) -> liste {
+    hvis lengde(f) != 5 { kast "NorsDB: ugyldig transaksjonsramme" }
+    hvis f[1] != "1" { kast "NorsDB: ukjend transaksjonsversjon" }
+    la kropp = f[4]
+    la postar = builtin.split(kropp, builtin.chr(30))
+    la tal = lengde(postar) - 1
+    hvis tal < 1 eller postar[tal] != "" eller f[2] != tekst_fra_heltall(tal) {
+        kast "NorsDB: ufullstendig transaksjonsramme"
+    }
+    hvis f[3] != tekst_fra_heltall(png.crc32(kropp)) { kast "NorsDB: transaksjons-CRC feila" }
+    la ut = []
+    la i = 0
+    mens i < tal {
+        la p = _felt(postar[i])
+        la op = p[0]
+        la n = lengde(p)
+        la gyldig = usann
+        hvis op == "I" { gyldig = n >= 3 }
+        hvis op == "C" { gyldig = n >= 2 og (n - 2) % 2 == 0 }
+        hvis op == "D" eller op == "M" eller op == "P" eller op == "Q" eller op == "T" { gyldig = n == 3 }
+        hvis op == "X" eller op == "G" { gyldig = n == 2 }
+        hvis op == "N" { gyldig = n >= 3 og (n - 3) % 2 == 0 }
+        hvis op == "A" { gyldig = n == 4 eller n == 5 }
+        hvis op == "R" { gyldig = n == 4 }
+        hvis ikke gyldig { kast "NorsDB: ugyldig post i transaksjon" }
+        legg_til(ut, p)
+        i = i + 1
+    }
+    returner ut
+}
+
 // Bruk éin post (felt-liste) på db.
 funksjon _bruk_post(db, f) {
     la op = f[0]
-    hvis op == "I" {
+    hvis op == "B" {
+        la postar = _tx_postar(f)
+        la i = 0
+        mens i < lengde(postar) {
+            _bruk_post(db, postar[i])
+            i = i + 1
+        }
+    } ellers hvis op == "I" {
         la navn = f[1]
         hvis finnes_nøkkel(db["tabellar"], navn) {
             _sett_rad_felt(db, db["tabellar"][navn], builtin.heltall_fra_tekst(f[2]), f, 3)
@@ -2061,6 +2161,7 @@ funksjon db_fil_finst(sti: tekst) -> boolsk {
 funksjon db_åpne(sti: tekst) -> ordbok_tekst {
     la db = db_ny(sti)
     la legacy = usann
+    la wal_hale = usann
     // Fullfør berre ei faktisk nyare og fullført kompaktering. Ei gammal
     // .cp2 skal aldri rulle tilbake ein nyare .cp med ferdige delta-segment.
     hvis builtin.fil_finnes(sti + ".cp2") {
@@ -2106,8 +2207,12 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             la hale = poster[n - 1] != ""
             la start = 0
             la epoke = -1
-            hvis builtin.slice(poster[0], 0, 1) == "E" {
-                epoke = builtin.heltall_fra_tekst(_felt(poster[0])[1])
+            // Ikkje tolk ein halv E-post: eit avbrot kan kome midt i hovudet.
+            hvis n > 1 og builtin.slice(poster[0], 0, 1) == "E" {
+                la h = _felt(poster[0])
+                hvis lengde(h) != 2 { kast "NorsDB: ugyldig WAL-hovud" }
+                epoke = builtin.heltall_fra_tekst(h[1])
+                hvis epoke < 0 eller tekst_fra_heltall(epoke) != h[1] { kast "NorsDB: ugyldig WAL-epoke" }
                 start = 1
             }
             hvis epoke >= 0 og epoke <= db["_absorbert"] {
@@ -2120,21 +2225,19 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
                     i = i + 1
                 }
                 hvis epoke >= 0 { db["_epoke"] = epoke }
-                db["_wal_hovud"] = sann
+                db["_wal_hovud"] = n > 1
                 db["_wal_bytes"] = lengde(w)
                 hvis hale {
-                    // Skriv WAL-en om utan den trunkerte halen, så nye postar ikkje
-                    // blir limte til eit halvt skrive post.
-                    la gyldig = builtin.slice(poster, 0, n - 1)
-                    la ny = builtin.join(gyldig, builtin.chr(30)) + builtin.chr(30)
-                    builtin.fil_skriv(sti + ".wal", ny)
-                    db["_wal_bytes"] = lengde(ny)
+                    // Kompakter den gjenoppretta tilstanden via .cp2 før WAL
+                    // blir sletta. In-place trunkering kunne elles miste den
+                    // gyldige prefiksen om prosessen stoppa under reparasjonen.
+                    wal_hale = sann
                 }
             }
         }
     }
     hvis ikke db["_wal_hovud"] { db["_epoke"] = db["_absorbert"] + 1 }
-    hvis legacy eller finnes_nøkkel(db, "_cp_skitten") { db_checkpoint_full(db) }
+    hvis legacy eller wal_hale eller finnes_nøkkel(db, "_cp_skitten") { db_checkpoint_full(db) }
     returner db
 }
 
@@ -2142,6 +2245,7 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
 // checkpoint-fila som eit delta-segment, og WAL-en sletta. Når delta-segmenta
 // til saman blir større enn basen, blir fila kompaktert (full omskriving).
 funksjon db_checkpoint(db) {
+    _utan_aktiv_tx(db)
     hvis db["sti"] == "" { returner 0 }
     la sti = db["sti"]
     hvis (ikke builtin.fil_finnes(sti + ".cp")) eller db["_cp_delta"] + db["_wal_bytes"] > db["_cp_base"] {
@@ -2162,12 +2266,12 @@ funksjon db_checkpoint(db) {
     hvis kropp != "" { seg = seg + kropp + rs }
     seg = seg + "Z" + us + e + us + tekst_fra_heltall(png.crc32(seg)) + rs
     la før = filops.fil_storleik(sti + ".cp")
-    hvis før < 0 { kast "NorsDB: kan ikkje lese checkpoint-storleik: " + sti }
+    hvis før < 0 { _wal_bryt(db, "kan ikkje lese checkpoint-storleik: " + sti) }
     prøv { builtin.fil_append(sti + ".cp", seg) }
-    fang (e) { kast "NorsDB: checkpoint-append feila: " + sti }
+    fang (e) { _wal_bryt(db, "checkpoint-append feila: " + sti) }
     hvis filops.fil_storleik(sti + ".cp") != før + lengde(seg) {
         // WAL finst framleis og kan brukast ved neste opning.
-        kast "NorsDB: ufullstendig checkpoint-append: " + sti
+        _wal_bryt(db, "ufullstendig checkpoint-append: " + sti)
     }
     builtin.fil_slett(sti + ".wal")
     db["_cp_delta"] = db["_cp_delta"] + lengde(seg)
@@ -2181,6 +2285,7 @@ funksjon db_checkpoint(db) {
 // Full checkpoint (kompaktering): skriv heile databasen som eitt base-segment.
 // Skriv først <sti>.cp2 ferdig, så <sti>.cp, så slett .cp2 og WAL.
 funksjon db_checkpoint_full(db) {
+    _utan_aktiv_tx(db)
     hvis db["sti"] == "" { returner 0 }
     la sti = db["sti"]
     la us = builtin.chr(31)
@@ -2189,8 +2294,10 @@ funksjon db_checkpoint_full(db) {
     la base = db_serialiser(db)
     la kropp = "S" + us + e + rs + base
     la innhald = _cp_hovud() + rs + kropp + "Z" + us + e + us + tekst_fra_heltall(png.crc32(kropp)) + rs
-    _skriv_cp_kontrollert(sti + ".cp2", innhald)
-    _skriv_cp_kontrollert(sti + ".cp", innhald)
+    prøv {
+        _skriv_cp_kontrollert(sti + ".cp2", innhald)
+        _skriv_cp_kontrollert(sti + ".cp", innhald)
+    } fang (e) { _wal_bryt(db, "full checkpoint feila: " + sti) }
     builtin.fil_slett(sti + ".cp2")
     hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
     db["_cp_base"] = lengde(innhald)
@@ -2205,9 +2312,10 @@ funksjon db_checkpoint_full(db) {
 // Skriv eit sjølvstendig checkpoint av heile databasen til `sti` (backup).
 // Fila kan leggjast som <mål>.cp og opnast som ein vanleg database.
 funksjon db_backup(db, sti: tekst) {
+    _utan_aktiv_tx(db)
     la us = builtin.chr(31)
     la rs = builtin.chr(30)
     la kropp = "S" + us + "0" + rs + db_serialiser(db)
     la innhald = _cp_hovud() + rs + kropp + "Z" + us + "0" + us + tekst_fra_heltall(png.crc32(kropp)) + rs
-    builtin.fil_skriv(sti, innhald)
+    _skriv_cp_kontrollert(sti, innhald)
 }

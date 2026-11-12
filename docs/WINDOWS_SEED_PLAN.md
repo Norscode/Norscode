@@ -110,8 +110,19 @@ ekte windows-latest (ingen interaktiv Windows lokalt → iterasjon via CI-push).
 
 ### 2.1 Bilete (PE32+)
 
-* `ImageBase` 0x400000, `IMAGE_FILE_RELOCS_STRIPPED`, `DllCharacteristics` utan
-  `DYNAMIC_BASE`/`HIGH_ENTROPY_VA` (fast adresse, same VA-ar som ELF-en → same maskinkode).
+* Føretrekt `ImageBase` 0x400000 (0x100000 for store tekstbilete). `DYNAMIC_BASE` og
+  NX er aktiverte; `IMAGE_FILE_RELOCS_STRIPPED` er av. Ekte `.reloc`-blokker inneheld
+  `HIGHLOW` for eksplisitte abs32-adressefelt og `DIR64` for abs64-peikarar, både i
+  kode, konstantar og OSTAB. Emitterane merkar adresser ved skriving og patching;
+  vanlege heiltal, relative hopp og import-RVA-ar blir aldri gjetta frå byteverdiar.
+* Abs32-operanda er sign-/nullutvida, så `LARGE_ADDRESS_AWARE` og `HIGH_ENTROPY_VA`
+  er av. [Windows garanterer då at alle prosessallokeringar ligg under 2 GiB](https://learn.microsoft.com/en-us/windows/win32/winprog64/virtual-address-space),
+  også når lastaren relokerer biletet. Dette er lågadresse-ASLR, med eit avgrensa
+  virtuelt adressebudsjett: GC-image og 16 MiB-stakk tek om lag 1729 MiB; DLL-ar og
+  andre allokeringar deler resten. Job Object-minnetaka er uendra. Microsoft åtvarar
+  om at [x64-emulering på ARM64 kan krevje 4 GiB](https://learn.microsoft.com/en-us/cpp/build/reference/largeaddressaware-handle-large-addresses),
+  så dette biletet lovar berre native Windows x86-64. Full 64-bit-ASLR krev at
+  emitterens abs32-operandar blir erstatta med 64-bit/PIC-adressering.
 * Seksjonar, samanhengande i VA (Windows-lastaren krev det):
 
   | seksjon  | VA          | VirtualSize            | innhald                                        | flagg |
@@ -121,6 +132,10 @@ ekte windows-latest (ingen interaktiv Windows lokalt → iterasjon via CI-push).
   | `.hostabi` | 0x770000  | 0x1000                 | verts-ABI-sida                                 | RW    |
   | `.idata` | 0x771000    | til 0x780000           | OS-porttabell + importkatalog + IAT + namn     | RW    |
   | `.heap`  | 0x780000    | `HEAP_SZ` (GC)         | uinitialisert (SizeOfRawData 0)                | RW    |
+  | `.reloc` | etter `.heap` | eksakt katalogstorleik | sidegrupperte HIGHLOW/DIR64-felt             | R, discardable |
+
+  VA-ane i tabellen er føretrekte adresser. `.heap` er del av PE-biletet og flyttar
+  saman med alle andre seksjonar; det er ikkje ein separat arena på ei fast VA.
 
   Heapen som uinitialisert seksjon gjer at lastaren reserverer heile området atomisk før
   noko anna (stakk, prosessheap) kan hamne der. Risiko: commit-kostnad for ein stor

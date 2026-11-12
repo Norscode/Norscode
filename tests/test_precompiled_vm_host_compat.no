@@ -20,6 +20,10 @@ funksjon les_payload(sti: tekst) -> tekst {
 //   vm-executor: selfhost.vm (vertsstyrt — globalane bur i vertens baka VM) og handtabellen i
 //     std.runtime_filesystem_native (berre programvare-fallbacken; C-æra-verten serverer
 //     opne_native med eigne native filhandtak, og pure-lana køyrer er_stream_fil på kvar test).
+//     Windows-fallbackane ligg bak same ABI-grense. Dei namngjevne globalane nedanfor
+//     er berre tillatne når den faktiske NCB-en ikkje har kall/referansar inn i den
+//     native lukkinga frå andre modular. Executor-host-testen forgiftar alle desse
+//     funksjonane og køyrer både JSON og NCB-stream gjennom verts-executoren.
 //   vm: berre vm.no (__main__) sjølv; at den varme vegen ikkje les dei (vm_green_på_i), er
 //     køyretidsporten i tests/test_precompiled_vm_payload_run.no.
 // Returnerer «modul.namn» for kvar global som ikkje er tillaten ("*" = alle i modulen).
@@ -46,7 +50,40 @@ funksjon modulglobal_brot(ncb, tillatne: ordbok_tekst) -> liste_tekst {
 }
 
 funksjon executor_tillatne() -> ordbok_tekst {
-    returner {"selfhost.vm": "*", "std.runtime_filesystem_native": "_fh_tabell,_fh_neste,_fs_event_backend"}
+    returner {"selfhost.vm": "*", "std.runtime_filesystem_native": "_fh_tabell,_fh_neste,_fs_event_backend",
+        "std.windows_filesystem": "_filer,_operasjonar,_neste_fil,_neste_operasjon",
+        "std.windows_abi": "_ids,_args,_last_error"}
+}
+
+funksjon native_fallback(namn: tekst) -> boolsk {
+    returner builtin.starts_with(namn, "std.runtime_filesystem_native.") eller
+        builtin.starts_with(namn, "std.windows_filesystem.") eller
+        builtin.starts_with(namn, "std.windows_abi.")
+}
+
+// Kontroller heile funksjonstabellen, ikkje berre statiske CALL frå entry.
+// Også ein funksjonsreferanse lasta som tekst skal avvisast utanfor fallbacken.
+funksjon fallback_grense_brot(ncb) -> liste_tekst {
+    la brot: liste_tekst = []
+    hvis ikkje finnes_nøkkel(ncb, "functions") { legg_til(brot, "(manglar functions)") returner brot }
+    la fns = ncb["functions"]
+    for namn i nøkler(fns) {
+        hvis ikkje native_fallback(tekst(namn)) {
+            la fn = fns[namn]
+            hvis finnes_nøkkel(fn, "__ncb_lazy_json__") { fn = builtin.json_parse_raw(fn["__ncb_lazy_json__"]) }
+            hvis ikkje finnes_nøkkel(fn, "code") { legg_til(brot, tekst(namn) + ": manglar code") }
+            ellers {
+                for op i fn["code"] {
+                    for operand i op {
+                        hvis builtin.type(operand) == "tekst" og native_fallback(tekst(operand)) {
+                            legg_til(brot, tekst(namn) + " -> " + tekst(operand))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    returner brot
 }
 
 funksjon start() -> heiltall {
@@ -75,7 +112,13 @@ funksjon start() -> heiltall {
 
     // Modulglobal-kontrakten på dei faktiske payloadane, og at han kan seie nei.
     la vm_brot = modulglobal_brot(builtin.json_parse_raw(vm_ncb), {"__main__": "*"})
-    la ex_brot = modulglobal_brot(builtin.json_parse_raw(ex_ncb), executor_tillatne())
+    la executor = builtin.json_parse_raw(ex_ncb)
+    la grense_brot = fallback_grense_brot(executor)
+    hvis lengde(grense_brot) > 0 {
+        skriv("FEIL: native fallback er tilgjengeleg for verts-executoren: " + builtin.join(grense_brot, ",") + "\n")
+        assert(usann)
+    }
+    la ex_brot = modulglobal_brot(executor, executor_tillatne())
     hvis lengde(vm_brot) > 0 eller lengde(ex_brot) > 0 {
         skriv("FEIL: nye modulglobalar i payloadane (C-æra-executoren har ikkje LOAD_GLOBAL): vm=" +
               builtin.join(vm_brot, ",") + " vm-executor=" + builtin.join(ex_brot, ",") + "\n")
@@ -85,6 +128,11 @@ funksjon start() -> heiltall {
     assert_eq(lengde(modulglobal_brot(builtin.json_parse_raw("{\"global_names\":{\"std.runtime_filesystem_native\":[\"_fh_tabell\",\"ny\"]}}"), executor_tillatne())), 1)
     assert_eq(lengde(modulglobal_brot(builtin.json_parse_raw("{\"global_names\":{\"selfhost.vm\":[\"a\"],\"selfhost.json\":[]}}"), executor_tillatne())), 0)
     assert_eq(lengde(modulglobal_brot(builtin.json_parse_raw("{}"), executor_tillatne())), 1)
+    assert_eq(lengde(modulglobal_brot({"global_names": {"std.windows_abi": ["_ids", "ny"]}}, executor_tillatne())), 1)
+    assert_eq(lengde(fallback_grense_brot({"functions": {"__main__.start": {"code": [["CALL", "std.windows_filesystem.read_operation", 1]]}}})), 1)
+    assert_eq(lengde(fallback_grense_brot({"functions": {"__main__.start": {"code": [["PUSH_CONST", "std.windows_abi.call"]]}}})), 1)
+    assert_eq(lengde(fallback_grense_brot({"functions": {"std.runtime_filesystem_native.read_operation": {"code": [["CALL", "std.windows_filesystem.read_operation", 1]]}}})), 0)
+    assert_eq(lengde(fallback_grense_brot({})), 1)
 
     skriv("test_precompiled_vm_host_compat OK")
     returner 0

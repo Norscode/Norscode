@@ -18,6 +18,7 @@
 
 bruk selfhost.vm som vm
 bruk tools.process_runner som prosess
+bruk std.filops som filops
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
@@ -32,50 +33,102 @@ funksjon aot_target() -> tekst {
     returner "linux-x86_64"
 }
 
-// Kompilatoren er den innebakte i den køyrande seeden (builtin.kompiler_fil, gata på
-// process.exec i VM-en) — same kompilator som bygg-native brukar, so sela samanliknar
-// berre KØYRINGA (tolk vs AOT-codegen). Før vart selfhost.kompiler importert og TOLKA:
-// tregt, og ein fiksatur på ~90 linjer tømde 1 GiB-GC-heapen under kompileringa
-// (aotfloat 2026-09-26, diff_desimal_samanlikning), medan `nc run` av same fil var grøn.
-funksjon køyr_tolk(kjelde: tekst) -> heiltall {
-    la ncb = builtin.json_parse_raw(builtin.kompiler_fil(kjelde, "__main__"))
-    returner vm.køyr_ncb(ncb)
+funksjon vel_native(root: tekst) -> tekst {
+    // Vel éin gong for begge sider. Eit eksplisitt val skal feile om binæren
+    // manglar, ikkje stille falle tilbake til ein annan runtime i dist.
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" {
+        prøv { native = tekst(builtin.system_info()["executable"]) } fang (e) {}
+    }
+    // Eldre stage0 manglar system_info; behald CLI-fallback berre der.
+    hvis native == "" { native = root + "/bin/nc" }
+    ellers hvis ikkje builtin.starts_with(native, "/") {
+        hvis builtin.starts_with(native, "./") { native = builtin.slice(native, 2, lengde(native)) }
+        native = root + "/" + native
+    }
+    returner native
 }
 
-funksjon køyr_aot(root: tekst, src_sti: tekst, target: tekst) -> ordbok {
-    prøv { filops_lag_dir(root + "/build/diff") } fang (e) {}
-    la ut = root + "/build/diff/aot_bin"
-    la miljø = {
+funksjon native_miljø(root: tekst, native: tekst) -> ordbok {
+    returner {
         "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_NATIVE_BIN": native,
+        "NC_NATIVE": native,
+        // Kandidaten kan ha eit anna filnamn enn norscode_native. Masker
+        // orkestratorens kommando òg når process_runner ikkje kjenner namnet.
+        "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+        "NORSCODE_RUN_CMD": "", "NORSCODE_RUN_FILE": "",
+        // CLI compile skal alltid levere JSON med same entry som tolkeorakelet,
+        // uavhengig av format-/modulval i foreldreprosessen.
+        "NORSCODE_NCB_BINARY": "0", "NORSCODE_MODULE": "__main__",
         "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
         "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
     }
-    la bygg = prosess.køyr(root + "/bin/nc",
-        ["bygg-native", "--target", target, src_sti, ut], root, miljø, 600000)
+}
+
+// ARM-codegen har ikkje builtin.kompiler_fil. Kandidaten sin native CLI har
+// kompilatoren, og compile bind òg importane før vm.køyr_ncb. Dette unngår å
+// importere og tolke heile selfhost.kompiler inne i differensialverktøyet.
+funksjon køyr_tolk(root: tekst, native: tekst, src_sti: tekst, dir: tekst) -> ordbok {
+    la ut = dir + "/tolk.ncb.json"
+    la bygg = {}
+    prøv {
+        bygg = prosess.køyr(native, ["compile", src_sti, ut], root,
+            native_miljø(root, native), 600000)
+    } fang (e) {
+        returner { "ok": "usann", "steg": "compile", "feil": tekst(e) }
+    }
+    hvis ikkje prosess.ok(bygg) {
+        returner { "ok": "usann", "steg": "compile", "res": bygg }
+    }
+    hvis ikkje builtin.fil_finnes(ut) {
+        returner { "ok": "usann", "steg": "compile-output", "res": bygg,
+            "feil": "Kandidaten skreiv ikkje NCB-fila " + ut }
+    }
+    prøv {
+        la ncb = builtin.json_parse_raw(builtin.fil_les(ut))
+        returner { "ok": "sann", "exit": vm.køyr_ncb(ncb) }
+    } fang (e) {
+        returner { "ok": "usann", "steg": "vm.køyr_ncb", "feil": tekst(e) }
+    }
+}
+
+funksjon køyr_aot(root: tekst, native: tekst, src_sti: tekst,
+                  target: tekst, dir: tekst) -> ordbok {
+    la ut = dir + "/aot_bin"
+    la bygg = prosess.køyr(native,
+        ["bygg-native", "--target", target, src_sti, ut], root,
+        native_miljø(root, native), 600000)
     hvis ikkje prosess.ok(bygg) {
         returner { "ok": "usann", "steg": "bygg-native", "res": bygg }
     }
     la kjor = prosess.køyr(ut, [], root, {}, 120000)
+    hvis tekst(kjor["status"]) != "ferdig" {
+        returner { "ok": "usann", "steg": "køyr", "res": kjor }
+    }
     returner { "ok": "sann", "exit": kjor["exit_code"], "res": kjor }
 }
 
-funksjon filops_lag_dir(sti: tekst) -> heiltall {
-    prøv { builtin.mkdir_p(sti) } fang (e) {}
-    returner 0
-}
-
-funksjon start() -> heiltall {
-    la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = "." }
-    la fil = env("NORSCODE_DIFF_FILE")
-    hvis fil == "" { skriv("Feil: sett NORSCODE_DIFF_FILE=<fil.no>\n") returner 2 }
-    la target = aot_target()
-    hvis target == "" { skriv("Feil: ingen AOT-target for denne verten\n") returner 2 }
-
-    la kjelde = builtin.fil_les(fil)
+funksjon samanlikn(root: tekst, native: tekst, fil: tekst,
+                   target: tekst, dir: tekst) -> heiltall {
     skriv("[differensial] " + fil + " (target " + target + ")\n")
+    skriv("  kandidat = " + native + "\n")
 
-    la tolk = køyr_tolk(kjelde)
+    la tolkesvar = køyr_tolk(root, native, fil, dir)
+    hvis tekst(tolkesvar["ok"]) != "sann" {
+        skriv("  [FEIL] NCB-steget feila ved " + tekst(tolkesvar["steg"]) + "\n")
+        hvis finnes_nøkkel(tolkesvar, "res") {
+            la res = tolkesvar["res"]
+            skriv("  status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + "\n")
+            prosess.skriv_resultat(res)
+            hvis finnes_nøkkel(res, "error") { skriv(tekst(res["error"]) + "\n") }
+        }
+        hvis finnes_nøkkel(tolkesvar, "feil") { skriv(tekst(tolkesvar["feil"]) + "\n") }
+        // Utan eit tolkeorakel kan heller ikkje diagnostikk-modus samanlikne.
+        returner 1
+    }
+    la tolk = heltall_fra_tekst(tekst(tolkesvar["exit"]))
     skriv("  tolk (vm.køyr_ncb) = " + tekst(tolk) + "\n")
 
     // Diagnostikk-modus (standard): rapporter avvik men blokker ikkje CI, fordi
@@ -97,7 +150,7 @@ funksjon start() -> heiltall {
         }
     }
 
-    la aot = køyr_aot(root, fil, target)
+    la aot = køyr_aot(root, native, fil, target, dir)
     hvis tekst(aot["ok"]) != "sann" {
         skriv("  [FEIL] AOT-steget feila ved " + tekst(aot["steg"]) + "\n")
         prosess.skriv_resultat(aot["res"])
@@ -118,8 +171,35 @@ funksjon start() -> heiltall {
     }
     skriv("  [AVVIK] tolk=" + tekst(tolk) + " (mod256=" + tekst(tolk % 256) +
           ") != AOT=" + tekst(aot_exit) + "\n")
+    // Fiksturar rapporterer den konkrete sjekken på stdout. Ta med denne
+    // diagnosen ved avvik, ikkje berre den pakka exit-koden.
+    prosess.skriv_resultat(aot["res"])
     hvis strikt { returner 1 }
     skriv("  (diagnostikk-modus: avvik rapportert, blokkerer ikkje CI. " +
           "Sett NORSCODE_DIFF_STRICT=1 for streng.)\n")
     returner 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la fil = env("NORSCODE_DIFF_FILE")
+    hvis fil == "" { skriv("Feil: sett NORSCODE_DIFF_FILE=<fil.no>\n") returner 2 }
+    la target = aot_target()
+    hvis target == "" { skriv("Feil: ingen AOT-target for denne verten\n") returner 2 }
+    la native = vel_native(root)
+    // Parallelle testbarn må aldri lese eller overskrive kvarandre sitt NCB/AOT.
+    la dir = root + "/build/diff/run-" + builtin.random_hex(12)
+    la kode = 1
+    prøv {
+        hvis ikkje filops.lag_katalogar(dir) { kast "klarte ikkje lage " + dir }
+        kode = samanlikn(root, native, fil, target, dir)
+    } fang (e) {
+        skriv("  [FEIL] differensial: " + tekst(e) + "\n")
+    }
+    hvis ikkje filops.slett_tre(dir) {
+        skriv("  [FEIL] klarte ikkje rydde " + dir + "\n")
+        returner 1
+    }
+    returner kode
 }

@@ -1,0 +1,380 @@
+// CRT-fri Windows-prosessisolasjon. All orkestrering er Norscode; OS-arbeidet
+// gaar gjennom den faste Win32-allowlista i windows_abi / OSTAB 502.
+// Barn blir oppretta suspendert i eit Job Object. Ingen brukar-kode kan koyre
+// foer job-medlemskap, minnegrense og eventuelt AppContainer-token er verifiserte.
+// no-network har INGEN network capabilities. no-write/pure er framleis avviste.
+
+bruk std.windows_abi som api
+bruk std.runtime.process_abi som process_abi
+
+funksjon gyldig(req) -> boolsk { returner process_abi.gyldig_request(req) }
+funksjon release_scratch(p: heiltall) -> boolsk { returner api.free(p) }
+
+funksjon feil(melding: tekst) {
+    la r = process_abi.resultat("feil", -1, 127, "", "", "process spawn failed")
+    r["error_detail"] = melding
+    returner r
+}
+
+funksjon _api_feil(namn: tekst) {
+    returner feil(namn + " feila: Win32 " + tekst(api.last_error()))
+}
+
+funksjon _alloc(st, n: heiltall) -> heiltall {
+    la p = api.alloc(n)
+    hvis p != 0 { legg_til(st["alloc"], p) }
+    returner p
+}
+
+funksjon _wide(st, t: tekst) -> heiltall {
+    la p = api.wide(t)
+    hvis p != 0 { legg_til(st["alloc"], p) }
+    returner p
+}
+
+funksjon _close(st, key: tekst) -> boolsk {
+    la h = st[key]
+    st[key] = 0
+    returner api.close(h)
+}
+
+// Legg til / fjern berre den unike AppContainer-SIDen. Revoke brukar dagens
+// DACL, saa samtidige endringar i andre ACE-ar ikkje blir skrivne over.
+// Read+execute gjeld berre den eksplisitte arbeidsrota, aldri skrive-tilgang.
+funksjon _acl(st, path: heiltall, sid: heiltall, revoke: boolsk, inherit: heiltall) -> boolsk {
+    la b = api.alloc(128)
+    hvis b == 0 { st["security_error"] = "ACL-buffer kunne ikkje allokerast" returner usann }
+    la ok = usann
+    la status = api.call("GetNamedSecurityInfoW", [path, 1, 4, 0, 0, b, 0, b + 8]) & 4294967295
+    hvis status != 0 { st["security_error"] = "GetNamedSecurityInfoW code=" + tekst(status) }
+    hvis status == 0 {
+        la old_acl = builtin.raw_load64(b)
+        // NULL DACL har alt tilgang. Ikkje gjer han meir restriktiv for verten.
+        hvis old_acl == 0 { ok = sann }
+        ellers {
+            la ea = b + 32
+            api.u32(ea, 1179817) // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+            la mode: heiltall = 1 // GRANT_ACCESS
+            hvis revoke { mode = 4 } // REVOKE_ACCESS
+            api.u32(ea + 4, mode)
+            api.u32(ea + 8, inherit)
+            // TRUSTEE_W @16: TRUSTEE_IS_SID=0, TRUSTEE_IS_UNKNOWN=0.
+            builtin.raw_store64(ea + 40, sid)
+            la made = api.call("SetEntriesInAclW", [1, ea, old_acl, b + 16]) & 4294967295
+            hvis made == 0 {
+                la new_acl = builtin.raw_load64(b + 16)
+                la applied = api.call("SetNamedSecurityInfoW", [path, 1, 4, 0, 0, new_acl, 0]) & 4294967295
+                ok = applied == 0
+                hvis ikkje ok { st["security_error"] = "SetNamedSecurityInfoW code=" + tekst(applied) }
+                hvis new_acl != 0 { api.call("LocalFree", [new_acl]) }
+            } ellers { st["security_error"] = "SetEntriesInAclW code=" + tekst(made) }
+        }
+    }
+    la sd = builtin.raw_load64(b + 8)
+    hvis sd != 0 { api.call("LocalFree", [sd]) }
+    api.free(b)
+    returner ok
+}
+
+funksjon _profile(st, cwd: heiltall, exe: heiltall) -> boolsk {
+    la random = _alloc(st, 32)
+    hvis random == 0 eller api.call("SystemFunction036", [random, 16]) == 0 { returner usann }
+    la digits = "0123456789abcdef"
+    la name = "Norscode.Runtime."
+    la i: heiltall = 0
+    mens i < 16 {
+        la b = builtin.raw_load8(random + i)
+        name = name + digits[b >> 4] + digits[b & 15]
+        i = i + 1
+    }
+    st["profile_name"] = _wide(st, name)
+    hvis st["profile_name"] == 0 { returner usann }
+    la sid_out = random + 16
+    la hr = api.call("CreateAppContainerProfile", [st["profile_name"], st["profile_name"], st["profile_name"], 0, 0, sid_out]) & 4294967295
+    // Eksisterande profil blir aldri gjenbrukt: han kan ha loopback-unntak
+    // eller gamle tillatingar. Eit tilfeldig namn gjev inga delt sandbox-identitet.
+    hvis hr != 0 { st["security_error"] = "CreateAppContainerProfile HRESULT=" + tekst(hr) returner usann }
+    st["profile_created"] = sann
+    st["sid"] = builtin.raw_load64(sid_out)
+    hvis st["sid"] == 0 { returner usann }
+    legg_til(st["grants"], [cwd, 3])
+    hvis ikkje _acl(st, cwd, st["sid"], usann, 3) { returner usann }
+    legg_til(st["grants"], [exe, 0])
+    hvis ikkje _acl(st, exe, st["sid"], usann, 0) { returner usann }
+    returner sann
+}
+
+funksjon _pipe(st, read_key: tekst, write_key: tekst, io: heiltall) -> boolsk {
+    // SECURITY_ATTRIBUTES: nLength=24, lpSD=NULL, inherit=TRUE.
+    la sa = io + 64
+    api.u32(sa, 24)
+    api.u32(sa + 16, 1)
+    hvis api.call("CreatePipe", [io, io + 8, sa, 0]) == 0 { returner usann }
+    st[read_key] = builtin.raw_load64(io)
+    st[write_key] = builtin.raw_load64(io + 8)
+    // Berre skriveenden skal arvast for stdout/stderr.
+    returner api.call("SetHandleInformation", [st[read_key], 1, 0]) != 0
+}
+
+funksjon _attribute(attrs: heiltall, key: heiltall, value: heiltall, size: heiltall) -> boolsk {
+    returner api.call("UpdateProcThreadAttribute", [attrs, 0, key, value, size, 0, 0]) != 0
+}
+
+funksjon _verify_job(st, memory: heiltall, limits: heiltall) -> boolsk {
+    la io = st["io"]
+    api.u32(io, 0)
+    hvis api.call("IsProcessInJob", [st["process"], st["job"], io]) == 0 eller api.read32(io) == 0 { returner usann }
+    hvis api.call("QueryInformationJobObject", [st["job"], 9, limits, 144, 0]) == 0 { returner usann }
+    la flags = api.read32(limits + 16)
+    hvis (flags & 8200) != 8200 eller api.read32(limits + 40) != 1 { returner usann }
+    hvis memory > 0 {
+        hvis (flags & 768) != 768 eller builtin.raw_load64(limits + 112) != memory eller
+           builtin.raw_load64(limits + 120) != memory { returner usann }
+    }
+    st["job_verified"] = sann
+    returner sann
+}
+
+funksjon _verify_container(st) -> boolsk {
+    la io = st["io"]
+    la token_info = _alloc(st, 1024)
+    hvis token_info == 0 { returner usann }
+    hvis api.call("OpenProcessToken", [st["process"], 8, io]) == 0 { returner usann }
+    st["token"] = builtin.raw_load64(io)
+    // TokenIsAppContainer=29; TokenCapabilities=30. Ingen network capability.
+    hvis api.call("GetTokenInformation", [st["token"], 29, io + 16, 4, io + 24]) == 0 eller api.read32(io + 16) != 1 { returner usann }
+    hvis api.call("GetTokenInformation", [st["token"], 30, token_info, 1024, io + 24]) == 0 eller api.read32(token_info) != 0 { returner usann }
+    st["appcontainer_verified"] = sann
+    returner _close(st, "token")
+}
+
+// PeekNamedPipe foer ReadFile gjer at ventinga aldri blokkerer bak eit stille
+// barn. Alle byte blir drenerte, og stdout/stderr har skilde fang-buffer.
+funksjon _drain(st, key: tekst, buffer_key: tekst, count_key: tekst, maximum: heiltall) -> boolsk {
+    la io = st["io"]
+    la iterations: heiltall = 0
+    mens iterations < 4 {
+        hvis api.call("PeekNamedPipe", [st[key], 0, 0, 0, io + 32, 0]) == 0 {
+            la e = api.last_error()
+            returner e == 109 // ERROR_BROKEN_PIPE: ingen skrivarar att
+        }
+        la available = api.read32(io + 32)
+        hvis available == 0 { returner sann }
+        la remaining = maximum - st["out_n"] - st["err_n"]
+        hvis remaining <= 0 { st["output_limit"] = sann returner usann }
+        hvis available > remaining { available = remaining }
+        hvis available > 16384 { available = 16384 }
+        hvis api.call("ReadFile", [st[key], st[buffer_key] + st[count_key], available, io + 40, 0]) == 0 { returner usann }
+        la got = api.read32(io + 40)
+        hvis got > available { returner usann }
+        st[count_key] = st[count_key] + got
+        hvis got == 0 { returner sann }
+        iterations = iterations + 1
+    }
+    returner sann
+}
+
+funksjon _run(st, req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
+    la profile = req["sandbox"]
+    la memory = heltall_fra_tekst(req["max_memory_bytes"])
+    la timeout = heltall_fra_tekst(req["timeout_ms"])
+    la max_output = heltall_fra_tekst(req["max_output_bytes"])
+    la max_handles = heltall_fra_tekst(req["max_open_files"])
+    la io = _alloc(st, 1024)
+    st["io"] = io
+    la command_w = _wide(st, cmd)
+    la cwd_w = _wide(st, cwd)
+    la exe_w = _wide(st, req["executable"])
+    la limits = _alloc(st, 144)
+    la si = _alloc(st, 112)
+    la pi = _alloc(st, 24)
+    st["out_buf"] = _alloc(st, max_output)
+    st["err_buf"] = _alloc(st, max_output)
+    hvis io == 0 eller command_w == 0 eller cwd_w == 0 eller exe_w == 0 eller limits == 0 eller si == 0 eller pi == 0 eller st["out_buf"] == 0 eller st["err_buf"] == 0 {
+        returner feil("Windows sandbox-buffer kunne ikkje allokerast")
+    }
+    la environment: heiltall = 0
+    hvis env_utf8 != 0 {
+        la count = builtin.raw_load64(env_utf8)
+        hvis count < 2 eller count > 65536 { returner feil("ugyldig Windows-miljo") }
+        environment = _alloc(st, count * 2)
+        hvis environment == 0 eller api.call("MultiByteToWideChar", [65001, 8, env_utf8 + 8, count, environment, count]) == 0 { returner _api_feil("miljokonvertering") }
+    }
+    st["job"] = api.call("CreateJobObjectW", [0, 0])
+    hvis st["job"] == 0 { returner _api_feil("CreateJobObjectW") }
+    la flags: heiltall = 8200 // KILL_ON_JOB_CLOSE | ACTIVE_PROCESS (ingen breakaway)
+    hvis memory > 0 {
+        flags = flags | 768 // PROCESS_MEMORY | JOB_MEMORY
+        builtin.raw_store64(limits + 112, memory)
+        builtin.raw_store64(limits + 120, memory)
+    }
+    api.u32(limits + 16, flags)
+    api.u32(limits + 40, 1)
+    hvis api.call("SetInformationJobObject", [st["job"], 9, limits, 144]) == 0 { returner _api_feil("SetInformationJobObject") }
+    hvis profile == "no-network" og ikkje _profile(st, cwd_w, exe_w) { returner feil("AppContainer profil/lesetilgang: " + st["security_error"]) }
+    hvis ikkje _pipe(st, "out_read", "out_write", io) eller ikkje _pipe(st, "err_read", "err_write", io) { returner _api_feil("CreatePipe") }
+    // Stdin er eksplisitt EOF, ikkje eit arva terminal-/filhandtak.
+    hvis ikkje _pipe(st, "in_read", "in_write", io) { returner _api_feil("stdin-pipe") }
+    hvis api.call("SetHandleInformation", [st["in_read"], 1, 1]) == 0 { returner _api_feil("stdin inherit") }
+    hvis ikkje _close(st, "in_write") { returner _api_feil("stdin EOF") }
+    la attr_count: heiltall = 2
+    hvis profile == "no-network" { attr_count = 3 }
+    builtin.raw_store64(io + 48, 0)
+    api.call("InitializeProcThreadAttributeList", [0, attr_count, 0, io + 48])
+    la attr_size = builtin.raw_load64(io + 48)
+    hvis attr_size <= 0 eller attr_size > 65536 { returner feil("ugyldig Windows-attributtstorleik") }
+    st["attrs"] = _alloc(st, attr_size)
+    hvis st["attrs"] == 0 eller api.call("InitializeProcThreadAttributeList", [st["attrs"], attr_count, 0, io + 48]) == 0 { returner _api_feil("InitializeProcThreadAttributeList") }
+    st["attrs_ready"] = sann
+    // HANDLE_LIST avgrensar arv til dei tre standardhandtaka.
+    builtin.raw_store64(io + 96, st["in_read"])
+    builtin.raw_store64(io + 104, st["out_write"])
+    builtin.raw_store64(io + 112, st["err_write"])
+    hvis ikkje _attribute(st["attrs"], 131074, io + 96, 24) { returner _api_feil("handle-list") }
+    builtin.raw_store64(io + 80, st["job"])
+    // JOB_LIST knyter barnet til jobben ved oppretting, foer det kan koyre.
+    hvis ikkje _attribute(st["attrs"], 131085, io + 80, 8) { returner _api_feil("job-list") }
+    hvis profile == "no-network" {
+        builtin.raw_store64(io + 192, st["sid"])
+        // SECURITY_CAPABILITIES: NULL capabilities, count=0, reserved=0.
+        hvis ikkje _attribute(st["attrs"], 131081, io + 192, 24) { returner _api_feil("security-capabilities") }
+    }
+    api.u32(si, 112)
+    api.u32(si + 60, 256) // STARTF_USESTDHANDLES
+    builtin.raw_store64(si + 80, st["in_read"])
+    builtin.raw_store64(si + 88, st["out_write"])
+    builtin.raw_store64(si + 96, st["err_write"])
+    builtin.raw_store64(si + 104, st["attrs"])
+    hvis api.call("CreateProcessW", [exe_w, command_w, 0, 0, 1, 525316, environment, cwd_w, si, pi]) == 0 { returner _api_feil("CreateProcessW sandbox") }
+    st["process"] = builtin.raw_load64(pi)
+    st["thread"] = builtin.raw_load64(pi + 8)
+    st["pid"] = api.read32(pi + 16)
+    hvis ikkje _verify_job(st, memory, limits) { returner _api_feil("Job Object verifikasjon") }
+    hvis profile == "no-network" og ikkje _verify_container(st) { returner _api_feil("AppContainer token-verifikasjon") }
+    hvis ikkje _close(st, "out_write") eller ikkje _close(st, "err_write") eller ikkje _close(st, "in_read") { returner _api_feil("pipe-arv cleanup") }
+    la began = api.call("GetTickCount64", [])
+    hvis (api.call("ResumeThread", [st["thread"]]) & 4294967295) == 4294967295 { returner _api_feil("ResumeThread") }
+    _close(st, "thread")
+    la status = "ferdig"
+    la exit_code: heiltall = 127
+    la detail = ""
+    la peak_handles: heiltall = 0
+    mens sann {
+        hvis ikkje _drain(st, "out_read", "out_buf", "out_n", max_output) eller ikkje _drain(st, "err_read", "err_buf", "err_n", max_output) {
+            status = "feil"
+            detail = "Windows pipe read failed"
+            hvis st["output_limit"] { detail = "output limit" }
+            api.call("TerminateJobObject", [st["job"], 1])
+            bryt
+        }
+        la wait = api.call("WaitForSingleObject", [st["process"], 0]) & 4294967295
+        hvis wait == 0 { bryt }
+        hvis wait != 258 { returner _api_feil("WaitForSingleObject") }
+        hvis api.call("GetTickCount64", []) - began >= timeout {
+            status = "timeout"
+            exit_code = 124
+            hvis api.call("TerminateJobObject", [st["job"], 124]) == 0 { returner _api_feil("TerminateJobObject") }
+            bryt
+        }
+        // Windows tilbyr ikkje RLIMIT_NOFILE. Ei konservativ handtaksgrense
+        // omfattar ogsaa andre kernel-handtak, og avsluttar heile jobben.
+        hvis max_handles > 0 {
+            hvis api.call("GetProcessHandleCount", [st["process"], io + 32]) == 0 { returner _api_feil("GetProcessHandleCount") }
+            la handles = api.read32(io + 32)
+            hvis handles > peak_handles { peak_handles = handles }
+            hvis handles > max_handles {
+                status = "feil"
+                detail = "process handle limit"
+                api.call("TerminateJobObject", [st["job"], 1])
+                bryt
+            }
+        }
+        api.call("Sleep", [1])
+    }
+    hvis (api.call("WaitForSingleObject", [st["process"], 5000]) & 4294967295) != 0 { returner feil("Windows-jobben vart ikkje avslutta") }
+    // Full drenering etter prosess-slutt. PIPE har ingen andre arva skrivarar.
+    la before: heiltall = 0 - 1
+    mens before != st["out_n"] + st["err_n"] {
+        before = st["out_n"] + st["err_n"]
+        hvis ikkje _drain(st, "out_read", "out_buf", "out_n", max_output) eller ikkje _drain(st, "err_read", "err_buf", "err_n", max_output) {
+            status = "feil"
+            detail = "output limit or pipe failure"
+            bryt
+        }
+    }
+    hvis status == "ferdig" {
+        hvis api.call("GetExitCodeProcess", [st["process"], io + 32]) == 0 { returner _api_feil("GetExitCodeProcess") }
+        exit_code = api.read32(io + 32)
+    }
+    la elapsed = api.call("GetTickCount64", []) - began
+    la peak: heiltall = 0
+    hvis api.call("QueryInformationJobObject", [st["job"], 9, limits, 144, 0]) != 0 { peak = builtin.raw_load64(limits + 136) }
+    la r = process_abi.resultat(status, st["pid"], exit_code, api.bytes_to_text(st["out_buf"], st["out_n"]), api.bytes_to_text(st["err_buf"], st["err_n"]), detail)
+    r["wall_ms"] = tekst(elapsed)
+    // Job Object rapporterer commit, ikkje resident set. Ikkje kall dette RSS.
+    r["peak_commit_bytes"] = tekst(peak)
+    // Faktisk maaling fraa den same watchdogen som handhevar grensa. Ho
+    // omfattar ogsaa Windows-lastaren sine handtak, ikkje berre opne filer.
+    r["peak_handles"] = tekst(peak_handles)
+    r["max_handles"] = tekst(max_handles)
+    hvis detail == "process handle limit" {
+        r["error_detail"] = "GetProcessHandleCount=" + tekst(peak_handles) +
+            " over max_open_files=" + tekst(max_handles)
+    }
+    r["sandbox"] = profile
+    r["sandbox_backend"] = "job-object"
+    hvis st["appcontainer_verified"] { r["sandbox_backend"] = "appcontainer+job-object" }
+    r["job_verified"] = st["job_verified"]
+    r["appcontainer_verified"] = st["appcontainer_verified"]
+    r["open_file_limit_backend"] = "process-handle-watchdog"
+    hvis finnes_nøkkel(req, "capture_stdout") og req["capture_stdout"] == "usann" { r["stdout"] = "" }
+    hvis finnes_nøkkel(req, "capture_stderr") og req["capture_stderr"] == "usann" { r["stderr"] = "" }
+    returner r
+}
+
+funksjon _cleanup(st) -> boolsk {
+    la ok = sann
+    hvis st["process"] != 0 {
+        la wait = api.call("WaitForSingleObject", [st["process"], 0]) & 4294967295
+        hvis wait != 0 {
+            // Ogsaa fail-closed-vegane foer ResumeThread terminerer barnet.
+            api.call("TerminateJobObject", [st["job"], 127])
+            api.call("TerminateProcess", [st["process"], 127])
+            hvis (api.call("WaitForSingleObject", [st["process"], 5000]) & 4294967295) != 0 { ok = usann }
+        }
+    }
+    for key i ["token", "thread", "process", "out_read", "out_write", "err_read", "err_write", "in_read", "in_write", "job"] {
+        hvis ikkje _close(st, key) { ok = usann }
+    }
+    for grant i st["grants"] {
+        hvis ikkje _acl(st, grant[0], st["sid"], sann, grant[1]) { ok = usann }
+    }
+    hvis st["attrs_ready"] { api.call("DeleteProcThreadAttributeList", [st["attrs"]]) }
+    hvis st["sid"] != 0 { api.call("FreeSid", [st["sid"]]) }
+    hvis st["profile_created"] {
+        la deleted = api.call("DeleteAppContainerProfile", [st["profile_name"]]) & 4294967295
+        hvis deleted != 0 { st["security_error"] = "DeleteAppContainerProfile HRESULT=" + tekst(deleted) ok = usann }
+    }
+    for p i st["alloc"] { hvis ikkje api.free(p) { ok = usann } }
+    returner ok
+}
+
+// cmd og den dobbelt-NUL-terminerte UTF-8-miljoblokka er bygde av den same
+// validerte Windows-argv/miljovegen som den vanlege CRT-frie process.exec.
+funksjon spawn(req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
+    hvis ikkje gyldig(req) { returner feil("ugyldig Windows sandbox-request") }
+    hvis req["sandbox"] != "restricted" og req["sandbox"] != "no-network" { returner feil("AppContainer-policy er ikkje implementert: " + tekst(req["sandbox"])) }
+    hvis cwd == "" { returner feil("Windows sandbox krev eksplisitt arbeidsrot") }
+    hvis req["stdin"] != "" { returner feil("Windows sandbox stdin er berre implementert som EOF") }
+    la maximum = heltall_fra_tekst(req["max_output_bytes"])
+    hvis maximum > 16777216 { returner feil("Windows sandbox fang-buffer er for stort") }
+    la st = {"alloc": [], "grants": [], "job": 0, "process": 0, "thread": 0, "token": 0,
+        "in_read": 0, "in_write": 0, "out_read": 0, "out_write": 0, "err_read": 0, "err_write": 0,
+        "sid": 0, "profile_name": 0, "profile_created": usann, "attrs": 0, "attrs_ready": usann,
+        "job_verified": usann, "appcontainer_verified": usann, "out_n": 0, "err_n": 0,
+        "output_limit": usann, "pid": -1, "security_error": "oppsett feila"}
+    la result = feil("Windows sandbox vart ikkje starta")
+    prøv { result = _run(st, req, cmd, cwd, env_utf8) } fang (e) { result = feil("Windows sandbox: " + tekst(e)) }
+    hvis ikkje _cleanup(st) { returner feil("Windows sandbox cleanup feila: " + st["security_error"]) }
+    returner result
+}

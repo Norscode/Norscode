@@ -44,6 +44,13 @@ funksjon open(sti: tekst) -> ordbok_tekst {
 }
 
 funksjon close(handle) -> bool {
+    // Ein mislukka append kan ha skrive delar av ein commit. Ikkje checkpoint
+    // eller returner ein slik handel til poolen; opning avgjer kva som kom med.
+    hvis finnes_nøkkel(handle, "_wal_feil") {
+        handle["_lukka"] = sann
+        returner usann
+    }
+    hvis motor.db_tx_aktiv(handle) { rollback(handle) }
     sql.lukk(handle)
     hvis finnes_nøkkel(handle, "_pool") {
         la p = handle["_pool"]
@@ -167,6 +174,7 @@ funksjon siste_feil(handle) -> tekst {
 }
 
 funksjon execute(handle, sql_str: tekst) -> heltall {
+    motor.db_sjekk_skrivbar(handle)
     la n = sql.exec(handle, sql_str)
     hvis n < 0 {
         handle["_feil"] = "Ukjend eller ugyldig SQL: " + sql_str
@@ -190,16 +198,21 @@ funksjon query_rader(handle, sql_str: tekst) -> tekst {
 
 // ── Transaksjonar (angre-logg i motoren) ─────────────────────────────
 // begin er O(1) (før: heile databasen serialisert som snapshot ved kvar begin).
-// Endringane går til WAL-en som vanleg; rollback spelar angre-loggen baklengs.
+// Endringane blir haldne i minnet til commit; rollback spelar angre-loggen baklengs.
 funksjon begin(handle) -> bool {
+    hvis motor.db_tx_aktiv(handle) {
+        handle["_feil"] = "Transaksjon er alt aktiv"
+        returner usann
+    }
     motor.db_tx_start(handle)
     handle["_i_tx"] = sann
     returner sann
 }
 
-// commit: endringane ligg alt i WAL-en; checkpointet er inkrementelt (berre
-// endringane blir skrivne), så commit kostar ikkje ei omskriving av heile fila.
+// commit skriv heile transaksjonen som éin komplett, CRC-kontrollert WAL-post
+// før angre-loggen blir kasta. Checkpoint kan deretter absorbere denne posten.
 funksjon commit(handle) -> bool {
+    hvis ikke motor.db_tx_aktiv(handle) { returner usann }
     motor.db_tx_slutt(handle)
     handle["_i_tx"] = usann
     motor.db_checkpoint(handle)
@@ -210,9 +223,6 @@ funksjon rollback(handle) -> bool {
     hvis ikke motor.db_tx_aktiv(handle) { returner usann }
     motor.db_tx_angre(handle)
     handle["_i_tx"] = usann
-    // Full checkpoint: WAL-en inneheld dei attenderulla endringane, så han må
-    // ikkje bli lagd til som delta — skriv heile (attenderulla) tilstanden.
-    motor.db_checkpoint_full(handle)
     returner sann
 }
 
@@ -236,8 +246,13 @@ funksjon migrate(handle, skript: tekst) -> heltall {
 
 // transaction: køyr skript atomisk. Commit om alt gyldig, elles rollback.
 funksjon transaction(handle, skript: tekst) -> heltall {
-    begin(handle)
-    la r = migrate(handle, skript)
+    hvis ikke begin(handle) { returner 0 }
+    la r = -1
+    prøv { r = migrate(handle, skript) }
+    fang (e) {
+        rollback(handle)
+        kast e
+    }
     hvis r >= 0 {
         commit(handle)
         returner 1

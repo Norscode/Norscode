@@ -1,0 +1,67 @@
+// Eige adresseområde for kvar skrivar/lesar. Skrivarane kan avslutte utan close.
+bruk std.norsdb_db som db
+bruk std.norsdb_motor som motor
+
+funksjon grunnlag(h) {
+    assert_eq(db.execute(h, "CREATE TABLE konto (id INTEGER PRIMARY KEY, saldo INTEGER)"), 0)
+    assert_eq(db.execute(h, "INSERT INTO konto (id, saldo) VALUES (1, 100)"), 1)
+    assert_eq(db.execute(h, "INSERT INTO konto (id, saldo) VALUES (2, 50)"), 1)
+}
+
+funksjon endre(h) {
+    assert(db.begin(h))
+    assert_eq(db.execute(h, "UPDATE konto SET saldo = 70 WHERE id = 1"), 1)
+    assert_eq(db.execute(h, "DELETE FROM konto WHERE id = 2"), 1)
+    assert_eq(db.execute(h, "INSERT INTO konto (id, saldo) VALUES (3, 30)"), 1)
+    assert_eq(db.execute(h, "CREATE TABLE hendelse (tekst TEXT)"), 0)
+    la melding = "Å" + builtin.chr(29) + builtin.chr(30) + builtin.chr(31) + "commit"
+    assert_eq(db.execute_bundet(h, "INSERT INTO hendelse (tekst) VALUES (?)", [melding]), 1)
+    assert_eq(db.execute(h, "ALTER TABLE konto ADD COLUMN merknad TEXT DEFAULT 'ny'"), 0)
+    assert_eq(db.execute(h, "CREATE INDEX saldo_idx ON konto(saldo)"), 0)
+}
+
+funksjon start() -> heiltall {
+    la sti = miljo_hent("NORSDB_TX_PATH")
+    la modus = miljo_hent("NORSDB_TX_CASE")
+    la h = db.open(sti)
+    hvis modus == "seed" {
+        grunnlag(h)
+        assert(db.close(h))
+    } ellers hvis modus == "read-original" {
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM konto"), 2)
+        assert_eq(db.query_text(h, "SELECT saldo FROM konto WHERE id = 1"), "100")
+        assert_eq(db.query_text(h, "SELECT saldo FROM konto WHERE id = 2"), "50")
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM konto WHERE id = 3"), 0)
+        assert(ikke finnes_nøkkel(h["tabellar"], "hendelse"))
+        assert_eq(lengde(h["tabellar"]["konto"]["kolnamn"]), 2)
+        assert(ikke motor.db_har_indeks(h, "konto", "saldo"))
+    } ellers hvis modus == "read-committed" {
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM konto"), 2)
+        assert_eq(db.query_text(h, "SELECT saldo FROM konto WHERE id = 1"), "70")
+        assert_eq(db.query_text(h, "SELECT saldo FROM konto WHERE id = 3"), "30")
+        assert_eq(db.query_int(h, "SELECT COUNT(*) FROM konto WHERE id = 2"), 0)
+        assert_eq(db.query_text(h, "SELECT tekst FROM hendelse"), "Å" + builtin.chr(29) + builtin.chr(30) + builtin.chr(31) + "commit")
+        assert_eq(db.query_text(h, "SELECT merknad FROM konto WHERE id = 1"), "ny")
+        assert(motor.db_har_indeks(h, "konto", "saldo"))
+    } ellers {
+        // Den opphavlege regresjonen: WAL finst, men ingen checkpoint enno.
+        hvis modus == "leave" { grunnlag(h) }
+        endre(h)
+        hvis modus == "leave" {
+            skriv("norsdb-child: leave\n")
+            // Ikkje commit, rollback eller close. Forelderen krev exit-kode 23.
+            returner 23
+        } ellers hvis modus == "commit-wal" {
+            // Avslutt nett etter commit-posten, før adapteren sitt checkpoint.
+            motor.db_tx_slutt(h)
+        } ellers hvis modus == "commit" {
+            assert(db.commit(h))
+        } ellers hvis modus == "rollback" {
+            assert(db.rollback(h))
+        } ellers hvis modus == "close" {
+            assert(db.close(h))
+        } ellers { kast "Ukjend NorsDB-testmodus: " + modus }
+    }
+    skriv("norsdb-child: " + modus + "\n")
+    returner 0
+}

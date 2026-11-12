@@ -1,0 +1,169 @@
+// Uttømmande bytekutt gjennom to commit-postar. Kvar gyldig prefiks skal gi
+// anten før, mellom eller etter transaksjonane, aldri eit delvis resultat.
+bruk std.norsdb_motor som motor
+bruk std.norsdb_db som db
+bruk std.filops som filops
+
+funksjon sjekk(h, fase: heiltall) {
+    assert_eq(motor.db_tel(h, "konto"), 10)
+    hvis fase == 0 {
+        assert_eq(motor.db_hent(h, "konto", 1)["saldo"], "100")
+        assert_eq(motor.db_hent(h, "konto", 2)["saldo"], "50")
+        assert(ikke motor.db_finst(h, "konto", 11))
+    } ellers hvis fase == 1 {
+        assert_eq(motor.db_hent(h, "konto", 1)["saldo"], "90")
+        assert_eq(motor.db_hent(h, "konto", 2)["saldo"], "60")
+        assert(ikke motor.db_finst(h, "konto", 11))
+    } ellers {
+        assert_eq(motor.db_hent(h, "konto", 1)["saldo"], "70")
+        assert(ikke motor.db_finst(h, "konto", 2))
+        assert_eq(motor.db_hent(h, "konto", 11)["saldo"], "30")
+        assert_eq(motor.db_hent(h, "konto", 11)["namn"], "second-commit-Å" + builtin.chr(29) + builtin.chr(30) + builtin.chr(31))
+    }
+}
+
+funksjon avvis_lagring(h, sti: tekst) {
+    la avvist = 0
+    prøv { motor.db_checkpoint(h) } fang (e) { avvist = avvist + 1 }
+    prøv { motor.db_checkpoint_full(h) } fang (e) { avvist = avvist + 1 }
+    prøv { motor.db_backup(h, sti) } fang (e) { avvist = avvist + 1 }
+    assert_eq(avvist, 3)
+    assert(ikke builtin.fil_finnes(sti))
+}
+
+funksjon start() -> heiltall {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la dir = root + "/build/norsdb-tx-recovery-" + builtin.random_hex(8)
+    assert(filops.lag_katalogar(dir))
+    la sti = dir + "/source"
+    la h = motor.db_ny(sti)
+    motor.db_opprett_tabell(h, "konto", [{"navn": "saldo", "tag": motor.tag_int()}, {"navn": "namn", "tag": motor.tag_tekst()}])
+    motor.db_sett_inn(h, "konto", ["100", "Ada"])
+    motor.db_sett_inn(h, "konto", ["50", "Bo"])
+    la pad = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    la i = 0
+    mens i < 8 {
+        motor.db_sett_inn(h, "konto", ["0", pad])
+        i = i + 1
+    }
+    // Gammalt NORSDB2-format utan transaksjonsrammer skal framleis kunne lesast.
+    la legacy = builtin.fil_les(sti + ".wal")
+    assert(ikke builtin.contains(legacy, "B" + builtin.chr(31)))
+    sjekk(motor.db_åpne(sti), 0)
+    motor.db_checkpoint_full(h)
+    la base = builtin.fil_les(sti + ".cp")
+
+    motor.db_tx_start(h)
+    motor.db_oppdater(h, "konto", 1, ["90", "Ada"])
+    motor.db_oppdater(h, "konto", 2, ["60", "Bo"])
+    assert(ikke builtin.fil_finnes(sti + ".wal"))
+    motor.db_tx_slutt(h)
+    la første = builtin.fil_les(sti + ".wal")
+    motor.db_tx_start(h)
+    motor.db_oppdater(h, "konto", 1, ["70", "Ada"])
+    motor.db_slett(h, "konto", 2)
+    motor.db_sett_inn(h, "konto", ["30", "second-commit-Å" + builtin.chr(29) + builtin.chr(30) + builtin.chr(31)])
+    assert_eq(builtin.fil_les(sti + ".wal"), første)
+    motor.db_tx_slutt(h)
+    la wal = builtin.fil_les(sti + ".wal")
+    sjekk(motor.db_åpne(sti), 2)
+
+    la kuttsti = dir + "/cut"
+    la kutt = 0
+    mens kutt <= lengde(wal) {
+        builtin.fil_skriv(kuttsti + ".cp", base)
+        builtin.fil_skriv(kuttsti + ".wal", builtin.slice(wal, 0, kutt))
+        la g = motor.db_åpne(kuttsti)
+        la fase = 0
+        hvis kutt >= lengde(første) { fase = 1 }
+        hvis kutt == lengde(wal) { fase = 2 }
+        sjekk(g, fase)
+        // Etter reparasjon må ein ny post verken bli limt til ein halv B-post
+        // eller miste tidlegare commit. Kontroller vidare skriving ved begge grenser.
+        hvis kutt == lengde(første) - 1 eller kutt == lengde(wal) - 1 {
+            motor.db_oppdater(g, "konto", 3, ["7", "etter avbrot"])
+            la etter = motor.db_åpne(kuttsti)
+            sjekk(etter, fase)
+            assert_eq(motor.db_hent(etter, "konto", 3)["saldo"], "7")
+        }
+        kutt = kutt + 1
+    }
+
+    // Ein komplett, korrupt commit er ein feil, ikkje ein stille delvis replay.
+    builtin.fil_skriv(kuttsti + ".cp", base)
+    builtin.fil_skriv(kuttsti + ".wal", builtin.replace(wal, "second-commit", "broken-commit"))
+    la korrupt = usann
+    prøv { motor.db_åpne(kuttsti) } fang (e) { korrupt = sann }
+    assert(korrupt)
+    builtin.fil_skriv(kuttsti + ".wal", builtin.replace(wal, "B" + builtin.chr(31) + "1", "B" + builtin.chr(31) + "2"))
+    la versjon = usann
+    prøv { motor.db_åpne(kuttsti) } fang (e) { versjon = sann }
+    assert(versjon)
+
+    // Begge checkpoint-vegane må halde på heile commit. Den store basen tvingar
+    // først delta-vegen, der B-postane faktisk blir liggjande i checkpointet.
+    motor.db_checkpoint(h)
+    assert(h["_cp_delta"] > 0)
+    assert(builtin.contains(builtin.fil_les(sti + ".cp"), "B" + builtin.chr(31)))
+    sjekk(motor.db_åpne(sti), 2)
+    // Avbrot etter checkpoint før WAL-sletting: same epoke må ikkje spelast på nytt.
+    builtin.fil_skriv(sti + ".wal", wal)
+    la g = motor.db_åpne(sti)
+    sjekk(g, 2)
+    assert(ikke builtin.fil_finnes(sti + ".wal"))
+    motor.db_checkpoint_full(g)
+    sjekk(motor.db_åpne(sti), 2)
+    assert_eq(g["_cp_delta"], 0)
+    assert(ikke builtin.contains(builtin.fil_les(sti + ".cp"), "B" + builtin.chr(31)))
+
+    // Checkpoint/backup skal aldri publisere den ucommitta tilstanden i minnet.
+    la før_cp = builtin.fil_les(sti + ".cp")
+    motor.db_tx_start(g)
+    motor.db_oppdater(g, "konto", 1, ["999", "pending"])
+    avvis_lagring(g, dir + "/pending-backup")
+    assert_eq(builtin.fil_les(sti + ".cp"), før_cp)
+    assert(ikke builtin.fil_finnes(sti + ".wal"))
+    sjekk(motor.db_åpne(sti), 2)
+    motor.db_tx_angre(g)
+    sjekk(g, 2)
+
+    // Reell filfeil ved commit: ein vanleg fil kan ikkje vere foreldrekatalog.
+    builtin.fil_skriv(dir + "/blocker", "ikkje katalog")
+    la feil = motor.db_ny(dir + "/blocker/db")
+    motor.db_tx_start(feil)
+    motor.db_opprett_tabell(feil, "t", [{"navn": "v", "tag": motor.tag_tekst()}])
+    motor.db_sett_inn(feil, "t", ["pending"])
+    la avvist = usann
+    prøv { motor.db_tx_slutt(feil) } fang (e) { avvist = sann }
+    assert(avvist)
+    avvis_lagring(feil, dir + "/failed-backup")
+    la angre_avvist = usann
+    prøv { motor.db_tx_angre(feil) } fang (e) { angre_avvist = sann }
+    assert(angre_avvist)
+    assert(ikke db.close(feil))
+
+    // Nøsta begin/transaction må ikkje kaste den ytre angre-loggen eller committe.
+    la minne = db.open(":memory:")
+    db.execute(minne, "CREATE TABLE t (v INTEGER)")
+    assert(db.begin(minne))
+    db.execute(minne, "INSERT INTO t (v) VALUES (1)")
+    assert(ikke db.begin(minne))
+    assert_eq(db.transaction(minne, "INSERT INTO t (v) VALUES (2)"), 0)
+    assert(db.rollback(minne))
+    assert_eq(db.query_int(minne, "SELECT COUNT(*) FROM t"), 0)
+    assert(ikke db.commit(minne))
+    la p = db.pool(":memory:", 1)
+    la c = db.pool_acquire(p)
+    db.execute(c, "CREATE TABLE t (v INTEGER)")
+    assert(db.begin(c))
+    db.execute(c, "INSERT INTO t (v) VALUES (1)")
+    assert(db.close(c))
+    la c2 = db.pool_acquire(p)
+    assert_eq(db.query_int(c2, "SELECT COUNT(*) FROM t"), 0)
+    assert(db.begin(c2))
+    assert(db.commit(c2))
+    assert(db.close(c2))
+    skriv("test_norsdb_tx_recovery OK (" + tekst_fra_heltall(lengde(wal) + 1) + " bytegrenser)\n")
+    returner 0
+}

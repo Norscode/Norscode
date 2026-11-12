@@ -1,0 +1,83 @@
+// Native/offentleg TLS-grense: eit godkjent anker må gi ein ekte handshake,
+// medan feil vertsnamn blir avvist. Ingen scheduler eller ekstern tenar.
+bruk std.socket som socket
+
+funksjon avvis_app_data(h: ordbok) {
+    la w = socket.native_skriv(h, "must-not-send")
+    assert_eq(w["status"], "feil")
+    assert(builtin.contains(w["error"], "TLS handshake incomplete"))
+    la r = socket.native_les(h, 32)
+    assert_eq(r["status"], "feil")
+    assert(builtin.contains(r["error"], "TLS handshake incomplete"))
+}
+
+funksjon par(lyttar: ordbok, hostname: tekst) -> ordbok {
+    la port = heltall_fra_tekst(tekst(lyttar["port"]))
+    la klient = socket.native_tls_tilkoble("127.0.0.1", port, hostname, "")
+    assert_eq(klient["status"], "connected")
+    la tenar = socket.native_aksepter(lyttar)
+    assert_eq(tenar["status"], "connected")
+    avvis_app_data(klient)
+    avvis_app_data(tenar)
+    la kr = {"status": "ventende"}
+    la tr = {"status": "ventende"}
+    la start_ms = builtin.tid_ms()
+    mens builtin.tid_ms() - start_ms < 60000 {
+        hvis kr["status"] != "connected" { kr = socket.native_tls_handshake(klient) }
+        hvis kr["status"] == "feil" { bryt }
+        hvis tr["status"] != "connected" { tr = socket.native_tls_handshake(tenar) }
+        hvis tr["status"] == "feil" { bryt }
+        // Tenaren har avleidd appnøklar etter sin flight, men må vente på
+        // klient-Finished (og eventuelt mTLS) før data-API-et kan brukast.
+        hvis tr["status"] == "ventende" { avvis_app_data(tenar) }
+        hvis kr["status"] == "connected" og tr["status"] == "connected" { bryt }
+    }
+    returner {"klient": klient, "tenar": tenar, "kr": kr, "tr": tr}
+}
+
+funksjon lukk_par(p: ordbok) {
+    socket.native_lukk(p["klient"])
+    socket.native_lukk(p["tenar"])
+}
+
+funksjon start() -> heiltall {
+    la cert = "tests/fixtures/tls/localhost-ed25519.crt"
+    la key = "tests/fixtures/tls/localhost-ed25519.key"
+    la tidlegare_ca = builtin.miljo_hent("NORSCODE_TLS_CA_FILE")
+    builtin.miljo_sett("NORSCODE_TLS_CA_FILE", cert)
+    skriv("TLS loopback: lytt\n")
+    la lyttar = socket.native_tls_lytt("127.0.0.1", 0, 8, cert, key)
+    assert_eq(lyttar["status"], "listening")
+    skriv("TLS loopback: tilkoble\n")
+    la ok = par(lyttar, "localhost")
+    hvis ok["kr"]["status"] == "feil" { skriv(ok["kr"]["error"] + "\n") }
+    assert_eq(ok["kr"]["status"], "connected")
+    assert_eq(ok["tr"]["status"], "connected")
+    assert(ok["kr"]["peer_verified"])
+    assert_eq(ok["kr"]["tls_version"], "TLSv1.3")
+    assert_eq(socket.native_skriv(ok["klient"], "authenticated")["status"], "ok")
+    la data = socket.native_les(ok["tenar"], 32)
+    assert_eq(data["status"], "ok")
+    assert_eq(data["data"], "authenticated")
+    lukk_par(ok)
+    la feil = par(lyttar, "wrong.example")
+    assert_eq(feil["kr"]["status"], "feil")
+    assert(builtin.contains(feil["kr"]["error"], "vertsnamn"))
+    lukk_par(feil)
+    socket.native_lukk(lyttar)
+    // Typa true med eit gyldig anker må òg handheve mTLS i sjølve
+    // handshaken; klienten utan sertifikat kan aldri bli verifisert.
+    la mtls = builtin.network_operation({"abi": socket.native_versjon(),
+        "operation": "tls_listen", "host": "127.0.0.1", "port": "0",
+        "backlog": "8", "cert_file": cert, "key_file": key,
+        "client_ca_file": cert, "require_client_cert": sann})
+    assert_eq(mtls["status"], "listening")
+    la utan_cert = par(mtls, "localhost")
+    assert_eq(utan_cert["tr"]["status"], "feil")
+    assert(builtin.contains(utan_cert["tr"]["error"], "klient"))
+    lukk_par(utan_cert)
+    socket.native_lukk(mtls)
+    builtin.miljo_sett("NORSCODE_TLS_CA_FILE", tidlegare_ca)
+    skriv("tls_trust_public_loopback OK\n")
+    returner 0
+}

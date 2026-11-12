@@ -28,6 +28,8 @@ bruk std.bigint som bn
 // F3.1 (X0.3): systemkallnummer, flagg, errno og struct-layout kjem BERRE frå std.native_sys
 // (tabell per mål, vald ved køyring via builtin.native_target()). Ingen rå tal i sys6-kall her.
 bruk std.native_sys som nsys
+bruk std.windows_process som win_process
+bruk std.windows_network som win_network
 
 funksjon json_parse(t: tekst) {
     hvis builtin.type(t) != "tekst" { returner "null" }
@@ -1581,15 +1583,127 @@ funksjon _pg_win_quote(s: tekst) -> tekst {
     returner s
 }
 
+// Win64: bygg ein eksplisitt, dobbelt-NUL-terminert UTF-8 miljøblokk for
+// CreateProcessW. OSTAB 501 konverterer blokka til UTF-16 og set
+// CREATE_UNICODE_ENVIRONMENT. Utan eksplisitt miljø og med inherit_env=1
+// brukar vi NULL, slik at Windows arvar forelderens miljø direkte.
+funksjon _pg_win_env_entries(miljø, arv: boolsk) -> liste_tekst {
+    la ut: liste_tekst = []
+    la keys = nøkler(miljø)
+    la i: heiltall = 0
+    mens i < lengde(keys) {
+        la namn = tekst(keys[i])
+        hvis namn == "" eller builtin.index_of(namn, "=") >= 0 eller
+           builtin.index_of(namn, "\u0000") >= 0 eller
+           builtin.index_of(tekst(miljø[namn]), "\u0000") >= 0 {
+            returner []
+        }
+        legg_til(ut, namn + "=" + tekst(miljø[namn]))
+        i = i + 1
+    }
+    hvis arv {
+        // Windows _start har alt konvertert GetEnvironmentStringsW til
+        // native_envp() UTF-8. Behald alle arva variablar unnateke dei
+        // som request-en uttrykkeleg overstyrer (Windows er case-insensitive).
+        la envp = builtin.native_envp()
+        hvis envp != 0 {
+            la ei: heiltall = 0
+            mens ei < 1024 {
+                la ptr = builtin.raw_load64(envp + ei * 8)
+                hvis ptr == 0 { bryt }
+                la b: liste_tekst = []
+                la j: heiltall = 0
+                mens j < 32768 og builtin.raw_load8(ptr + j) != 0 {
+                    legg_til(b, builtin.chr(builtin.raw_load8(ptr + j)))
+                    j = j + 1
+                }
+                hvis j >= 32768 { returner [] }
+                la entry = builtin.join(b, "")
+                la eq = builtin.index_of(entry, "=")
+                // Windows kan ha skjulte =C:-oppføringar. Dei er ikkje
+                // normaliserte miljønamn og blir ikkje endra eller sendte.
+                hvis eq > 0 {
+                    la arva_namn = builtin.lower(builtin.slice(entry, 0, eq))
+                    la overstyrt = usann
+                    i = 0
+                    mens i < lengde(keys) og ikkje overstyrt {
+                        hvis builtin.lower(tekst(keys[i])) == arva_namn { overstyrt = sann }
+                        i = i + 1
+                    }
+                    hvis ikkje overstyrt { legg_til(ut, entry) }
+                }
+                ei = ei + 1
+            }
+        }
+    }
+    // Windows sitt miljøblokkformat krev alfabetisk rekkefølgje.
+    la a: heiltall = 1
+    mens a < lengde(ut) {
+        la verdi = ut[a]
+        la k = a
+        mens k > 0 og builtin.lower(ut[k - 1]) > builtin.lower(verdi) {
+            ut[k] = ut[k - 1]
+            k = k - 1
+        }
+        ut[k] = verdi
+        a = a + 1
+    }
+    returner ut
+}
+
+funksjon _pg_win_env_pack(req, adr: heiltall, maks: heiltall) -> heiltall {
+    la miljø = {}
+    hvis finnes_nøkkel(req, "environment") {
+        hvis builtin.type(req["environment"]) != "ordbok" { returner -1 }
+        miljø = req["environment"]
+    }
+    la arv = sann
+    hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
+    hvis lengde(nøkler(miljø)) == 0 og arv { returner 0 }
+    la entries = _pg_win_env_entries(miljø, arv)
+    hvis lengde(entries) == 0 og lengde(nøkler(miljø)) > 0 { returner -1 }
+    // [u64 bytecount][UTF-8 KEY=VALUE NUL... NUL]. Dobbelt NUL
+    // konverterast byte-eksakt av MultiByteToWideChar med eksplisitt lengde.
+    la n: heiltall = 8
+    la i: heiltall = 0
+    mens i < lengde(entries) {
+        la e = tekst(entries[i])
+        hvis n + lengde(e) + 3 > maks { returner -1 }
+        n = _pg_cstr(adr + n, e) - adr
+        i = i + 1
+    }
+    hvis n + 2 > maks { returner -1 }
+    builtin.raw_store8(adr + n, 0)
+    n = n + 1
+    hvis lengde(entries) == 0 {
+        // Tomt miljø treng to NUL i staden for éin.
+        builtin.raw_store8(adr + n, 0)
+        n = n + 1
+    }
+    builtin.raw_store64(adr, n - 8)
+    returner n
+}
+
 // Synkron Windows-spawn: byggjer CreateProcessW-kommandolinja (exe + args, kvar token
 // sitert ved mellomrom) i mmap-scratch (VirtualAlloc via os_mmap), gjev os_win_spawn
 // (OSTAB 501) eit fang-buffer, og les stdout+stderr attende (chr(raw_load8) → join).
 // Windows har ingen fork, so dette er den parallelle vegen til POSIX-_pg_spawn.
 // Returnerer same forma som process_spawn_argv_gap (norscode-process-spawn-v1).
 funksjon _pg_windows_spawn_synkron(req) {
+    hvis ikkje win_process.gyldig(req) { returner _pg_synkron_feil("ugyldig Windows sandbox-request") }
     la exe = ""
     hvis finnes_nøkkel(req, "executable") { exe = tekst(req["executable"]) }
     hvis exe == "" { returner _pg_synkron_feil("tom executable") }
+    // Ukjend/manglande policy og dei enno ustotta skriveprofilane er fail-closed.
+    // restricted/no-network gaar til verifisert Job Object / AppContainer,
+    // og kan aldri falle tilbake til den uisolerte CreateProcessW-vegen.
+    hvis ikkje finnes_nøkkel(req, "sandbox") {
+        returner _pg_synkron_feil("Windows sandbox profile manglar")
+    }
+    la windows_profile = tekst(req["sandbox"])
+    hvis windows_profile != "none" og windows_profile != "restricted" og windows_profile != "no-network" {
+        returner _pg_synkron_feil("AppContainer-policy er ikkje implementert: " + windows_profile)
+    }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
     la cmd = _pg_win_quote(exe)
@@ -1613,12 +1727,23 @@ funksjon _pg_windows_spawn_synkron(req) {
         cwd_adr = fri
         fri = _pg_cstr(fri, cwd)
     }
+    // Miljøblokka ligg etter argv/cwd i det same 60 KiB strengområdet,
+    // med grense før fang-bufferet. Null betyr OS-arva miljø.
+    la miljø_adr: heiltall = 0
+    la blokk_lengd = _pg_win_env_pack(req, fri, str_slutt - fri)
+    hvis blokk_lengd < 0 { returner _pg_synkron_feil("Windows miljøblokk er ugyldig eller for stor") }
+    hvis blokk_lengd > 0 { miljø_adr = fri }
+    hvis windows_profile != "none" {
+        la isolated = win_process.spawn(req, cmd, cwd, miljø_adr)
+        hvis ikkje win_process.release_scratch(scratch) { returner _pg_synkron_feil("Windows scratch cleanup feila") }
+        returner isolated
+    }
     // Fang-buffer etter streng-området: out_buf .. out_len_ptr i same scratch.
     la out_buf: heiltall = scratch + _PG_STR_SLUTT()
     la out_len_ptr: heiltall = scratch + _PG_SCRATCH() - 8
     la out_cap: heiltall = out_len_ptr - out_buf - 8
     builtin.raw_store64(out_len_ptr, 0)
-    la exit_kode = builtin.sys6(_PG_NR_WIN_SPAWN(), cmd_adr, cwd_adr, out_buf, out_cap, out_len_ptr, 0)
+    la exit_kode = builtin.sys6(_PG_NR_WIN_SPAWN(), cmd_adr, cwd_adr, out_buf, out_cap, out_len_ptr, miljø_adr)
     hvis exit_kode < 0 { returner _pg_synkron_feil("CreateProcessW feila") }
     // Les fanga stdout+stderr (byte-eksakt, som _pg_dren): chr(raw_load8) → join.
     la ut = ""
@@ -2325,6 +2450,7 @@ funksjon acme_verify(alg: tekst, offentleg_pem: tekst, signing_input: tekst, sig
 
 funksjon network_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
+    hvis builtin.native_target() == "windows-x86_64" { returner win_network.operation(req) }
     la op = _nw_tekst(req, "operation", "")
     hvis op == "poll_mange" { returner _s29_poll_mange(req) }   // 2.9 (seksjon nedst)
     hvis op == "tls_connect" { returner _tls_connect(req) }
@@ -3590,6 +3716,7 @@ funksjon atomic_operation(req) {
 //                rows*inner*columns <= 2e7; left/right liste med rett lengd; kvar
 //                verdi heiltal i [-32768, 32767]; int64-akkumulering;
 //                backend "metal" → feil "metal backend unavailable" (Linux-stubben).
+//   last_opp / matmul_i32 med left_handle / frigjer → vedvarande vekter (sjå under).
 //
 // SIMD-vegen er EKTE SSE4.1: ein fast kjerne (pmulld 4×i32 → pmovsxdq → paddq i64)
 // blir skriven éin gong i ei mmap-sone, mprotect-a til R|X (W^X, som JIT-backenden)
@@ -3606,6 +3733,20 @@ funksjon atomic_operation(req) {
 
 la _tn_simd = 0            // 0 ukjent, 1 SSE4.1-kjerne klar, 2 ikkje tilgjengeleg (same 0-init-mønster som _jit_skrap/_arena)
 la _tn_kode = 0            // R|X-sida med kjerne + cpuid-stubb
+
+// Vedvarande vekter (handtak): ei venstre-matrise (t.d. vektene i eit lineært lag) blir
+// validert og pakka ÉIN gong i ei eiga mmap-sone (i32, rows × inner_p, same layout som
+// A i kjerne-ABI-en). Seinare matmul_i32 med «left_handle» pakkar berre høgre-sida (ofte
+// éin vektor) og les resultatet, i staden for å validere og pakke heile vektmatrisa i
+// kvart kall. Same handtak-bord-mønster som JIT-en (_jit_tabell).
+//   last_opp    {left, rows, inner}        → {status, handle, rows, inner, backend}
+//   matmul_i32  {left_handle, right, columns} (rows/inner frå handtaket)
+//   frigjer     {handle}
+// Grenser for handtak: rows ≤ 1 048 576, inner ≤ 4096, rows·inner ≤ 67 108 864,
+// columns ≤ 4096, rows·columns ≤ 4 194 304, inner·columns ≤ 1 000 000.
+la _tn_tabell = {}
+la _tn_neste = 0
+la _tn_aktive = 0
 
 funksjon _tn_kjerne_bytes() -> liste_heiltall {
     returner [
@@ -3869,20 +4010,7 @@ funksjon _tn_matmul_simd(l, r, rader: heiltall, inner: heiltall, kolonner: heilt
     la a_adr: heiltall = blokk + 64
     la b_adr: heiltall = a_adr + a_len
     la o_adr: heiltall = b_adr + b_len
-    la rr: heiltall = 0
-    mens rr < rader {
-        la basis: heiltall = rr * inner
-        la k: heiltall = 0
-        mens k < inner {
-            la lo: heiltall = l[basis + k]
-            la hi: heiltall = 0
-            hvis k + 1 < inner { hi = l[basis + k + 1] }
-            hvis lo < 0 { lo = lo + 4294967296 }
-            builtin.raw_store64(a_adr + (rr * inner_p + k) * 4, hi * 4294967296 + lo)
-            k = k + 2
-        }
-        rr = rr + 1
-    }
+    _tn_pakk_a(l, rader, inner, inner_p, a_adr)
     la c: heiltall = 0
     mens c < kolonner {
         la k: heiltall = 0
@@ -3917,6 +4045,148 @@ funksjon _tn_matmul_simd(l, r, rader: heiltall, inner: heiltall, kolonner: heilt
     returner ut
 }
 
+// Pakk venstre-matrisa l (rader × inner, radvis) til i32 i a_adr (rader × inner_p).
+funksjon _tn_pakk_a(l, rader: heiltall, inner: heiltall, inner_p: heiltall, a_adr: heiltall) {
+    la rr: heiltall = 0
+    mens rr < rader {
+        la basis: heiltall = rr * inner
+        la k: heiltall = 0
+        mens k < inner {
+            la lo: heiltall = l[basis + k]
+            la hi: heiltall = 0
+            hvis k + 1 < inner { hi = l[basis + k + 1] }
+            hvis lo < 0 { lo = lo + 4294967296 }
+            builtin.raw_store64(a_adr + (rr * inner_p + k) * 4, hi * 4294967296 + lo)
+            k = k + 2
+        }
+        rr = rr + 1
+    }
+}
+
+funksjon _tn_last_opp(req) {
+    la rader = _tn_heiltal(req, "rows")
+    la inner = _tn_heiltal(req, "inner")
+    hvis rader <= 0 eller inner <= 0 eller rader > 1048576 eller inner > 4096 eller rader * inner > 67108864 {
+        returner _tn_svar("feil", "tensor limits exceeded")
+    }
+    la l = []
+    hvis finnes_nøkkel(req, "left") { l = req["left"] }
+    hvis builtin.type(l) != "liste" eller lengde(l) != rader * inner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis ikkje _tn_int16_liste(l, rader * inner) { returner _tn_svar("feil", "left value outside int16 range") }
+    la e = {"rows": rader, "inner": inner, "simd": usann, "adr": 0, "len": 0, "inner_p": 0, "l": []}
+    hvis _tn_simd_klar() {
+        la inner_p: heiltall = ((inner + 3) / 4) * 4
+        la a_len: heiltall = rader * inner_p * 4
+        la total: heiltall = ((a_len + 4095) / 4096) * 4096
+        la adr = _sys_mmap_rw(total)
+        hvis adr >= 0 {
+            _tn_pakk_a(l, rader, inner, inner_p, adr)
+            e["simd"] = sann
+            e["adr"] = adr
+            e["len"] = total
+            e["inner_p"] = inner_p
+        }
+    }
+    // Utan SIMD (eller om mmap feila): behald lista og rekn skalart, same svar.
+    hvis ikkje e["simd"] { e["l"] = l }
+    _tn_neste = _tn_neste + 1
+    la h = "tensor-" + tekst_fra_heltall(_tn_neste)
+    _tn_tabell[h] = e
+    _tn_aktive = _tn_aktive + 1
+    la ut = _tn_svar("ferdig", "")
+    ut["handle"] = h
+    ut["rows"] = rader
+    ut["inner"] = inner
+    la b = "scalar"
+    hvis e["simd"] { b = _tn_backend() }
+    ut["backend"] = b
+    returner ut
+}
+
+funksjon _tn_frigjer(req) {
+    la h = _tn_tekst(req, "handle")
+    hvis h == "" eller ikkje finnes_nøkkel(_tn_tabell, h) { returner _tn_svar("feil", "unknown or freed tensor handle") }
+    la e = _tn_tabell[h]
+    hvis e["simd"] { _sys_munmap(e["adr"], e["len"]) }
+    fjern_nokkel(_tn_tabell, h)
+    _tn_aktive = _tn_aktive - 1
+    la ut = _tn_svar("ferdig", "")
+    ut["handle"] = h
+    returner ut
+}
+
+funksjon _tn_matmul_handtak(req) {
+    la h = _tn_tekst(req, "left_handle")
+    hvis h == "" eller ikkje finnes_nøkkel(_tn_tabell, h) { returner _tn_svar("feil", "unknown or freed tensor handle") }
+    la e = _tn_tabell[h]
+    la rader: heiltall = e["rows"]
+    la inner: heiltall = e["inner"]
+    la kolonner = _tn_heiltal(req, "columns")
+    // rows/inner er valfrie i førespurnaden, men må stemme med handtaket om dei er med.
+    hvis finnes_nøkkel(req, "rows") og _tn_heiltal(req, "rows") != rader { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis finnes_nøkkel(req, "inner") og _tn_heiltal(req, "inner") != inner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis kolonner <= 0 eller kolonner > 4096 eller rader * kolonner > 4194304 eller inner * kolonner > 1000000 {
+        returner _tn_svar("feil", "tensor limits exceeded")
+    }
+    la r = []
+    hvis finnes_nøkkel(req, "right") { r = req["right"] }
+    hvis builtin.type(r) != "liste" eller lengde(r) != inner * kolonner { returner _tn_svar("feil", "tensor shape mismatch") }
+    hvis ikkje _tn_int16_liste(r, inner * kolonner) { returner _tn_svar("feil", "right value outside int16 range") }
+    la data = []
+    la backend = "scalar"
+    hvis e["simd"] og _tn_kode != 0 {
+        la inner_p: heiltall = e["inner_p"]
+        la b_len: heiltall = kolonner * inner_p * 4
+        la o_len: heiltall = rader * kolonner * 8
+        la total: heiltall = ((64 + b_len + o_len + 4095) / 4096) * 4096
+        la blokk = _sys_mmap_rw(total)
+        hvis blokk >= 0 {
+            la b_adr: heiltall = blokk + 64
+            la o_adr: heiltall = b_adr + b_len
+            la c: heiltall = 0
+            mens c < kolonner {
+                la k: heiltall = 0
+                mens k < inner {
+                    la lo: heiltall = r[k * kolonner + c]
+                    la hi: heiltall = 0
+                    hvis k + 1 < inner { hi = r[(k + 1) * kolonner + c] }
+                    hvis lo < 0 { lo = lo + 4294967296 }
+                    builtin.raw_store64(b_adr + (c * inner_p + k) * 4, hi * 4294967296 + lo)
+                    k = k + 2
+                }
+                c = c + 1
+            }
+            builtin.raw_store64(blokk, e["adr"])
+            builtin.raw_store64(blokk + 8, b_adr)
+            builtin.raw_store64(blokk + 16, o_adr)
+            builtin.raw_store64(blokk + 24, rader)
+            builtin.raw_store64(blokk + 32, inner_p)
+            builtin.raw_store64(blokk + 40, kolonner)
+            hvis builtin.raw_call(_tn_kode, blokk) == 1 {
+                la ut2: liste_heiltall = []
+                la i: heiltall = 0
+                mens i < rader * kolonner {
+                    legg_til(ut2, builtin.raw_load64(o_adr + i * 8))
+                    i = i + 1
+                }
+                data = ut2
+                backend = _tn_backend()
+            }
+            _sys_munmap(blokk, total)
+        }
+    }
+    hvis lengde(data) == 0 {
+        hvis e["simd"] { returner _tn_svar("feil", "tensor kernel failed") }
+        data = _tn_matmul_skalar(e["l"], r, rader, inner, kolonner)
+    }
+    la ut = _tn_svar("ferdig", "")
+    ut["data"] = data
+    ut["rows"] = rader
+    ut["columns"] = kolonner
+    ut["backend"] = backend
+    returner ut
+}
+
 funksjon tensor_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _tn_svar("feil", "request must be a map") }
     hvis _tn_tekst(req, "abi") != "norscode-tensor-v1" { returner _tn_svar("feil", "invalid ABI") }
@@ -3928,9 +4198,14 @@ funksjon tensor_operation(req) {
         hvis _tn_simd_klar() { lanes = 4 }
         s["vector_lanes"] = lanes
         s["metal_available"] = usann
+        s["persistent_weights"] = sann
+        s["handles"] = _tn_aktive
         returner s
     }
+    hvis op == "last_opp" { returner _tn_last_opp(req) }
+    hvis op == "frigjer" { returner _tn_frigjer(req) }
     hvis op != "matmul_i32" { returner _tn_svar("feil", "unsupported tensor operation") }
+    hvis finnes_nøkkel(req, "left_handle") { returner _tn_matmul_handtak(req) }
     la rader = _tn_heiltal(req, "rows")
     la inner = _tn_heiltal(req, "inner")
     la kolonner = _tn_heiltal(req, "columns")
@@ -4730,11 +5005,51 @@ funksjon _tls_fd_skriv(fd: heiltall, data: liste_heiltall) -> heiltall {
     }
     returner sendt
 }
+// Policyfelt kjem både frå tekst-ABI-et og typa builtin-kall. Ukjende verdiar
+// skal avvisast, ikkje skru av klientautentisering ved eit uhell.
+funksjon _tls_policy_flagg(req: ordbok, felt: tekst) -> heiltall {
+    la verdi = _nw_tekst(req, felt, "")
+    hvis verdi == "" eller verdi == "0" eller verdi == "false" eller verdi == "usann" { returner 0 }
+    hvis verdi == "1" eller verdi == "true" eller verdi == "sann" eller verdi == "sant" { returner 1 }
+    returner -1
+}
 funksjon _tls_connect(req: ordbok) -> ordbok {
     la host = _nw_tekst(req, "host", "")
     la port = _nw_heiltal(req, "port", 0)
     la hostname = _nw_tekst(req, "hostname", host)
     hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
+    hvis hostname == "" { returner _nw_feil("", "TLS hostname required") }
+    hvis _nw_tekst(req, "crl_file", "") != "" { returner _nw_feil("", "TLS client CRL verification unsupported") }
+    la ocsp_policy = _nw_tekst(req, "require_ocsp", "")
+    hvis ocsp_policy != "" og ocsp_policy != "0" og ocsp_policy != "false" og ocsp_policy != "usann" {
+        returner _nw_feil("", "TLS OCSP verification unsupported: signature, CertID and validity checks required")
+    }
+    // Tillit må vere avklart FØR sokkelen blir opna. Denne backend-en har ikkje
+    // eit OS-sertifikatlager: tom/uleseleg/ugyldig CA-fil er ein feil, aldri «hopp
+    // over verifisering». PEM-bundlar og kjeder brukar same kontroll som pg-TLS.
+    la ca_file = _nw_tekst(req, "ca_file", "")
+    hvis ca_file == "" {
+        prøv { ca_file = builtin.miljo_hent("NORSCODE_TLS_CA_FILE") } fang (e) { ca_file = "" }
+    }
+    hvis ca_file == "" { returner _nw_feil("", "TLS CA file required; system trust store unavailable") }
+    la ca_ankere: liste = []
+    prøv { ca_ankere = tls13.les_tillitsanker(builtin.fil_les(ca_file)) }
+    fang (e) { returner _nw_feil("", "TLS CA unavailable or invalid: " + ca_file) }
+    la cc_file = _nw_tekst(req, "client_cert_file", "")
+    la ck_file = _nw_tekst(req, "client_key_file", "")
+    la cc_der: liste_heiltall = []
+    la ck_seed: liste_heiltall = []
+    hvis cc_file != "" eller ck_file != "" {
+        prøv {
+            cc_der = x509.pem_til_der(builtin.fil_les(cc_file))
+            la _ck = x509.ed25519_privat_frå_pem(builtin.fil_les(ck_file))
+            hvis _ck["status"] == "ok" { ck_seed = _ck["seed"] }
+        } fang (e) { returner _nw_feil("", "TLS client certificate or key unavailable") }
+        hvis x509.les_der(cc_der)["status"] != "ok" eller lengde(ck_seed) != 32 { returner _nw_feil("", "TLS client certificate or key invalid") }
+    }
+    la krev_ocsp = _nw_tekst(req, "require_ocsp", "") == "1"
+    // Rå testnøklar blir med vilje ikkje vidaresende frå nettverks-ABI-en.
+    la sess = tls13.ny_klient({"priv": _tls_random32(), "hostname": hostname, "ca_ankere": ca_ankere, "client_cert_der": cc_der, "client_priv_seed": ck_seed, "require_ocsp": krev_ocsp})
     la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
     hvis fd < 0 { returner _nw_feil("", "socket failed") }
     la r = 0
@@ -4742,30 +5057,18 @@ funksjon _tls_connect(req: ordbok) -> ordbok {
     hvis r < 0 { _sys_lukk(fd) returner _nw_feil("", "connect failed") }
     _pg_nonblock(fd)
     la h = _nw_ny_slot(fd, "tls")
-    la ca_file = _nw_tekst(req, "ca_file", "")
-    la ca_der: liste_heiltall = []
-    hvis ca_file != "" { prøv { ca_der = x509.pem_til_der(builtin.fil_les(ca_file)) } fang (e) { ca_der = [] } }
-    la cc_file = _nw_tekst(req, "client_cert_file", "")
-    la ck_file = _nw_tekst(req, "client_key_file", "")
-    la cc_der: liste_heiltall = []
-    la ck_seed: liste_heiltall = []
-    hvis cc_file != "" { prøv { cc_der = x509.pem_til_der(builtin.fil_les(cc_file)) } fang (e) { cc_der = [] } }
-    hvis ck_file != "" { prøv { la _ck = x509.ed25519_privat_frå_pem(builtin.fil_les(ck_file)) hvis _ck["status"] == "ok" { ck_seed = _ck["seed"] } } fang (e) { ck_seed = [] } }
-    la krev_ocsp = _nw_tekst(req, "require_ocsp", "") == "1"
-    la sess = tls13.ny_klient({"priv": _tls_random32(), "hostname": hostname, "ca_der": ca_der, "client_cert_der": cc_der, "client_priv_seed": ck_seed, "require_ocsp": krev_ocsp})
     _tls_sess[h] = {"fd": fd, "sess": sess, "rolle": "klient", "ch_sendt": usann, "etablert": usann, "appbuf": []}
     returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
 }
 funksjon _tls_listen(req: ordbok) -> ordbok {
+    // Ei CRL-signatur åleine validerer ikkje CRL-type, tidsrom eller dekning.
+    // Avvis eksplisitt policy til heile kontrollen finst; aldri svelg ei filfeil.
+    hvis _nw_tekst(req, "client_crl_file", "") != "" { returner _nw_feil("", "TLS server CRL verification unsupported") }
+    la klient_policy = _tls_policy_flagg(req, "require_client_cert")
+    hvis klient_policy < 0 { returner _nw_feil("", "TLS require_client_cert policy invalid") }
+    la krev = klient_policy == 1
     la host = _nw_tekst(req, "host", "127.0.0.1")
     la port = _nw_heiltal(req, "port", 0)
-    la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
-    hvis fd < 0 { returner _nw_feil("", "socket failed") }
-    prøv { hvis socket_bind(fd, host, port) < 0 { _sys_lukk(fd) returner _nw_feil("", "bind failed") } } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
-    la backlog = _nw_heiltal(req, "backlog", 128)
-    hvis builtin.sys6(nsys._nr("listen"), fd, backlog, 0, 0, 0, 0) < 0 { _sys_lukk(fd) returner _nw_feil("", "listen failed") }
-    _pg_nonblock(fd)
-    la h = _nw_ny_slot(fd, "tls-lyttar")
     la id_seed = _nw_hex_dekod(_nw_tekst(req, "tls_id_hex", ""))
     la cert_file = _nw_tekst(req, "cert_file", "")
     la key_file = _nw_tekst(req, "key_file", "")
@@ -4773,22 +5076,30 @@ funksjon _tls_listen(req: ordbok) -> ordbok {
     la priv_seed: liste_heiltall = []
     hvis cert_file != "" { prøv { cert_der = x509.pem_til_der(builtin.fil_les(cert_file)) } fang (e) { cert_der = [] } }
     hvis key_file != "" { prøv { la _pk = x509.ed25519_privat_frå_pem(builtin.fil_les(key_file)) hvis _pk["status"] == "ok" { priv_seed = _pk["seed"] } } fang (e) { priv_seed = [] } }
-    // Fail-closed på manglande/uleselege filer (C-kontrakten, test_tls_http): ein
-    // lyttar utan sertifikatet han vart beden om skal ikkje starte og svare med
-    // ein tilfeldig identitet. Nøkkeltypen blir ikkje sjekka her (RSA-nøklar vert
-    // framleis handterte av handshake-laget).
-    hvis cert_file != "" og lengde(cert_der) == 0 { _sys_lukk(fd) fjern_nokkel(_nw_slots, h) returner _nw_feil("", "TLS certificate unavailable: " + cert_file) }
-    hvis key_file != "" og ikkje builtin.fil_finnes(key_file) { _sys_lukk(fd) fjern_nokkel(_nw_slots, h) returner _nw_feil("", "TLS key unavailable: " + key_file) }
+    // Kontroller identitet og mTLS-policy før bind/listen. Den reine tenar-
+    // backend-en signerer CertificateVerify med Ed25519; eit anna nøkkelformat
+    // eller ei eksisterande, men ugyldig nøkkelfil er ikkje ein fungerande lyttar.
+    hvis x509.les_der(cert_der)["status"] != "ok" { returner _nw_feil("", "TLS certificate unavailable or invalid: " + cert_file) }
+    hvis key_file == "" eller ikkje builtin.fil_finnes(key_file) { returner _nw_feil("", "TLS key unavailable: " + key_file) }
+    la identitet_feil = tls13._identitet_feil(cert_der, priv_seed)
+    hvis identitet_feil != "" { returner _nw_feil("", identitet_feil) }
     la cca_file = _nw_tekst(req, "client_ca_file", "")
     la cca_der: liste_heiltall = []
     hvis cca_file != "" { prøv { cca_der = x509.pem_til_der(builtin.fil_les(cca_file)) } fang (e) { cca_der = [] } }
-    la krev = _nw_tekst(req, "require_client_cert", "") == "1"
+    hvis (krev eller cca_file != "") og ikkje tls13._ankere_gyldige([cca_der]) { returner _nw_feil("", "TLS client CA unavailable or invalid: " + cca_file) }
     la crl_file = _nw_tekst(req, "client_crl_file", "")
     la crl_der: liste_heiltall = []
     hvis crl_file != "" { prøv { crl_der = x509.crl_pem_til_der(builtin.fil_les(crl_file)) } fang (e) { crl_der = [] } }
     la ocsp_file = _nw_tekst(req, "ocsp_response_file", "")
     la ocsp_der: liste_heiltall = []
     hvis ocsp_file != "" { prøv { ocsp_der = builtin.fil_les_binær(ocsp_file) } fang (e) { ocsp_der = [] } }
+    la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
+    hvis fd < 0 { returner _nw_feil("", "socket failed") }
+    prøv { hvis socket_bind(fd, host, port) < 0 { _sys_lukk(fd) returner _nw_feil("", "bind failed") } } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
+    la backlog = _nw_heiltal(req, "backlog", 128)
+    hvis builtin.sys6(nsys._nr("listen"), fd, backlog, 0, 0, 0, 0) < 0 { _sys_lukk(fd) returner _nw_feil("", "listen failed") }
+    _pg_nonblock(fd)
+    la h = _nw_ny_slot(fd, "tls-lyttar")
     _tls_sess[h] = {"fd": fd, "rolle": "lyttar", "id_seed": id_seed, "cert_der": cert_der, "priv_seed": priv_seed, "client_ca_der": cca_der, "krev_klient": krev, "crl_der": crl_der, "ocsp_der": ocsp_der}
     returner _nw_res("listening", h, "", 0, _nw_lokal_port(fd), "")
 }
@@ -4849,6 +5160,7 @@ funksjon _tls_handshake(req: ordbok) -> ordbok {
 }
 funksjon _tls_les(req: ordbok, h: tekst, op: tekst) -> ordbok {
     la st = _tls_sess[h]
+    hvis ikkje finnes_nøkkel(st, "etablert") eller ikkje st["etablert"] { returner _nw_feil(h, "TLS handshake incomplete") }
     la sess = st["sess"]
     la r = _tls_fd_les(st["fd"])
     hvis r["status"] == "feil" { returner _nw_feil(h, "tls read failed") }
@@ -4889,6 +5201,7 @@ funksjon _tls_les(req: ordbok, h: tekst, op: tekst) -> ordbok {
 }
 funksjon _tls_skriv(req: ordbok, h: tekst, op: tekst) -> ordbok {
     la st = _tls_sess[h]
+    hvis ikkje finnes_nøkkel(st, "etablert") eller ikkje st["etablert"] { returner _nw_feil(h, "TLS handshake incomplete") }
     la sess = st["sess"]
     la data: liste_heiltall = []
     hvis op == "write" { data = _nw_tekst_til_liste(_nw_tekst(req, "data", "")) }

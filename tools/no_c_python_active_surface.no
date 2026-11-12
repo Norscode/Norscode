@@ -2,6 +2,7 @@
 
 bruk std.liste som liste
 bruk std.runtime_filesystem som native_fs
+bruk tools.process_runner som prosess
 
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
@@ -1343,9 +1344,70 @@ funksjon c_æra_signatur(type: tekst, innhald: tekst) -> bool {
     returner usann
 }
 
-// sha256 (hex) av fila, eller "" når ho ikkje kan lesast.
+funksjon sha256_fra_barn(resultat: ordbok_tekst) -> tekst {
+    hvis ikkje prosess.ok(resultat) { returner "" }
+    // Nokre eldre prosessvertar escaper linjeskift i stdout. Digestprotokollen
+    // har berre ASCII-hex; normaliseringa kan ikkje endre sjølve digesten.
+    la ut = builtin.replace(tekst(resultat["stdout"]), "\\r\\n", "\n")
+    ut = builtin.replace(ut, "\\n", "\n")
+    la markør = "F0_FILE_SHA256 "
+    la digest = ""
+    for rå i builtin.split(ut, "\n") {
+        la linja = trim_tekst(tekst(rå))
+        hvis builtin.starts_with(linja, markør) {
+            hvis digest != "" { returner "" }
+            la verdi = builtin.slice(linja, lengde(markør), lengde(linja))
+            hvis lengde(verdi) != 64 eller ikkje er_hexsiffer(verdi) { returner "" }
+            digest = builtin.lower(verdi)
+        }
+    }
+    returner digest
+}
+
+// Fullfil-SHA256 utan at inventarløparen eig ein stor, boksa byte-liste.
+// Barnet brukar same runtime og same heapgrense, og slepper alle filbyte når
+// det sluttar. Manglande barn, feil exit eller manglande digest er avvik.
 funksjon fil_sha256(sti: tekst) -> tekst {
-    prøv { returner tekst(builtin.sha256_bytes(builtin.fil_les_binær(sti))) } fang (e) {}
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" {
+        prøv {
+            la info = builtin.system_info()
+            hvis builtin.har_nokkel(info, "executable") { native = tekst(info["executable"]) }
+        } fang (e) {}
+    }
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    la helper = root + "/tools/active_surface_file_sha256.no"
+    la disk = env("NORSCODE_VM_TARGET_DISK_ROOT")
+    hvis disk == "" og env("NORSCODE_VM_REQUESTED_POLICY") == "1" {
+        disk = env("NORSCODE_VM_REQUESTED_DISK_ROOT")
+        hvis disk == "" { disk = "." }
+    }
+    hvis disk == "" { disk = env("NORSCODE_VM_DISK_ROOT") }
+    hvis disk == "" { disk = root + ",." }
+    la caps = "env.read,disk.read"
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_CMD": "run",
+        "NORSCODE_FILE": helper,
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_VM_SOURCE": "0",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_VM_QUIET": "1",
+        "NORSCODE_VM_CAPABILITIES": caps,
+        "NORSCODE_VM_DISK_ROOT": disk,
+        "NORSCODE_VM_TARGET_CAPABILITIES": caps,
+        "NORSCODE_VM_TARGET_DISK_ROOT": disk,
+        "NORSCODE_VM_REQUESTED_POLICY": "1",
+        "NORSCODE_VM_REQUESTED_CAPABILITIES": caps,
+        "NORSCODE_VM_REQUESTED_DISK_ROOT": disk,
+        "NORSCODE_SURFACE_SHA256_FILE": sti
+    }
+    prøv {
+        returner sha256_fra_barn(prosess.køyr(native, ["run", helper], root, miljø, 120000))
+    } fang (e) {}
     returner ""
 }
 
@@ -1586,6 +1648,26 @@ funksjon godkjend_binær_avvik(root: tekst, rel: tekst, allow: ordbok_tekst) -> 
     returner ""
 }
 
+// Berre kompakte klassifiseringsresultat forlèt denne funksjonen. Den heile
+// tekstbufferen maa vere ute av scope før godkjend_binær_avvik les bytebufferen
+// for SHA-256; to samtidige store bufferar sprengjer den committa seed-heapen.
+// PE-signaturar og hex-kjelde blir framleis leita gjennom heile innhaldet.
+funksjon f0_filinnhald(sti: tekst, rel: tekst) {
+    la info = {"lest": usann, "shebang": "", "binær": "", "c_æra": usann, "hex": []}
+    la data = ""
+    prøv { data = builtin.fil_les(sti) } fang (e) { returner info }
+    info["lest"] = sann
+    la start = builtin.slice(data, 0, 1024)
+    hvis builtin.starts_with(start, "#!") og shebang_framand(start) {
+        info["shebang"] = shebang_tolk(start)
+    }
+    la bt = binær_type(builtin.slice(data, 0, 4096))
+    info["binær"] = bt
+    hvis bt != "" { info["c_æra"] = c_æra_signatur(bt, data) }
+    hvis hex_flate(rel) { info["hex"] = hex_treff_i_kjelde(rel, data) }
+    returner info
+}
+
 // Alle F0.1-treff for flata under root som "kategori<TAB>nøkkel<TAB>merknad".
 funksjon f0_treff(root: tekst, flate: liste_tekst, allow: ordbok_tekst) -> liste_tekst {
     la ut: liste_tekst = []
@@ -1605,18 +1687,12 @@ funksjon f0_treff(root: tekst, flate: liste_tekst, allow: ordbok_tekst) -> liste
         } ellers hvis kind == "f" {
             hvis framandspråk_namn(rel) { legg_til(ut, "framandspråk\t" + rel + "\t") }
             hvis json_namn(rel) { legg_til(ut, "json\t" + rel + "\t") }
-            la data = ""
-            la lest = usann
-            prøv {
-                data = builtin.fil_les(root + "/" + rel)
-                lest = sann
-            } fang (e) { lest = usann }
-            hvis lest {
-                la start = builtin.slice(data, 0, 1024)
-                hvis builtin.starts_with(start, "#!") og shebang_framand(start) {
-                    legg_til(ut, "shebang\t" + rel + "\t#!" + shebang_tolk(start))
+            la info = f0_filinnhald(root + "/" + rel, rel)
+            hvis info["lest"] {
+                hvis info["shebang"] != "" {
+                    legg_til(ut, "shebang\t" + rel + "\t#!" + tekst(info["shebang"]))
                 }
-                la bt = binær_type(builtin.slice(data, 0, 4096))
+                la bt = tekst(info["binær"])
                 hvis bt != "" {
                     hvis allow_har(allow, "godkjend\tbinær\t" + rel) {
                         la avvik = godkjend_binær_avvik(root, rel, allow)
@@ -1624,10 +1700,10 @@ funksjon f0_treff(root: tekst, flate: liste_tekst, allow: ordbok_tekst) -> liste
                     } ellers {
                         legg_til(ut, "binær\t" + rel + "\t" + bt)
                     }
-                    hvis c_æra_signatur(bt, data) { legg_til(ut, "c_æra\t" + rel + "\t" + bt) }
+                    hvis info["c_æra"] { legg_til(ut, "c_æra\t" + rel + "\t" + bt) }
                 }
                 hvis hex_flate(rel) {
-                    la hx = hex_treff_i_kjelde(rel, data)
+                    la hx = info["hex"]
                     la h = 0
                     mens h < lengde(hx) {
                         legg_til(ut, "hex\t" + hx[h] + "\t")

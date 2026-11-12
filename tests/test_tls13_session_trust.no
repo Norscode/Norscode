@@ -1,0 +1,133 @@
+// Regresjon for den faktiske inkrementelle TLS-klienten, utan nettverk.
+bruk std.tls13_session som tls
+bruk std.tls13_handshake som hs
+bruk std.x509 som x509
+bruk std.tls13_klient som klient
+
+funksjon der_saman(a: liste, b: liste) -> liste {
+    la ut: liste = []
+    for v i a { legg_til(ut, v) }
+    for v i b { legg_til(ut, v) }
+    returner ut
+}
+funksjon der_tlv(tag: heiltall, body: liste) -> liste {
+    assert(lengde(body) < 128)
+    returner der_saman([tag, lengde(body)], body)
+}
+funksjon der_rdn(oid: liste, verdi: tekst) -> liste {
+    la raw: liste = []
+    la i = 0
+    mens i < lengde(verdi) { legg_til(raw, builtin.char_code(builtin.slice(verdi, i, i + 1))) i = i + 1 }
+    returner der_tlv(49, der_tlv(48, der_saman(der_tlv(6, oid), der_tlv(12, raw))))
+}
+funksjon vertsnamn_injeksjon() {
+    // Ekte DER: O-verdien inneheld tekst som ser ut som ein ekstra CN etter
+    // rendering. Han må aldri bli ein identitet i nokon av TLS-klientane.
+    la der = der_tlv(48, der_saman(der_rdn([85, 4, 3], "attacker.example"),
+                                  der_rdn([85, 4, 10], "company,CN=victim.example")))
+    la subject = x509._name(der, x509._tlv(der, 0, lengde(der)))
+    assert_eq(subject, "CN=attacker.example,O=company,CN=victim.example")
+    la info = {"status": "ok", "sans": [], "subject": subject}
+    assert(ikkje tls._verifiser_vertsnamn(info, "victim.example"))
+    assert(ikkje klient.vert_matchar(info, "victim.example"))
+    assert(ikkje klient.vert_matchar(info, "attacker.example")) // SAN er påkravd
+    info["sans"] = ["DNS:attacker.example"]
+    assert(tls._verifiser_vertsnamn(info, "attacker.example"))
+    assert(klient.vert_matchar(info, "attacker.example"))
+    assert(ikkje tls._verifiser_vertsnamn(info, "victim.example"))
+}
+
+funksjon sesjon(ankere: liste, no_iso: tekst, hostname: tekst) -> ordbok {
+    returner {"ankere": ankere, "no_iso": no_iso, "hostname": hostname,
+        "test_raw_peer_key": [], "peer_verified": usann, "cert_checked": usann,
+        "hs_buf": [], "transcript": [], "ocsp_der": []}
+}
+
+funksjon sertifikat(s: ordbok, der: liste_heiltall) -> ordbok {
+    s["hs_buf"] = hs.build_certificate(der)
+    returner tls._klient_prosesser_hs(s)
+}
+
+funksjon start() -> heiltall {
+    vertsnamn_injeksjon()
+    la der = x509.pem_til_der(builtin.fil_les("tests/fixtures/tls/localhost-ed25519.crt"))
+    la info = x509.les_der(der)
+    assert_eq(info["status"], "ok")
+    la nokkel = x509.ed25519_privat_frå_pem(builtin.fil_les("tests/fixtures/tls/localhost-ed25519.key"))
+    assert_eq(nokkel["status"], "ok")
+    assert_eq(tls._identitet_feil(der, nokkel["seed"]), "")
+    assert(builtin.contains(tls._identitet_feil(der, []), "TLS key invalid or unsupported"))
+    la annan_nokkel = x509.ed25519_privat_frå_pem(builtin.fil_les("tests/fixtures/tls/revoked-client-ed25519.key"))
+    assert_eq(annan_nokkel["status"], "ok")
+    assert(builtin.contains(tls._identitet_feil(der, annan_nokkel["seed"]), "TLS certificate and key mismatch"))
+    la no_iso = info["not_before"]
+    assert(ikkje tls._verifiser_tillit(info, der, []))
+    assert(ikkje tls._verifiser_tillit({"status": "feil"}, [1, 2, 3], der))
+    assert(ikkje tls._verifiser_vertsnamn({"status": "feil"}, "localhost"))
+    assert(ikkje tls._verifiser_vertsnamn(info, ""))
+    assert(ikkje tls._verifiser_vertsnamn(info, "wrong.example"))
+    assert(tls._verifiser_vertsnamn(info, "localhost"))
+
+    // Certificate-meldinga må faktisk avvise desse tilfella før CertificateVerify.
+    for tidspunkt i ["1900-01-01T00:00:00Z", "9999-01-01T00:00:00Z"] {
+        la s = sesjon([der], tidspunkt, "localhost")
+        assert_eq(sertifikat(s, der)["status"], "feil")
+        assert(ikkje s["peer_verified"])
+    }
+    la utan_ca = sesjon([], no_iso, "localhost")
+    assert_eq(sertifikat(utan_ca, der)["status"], "feil")
+    assert(ikkje utan_ca["peer_verified"])
+    la bad_host = sesjon([der], no_iso, "wrong.example")
+    assert_eq(sertifikat(bad_host, der)["status"], "feil")
+    la bad_der = sesjon([der], no_iso, "localhost")
+    assert_eq(sertifikat(bad_der, [1, 2, 3])["status"], "feil")
+    la pinna = sesjon([der], no_iso, "localhost")
+    assert_eq(sertifikat(pinna, der)["status"], "ventande")
+    assert(pinna["cert_checked"])
+    assert(ikkje pinna["peer_verified"]) // eigarskap til nøkkelen er ikkje bevist enno
+    pinna["hs_buf"] = hs.build_finished([])
+    assert_eq(tls._klient_prosesser_hs(pinna)["status"], "feil")
+    assert(ikkje pinna["peer_verified"])
+
+    // Ei mislykka sesjon kan ikkje halde fram med eit gammalt verified-flagg.
+    la stoppa = {"rolle": "klient", "fase": "vent_sh", "inbuf": [], "peer_verified": sann}
+    assert_eq(tls.motta(stoppa, [0, 3, 3, 0, 0])["status"], "feil")
+    assert_eq(stoppa["fase"], "feil")
+    assert(ikkje stoppa["peer_verified"])
+    assert_eq(tls.motta(stoppa, [])["status"], "feil")
+    for fase i ["vent_cfin", "feil"] {
+        la tidleg = {"rolle": "tenar", "fase": fase, "sk_ap": {"key": [], "iv": []},
+            "ck_ap": {"key": [], "iv": []}, "seq_w": 0, "seq_r": 0}
+        la feil = 0
+        prøv { tls.krypter_app(tidleg, [1]) } fang (e) { hvis builtin.contains(tekst(e), "completed handshake") { feil = feil + 1 } }
+        prøv { tls.dekrypter_app(tidleg, [1]) } fang (e) { hvis builtin.contains(tekst(e), "completed handshake") { feil = feil + 1 } }
+        assert_eq(feil, 2)
+    }
+
+    // Manglande/ugyldig CA blir avvist i konstruktøren, før ECDHE eller sokkel.
+    la avvist = 0
+    prøv { tls.ny_klient({"priv": [], "hostname": "localhost"}) } fang (e) { avvist = avvist + 1 }
+    prøv { tls.ny_klient({"priv": [], "hostname": "localhost", "ca_der": [1, 2, 3]}) } fang (e) { avvist = avvist + 1 }
+    prøv { tls.les_tillitsanker("ikkje eit sertifikat") } fang (e) { avvist = avvist + 1 }
+    prøv { tls.ny_klient({"require_ocsp": sann}) } fang (e) { hvis builtin.contains(tekst(e), "OCSP verification unsupported") { avvist = avvist + 1 } }
+    prøv { tls.ny_tenar({"crl_der": [1, 2, 3]}) } fang (e) { hvis builtin.contains(tekst(e), "CRL verification unsupported") { avvist = avvist + 1 } }
+    assert_eq(avvist, 5)
+
+    // Rå testnøkkel: aldri ein generell «insecure»-brytar. Eksakt pin + loopback.
+    la raw: liste_heiltall = []
+    mens lengde(raw) < 32 { legg_til(raw, 7) }
+    la vanleg = sesjon([der], no_iso, "localhost")
+    assert_eq(sertifikat(vanleg, raw)["status"], "feil")
+    la probe = sesjon([], no_iso, "localhost")
+    probe["test_raw_peer_key"] = raw
+    assert_eq(sertifikat(probe, raw)["status"], "ventande")
+    probe["hostname"] = "example.com"
+    assert_eq(sertifikat(probe, raw)["status"], "feil")
+    probe["hostname"] = "localhost"
+    la annan: liste_heiltall = []
+    mens lengde(annan) < 32 { legg_til(annan, 8) }
+    assert_eq(sertifikat(probe, annan)["status"], "feil")
+    assert(ikkje probe["peer_verified"])
+    skriv("test_tls13_session_trust OK\n")
+    returner 0
+}

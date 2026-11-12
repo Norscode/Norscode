@@ -1,0 +1,281 @@
+// Rebuild native codegens on their ACTUAL host, without Python/C or a stale-hash
+// override. Gen0 is the existing allowlist-pinned binary; it may predate the
+// current source. Bundle current source once, then Gen0 -> Gen1 -> Gen2 -> Gen3.
+// Require zero unresolved builtins at every step and byte-equal Gen2/Gen3 before
+// writing the host binary, source hashes or pin. Rebuild existing cross-codegens
+// with tools/build_cross_codegen.no so .vertcg records the real host compiler.
+//
+// Run from a disposable checkout on Linux x86-64 or macOS ARM64:
+//   ./bin/nc run tools/refresh_native_codegen.no
+// NORSCODE_ROOT and NORSCODE_NATIVE_BIN can select the checkout/runtime.
+// Reports and complete child logs: build/codegen-refresh/report.json, *.log.
+// This tool updates codegen artifacts and their pins, never stage0 or dist.
+
+bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon hash_gyldig(h: tekst) -> boolsk {
+    hvis lengde(h) != 64 { returner usann }
+    la i: heiltall = 0
+    mens i < 64 {
+        hvis builtin.index_of("0123456789abcdef", builtin.slice(h, i, i + 1)) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Exact, unique full-line pin. Never replace another host's matching digest.
+funksjon pin_pos(inn: tekst, rel: tekst) -> heiltall {
+    la t: tekst = "\n" + inn
+    la merke: tekst = "\ngodkjend binær " + rel + " sha256="
+    la p: heiltall = builtin.index_of(t, merke)
+    hvis p < 0 { kast "refresh: manglar binærpin for " + rel }
+    la start: heiltall = p + lengde(merke)
+    la rest: tekst = builtin.slice(t, start, lengde(t))
+    hvis builtin.index_of(rest, merke) >= 0 { kast "refresh: fleire binærpinnar for " + rel }
+    hvis lengde(rest) < 64 eller ikkje hash_gyldig(builtin.slice(rest, 0, 64)) {
+        kast "refresh: ugyldig binærpin for " + rel
+    }
+    hvis lengde(rest) > 64 {
+        la neste = builtin.slice(rest, 64, 65)
+        hvis neste != "\n" og neste != "\r" { kast "refresh: ugyldig pin-linje for " + rel }
+    }
+    returner start - 1
+}
+
+funksjon pin_les(inn: tekst, rel: tekst) -> tekst {
+    la p = pin_pos(inn, rel)
+    returner builtin.slice(inn, p, p + 64)
+}
+
+funksjon pin_sett(inn: tekst, rel: tekst, sha: tekst) -> tekst {
+    hvis ikkje hash_gyldig(sha) { kast "refresh: ugyldig ny sha256 for " + rel }
+    la p = pin_pos(inn, rel)
+    returner builtin.slice(inn, 0, p) + sha + builtin.slice(inn, p + 64, lengde(inn))
+}
+
+funksjon rapport_tal(t: tekst, felt: tekst) -> heiltall {
+    la delar = builtin.split(t, felt + "=")
+    hvis lengde(delar) != 2 { kast "refresh: manglar/ein fleirtydig " + felt + " i builtin-rapport" }
+    la rest: tekst = tekst(delar[1])
+    la i: heiltall = 0
+    mens i < lengde(rest) og builtin.index_of("0123456789", builtin.slice(rest, i, i + 1)) >= 0 {
+        i = i + 1
+    }
+    hvis i == 0 { kast "refresh: ugyldig " + felt + " i builtin-rapport" }
+    hvis i < lengde(rest) {
+        la c = builtin.slice(rest, i, i + 1)
+        hvis c != " " og c != "\n" og c != "\r" og c != builtin.chr(92) {
+            kast "refresh: ugyldig " + felt + " i builtin-rapport"
+        }
+    }
+    returner heltall_fra_tekst(builtin.slice(rest, 0, i))
+}
+
+// Check the report itself as well as the process status. No missing report or
+// nonzero gap may become green because a seed swallowed an entry return value.
+funksjon krev_nullrapportar(ut: tekst, venta: heiltall) -> heiltall {
+    la delar = builtin.split(ut, "BUILTIN-RAPPORT ")
+    hvis lengde(delar) != venta + 1 { kast "refresh: venta " + tekst(venta) + " builtin-rapport(ar)" }
+    la i: heiltall = 1
+    mens i < lengde(delar) {
+        la del: tekst = tekst(delar[i])
+        hvis rapport_tal(del, "uløyste") != 0 { kast "refresh: uløyste builtins; sjå byggjeloggen" }
+        hvis builtin.contains(del, "uventa=") og rapport_tal(del, "uventa") != 0 {
+            kast "refresh: uventa builtins; sjå byggjeloggen"
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon grunnmiljø(root: tekst) -> ordbok_tekst {
+    returner {"NORSCODE_ROOT": root, "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1", "NORSCODE_GC_ALLOC": "",
+        "NC_INPUT": "", "NC_OUTPUT": "", "NC_TARGET": "", "NC_NATIVE_SYMBOL_MAP": "",
+        "NC_BUILTIN_REPORT": "1", "NC_BUILTIN_KVITLISTE": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"}
+}
+
+funksjon lagre_rapport(ut: tekst, rapport: ordbok) {
+    fil_skriv(ut + "/report.json", json_stringify(rapport) + "\n")
+}
+
+funksjon køyr(root: tekst, ut: tekst, merke: tekst, exe: tekst, argv: liste_tekst,
+               miljø: ordbok_tekst, rapport: ordbok) -> ordbok_tekst {
+    skriv("[codegen-refresh] " + merke + "\n")
+    rapport["step"] = merke
+    lagre_rapport(ut, rapport)
+    // Match the existing cross-codegen builder: native heaps reserve large lazy
+    // VA ranges. The OS owns RSS; each child has a 30-minute and 64-process bound.
+    la r = prosess.køyr_med_grenser(exe, argv, root, miljø, 1800000, 0, 64)
+    la logg: tekst = "status=" + tekst(r["status"]) + " exit=" + tekst(r["exit_code"]) +
+        " error=" + tekst(r["error"]) + "\n" + tekst(r["stdout"]) + tekst(r["stderr"])
+    fil_skriv(ut + "/" + merke + ".log", logg)
+    prosess.skriv_resultat(r)
+    hvis ikkje prosess.ok(r) { kast "refresh: " + merke + " feila; sjå " + ut + "/" + merke + ".log" }
+    returner r
+}
+
+funksjon hash_fil(sti: tekst) -> tekst {
+    la h: tekst = cgp.sha256_fil(sti)
+    hvis ikkje hash_gyldig(h) { kast "refresh: kunne ikkje hashe " + sti }
+    returner h
+}
+
+funksjon krev_kjelder(root: tekst, mål: tekst, src: tekst, deps: tekst) {
+    hvis cgp.srchash(root, mål) != src eller cgp.depshash(root, mål) != deps {
+        kast "refresh: kjeldene for " + mål + " endra seg under bygget"
+    }
+}
+
+funksjon køyr_refresh(root: tekst, ut: tekst, rapport: ordbok) {
+    la vert: tekst = cgp.vert_plattform()
+    rapport["host"] = vert
+    hvis vert != "linux-x86_64" og vert != "macos-arm64" { kast "refresh: krev faktisk Linux x86-64 eller macOS ARM64-vert" }
+    la runtime: tekst = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis runtime == "" { runtime = root + "/dist/norscode_native" }
+    hvis ikkje builtin.fil_finnes(runtime) { kast "refresh: manglar runtime " + runtime }
+    rapport["bundle_runtime"] = {"path": runtime, "sha256": hash_fil(runtime)}
+    la rel: tekst = cgp.vert_codegen_rel(root, vert)
+    hvis rel == "" { kast "refresh: manglar Gen0-codegen for " + vert }
+    la allow_sti: tekst = root + "/tools/active_surface_allowlist.txt"
+    la allow: tekst = builtin.fil_les(allow_sti)
+    la pin: tekst = pin_les(allow, rel)
+    la gen0_sha: tekst = hash_fil(root + "/" + rel)
+    hvis gen0_sha != pin { kast "refresh: Gen0 samsvarar ikkje med den godkjende binærpinnen" }
+    rapport["gen0"] = {"path": rel, "sha256": gen0_sha}
+
+    // Discover only the existing distinct cross binaries for this actual host.
+    // The norscodeos-x86_64 alias on Linux uses the host codegen, not a new file.
+    la kryss: liste_tekst = []
+    la kryss_src: ordbok_tekst = {}
+    la kryss_deps: ordbok_tekst = {}
+    for mål i cgp.mål_liste() {
+        hvis mål != vert og ikkje cgp.er_vert_codegen(mål, vert) {
+            la stiar = cgp.binær_stiar(mål, vert)
+            hvis lengde(stiar) > 0 og builtin.fil_finnes(root + "/" + tekst(stiar[0])) {
+                pin_les(allow, tekst(stiar[0])) // fail before any writes if a pin is missing
+                legg_til(kryss, mål)
+                kryss_src[mål] = cgp.srchash(root, mål)
+                kryss_deps[mål] = cgp.depshash(root, mål)
+            }
+        }
+    }
+    hvis lengde(kryss) == 0 { kast "refresh: fann ingen eksisterande kryss-codegens for " + vert }
+    rapport["cross_targets"] = kryss
+    la src: tekst = cgp.srchash(root, vert)
+    la deps: tekst = cgp.depshash(root, vert)
+    hvis ikkje hash_gyldig(src) eller ikkje hash_gyldig(deps) { kast "refresh: kunne ikkje hashe vertskjeldene" }
+    rapport["source_sha256"] = src
+    rapport["dependencies_sha256"] = deps
+
+    la ending: tekst = cgp.vert_ending(vert)
+    la gen0: tekst = ut + "/gen0" + ending
+    hvis ikkje filops.kopier2(root + "/" + rel, gen0) eller hash_fil(gen0) != pin {
+        kast "refresh: kunne ikkje ta ein byte-eksakt Gen0-kopi"
+    }
+    hvis ikkje builtin.fil_sett_kjorbar(gen0) { kast "refresh: Gen0 er ikkje køyrbar" }
+    la ncb: tekst = ut + "/codegen.ncb.json"
+    la bund_env = grunnmiljø(root)
+    bund_env["NORSCODE_GC_ALLOC"] = "1"
+    køyr(root, ut, "bundle-host", runtime, ["bundle", "--output", ncb, root + "/" + cgp.codegen_kjelde(vert)], bund_env, rapport)
+    hvis ikkje builtin.fil_finnes(ncb) { kast "refresh: bundle skreiv ingen NCB" }
+    rapport["ncb_sha256"] = hash_fil(ncb)
+    la generasjonar: liste = []
+    rapport["generations"] = generasjonar
+    la førre: tekst = gen0
+    la g: heiltall = 1
+    mens g <= 3 {
+        la navn: tekst = "gen" + tekst(g)
+        la kandidat: tekst = ut + "/" + navn + ending
+        la miljø = grunnmiljø(root)
+        miljø["NC_INPUT"] = ncb
+        miljø["NC_OUTPUT"] = kandidat
+        miljø["NC_TARGET"] = vert
+        la r = køyr(root, ut, navn, førre, [], miljø, rapport)
+        krev_nullrapportar(tekst(r["stdout"]) + tekst(r["stderr"]), 1)
+        hvis ikkje builtin.fil_finnes(kandidat) { kast "refresh: " + navn + " skreiv ingen binær" }
+        hvis ikkje builtin.fil_sett_kjorbar(kandidat) { kast "refresh: " + navn + " er ikkje køyrbar" }
+        legg_til(generasjonar, {"generation": g, "path": kandidat,
+            "sha256": hash_fil(kandidat), "bytes": filops.fil_storleik(kandidat), "unresolved": 0,
+            "wall_ms": prosess.veggtid_ms(r), "peak_rss_bytes": prosess.minnetopp_bytes(r)})
+        førre = kandidat
+        g = g + 1
+    }
+    la gen2: tekst = ut + "/gen2" + ending
+    la gen3: tekst = ut + "/gen3" + ending
+    hvis hash_fil(gen2) != hash_fil(gen3) eller builtin.fil_les(gen2) != builtin.fil_les(gen3) {
+        kast "refresh: Gen2 og Gen3 er ikkje byte-identiske"
+    }
+    krev_kjelder(root, vert, src, deps)
+    rapport["fixed_point"] = sann
+    rapport["status"] = "fixed_point_verified"
+    lagre_rapport(ut, rapport)
+
+    // This is the first modification of any tracked codegen/hash/pin artifact.
+    hvis builtin.fil_les(allow_sti) != allow { kast "refresh: allowlist endra seg under bygget" }
+    hvis ikkje filops.kopier2(gen2, root + "/" + rel) eller hash_fil(root + "/" + rel) != hash_fil(gen2) {
+        kast "refresh: kunne ikkje installere verifisert Gen2"
+    }
+    hvis ikkje builtin.fil_sett_kjorbar(root + "/" + rel) { kast "refresh: installert vert-codegen er ikkje køyrbar" }
+    fil_skriv(root + "/" + rel + ".srchash", src + "\n")
+    fil_skriv(root + "/" + rel + ".depshash", deps + "\n")
+    allow = pin_sett(allow, rel, hash_fil(gen2))
+    fil_skriv(allow_sti, allow)
+    la host_val = cgp.vel(root, vert, vert)
+    hvis tekst(host_val["status"]) != "ok" { kast "refresh: host-ferskheitsport: " + tekst(host_val["melding"]) }
+    rapport["host_installed"] = sann
+
+    la cross_env = grunnmiljø(root)
+    cross_env["NORSCODE_CMD"] = "run"
+    cross_env["NORSCODE_FILE"] = root + "/tools/build_cross_codegen.no"
+    cross_env["NORSCODE_NATIVE_BIN"] = runtime
+    cross_env["NC_CROSS_TARGETS"] = builtin.join(kryss, ",")
+    la cross_res = køyr(root, ut, "cross-codegens", runtime,
+        ["run", root + "/tools/build_cross_codegen.no"], cross_env, rapport)
+    krev_nullrapportar(tekst(cross_res["stdout"]) + tekst(cross_res["stderr"]), lengde(kryss))
+    la host_allow: tekst = allow
+    la artifacts: liste = [{"target": vert, "path": rel, "sha256": hash_fil(root + "/" + rel)}]
+    for mål i kryss {
+        krev_kjelder(root, mål, kryss_src[mål], kryss_deps[mål])
+        la val = cgp.vel(root, mål, vert)
+        hvis tekst(val["status"]) != "ok" { kast "refresh: kryss-ferskheitsport: " + tekst(val["melding"]) }
+        la cross_rel: tekst = tekst(val["rel"])
+        la sha: tekst = hash_fil(root + "/" + cross_rel)
+        allow = pin_sett(allow, cross_rel, sha)
+        legg_til(artifacts, {"target": mål, "path": cross_rel, "sha256": sha,
+            "source_sha256": kryss_src[mål], "dependencies_sha256": kryss_deps[mål],
+            "provenance": builtin.fil_les(root + "/" + cross_rel + ".vertcg")})
+    }
+    krev_kjelder(root, vert, src, deps)
+    hvis builtin.fil_les(allow_sti) != host_allow { kast "refresh: allowlist endra seg under kryssbygget" }
+    fil_skriv(allow_sti, allow)
+    rapport["artifacts"] = artifacts
+    rapport["status"] = "ok"
+    rapport["step"] = "complete"
+    lagre_rapport(ut, rapport)
+    skriv("[codegen-refresh] OK: " + vert + ", Gen2 == Gen3, null uløyste builtins, " +
+        tekst(lengde(kryss)) + " ferske kryss-codegens\n")
+}
+
+funksjon start() -> heiltall {
+    la root: tekst = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la ut: tekst = root + "/build/codegen-refresh"
+    la rapport: ordbok = {"schema": "norscode-codegen-refresh-v1", "status": "running", "fixed_point": usann}
+    prøv {
+        hvis ikkje filops.lag_katalogar(ut) { kast "refresh: kunne ikkje opprette " + ut }
+        køyr_refresh(root, ut, rapport)
+    } fang (e) {
+        rapport["status"] = "failed"
+        rapport["error"] = tekst(e)
+        prøv { lagre_rapport(ut, rapport) fil_skriv(ut + "/failure.log", tekst(e) + "\n") } fang (e2) {}
+        skriv("[codegen-refresh] FEIL: " + tekst(e) + "\n")
+        builtin.exit(1)
+        returner 1
+    }
+    returner 0
+}

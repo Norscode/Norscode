@@ -1,0 +1,241 @@
+// Exercise the real x86 emitter above its original 3 MiB text window. The
+// generated program calls functions at both ends and must return 20 + 22.
+bruk tools.process_runner som prosess
+bruk std.filops som filops
+bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk selfhost.native_execution.pe_emitter som pe
+bruk tests.helpers.pe_relocation_elf som rebase
+
+funksjon krev_ok(r: ordbok, fase: tekst) {
+    hvis ikkje prosess.ok(r) {
+        prosess.skriv_resultat(r)
+        kast "large-image " + fase + ": " + tekst(r["status"]) + "/" + tekst(r["exit_code"])
+    }
+}
+
+funksjon ncb(sti: tekst, stor: boolsk) {
+    la tal: heiltall = 2
+    la repetisjonar: heiltall = 1
+    hvis stor { tal = 256 repetisjonar = 768 }
+    la kode: tekst = ""
+    la i: heiltall = 0
+    mens i < repetisjonar {
+        kode = kode + "[\"PUSH_CONST\",0],[\"POP\"],"
+        i = i + 1
+    }
+    fil_skriv(sti, "{\"format\":\"norscode-bytecode-v1\",\"entry\":\"__main__.start\",\"module_initializers\":[],\"global_names\":{},\"functions\":{")
+    i = 0
+    mens i < tal {
+        hvis i > 0 { builtin.fil_append(sti, ",") }
+        la namn = "f" + tekst(i)
+        la verdi: heiltall = 20
+        hvis i == tal - 1 { verdi = 22 }
+        builtin.fil_append(sti, "\"__main__." + namn + "\":{\"name\":\"" + namn +
+            "\",\"module\":\"__main__\",\"params\":[],\"code\":[" + kode +
+            "[\"PUSH_CONST\"," + tekst(verdi) + "],[\"RETURN\"]]}")
+        i = i + 1
+    }
+    // Include the optional green-thread runtime so cached batches must restore
+    // its selection before rebuilding runtime code at the lower image base.
+    builtin.fil_append(sti, ",\"std.native_gap._gr_inngang\":{\"name\":\"_gr_inngang\",\"module\":\"std.native_gap\",\"params\":[],\"code\":[[\"PUSH_CONST\",0],[\"RETURN\"]]}")
+    builtin.fil_append(sti, ",\"__main__.start\":{\"name\":\"start\",\"module\":\"__main__\",\"params\":[],\"code\":[" +
+        "[\"PUSH_CONST\",\"__main__.start\"],[\"CALL\",\"builtin.host_finst\",1],[\"POP\"]," +
+        "[\"CALL\",\"__main__.f0\",0],[\"CALL\",\"__main__.f" + tekst(tal - 1) +
+        "\",0],[\"BINARY_ADD\"],[\"RETURN\"]]}}}")
+}
+
+funksjon miljø(root: tekst) -> ordbok {
+    returner {"NORSCODE_ROOT": root, "NORSCODE_CMD": "", "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "", "NORSCODE_GC_ALLOC": "1", "NC_BUILTIN_REPORT": "1",
+        "NC_BUILTIN_KVITLISTE": "", "NC_NATIVE_EXTERNAL_EMBED_NCB": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"}
+}
+
+funksjon bygg(cg: tekst, root: tekst, inn: tekst, ut: tekst, target: tekst) {
+    la env = miljø(root)
+    env["NC_INPUT"] = inn
+    env["NC_OUTPUT"] = ut
+    env["NC_TARGET"] = target
+    la r = prosess.køyr(cg, [], root, env, 180000)
+    krev_ok(r, "bygg " + target)
+    assert(builtin.contains(tekst(r["stdout"]), "BUILTIN-RAPPORT uløyste=0 uventa=0"))
+    assert(builtin.fil_sett_kjorbar(ut))
+}
+
+funksjon batchfase(driver: tekst, root: tekst, env: ordbok, fase: tekst) {
+    env["NC_X86_MODE"] = fase
+    la r = prosess.køyr(driver, [], root, env, 180000)
+    krev_ok(r, "batch " + fase)
+    assert(builtin.contains(tekst(r["stdout"]), "[" + fase))
+}
+
+// Use the production cache/phase driver, with a new process for every phase.
+// Keeping setup alive in one process would hide missing serialized state.
+funksjon batchbygg(driver: tekst, root: tekst, inn: tekst, ut: tekst, prefix: tekst) {
+    la env = miljø(root)
+    env["NC_TARGET"] = "linux-x86_64"
+    env["NC_X86_NCB"] = inn
+    env["NC_X86_CACHE"] = prefix + "-cache.json"
+    env["NC_X86_RT"] = prefix + "-rt.bin"
+    env["NC_X86_DATA"] = prefix + "-data.bin"
+    env["NC_X86_OUT"] = prefix + "-total.txt"
+    batchfase(driver, root, env, "prep")
+    la total = heltall_fra_tekst(fil_les(env["NC_X86_OUT"]))
+    assert(total > 0)
+    la sizes: ordbok = {}
+    la i: heiltall = 0
+    mens i < total {
+        env["NC_X86_START"] = tekst(i)
+        env["NC_X86_COUNT"] = "128"
+        env["NC_X86_OUT"] = prefix + "-measure-" + tekst(i) + ".json"
+        batchfase(driver, root, env, "measure")
+        la part = builtin.json_parse_raw(fil_les(env["NC_X86_OUT"]))
+        for namn i nøkler(part) { sizes[namn] = part[namn] }
+        i = i + 128
+    }
+    assert_eq(lengde(nøkler(sizes)), total)
+    env["NC_X86_SIZES"] = prefix + "-sizes.json"
+    fil_skriv(env["NC_X86_SIZES"], builtin.json_skriv(sizes))
+    la fragment: liste = []
+    i = 0
+    mens i < total {
+        env["NC_X86_START"] = tekst(i)
+        env["NC_X86_COUNT"] = "128"
+        env["NC_X86_OUT"] = prefix + "-fragment-" + tekst(i) + ".bin"
+        batchfase(driver, root, env, "emit")
+        legg_til(fragment, env["NC_X86_OUT"])
+        i = i + 128
+    }
+    env["NC_X86_FRAGS"] = builtin.join(fragment, ",")
+    env["NC_X86_BIN"] = ut
+    batchfase(driver, root, env, "link")
+}
+
+funksjon elf_layout(sti: tekst, base: heiltall) {
+    la b = builtin.fil_les_binær(sti)
+    assert_eq(b[0], 127)
+    assert_eq(pe.les_u16_le(b, 18), 62)
+    assert_eq(pe.les_u16_le(b, 56), 4)
+    la ph = pe.les_u64_le(b, 32)
+    la siste: heiltall = 0
+    la adresser = [base, 7340032, 7798784, 7864320]
+    la flagg = [5, 4, 6, 6]
+    la i: heiltall = 0
+    mens i < 4 {
+        la h = ph + i * 56
+        assert_eq(pe.les_u32_le(b, h), 1)
+        assert_eq(pe.les_u32_le(b, h + 4), flagg[i])
+        la va = pe.les_u64_le(b, h + 16)
+        la storleik = pe.les_u64_le(b, h + 40)
+        assert_eq(va, adresser[i])
+        assert(va >= siste)
+        assert(pe.les_u64_le(b, h + 32) <= storleik)
+        assert_eq(pe.les_u64_le(b, h + 48), 4096)
+        siste = va + storleik
+        i = i + 1
+    }
+    la entry = pe.les_u64_le(b, 24)
+    assert(entry >= base + 4096)
+    assert(entry < base + pe.les_u64_le(b, ph + 40))
+}
+
+funksjon pe_layout(sti: tekst, base: heiltall) {
+    la info = pe.beskriv_pe(builtin.fil_les_binær(sti))
+    assert_eq(info["image_base"], base)
+    assert_eq(info["maskin"], 34404)
+    la seksjonar = info["seksjonar"]
+    assert_eq(lengde(seksjonar), 6)
+    assert_eq(info["karakteristikk"], 2)
+    assert_eq(info["dll_karakteristikk"], 33088)
+    la adresser = [base + 4096, 7340032, 7798784, 7802880, 7864320]
+    la flagg = [pe.FLAGG_TEXT(), pe.FLAGG_RDATA(), pe.FLAGG_DATA(), pe.FLAGG_DATA(), pe.FLAGG_BSS()]
+    la siste: heiltall = base
+    la i: heiltall = 0
+    mens i < 5 {
+        la s = seksjonar[i]
+        la va = base + s["rva"]
+        assert_eq(va, adresser[i])
+        assert_eq(s["flagg"], flagg[i])
+        assert(va >= siste)
+        assert(s["raw"] <= s["vsize"])
+        siste = va + s["vsize"]
+        i = i + 1
+    }
+    assert_eq(seksjonar[5]["namn"], ".reloc")
+    assert_eq(seksjonar[5]["flagg"], pe.FLAGG_RELOC())
+    assert_eq(base + seksjonar[5]["rva"], pe.align_opp(siste, 4096))
+    assert(seksjonar[5]["vsize"] > 0)
+    assert(lengde(nøkler(info["importar"])) > 0)
+    assert(info["entry_rva"] >= seksjonar[0]["rva"])
+    assert(info["entry_rva"] < seksjonar[0]["rva"] + seksjonar[0]["vsize"])
+}
+
+// Køyr dei faktiske PE-maskinbyta etter relokering. Berre OS-tabellen får
+// Linux-stubbar; strings/globalar/closures/catch/SHA/GC er uendra generert kode.
+// Ekte Windows/AppContainer-attestasjon er framleis ein separat obligatorisk port.
+funksjon pe_runtime(cg: tekst, runtime: tekst, root: tekst, dir: tekst) {
+    la inn = dir + "/reloc.ncb.json"
+    krev_ok(prosess.køyr(runtime, ["build", "tests/fixtures/pe_relocation_runtime_probe.no", inn],
+        root, miljø(root), 60000), "PE runtime-probe NCB")
+    la exe = dir + "/reloc.exe"
+    bygg(cg, root, inn, exe, "windows-x86_64")
+    for base i [5242880, 285212672] { // 0x500000 og 0x11000000, begge under abs32-taket.
+        la elf = dir + "/reloc-" + tekst(base) + ".elf"
+        assert_eq(rebase.bygg(exe, elf, base), 0)
+        la r = prosess.køyr(elf, [], root, miljø(root), 30000)
+        assert_eq(tekst(r["status"]), "ferdig")
+        assert_eq(tekst(r["exit_code"]), "42")
+        assert(builtin.contains(tekst(r["stdout"]), "PE_RELOCATION_RUNTIME_OK"))
+    }
+}
+
+funksjon start() -> heiltall {
+    hvis cgp.vert_plattform() != "linux-x86_64" {
+        skriv("test_native_large_image: hoppa over (krev Linux x86-64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la cg = miljo_hent("NORSCODE_GC_TEST_CODEGEN")
+    hvis cg == "" {
+        la val = cgp.vel(root, "linux-x86_64", "linux-x86_64")
+        assert_eq(val["status"], "ok")
+        cg = root + "/" + tekst(val["rel"])
+    }
+    la dir = root + "/build/large-image-" + builtin.random_hex(8)
+    assert(filops.lag_katalogar(dir))
+    la runtime = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis runtime == "" { runtime = tekst(builtin.system_info()["executable"]) }
+    pe_runtime(cg, runtime, root, dir)
+    la driver_ncb = dir + "/batch-driver.ncb.json"
+    la driver = dir + "/batch-driver"
+    la driver_env = miljø(root)
+    driver_env["NORSCODE_NCB_BINARY"] = "0"
+    krev_ok(prosess.køyr(runtime, ["bundle", "--output", driver_ncb,
+        root + "/tools/x86_batch_host.no"], root, driver_env, 300000), "batch-driver bundle")
+    bygg(cg, root, driver_ncb, driver, "linux-x86_64")
+    for stor i [usann, sann] {
+        la namn = "small"
+        la base: heiltall = 4194304
+        hvis stor { namn = "large" base = 1048576 }
+        la inn = dir + "/" + namn + ".ncb.json"
+        ncb(inn, stor)
+        la elf = dir + "/" + namn + ".elf"
+        bygg(cg, root, inn, elf, "linux-x86_64")
+        elf_layout(elf, base)
+        la r = prosess.køyr(elf, [], root, miljø(root), 30000)
+        assert_eq(tekst(r["status"]), "ferdig")
+        assert_eq(tekst(r["exit_code"]), "42")
+        la batch = dir + "/" + namn + "-batch.elf"
+        batchbygg(driver, root, inn, batch, dir + "/" + namn)
+        assert_eq(cgp.sha256_fil(batch), cgp.sha256_fil(elf))
+        assert_eq(fil_les(batch), fil_les(elf))
+        la exe = dir + "/" + namn + ".exe"
+        bygg(cg, root, inn, exe, "windows-x86_64")
+        pe_layout(exe, base)
+    }
+    assert(filops.slett_tre(dir))
+    skriv("test_native_large_image OK (small/large ELF execution, batch parity, PE layout, unchanged heap)\n")
+    returner 0
+}

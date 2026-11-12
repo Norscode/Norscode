@@ -10,6 +10,7 @@
 // + EPIPE: barnet lukkar stdin tidleg (head -c) → forelderen overlever (SIGPIPE halden unna).
 // + feilformer for synkron spawn (paritet med den tidlegare rå-rutina): tom executable →
 //   ferdig/127; feil før barnet startar → feil/127/«process spawn failed», ingen handle.
+// + sluttdrenering: eit ferdig barn kan ha fleire buffer med ulesen output i røyret.
 // tests/fixtures/aot_prosess_stress.no byggjer same test AOT (CI-dekning før seed-promotering).
 // Berre Linux: dei frosne C-æra-vertane (macOS/Windows) har eigen spawn-kode.
 bruk std.runtime.process_abi som abi
@@ -30,6 +31,49 @@ funksjon mib_tekst() -> tekst {
 
 funksjon spawn(exe: tekst, args: liste_tekst, stdin: tekst, timeout_ms: heiltall, maks: heiltall) -> ordbok_tekst {
     returner builtin.process_spawn_argv(abi.request(exe, args, "", stdin, timeout_ms, maks))
+}
+
+// Terminalstatus gjeld barnet, ikkje EOF på stdout. Kvar read er framleis avgrensa
+// av max_output_bytes, så éi siste lesing kan miste resten. Les til tomt med eit
+// eksplisitt rundetak; feilstatus, stderr eller manglande EOF skal feile testen.
+funksjon drener_ferdig(handle: tekst, maks: heiltall, maks_runder: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la runder: heiltall = 0
+    la tom = usann
+    mens ikkje tom og runder < maks_runder {
+        la bit = builtin.process_operation(abi.async_operation("read", handle))
+        assert_eq(tekst(bit["status"]), "ferdig")
+        assert_eq(tekst(bit["exit_code"]), "0")
+        assert_eq(tekst(bit["stderr"]), "")
+        la ut = tekst(bit["stdout"])
+        assert(lengde(ut) <= maks)
+        hvis ut == "" { tom = sann }
+        ellers { legg_til(delar, ut) }
+        runder = runder + 1
+    }
+    assert(tom)
+    returner builtin.join(delar, "")
+}
+
+funksjon sjekk_terminal_drenering() {
+    // 2 KiB får plass i eit Linux-røyr, men krev 16 lesingar med 128-byte buffer.
+    // Vent på exit utan read først: då er fleire lesingar ETTER exit nødvendige,
+    // uavhengig av korleis cat-stresstesten over blir tidsdelt på CI-verten.
+    la data = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-\n"
+    mens lengde(data) < 2048 { data = data + data }
+    la h = builtin.process_operation(abi.async_spawn_request(
+        "/usr/bin/printf", ["%s", data], "", "", 10000, 128))
+    assert_eq(tekst(h["status"]), "kjorer")
+    la handle = tekst(h["handle"])
+    la ferdig = builtin.process_operation(abi.async_wait_request(handle, 5000))
+    assert_eq(tekst(ferdig["status"]), "ferdig")
+    assert_eq(tekst(ferdig["exit_code"]), "0")
+    la ut = drener_ferdig(handle, 128, 18)
+    la lukk = builtin.process_operation(abi.async_operation("close", handle))
+    assert_eq(tekst(lukk["status"]), "ferdig")
+    assert_eq(lengde(ut), 2048)
+    assert_eq(ut, data)
+    skriv("stress: sluttdrenering 2 KiB med 128-byte buffer OK\n")
 }
 
 funksjon start() -> heiltall {
@@ -113,14 +157,17 @@ funksjon start() -> heiltall {
         hvis ut != "" { legg_til(delar, ut) n = n + lengde(ut) }
         runder = runder + 1
     }
-    la rest = builtin.process_operation(abi.async_operation("read", handle))
-    hvis tekst(rest["stdout"]) != "" { legg_til(delar, tekst(rest["stdout"])) n = n + lengde(tekst(rest["stdout"])) }
-    la lukk = builtin.process_operation(abi.async_operation("close", handle))
     assert_eq(tekst(siste["status"]), "ferdig")
+    assert_eq(tekst(siste["exit_code"]), "0")
+    // Høgst 16 fulle 64-KiB-buffer for 1 MiB, pluss EOF og éin marginrunde.
+    la rest = drener_ferdig(handle, 65536, 18)
+    hvis rest != "" { legg_til(delar, rest) n = n + lengde(rest) }
+    la lukk = builtin.process_operation(abi.async_operation("close", handle))
     assert_eq(tekst(lukk["status"]), "ferdig")
     assert_eq(n, 1048576)
     assert(builtin.join(delar, "") == mib)
     skriv("stress: asynkron 1 MiB med mottrykk OK (" + tekst_fra_heltall(runder) + " rundar)\n")
+    sjekk_terminal_drenering()
 
     skriv("test_native_process_stress OK\n")
     returner 0

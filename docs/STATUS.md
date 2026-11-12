@@ -2,6 +2,30 @@
 
 Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
+## Gjeldande avgrensingar 2026-11-11
+
+Dei daterte seksjonane under er historikk for tidlegare kandidatar. Gamle
+binærhashar, OpenSSL/C-backendar og lokale attestasjonar dokumenterer ikkje
+den aktive kjeldebygde kandidaten.
+
+- Registera deklarerer **19/22** stabile runtimeområde og **62/66** stabile
+  standardbibliotekmodular. Tre runtimeområde er delvise, og fire
+  bibliotekmodular er eksperimentelle. Desse statusane er ikkje oppgraderte
+  av feilrettingsarbeidet.
+- Sluttporten kontrollerer no det godkjende namneomfanget, ikkje det gamle
+  kravet om nøyaktig 61 stdlib-rader. Kvar rad må vere til stades éin gong og
+  ha stabil status. Full produksjonsstatus krev òg testar og signerte bevis
+  for same commit og binærar på alle fire plattformene.
+- Den CRT-frie Windows-prosessvegen avviser sandboxprofilar fordi
+  AppContainer/Job Object enno ikkje er implementert der. Historiske
+  Windows/Wine-resultat for ein annan backend er ikkje bevis på isolasjon
+  i denne vegen.
+- `std.runtime_gui` si stabile flate gjeld HTML/headless-rendering.
+  `std.ai` si kontraktflate er ikkje i seg sjølv ein generell språkmodell.
+- Aktiv databaseveg er NorsDB. Prosesskrasj og ufullstendige WAL-skrivingar
+  må testast separat frå rollback i ein levande prosess. Filsystemets
+  `native_flush` er ikkje ein dokumentert fsync-garanti mot straumbrot.
+
 ## Sjølvstendigheitsstatus 2026-07-20
 
 - Legacy compiler-seeding via ekstern shell er fjerna frå native backend.
@@ -153,7 +177,7 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - `std.runtime_status` rapporterer 19 av 22 runtimeområde som stabile (86 %).
   `network_runtime`, `process_api` og `runtime_security` er
   framleis `delvis` på grunn av reelle plattform-/backendbevis som står att.
-- `std.stdlib_status` rapporterer 57 av 61 modular som stabile (93 %).
+- `std.stdlib_status` rapporterer 62 av 66 modular som stabile (94 %).
   `sikkerheit`, `dns`, `tls_acme` og `domenehost` er framleis eksperimentelle.
 - Repoets 10/10-modenheitsgate er ei produkt-/bevisflate og er grøn med
   atferdssjekkar for CLI, doctor, LSP, seed, distribusjon, stdlib, produksjon og

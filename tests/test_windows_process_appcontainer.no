@@ -17,38 +17,164 @@ funksjon runtime_sti(root: tekst) -> tekst {
     returner tekst(builtin.system_info()["executable"])
 }
 
-funksjon barn_miljø(root: tekst, mode: tekst) -> ordbok_tekst {
+funksjon barn_miljø(root: tekst, mode: tekst, systemroot: tekst, localappdata: tekst) -> ordbok_tekst {
     returner {
+        // CreateProcessW byggjer AppContainer-profilmiljøet frå denne
+        // eksplisitte blokka. LOCALAPPDATA er grunnlaget for Packages/AC;
+        // utan han feilar opprettinga med ERROR_ENVVAR_NOT_FOUND (203).
+        // SystemRoot bind Windows-lastaren. Resten av vertsmiljøet blir
+        // framleis ikkje arva, og ingen ekstra OS-capabilities blir gjevne.
+        "SystemRoot": systemroot,
+        "LOCALAPPDATA": localappdata,
         "NORSCODE_ROOT": root,
         "NORSCODE_CMD": "run",
         "NORSCODE_FILE": root + "/tests/fixtures/windows_process_child.no",
         "NORSCODE_WINDOWS_CHILD_MODE": mode,
         "NORSCODE_VM_CAPABILITIES": "env.read,disk.read",
-        "NORSCODE_VM_DISK_ROOT": root
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,disk.read",
+        "NORSCODE_VM_DISK_ROOT": root,
+        "NORSCODE_VM_TARGET_DISK_ROOT": root
     }
 }
 
 funksjon start() -> heiltall {
     la root = root_sti()
     la runtime = runtime_sti(root)
+    la systemroot = env("SystemRoot")
+    hvis systemroot == "" { systemroot = env("SYSTEMROOT") }
+    la localappdata = env("LOCALAPPDATA")
+    hvis systemroot == "" eller localappdata == "" {
+        skriv("Windows AppContainer-test krev SystemRoot og LOCALAPPDATA frå verten\n")
+        returner 1
+    }
+
+    // Den CRT-frie PE-en har ~1706 MiB privat, skrivbar .heap og 16 MiB
+    // stack commit. Windows belastar image-commit ved lasting, ikkje berre
+    // rørte heap-sider. 2 GiB gjev ~326 MiB til DLL-ar/øvrig oppstart og er
+    // framleis eit eksplisitt PROCESS_MEMORY + JOB_MEMORY-tak som backenden
+    // les tilbake og verifiserer før ResumeThread. 256 MiB blir testa negativt.
+    la minnetak: heiltall = 2147483648
+    // Windows-watchdogen tel ALLE kernel-handtak, inkludert lastar/DLL-ar,
+    // ikkje berre filar. Den CRT-frie kandidaten paa Windows Server 2025
+    // maalte 116 under AppContainer-oppstart og 88 under restricted. Begge
+    // fixturane faar difor eit fast 256-tak med margin for lastarvariasjon;
+    // den gamle verten held 64. Tre 256-filprobar nedanfor skal framleis
+    // stoppe dersom kvar filopning lekkjer eit kernel-handtak.
+    // Runtime-standardar og den separate eitt-handtak-avvisinga er uendra.
+    la handtakstak: heiltall = 64
+    hvis env("NORSCODE_WINDOWS_FREESTANDING_ATTESTATION") == "1" { handtakstak = 256 }
+    // Timeout-fixturen bruker same eksplisitte, maalingsbaserte budsjett.
+    la timeout_handtakstak: heiltall = handtakstak
 
     la req = abi.request(runtime, [], root, "", 10000, 65536)
-    abi.sett_sandbox(req, "no-network", 268435456, 8, usann)
-    abi.sett_environment(req, barn_miljø(root, "ok"))
+    req = abi.sett_sandbox(req, "no-network", minnetak, handtakstak, usann)
+    req = abi.sett_environment(req, barn_miljø(root, "ok", systemroot, localappdata))
     la child = builtin.process_spawn_argv(req)
+    hvis child["status"] != "ferdig" eller heiltall_fra_tekst(tekst(child["exit_code"])) != 0 {
+        skriv("AppContainer status=" + tekst(child["status"]) + " exit=" + tekst(child["exit_code"]) + " error=" + tekst(child["error"]) + "\n")
+        hvis finnes_nøkkel(child, "error_detail") { skriv(tekst(child["error_detail"]) + "\n") }
+        skriv("AppContainer stdout=" + tekst(child["stdout"]) + " stderr=" + tekst(child["stderr"]) + "\n")
+    }
     assert_eq(child["status"], "ferdig")
     assert_eq(heiltall_fra_tekst(tekst(child["exit_code"])), 0)
-    assert_eq(child["stdout"], "appcontainer-ok")
+    // Fersk nc_main køyrer kjelda gjennom vm.køyr_ncb og legg til denne
+    // faste sluttlinja. Godta berre eksakt payload, med eller utan VM-linja.
+    assert(child["stdout"] == "appcontainer-ok" eller
+           child["stdout"] == "appcontainer-ok[vm] entry returned\n")
     assert_eq(child["sandbox"], "no-network")
     assert_eq(child["sandbox_backend"], "appcontainer+job-object")
+    assert_eq(child["job_verified"], sann)
+    assert_eq(child["appcontainer_verified"], sann)
+    skriv("Windows AppContainer peak_commit_bytes=" + tekst(child["peak_commit_bytes"]) + "\n")
+    hvis finnes_nøkkel(child, "peak_handles") {
+        skriv("Windows AppContainer peak_handles=" + tekst(child["peak_handles"]) + "\n")
+    }
+
+    // Prov handtaksgrensa uavhengig av tidsfristen: barnet faar langt nok
+    // tidsrom til aa starte, men ikkje fleire enn eitt kernel-handtak.
+    // Watchdogen skal avslutte jobben og rapportere den maalte overskridinga.
+    hvis env("NORSCODE_WINDOWS_FREESTANDING_ATTESTATION") == "1" {
+        // Ein ny unik AppContainer-profil maa ogsaa fullfoere under det
+        // same faste budsjettet; ingen profil eller tillating blir gjenbrukt.
+        la repeat = builtin.process_spawn_argv(req)
+        skriv("Windows AppContainer repeat status=" + tekst(repeat["status"]) +
+            " peak_handles=" + tekst(repeat["peak_handles"]) + "\n")
+        assert_eq(repeat["status"], "ferdig")
+        assert_eq(heiltall_fra_tekst(tekst(repeat["exit_code"])), 0)
+        assert_eq(repeat["job_verified"], sann)
+        assert_eq(repeat["appcontainer_verified"], sann)
+        assert_eq(repeat["sandbox_backend"], "appcontainer+job-object")
+        assert(repeat["stdout"] == "appcontainer-ok" eller
+               repeat["stdout"] == "appcontainer-ok[vm] entry returned\n")
+        assert(heiltall_fra_tekst(tekst(repeat["peak_handles"])) <= handtakstak)
+
+        la handles_req = abi.request(runtime, [], root, "", 10000, 65536)
+        handles_req = abi.sett_sandbox(handles_req, "restricted", minnetak, 1, usann)
+        handles_req = abi.sett_environment(handles_req, barn_miljø(root, "busy", systemroot, localappdata))
+        la handles = builtin.process_spawn_argv(handles_req)
+        skriv("Windows handle-limit status=" + tekst(handles["status"]) +
+            " peak_handles=" + tekst(handles["peak_handles"]) + "\n")
+        assert_eq(handles["status"], "feil")
+        assert_eq(handles["error"], "process handle limit")
+        assert_eq(handles["sandbox_backend"], "job-object")
+        assert_eq(handles["job_verified"], sann)
+        assert_eq(handles["open_file_limit_backend"], "process-handle-watchdog")
+        assert(heiltall_fra_tekst(tekst(handles["peak_handles"])) > 1)
+        assert(ikkje builtin.contains(tekst(handles["stdout"]), "appcontainer-ok"))
+
+        // Tre avgrensa restricted-koeyringar les 256 filer kvar. Det provar
+        // at oppstart + gjentekne opne/lukke-kall held det same faste
+        // budsjettet, og at vi ikkje skjuler ein voksande fillekkasje.
+        la runde: heiltall = 0
+        mens runde < 3 {
+            la probe_req = abi.request(runtime, [], root, "", 10000, 65536)
+            probe_req = abi.sett_sandbox(probe_req, "restricted", minnetak, timeout_handtakstak, usann)
+            probe_req = abi.sett_environment(probe_req, barn_miljø(root, "files", systemroot, localappdata))
+            la probe = builtin.process_spawn_argv(probe_req)
+            skriv("Windows restricted files round=" + tekst(runde) + " status=" + tekst(probe["status"]) +
+                " peak_handles=" + tekst(probe["peak_handles"]) + "\n")
+            assert_eq(probe["status"], "ferdig")
+            assert_eq(heiltall_fra_tekst(tekst(probe["exit_code"])), 0)
+            assert_eq(probe["job_verified"], sann)
+            assert_eq(probe["sandbox_backend"], "job-object")
+            assert(probe["stdout"] == "appcontainer-ok" eller
+                   probe["stdout"] == "appcontainer-ok[vm] entry returned\n")
+            assert(heiltall_fra_tekst(tekst(probe["peak_handles"])) <= timeout_handtakstak)
+            runde = runde + 1
+        }
+    }
 
     la timeout_req = abi.request(runtime, [], root, "", 50, 65536)
-    abi.sett_sandbox(timeout_req, "restricted", 268435456, 8, usann)
-    abi.sett_environment(timeout_req, barn_miljø(root, "busy"))
+    timeout_req = abi.sett_sandbox(timeout_req, "restricted", minnetak, timeout_handtakstak, usann)
+    timeout_req = abi.sett_environment(timeout_req, barn_miljø(root, "busy", systemroot, localappdata))
     la timed = builtin.process_spawn_argv(timeout_req)
+    hvis finnes_nøkkel(timed, "peak_handles") {
+        skriv("Windows timeout peak_handles=" + tekst(timed["peak_handles"]) + "\n")
+    }
+    hvis timed["status"] != "timeout" {
+        skriv("Job timeout status=" + tekst(timed["status"]) + " error=" + tekst(timed["error"]) + "\n")
+        hvis finnes_nøkkel(timed, "error_detail") { skriv(tekst(timed["error_detail"]) + "\n") }
+    }
     assert_eq(timed["status"], "timeout")
     assert_eq(heiltall_fra_tekst(tekst(timed["exit_code"])), 124)
     assert_eq(timed["sandbox_backend"], "job-object")
+    assert_eq(timed["job_verified"], sann)
+
+    hvis env("NORSCODE_WINDOWS_FREESTANDING_ATTESTATION") == "1" {
+        // Den gamle CRT-verten har ei langt mindre image og kan køyre under
+        // 256 MiB. Denne negative porten gjeld berre den ferske store PE-en:
+        // han skal feile under lasting, aldri fullføre barnekjelda eller
+        // omgå minnetaket. Timeout åleine er ikkje prov på denne grensa.
+        la liten_req = abi.request(runtime, [], root, "", 10000, 65536)
+        liten_req = abi.sett_sandbox(liten_req, "restricted", 268435456, handtakstak, usann)
+        liten_req = abi.sett_environment(liten_req, barn_miljø(root, "ok", systemroot, localappdata))
+        la liten = builtin.process_spawn_argv(liten_req)
+        skriv("Windows low-memory status=" + tekst(liten["status"]) + " exit=" + tekst(liten["exit_code"]) + "\n")
+        hvis finnes_nøkkel(liten, "error_detail") { skriv(tekst(liten["error_detail"]) + "\n") }
+        assert(liten["status"] == "feil" eller
+               (liten["status"] == "ferdig" og heiltall_fra_tekst(tekst(liten["exit_code"])) != 0))
+        assert(ikkje builtin.contains(tekst(liten["stdout"]), "appcontainer-ok"))
+    }
     skriv("test_windows_process_appcontainer OK")
     returner 0
 }
