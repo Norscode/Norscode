@@ -8,6 +8,8 @@ bruk std.http som http
 bruk std.dns som dns
 bruk std.socket som socket
 bruk std.runtime_filesystem som fs
+// Windows AOT must retain the native network dispatch and SChannel backend.
+bruk std.native_gap som native_gap
 bruk tools.stage_verified_arm_blobs_19ee som pinned
 
 funksjon env(namn: tekst) -> tekst {
@@ -63,12 +65,13 @@ funksjon config(root: tekst) {
     krev(felt(cfg, "staging_ref") == "refs/heads/fix/pr276-arm-blob-staging-20261112")
     krev(tal(cfg, "source_run_id") == 43267262599 og tal(cfg, "source_attempt") == 1)
     krev(tal(cfg, "uploader_run_id") == 43267262565 og tal(cfg, "uploader_attempt") == 1)
+    krev(tal(cfg, "windows_run_id") == 43267262557 og tal(cfg, "windows_attempt") == 1)
     krev(felt(cfg, "source_head") == "19ee05039d6b72a0a9986d1afc31a963d67b504c")
     for namn i ["source_head", "source_commit"] { krev(hex_hash(felt(cfg, namn), 40)) }
-    for namn i ["runtime_sources_sha256", "ncb_sha256", "uploader_sha256"] {
+    for namn i ["runtime_sources_sha256", "ncb_sha256", "uploader_sha256", "windows_sha256"] {
         krev(hex_hash(felt(cfg, namn), 64))
     }
-    krev(lengde(cfg["candidates"]) == 2 og lengde(cfg["artifacts"]) == 4)
+    krev(lengde(cfg["candidates"]) == 2 og lengde(cfg["artifacts"]) == 5)
     krev(felt(cfg["candidates"][0], "platform") == "linux-arm64")
     krev(felt(cfg["candidates"][1], "platform") == "macos-arm64")
     for kandidat i cfg["candidates"] {
@@ -76,15 +79,16 @@ funksjon config(root: tekst) {
         krev(hex_hash(felt(kandidat, "git_blob_sha"), 40))
         krev(tal(kandidat, "size") > 0 og tal(kandidat, "size") <= 33554432)
     }
-    la ids = [13966976213, 13966143591, 13965918843, 13965634112]
+    la ids = [13966976213, 13966143591, 13965918843, 13965634112, 13966821546]
     la namn = ["norscode-linux-arm64-kandidat", "norscode-macos-arm64-kandidat",
-        "norscode-macos-arm64-feilsok", "norscode-native-linux"]
+        "norscode-macos-arm64-feilsok", "norscode-native-linux", "norscode-windows-freestanding-kandidat"]
     la i = 0
-    mens i < 4 {
+    mens i < 5 {
         la artifact = cfg["artifacts"][i]
         krev(tal(artifact, "id") == ids[i] og felt(artifact, "name") == namn[i])
         la run_id = tal(cfg, "source_run_id")
         hvis i == 3 { run_id = tal(cfg, "uploader_run_id") }
+        hvis i == 4 { run_id = tal(cfg, "windows_run_id") }
         krev(tal(artifact, "run_id") == run_id)
         krev(tal(artifact, "size_in_bytes") > 0 og tal(artifact, "size_in_bytes") <= 33554432)
         la digest = felt(artifact, "digest")
@@ -116,6 +120,15 @@ funksjon verifiser_run(cfg, run, uploader: boolsk) {
         attempt = tal(cfg, "uploader_attempt")
         path = ".github/workflows/ci.yml"
     }
+    verifiser_run_data(cfg, run, run_id, attempt, path)
+}
+
+funksjon verifiser_windows_run(cfg, run) {
+    verifiser_run_data(cfg, run, tal(cfg, "windows_run_id"), tal(cfg, "windows_attempt"),
+        ".github/workflows/windows-seed.yml")
+}
+
+funksjon verifiser_run_data(cfg, run, run_id: heiltall, attempt: heiltall, path: tekst) {
     krev(tal(run, "id") == run_id og tal(run, "run_attempt") == attempt)
     krev(felt(run, "head_sha") == felt(cfg, "source_head"))
     krev(felt(run, "event") == "pull_request" og felt(run, "path") == path)
@@ -186,6 +199,35 @@ funksjon verifiser_jobs(cfg, jobs, uploader: boolsk) {
     }
 }
 
+funksjon verifiser_windows_jobs(cfg, jobs) {
+    krev(tal(jobs, "total_count") == lengde(jobs["jobs"]) og lengde(jobs["jobs"]) <= 100)
+    la venta = [
+        ["Kryss-bygg frittståande CRT-fri windows nc_main (på x86_64)", [
+            "Verifiser SChannel-policy før Windows-kryssbygg",
+            "Bygg fersk fullhost-NCB med byteverifisert L5-kompilator",
+            "Bygg frittståande windows nc_main (codegen frå kjelde) + gate C-runtime-fri"]],
+        ["process.exec på ekte Windows (kandidat som adapter)", [
+            "process_spawn_argv (cmd /c echo) + fang stdout",
+            "W6.2 - Windows-miljøoverføring og fail-closed sandbox"]],
+        ["8 Windows-runtime tester på CRT-fri kandidat", [
+            "Kjør alle 8 Windows-attestasjonstester på CRT-fri kandidat"]]
+    ]
+    for krav i venta {
+        la treff = 0
+        for job i jobs["jobs"] {
+            hvis felt(job, "name") == krav[0] {
+                krev(tal(job, "run_id") == tal(cfg, "windows_run_id"))
+                krev(tal(job, "run_attempt") == tal(cfg, "windows_attempt"))
+                krev(felt(job, "head_sha") == felt(cfg, "source_head"))
+                krev(felt(job, "status") == "completed" og felt(job, "conclusion") == "success")
+                for step_name i krav[1] { krev_steg(job, step_name) }
+                treff = treff + 1
+            }
+        }
+        krev(treff == 1)
+    }
+}
+
 funksjon verifiser_artifact(cfg, venta, actual) {
     for namn i ["id", "name", "digest"] { krev(felt(actual, namn) == felt(venta, namn)) }
     hvis finnes_nøkkel(venta, "size_in_bytes") {
@@ -233,7 +275,11 @@ funksjon dechunk(body: tekst) -> tekst {
 funksjon svar_json(response: tekst, venta_status: heiltall) {
     krev(response != "")
     la r = builtin.json_parse_raw(response)
-    krev(tal(r, "status") == venta_status)
+    la status = tal(r, "status")
+    hvis status != venta_status {
+        skriv("ARM blob HTTP status=" + tekst(status) + " expected=" + tekst(venta_status) + "\n")
+    }
+    krev(status == venta_status)
     la body = felt(r, "body")
     krev(lengde(body) <= 2097152)
     la headers = r["headers"]
@@ -247,20 +293,39 @@ funksjon svar_json(response: tekst, venta_status: heiltall) {
     returner builtin.json_parse_raw(body)
 }
 
-// Keep the port numeric. std.http._http_ipv4 in the pinned source converts
-// this integer with heltall_fra_tekst, which is invalid in native AOT.
-// Resolve directly and retain the same fixed TLS hostname and CA validation.
-funksjon api_tilkoble() {
-    marker("API DNS started")
-    la resolved = dns.resolve("api.github.com", 443)
-    krev(felt(resolved, "status") == "ok")
-    la host = ""
-    for address i resolved["addresses"] {
-        hvis host == "" og builtin.contains(tekst(address), ".") { host = tekst(address) }
+funksjon er_windows() -> boolsk {
+    returner tekst(builtin.system_info()["system"]) == "Windows"
+}
+
+funksjon verifiser_tls(tls, windows: boolsk) {
+    krev(felt(tls, "status") == "connected" og tls["peer_verified"] == sann)
+    hvis windows {
+        krev(tls["peer_cert_present"] == sann og felt(tls, "tls_version") == "TLSv1.3")
     }
-    krev(host != "")
-    marker("API DNS resolved")
-    la h = socket.native_tls_tilkoble(host, 443, "api.github.com", "/etc/ssl/certs/ca-certificates.crt")
+}
+
+// Windows resolves the fixed hostname through Winsock and verifies the peer
+// through SChannel's system trust store. Linux retains its explicit CA bundle.
+// Keep the Linux port numeric: pinned std.http._http_ipv4 attempts an invalid
+// integer-to-text parse under AOT, so only Linux uses direct std.dns.resolve.
+funksjon api_tilkoble() {
+    la windows = er_windows()
+    la h = {}
+    hvis windows {
+        marker("API Windows system-store TLS started")
+        h = socket.native_tls_tilkoble_systemlager("api.github.com", 443, "api.github.com")
+    } ellers {
+        marker("API DNS started")
+        la resolved = dns.resolve("api.github.com", 443)
+        krev(felt(resolved, "status") == "ok")
+        la host = ""
+        for address i resolved["addresses"] {
+            hvis host == "" og builtin.contains(tekst(address), ".") { host = tekst(address) }
+        }
+        krev(host != "")
+        marker("API DNS resolved")
+        h = socket.native_tls_tilkoble(host, 443, "api.github.com", "/etc/ssl/certs/ca-certificates.crt")
+    }
     prøv {
         marker("API TLS connect returned")
         krev(felt(h, "status") != "feil")
@@ -278,7 +343,7 @@ funksjon api_tilkoble() {
             tls = socket.native_tls_handshake(h)
         }
         skriv(tls_diagnose(tls) + "\n")
-        krev(felt(tls, "status") == "connected" og tls["peer_verified"] == sann)
+        verifiser_tls(tls, windows)
         marker("API TLS peer verified")
         returner h
     } fang (e) {
@@ -320,6 +385,9 @@ funksjon verifiser_api(cfg, token: tekst) {
         verifiser_run(cfg, api_get("/actions/runs/" + id, token), uploader)
         verifiser_jobs(cfg, api_get("/actions/runs/" + id + "/jobs?per_page=100&filter=latest", token), uploader)
     }
+    la windows_id = felt(cfg, "windows_run_id")
+    verifiser_windows_run(cfg, api_get("/actions/runs/" + windows_id, token))
+    verifiser_windows_jobs(cfg, api_get("/actions/runs/" + windows_id + "/jobs?per_page=100&filter=latest", token))
     for artifact i cfg["artifacts"] {
         verifiser_artifact(cfg, artifact, api_get("/actions/artifacts/" + felt(artifact, "id"), token))
     }
@@ -366,6 +434,13 @@ funksjon send_del(h, data: tekst, frist: heiltall) {
     }
 }
 
+funksjon svar_data(r) -> tekst {
+    la status = felt(r, "status")
+    // SChannel reports a verified TLS close_notify as eof; Unix uses closed.
+    krev(status == "ok" eller status == "closed" eller status == "eof")
+    returner felt(r, "data")
+}
+
 funksjon les_svar(h, frist: heiltall) -> tekst {
     la delar: liste_tekst = []
     la total = 0
@@ -373,8 +448,7 @@ funksjon les_svar(h, frist: heiltall) -> tekst {
         la r = socket.native_les(h, 16384)
         hvis felt(r, "status") == "ventende" { krev(http._http_wait(h, 1, 30000)) }
         ellers {
-            krev(felt(r, "status") == "ok" eller felt(r, "status") == "closed")
-            la data = felt(r, "data")
+            la data = svar_data(r)
             hvis data == "" { returner builtin.join(delar, "") }
             total = total + lengde(data)
             krev(total <= 2097152)
@@ -435,12 +509,12 @@ funksjon dry_encode(data) -> heiltall {
     returner total
 }
 
-funksjon upload_modus() -> boolsk {
+funksjon modus() -> tekst {
     la args = builtin.argv_operation({"abi": "norscode-argv-v1", "operation": "get"})["argv"]
-    hvis lengde(args) == 1 { returner usann }
+    hvis lengde(args) == 1 { returner "--dry-run" }
     krev(lengde(args) == 2)
-    krev(args[1] == "--dry-run" eller args[1] == "--upload")
-    returner args[1] == "--upload"
+    krev(args[1] == "--dry-run" eller args[1] == "--upload" eller args[1] == "--probe")
+    returner args[1]
 }
 
 funksjon start() -> heiltall {
@@ -450,7 +524,8 @@ funksjon start() -> heiltall {
         la root = env("NORSCODE_ROOT")
         hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
         la cfg = config(root)
-        la upload = upload_modus()
+        la mode = modus()
+        la upload = mode == "--upload"
         phase = "artifact validation"
         marker("artifact validation")
         la rapport_sti = root + "/build/arm-blob-stage/report/ci-runtime/build.json"
@@ -460,6 +535,9 @@ funksjon start() -> heiltall {
         marker("build report verified")
         les_verifisert(root + "/dist/norscode_native", felt(cfg, "uploader_sha256"), tal(cfg, "uploader_size"))
         marker("uploader bytes verified")
+        les_verifisert(root + "/build/windows/nc_main_freestanding_win.exe",
+            felt(cfg, "windows_sha256"), tal(cfg, "windows_size"))
+        marker("Windows adapter bytes verified")
         la ncb_sti = root + "/build/arm-blob-stage/report/ci-runtime/nc_main_fullhost.ncb.json"
         la ncb_stat = fs.native_stat_sti(ncb_sti)
         krev(felt(ncb_stat, "status") == "ok" og tal(ncb_stat, "value") > 0 og tal(ncb_stat, "value") <= 16777216)
@@ -479,12 +557,20 @@ funksjon start() -> heiltall {
             marker("Actions authorization")
             krev(env("GITHUB_ACTIONS") == "true" og env("GITHUB_REPOSITORY") == "Norscode/Norscode")
             krev(env("GITHUB_REF") == felt(cfg, "staging_ref"))
-            la ca_stat = fs.native_stat_sti("/etc/ssl/certs/ca-certificates.crt")
-            krev(felt(ca_stat, "status") == "ok" og tal(ca_stat, "value") > 0)
+        }
+        hvis upload eller mode == "--probe" {
+            hvis ikkje er_windows() {
+                la ca_stat = fs.native_stat_sti("/etc/ssl/certs/ca-certificates.crt")
+                krev(felt(ca_stat, "status") == "ok" og tal(ca_stat, "value") > 0)
+            }
             phase = "unauthenticated TLS preflight"
             marker("unauthenticated TLS preflight")
             verifiser_run(cfg, api_get("/actions/runs/" + felt(cfg, "source_run_id"), ""), usann)
             marker("unauthenticated TLS preflight passed")
+            hvis mode == "--probe" {
+                skriv("ARM blob unauthenticated probe OK\n")
+                returner 0
+            }
             token = env("GITHUB_TOKEN")
             krev(lengde(token) >= 20 og lengde(token) <= 4096 og
                  ikkje builtin.contains(token, "\r") og ikkje builtin.contains(token, "\n"))
