@@ -343,14 +343,32 @@ funksjon sett_rt_inngang(bytes, rt_va: heiltall, target: heiltall) {
 // gc_fix["gc"] == 1 betyr GC-modus (NORSCODE_GC_ALLOC=1).
 funksjon GC_FIX_NAMN() -> liste { returner ["int_boks", "str_payload", "str_boks", "join_raw", "join_boks"] }
 
-// x86 GC: same size classes as arm64_gc (small < 1 KiB, then 14 powers-of-two
-// ranges, the last >= 8 MiB). The old single 512-node walk repeatedly missed
+// x86 GC: exact 16-byte classes below 1 KiB, then 14 powers-of-two
+// ranges, the last >= 8 MiB. A single small chain made 32/64-byte requests
+// repeatedly scan thousands of unusable 16-byte boxes after binary decoding.
+// Keep the 16-byte head at HEAP+40; the other 62 heads follow the existing
+// large-class table inside its already mapped metadata region.
+// The old single 512-node walk repeatedly missed
 // large holes behind small boxes and drove repeated NCB serialization to OOM.
 // Each list first gets a 512-node fast pass. Before bump, a complete fallback
 // pass must also rule out a fit later in the request's own class. Its walk is
 // bounded by the heap's maximum number of disjoint 16-byte slots. Split
 // remainders are classified again immediately, never left in a larger class.
 // r8 = address of the class head; size is in rcx (modrm C1) or rdx (C2).
+funksjon gc_small_class_count() -> heiltall { returner 62 }
+
+funksjon gc_small_classes_va() -> heiltall {
+    returner hl.GC_FREE_CLASSES_VA(X86_MAL()) + hl.GC_FREE_CLASS_COUNT() * 8
+}
+
+// size is aligned and in [32,1008]. Slot = base + (size / 16 - 2) * 8.
+funksjon emit_gc_small_slot(bytes, modrm: heiltall) {
+    hvis modrm == 0xC1 { copy(bytes, [0x49, 0x89, 0xC8]) } // mov r8,rcx
+    ellers { copy(bytes, [0x49, 0x89, 0xD0]) }             // mov r8,rdx
+    copy(bytes, [0x49, 0xD1, 0xE8])                     // shr r8,1
+    copy(bytes, [0x49, 0x81, 0xC0]) adresse32(bytes, gc_small_classes_va() - 16)
+}
+
 funksjon emit_gc_class_slot(bytes, modrm: heiltall) {
     copy(bytes, [0x4C, 0x0F, 0xBD, modrm])          // bsr r8,size
     copy(bytes, [0x41, 0x83, 0xE8, 0x0A])         // sub r8d,10
@@ -368,6 +386,8 @@ funksjon emit_gc_sizeclasses(bytes, atomics, oom_sites) {
     la small: heiltall = hl.HEAP_VA(X86_MAL()) + 40
     la classes: heiltall = hl.GC_FREE_CLASSES_VA(X86_MAL())
     la classes_end: heiltall = classes + hl.GC_FREE_CLASS_COUNT() * 8
+    la small_classes: heiltall = gc_small_classes_va()
+    la small_classes_end: heiltall = small_classes + gc_small_class_count() * 8
     atomics["gc_free_raw"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x9C, 0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51])
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
@@ -381,10 +401,16 @@ funksjon emit_gc_sizeclasses(bytes, atomics, oom_sites) {
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])
     la free_unaligned_short = emit_jcc_placeholder(bytes, 0x82)
     copy(bytes, [0x41, 0xB8]) adresse32(bytes, small)    // r8 = &small_head
+    copy(bytes, [0x48, 0x83, 0xFA, 0x10])
+    la free_slot_ready = emit_je_placeholder(bytes)
     copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, 1024)
-    la free_small = emit_jcc_placeholder(bytes, 0x82)
+    la free_large = emit_jcc_placeholder(bytes, 0x83)
+    emit_gc_small_slot(bytes, 0xC2)
+    la free_small_ready = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, free_large, lengde(bytes))
     emit_gc_class_slot(bytes, 0xC2)               // size = rdx
-    patch_jump(bytes, free_small, lengde(bytes))
+    patch_jump(bytes, free_slot_ready, lengde(bytes))
+    patch_jump(bytes, free_small_ready, lengde(bytes))
     copy(bytes, [0x4D, 0x8B, 0x08])               // mov r9,[r8]
     copy(bytes, [0x4C, 0x89, 0x08])               // mov [rax],r9
     copy(bytes, [0x48, 0x89, 0x50, 0x08])         // mov [rax+8],rdx
@@ -405,10 +431,16 @@ funksjon emit_gc_sizeclasses(bytes, atomics, oom_sites) {
     copy(bytes, [0x48, 0x81, 0xF9]) u32(bytes, hl.GC_HEAP_LIMIT(X86_MAL()))
     la size_too_large = emit_jcc_placeholder(bytes, 0x83)
     copy(bytes, [0x41, 0xB8]) adresse32(bytes, small)
+    copy(bytes, [0x48, 0x83, 0xF9, 0x10])
+    la alloc_slot_ready = emit_je_placeholder(bytes)
     copy(bytes, [0x48, 0x81, 0xF9]) u32(bytes, 1024)
-    la alloc_small = emit_jcc_placeholder(bytes, 0x82)
+    la alloc_large = emit_jcc_placeholder(bytes, 0x83)
+    emit_gc_small_slot(bytes, 0xC1)
+    la alloc_small_ready = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, alloc_large, lengde(bytes))
     emit_gc_class_slot(bytes, 0xC1)               // size = rcx
-    patch_jump(bytes, alloc_small, lengde(bytes))
+    patch_jump(bytes, alloc_slot_ready, lengde(bytes))
+    patch_jump(bytes, alloc_small_ready, lengde(bytes))
     copy(bytes, [0x4C, 0x89, 0xC6])               // rsi = first eligible head slot
     copy(bytes, [0xBF]) u32(bytes, 512)           // rdi = fast-pass node budget
     la pass = lengde(bytes)
@@ -449,12 +481,22 @@ funksjon emit_gc_sizeclasses(bytes, atomics, oom_sites) {
     patch_jump(bytes, capped, next_class)
     copy(bytes, [0x41, 0x81, 0xF8]) adresse32(bytes, small)
     la from_small = emit_je_placeholder(bytes)
+    copy(bytes, [0x41, 0x81, 0xF8]) adresse32(bytes, small_classes)
+    la from_small_class = emit_jcc_placeholder(bytes, 0x83)
     copy(bytes, [0x49, 0x83, 0xC0, 0x08])         // next class
     copy(bytes, [0x41, 0x81, 0xF8]) adresse32(bytes, classes_end)
     la another_class = emit_jcc_placeholder(bytes, 0x82)
     patch_jump(bytes, another_class, pass)
     la to_fallback = emit_jmp_placeholder(bytes)
     patch_jump(bytes, from_small, lengde(bytes))
+    copy(bytes, [0x41, 0xB8]) adresse32(bytes, small_classes)
+    la first_small_class = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, first_small_class, pass)
+    patch_jump(bytes, from_small_class, lengde(bytes))
+    copy(bytes, [0x49, 0x83, 0xC0, 0x08])
+    copy(bytes, [0x41, 0x81, 0xF8]) adresse32(bytes, small_classes_end)
+    la another_small_class = emit_jcc_placeholder(bytes, 0x82)
+    patch_jump(bytes, another_small_class, pass)
     copy(bytes, [0x41, 0xB8]) adresse32(bytes, classes)
     la first_class = emit_jmp_placeholder(bytes)
     patch_jump(bytes, first_class, pass)
@@ -11056,7 +11098,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         // Clear EVERY class before rebuilding from the live map; retaining one
         // old head here would double-free its blocks on the next collection.
         copy(bytes, [0x31, 0xC0, 0xBF]) adresse32(bytes, hl.GC_FREE_CLASSES_VA(X86_MAL()))
-        copy(bytes, [0xB9]) u32(bytes, hl.GC_FREE_CLASS_COUNT())
+        copy(bytes, [0xB9]) u32(bytes, hl.GC_FREE_CLASS_COUNT() + gc_small_class_count())
         copy(bytes, [0xF3, 0x48, 0xAB])             // rep stosq
     }
     call_rel32(bytes, atomics["gc_mark_roots"], TEXT_VA()) // mark (side-effekt)
