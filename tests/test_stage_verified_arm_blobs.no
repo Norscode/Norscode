@@ -1,0 +1,193 @@
+bruk tools.stage_verified_arm_blobs som stage
+bruk std.base64 som b64
+bruk std.runtime_filesystem som fs
+
+funksjon kopi(v) { returner builtin.json_parse_raw(builtin.json_skriv(v)) }
+
+funksjon test_steg(namn: tekst) {
+    returner {"name": namn, "status": "completed", "conclusion": "success"}
+}
+
+funksjon job(cfg, namn: tekst, steps) {
+    returner {"name": namn, "run_id": cfg["source_run_id"], "run_attempt": 1,
+        "head_sha": cfg["source_head"], "status": "completed", "conclusion": "success",
+        "steps": steps}
+}
+
+funksjon jobs(cfg) {
+    la out = [job(cfg, "Kryss-bygg arm64 nc_main (linux + macos, på x86_64)", [
+        test_steg("Bygg fersk fullhost-NCB med byteverifisert L5-kompilator"),
+        test_steg("Bygg linux-arm64 nc_main frå kjelde (materialisering + kryss-codegen)"),
+        test_steg("Bygg macos-arm64 nc_main frå same NCB (kryss-codegen → Mach-O)")])]
+    for namn i ["seed-gate (linux-arm64) shard 0", "seed-gate (linux-arm64) shard 1",
+        "seed-gate (linux-arm64) shard 2", "seed-gate (macos-arm64) shard 0",
+        "seed-gate (macos-arm64) shard 1", "seed-gate (macos-arm64) shard 2"] {
+        legg_til(out, job(cfg, namn, [test_steg("Kandidat-selftest"),
+            test_steg("Kandidatens runtime-gap-port før stage0-promotering"),
+            test_steg("Seed-porten: tools/seed_gate_tests.txt via nc_test.no (kandidaten)")]))
+    }
+    // Parity must remain a separate real gate; its expected pre-promotion
+    // failure is not permission to skip any of the seven candidate checks.
+    legg_til(out, {"name": "Stage0 byte-paritet (linux-arm64)", "status": "completed", "conclusion": "failure"})
+    legg_til(out, {"name": "Stage0 byte-paritet (macos-arm64)", "status": "completed", "conclusion": "failure"})
+    returner {"total_count": 9, "jobs": out}
+}
+
+funksjon avviser_jobs(cfg, d) -> boolsk {
+    prøv { stage.verifiser_jobs(cfg, d, usann) } fang (e) { returner sann }
+    returner usann
+}
+
+funksjon avviser_run(cfg, d) -> boolsk {
+    prøv { stage.verifiser_run(cfg, d, usann) } fang (e) { returner sann }
+    returner usann
+}
+
+funksjon avviser_rapport(cfg, d) -> boolsk {
+    prøv { stage.verifiser_rapport(cfg, d) } fang (e) { returner sann }
+    returner usann
+}
+
+funksjon avviser_artifact(cfg, venta, actual) -> boolsk {
+    prøv { stage.verifiser_artifact(cfg, venta, actual) } fang (e) { returner sann }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    la root = tekst(builtin.system_info()["cwd"])
+    la cfg = stage.config(root)
+    la run = {"id": cfg["source_run_id"], "run_attempt": 1,
+        "head_sha": cfg["source_head"], "event": "pull_request",
+        "path": ".github/workflows/arm64-seed.yml",
+        "repository": {"id": 1248461779, "full_name": "Norscode/Norscode"},
+        "head_repository": {"id": 1248461779, "full_name": "Norscode/Norscode"},
+        "pull_requests": [{"number": 276,
+            "head": {"sha": cfg["source_head"], "repo": {"id": 1248461779}},
+            "base": {"repo": {"id": 1248461779}}}]}
+    stage.verifiser_run(cfg, run, usann)
+    for felt i ["head_sha", "event", "path"] {
+        la feil = kopi(run)
+        feil[felt] = "wrong"
+        assert(avviser_run(cfg, feil))
+    }
+    la feil_run = kopi(run)
+    feil_run["run_attempt"] = 2
+    assert(avviser_run(cfg, feil_run))
+    feil_run = kopi(run)
+    feil_run["head_repository"]["id"] = 1
+    assert(avviser_run(cfg, feil_run))
+
+    la js = jobs(cfg)
+    stage.verifiser_jobs(cfg, js, usann)
+    la feil = kopi(js)
+    feil["jobs"][6]["conclusion"] = "failure"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][6]["status"] = "in_progress"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][6]["name"] = "seed-gate (macos-arm64) shard 1"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][2]["head_sha"] = "wrong"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][1]["steps"][1]["conclusion"] = "skipped"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][1]["steps"][0]["name"] = "wrong selftest"
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["jobs"][1]["run_attempt"] = 2
+    assert(avviser_jobs(cfg, feil))
+    feil = kopi(js)
+    feil["total_count"] = 10
+    assert(avviser_jobs(cfg, feil))
+
+    la report = {"schema": "norscode-ci-runtime-v1", "status": "ok",
+        "source_commit": cfg["source_commit"], "runtime_sources_sha256": cfg["runtime_sources_sha256"],
+        "ncb_sha256": cfg["ncb_sha256"], "candidate_sha256": cfg["uploader_sha256"],
+        "runtime_source_files": 60, "l5_byte_parity": sann, "promoted": usann,
+        "selftest": "passed", "unresolved_builtins": 0, "unexpected_builtins": 0}
+    stage.verifiser_rapport(cfg, report)
+    for felt i ["source_commit", "runtime_sources_sha256", "ncb_sha256", "candidate_sha256"] {
+        la d = kopi(report)
+        d[felt] = "wrong"
+        assert(avviser_rapport(cfg, d))
+    }
+    la d = kopi(report)
+    d["unresolved_builtins"] = 1
+    assert(avviser_rapport(cfg, d))
+
+    for venta i cfg["artifacts"] {
+        la actual = kopi(venta)
+        actual["expired"] = usann
+        actual["workflow_run"] = {"id": venta["run_id"], "repository_id": 1248461779,
+            "head_repository_id": 1248461779, "head_sha": cfg["source_head"]}
+        stage.verifiser_artifact(cfg, venta, actual)
+        for felt i ["id", "digest", "size_in_bytes"] {
+            la feil_artifact = kopi(actual)
+            feil_artifact[felt] = "wrong"
+            assert(avviser_artifact(cfg, venta, feil_artifact))
+        }
+        la feil_artifact = kopi(actual)
+        feil_artifact["expired"] = sann
+        assert(avviser_artifact(cfg, venta, feil_artifact))
+        feil_artifact = kopi(actual)
+        feil_artifact["workflow_run"]["head_repository_id"] = 1
+        assert(avviser_artifact(cfg, venta, feil_artifact))
+        feil_artifact = kopi(actual)
+        feil_artifact["workflow_run"]["head_sha"] = "wrong"
+        assert(avviser_artifact(cfg, venta, feil_artifact))
+    }
+
+    // RFC 4648, binary NUL/high bytes, and the 12,288-byte record boundary.
+    la vector = [[[102], "Zg=="], [[102, 111], "Zm8="], [[102, 111, 111], "Zm9v"],
+        [[102, 111, 111, 98], "Zm9vYg=="], [[102, 111, 111, 98, 97], "Zm9vYmE="],
+        [[102, 111, 111, 98, 97, 114], "Zm9vYmFy"], [[0, 255, 17, 64, 128, 10], "AP8RQIAK"]]
+    for v i vector {
+        la data = builtin.bytes_from_list(v[0])
+        assert_eq(stage.base64_del(data, 0), v[1])
+        assert_eq(stage.dry_encode(data), lengde(v[1]))
+    }
+    la data: liste_heiltall = []
+    la i = 0
+    mens i < 24577 { legg_til(data, i % 256) i = i + 1 }
+    la raw = builtin.bytes_from_list(data)
+    la a = stage.base64_del(raw, 0)
+    la b = stage.base64_del(raw, 12288)
+    la c = stage.base64_del(raw, 24576)
+    assert_eq(lengde(a), 16384)
+    assert_eq(lengde(b), 16384)
+    assert_eq(lengde(c), 4)
+    assert(ikkje builtin.contains(a + b, "="))
+    assert_eq(a + b + c, b64.kod_bytes(data))
+    assert_eq(stage.dry_encode(raw), 32772)
+    assert_eq(builtin.sha256_bytes(b64.dekod_bytes(a + b + c)), builtin.sha256_bytes(raw))
+
+    assert_eq(stage.dechunk("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"), "Wikipedia")
+    la good = stage.svar_json("{\"status\":201,\"headers\":{},\"body\":\"{\\\"sha\\\":\\\"ok\\\"}\"}", 201)
+    assert_eq(good["sha"], "ok")
+    la rejected = usann
+    prøv { stage.svar_json("{\"status\":302,\"headers\":{},\"body\":\"do not print response\"}", 201) }
+    fang (e) { rejected = sann }
+    assert(rejected)
+    rejected = usann
+    prøv { stage.dechunk("1\r\na\r\n0\r\nX-Extra: x\r\n\r\n") } fang (e) { rejected = sann }
+    assert(rejected)
+
+    la path = root + "/build/arm-blob-stage/test-bytes.bin"
+    builtin.fil_skriv_binær(path, raw)
+    stage.les_verifisert(path, builtin.sha256_bytes(raw), lengde(raw))
+    rejected = usann
+    prøv { stage.les_verifisert(path, cfg["candidates"][0]["sha256"], lengde(raw)) }
+    fang (e) { rejected = sann }
+    assert(rejected)
+    rejected = usann
+    prøv { stage.les_verifisert(path, builtin.sha256_bytes(raw), lengde(raw) + 1) }
+    fang (e) { rejected = sann }
+    assert(rejected)
+    assert_eq(fs.native_slett(root, "build/arm-blob-stage/test-bytes.bin")["status"], "deleted")
+    skriv("test_stage_verified_arm_blobs OK\n")
+    returner 0
+}

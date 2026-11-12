@@ -1,0 +1,447 @@
+// Operational staging only: creates two content-addressed Git blobs.
+// No commit, tree, branch, ref, settings, redirect, shell or external runtime API.
+// Default --dry-run verifies and encodes the exact public artifacts without network.
+// --upload requires the exact isolated Actions branch, seven successful source jobs,
+// fixed artifact provenance and candidate hashes before the token is used.
+bruk std.base64 som b64
+bruk std.http som http
+bruk std.socket som socket
+bruk std.runtime_filesystem som fs
+bruk tools.stage_verified_arm_blobs_19ee som pinned
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon krev(ok: boolsk) {
+    hvis ikkje ok { kast "ARM blob staging precondition failed" }
+}
+
+funksjon hex_hash(t: tekst, n: heiltall) -> boolsk {
+    hvis lengde(t) != n { returner usann }
+    for c i builtin.split(t, "") {
+        hvis builtin.index_of("0123456789abcdef", c) < 0 { returner usann }
+    }
+    returner sann
+}
+
+funksjon felt(m, namn: tekst) -> tekst {
+    krev(finnes_nøkkel(m, namn))
+    returner tekst(m[namn])
+}
+
+funksjon tal(m, namn: tekst) -> heiltall {
+    la t = felt(m, namn)
+    la n = heiltall_fra_tekst(t)
+    krev(n >= 0 og tekst(n) == t)
+    returner n
+}
+
+funksjon config(root: tekst) {
+    la cfg = pinned.verdi()
+    krev(felt(cfg, "schema") == "norscode-arm-blob-stage-v1")
+    krev(felt(cfg, "repository") == "Norscode/Norscode")
+    krev(tal(cfg, "repository_id") == 1248461779)
+    krev(felt(cfg, "staging_ref") == "refs/heads/fix/pr276-arm-blob-staging-20261112")
+    krev(tal(cfg, "source_run_id") == 43267262599 og tal(cfg, "source_attempt") == 1)
+    krev(tal(cfg, "uploader_run_id") == 43267262565 og tal(cfg, "uploader_attempt") == 1)
+    krev(felt(cfg, "source_head") == "19ee05039d6b72a0a9986d1afc31a963d67b504c")
+    for namn i ["source_head", "source_commit"] { krev(hex_hash(felt(cfg, namn), 40)) }
+    for namn i ["runtime_sources_sha256", "ncb_sha256", "uploader_sha256"] {
+        krev(hex_hash(felt(cfg, namn), 64))
+    }
+    krev(lengde(cfg["candidates"]) == 2 og lengde(cfg["artifacts"]) == 4)
+    krev(felt(cfg["candidates"][0], "platform") == "linux-arm64")
+    krev(felt(cfg["candidates"][1], "platform") == "macos-arm64")
+    for kandidat i cfg["candidates"] {
+        krev(hex_hash(felt(kandidat, "sha256"), 64))
+        krev(hex_hash(felt(kandidat, "git_blob_sha"), 40))
+        krev(tal(kandidat, "size") > 0 og tal(kandidat, "size") <= 33554432)
+    }
+    la ids = [13966976213, 13966143591, 13965918843, 13965634112]
+    la namn = ["norscode-linux-arm64-kandidat", "norscode-macos-arm64-kandidat",
+        "norscode-macos-arm64-feilsok", "norscode-native-linux"]
+    la i = 0
+    mens i < 4 {
+        la artifact = cfg["artifacts"][i]
+        krev(tal(artifact, "id") == ids[i] og felt(artifact, "name") == namn[i])
+        la run_id = tal(cfg, "source_run_id")
+        hvis i == 3 { run_id = tal(cfg, "uploader_run_id") }
+        krev(tal(artifact, "run_id") == run_id)
+        krev(tal(artifact, "size_in_bytes") > 0 og tal(artifact, "size_in_bytes") <= 33554432)
+        la digest = felt(artifact, "digest")
+        krev(builtin.starts_with(digest, "sha256:") og hex_hash(builtin.slice(digest, 7, lengde(digest)), 64))
+        i = i + 1
+    }
+    returner cfg
+}
+
+funksjon verifiser_rapport(cfg, rapport) {
+    krev(felt(rapport, "schema") == "norscode-ci-runtime-v1")
+    krev(felt(rapport, "status") == "ok")
+    for namn i ["source_commit", "runtime_sources_sha256", "ncb_sha256"] {
+        krev(felt(rapport, namn) == felt(cfg, namn))
+    }
+    krev(tal(rapport, "runtime_source_files") == 60)
+    krev(rapport["l5_byte_parity"] == sann og rapport["promoted"] == usann)
+    krev(felt(rapport, "selftest") == "passed")
+    krev(tal(rapport, "unresolved_builtins") == 0 og tal(rapport, "unexpected_builtins") == 0)
+    krev(felt(rapport, "candidate_sha256") == felt(cfg, "uploader_sha256"))
+}
+
+funksjon verifiser_run(cfg, run, uploader: boolsk) {
+    la run_id = tal(cfg, "source_run_id")
+    la attempt = tal(cfg, "source_attempt")
+    la path = ".github/workflows/arm64-seed.yml"
+    hvis uploader {
+        run_id = tal(cfg, "uploader_run_id")
+        attempt = tal(cfg, "uploader_attempt")
+        path = ".github/workflows/ci.yml"
+    }
+    krev(tal(run, "id") == run_id og tal(run, "run_attempt") == attempt)
+    krev(felt(run, "head_sha") == felt(cfg, "source_head"))
+    krev(felt(run, "event") == "pull_request" og felt(run, "path") == path)
+    for namn i ["repository", "head_repository"] {
+        krev(tal(run[namn], "id") == tal(cfg, "repository_id"))
+        krev(felt(run[namn], "full_name") == "Norscode/Norscode")
+    }
+    krev(lengde(run["pull_requests"]) == 1)
+    la pr = run["pull_requests"][0]
+    krev(tal(pr, "number") == 276)
+    krev(felt(pr["head"], "sha") == felt(cfg, "source_head"))
+    krev(tal(pr["head"]["repo"], "id") == tal(cfg, "repository_id"))
+    krev(tal(pr["base"]["repo"], "id") == tal(cfg, "repository_id"))
+}
+
+funksjon krev_steg(job, namn: tekst) {
+    la treff = 0
+    for job_steg i job["steps"] {
+        hvis felt(job_steg, "name") == namn {
+            krev(felt(job_steg, "status") == "completed" og felt(job_steg, "conclusion") == "success")
+            treff = treff + 1
+        }
+    }
+    krev(treff == 1)
+}
+
+funksjon krev_job(cfg, jobs, namn: tekst, uploader: boolsk) {
+    la treff = 0
+    for job i jobs["jobs"] {
+        hvis felt(job, "name") == namn {
+            la run_id = tal(cfg, "source_run_id")
+            la attempt = tal(cfg, "source_attempt")
+            hvis uploader {
+                run_id = tal(cfg, "uploader_run_id")
+                attempt = tal(cfg, "uploader_attempt")
+            }
+            krev(tal(job, "run_id") == run_id og tal(job, "run_attempt") == attempt)
+            krev(felt(job, "head_sha") == felt(cfg, "source_head"))
+            krev(felt(job, "status") == "completed" og felt(job, "conclusion") == "success")
+            hvis builtin.starts_with(namn, "seed-gate (") {
+                krev_steg(job, "Kandidat-selftest")
+                krev_steg(job, "Kandidatens runtime-gap-port før stage0-promotering")
+                krev_steg(job, "Seed-porten: tools/seed_gate_tests.txt via nc_test.no (kandidaten)")
+            } ellers hvis ikkje uploader {
+                krev_steg(job, "Bygg fersk fullhost-NCB med byteverifisert L5-kompilator")
+                krev_steg(job, "Bygg linux-arm64 nc_main frå kjelde (materialisering + kryss-codegen)")
+                krev_steg(job, "Bygg macos-arm64 nc_main frå same NCB (kryss-codegen → Mach-O)")
+            } ellers {
+                krev_steg(job, "Bygg runtime frå aktuelle kjelder og byteverifisert L5")
+            }
+            treff = treff + 1
+        }
+    }
+    krev(treff == 1)
+}
+
+funksjon verifiser_jobs(cfg, jobs, uploader: boolsk) {
+    krev(tal(jobs, "total_count") == lengde(jobs["jobs"]) og lengde(jobs["jobs"]) <= 100)
+    hvis uploader {
+        krev_job(cfg, jobs, "Build Linux (x86_64)", sann)
+        returner
+    }
+    krev_job(cfg, jobs, "Kryss-bygg arm64 nc_main (linux + macos, på x86_64)", usann)
+    for os i ["linux", "macos"] {
+        for shard i [0, 1, 2] {
+            krev_job(cfg, jobs, "seed-gate (" + os + "-arm64) shard " + tekst(shard), usann)
+        }
+    }
+}
+
+funksjon verifiser_artifact(cfg, venta, actual) {
+    for namn i ["id", "name", "digest"] { krev(felt(actual, namn) == felt(venta, namn)) }
+    hvis finnes_nøkkel(venta, "size_in_bytes") {
+        krev(tal(actual, "size_in_bytes") == tal(venta, "size_in_bytes"))
+    }
+    krev(actual["expired"] == usann)
+    la run = actual["workflow_run"]
+    krev(tal(run, "id") == tal(venta, "run_id"))
+    krev(tal(run, "repository_id") == tal(cfg, "repository_id"))
+    krev(tal(run, "head_repository_id") == tal(cfg, "repository_id"))
+    krev(felt(run, "head_sha") == felt(cfg, "source_head"))
+}
+
+// The HTTP library does not decode Transfer-Encoding. Decode only bounded,
+// canonical chunks here; never treat a redirect or compressed error as JSON.
+funksjon dechunk(body: tekst) -> tekst {
+    la p = 0
+    la delar: liste_tekst = []
+    la total = 0
+    mens p < lengde(body) {
+        la tail = builtin.slice(body, p, lengde(body))
+        la e = builtin.index_of(tail, "\r\n")
+        krev(e > 0 og e <= 8)
+        la n = 0
+        for c i builtin.split(builtin.lower(builtin.slice(tail, 0, e)), "") {
+            la v = builtin.index_of("0123456789abcdef", c)
+            krev(v >= 0)
+            n = n * 16 + v
+        }
+        p = p + e + 2
+        hvis n == 0 {
+            krev(builtin.slice(body, p, lengde(body)) == "\r\n")
+            returner builtin.join(delar, "")
+        }
+        total = total + n
+        krev(total <= 2097152 og p + n + 2 <= lengde(body))
+        legg_til(delar, builtin.slice(body, p, p + n))
+        krev(builtin.slice(body, p + n, p + n + 2) == "\r\n")
+        p = p + n + 2
+    }
+    krev(usann)
+    returner ""
+}
+
+funksjon svar_json(response: tekst, venta_status: heiltall) {
+    krev(response != "")
+    la r = builtin.json_parse_raw(response)
+    krev(tal(r, "status") == venta_status)
+    la body = felt(r, "body")
+    krev(lengde(body) <= 2097152)
+    la headers = r["headers"]
+    hvis finnes_nøkkel(headers, "content-encoding") {
+        krev(builtin.lower(felt(headers, "content-encoding")) == "identity")
+    }
+    hvis finnes_nøkkel(headers, "transfer-encoding") {
+        krev(builtin.lower(felt(headers, "transfer-encoding")) == "chunked")
+        body = dechunk(body)
+    }
+    returner builtin.json_parse_raw(body)
+}
+
+funksjon api_get(suffiks: tekst, token: tekst) {
+    // Callers pass only paths built from pinned numeric run/artifact IDs.
+    krev(builtin.starts_with(suffiks, "/actions/") og ikkje builtin.contains(suffiks, "\r") og
+         ikkje builtin.contains(suffiks, "\n") og ikkje builtin.contains(suffiks, "://"))
+    la headers = {"X-GitHub-Api-Version": "2026-03-10", "Accept-Encoding": "identity"}
+    hvis token != "" { headers["Authorization"] = "Bearer " + token }
+    returner svar_json(http.request_full_ca("GET",
+        "https://api.github.com/repos/Norscode/Norscode" + suffiks,
+        headers, {}, "", 120000, "/etc/ssl/certs/ca-certificates.crt"), 200)
+}
+
+funksjon verifiser_api(cfg, token: tekst) {
+    for uploader i [usann, sann] {
+        la id = felt(cfg, "source_run_id")
+        hvis uploader { id = felt(cfg, "uploader_run_id") }
+        verifiser_run(cfg, api_get("/actions/runs/" + id, token), uploader)
+        verifiser_jobs(cfg, api_get("/actions/runs/" + id + "/jobs?per_page=100&filter=latest", token), uploader)
+    }
+    for artifact i cfg["artifacts"] {
+        verifiser_artifact(cfg, artifact, api_get("/actions/artifacts/" + felt(artifact, "id"), token))
+    }
+}
+
+funksjon les_verifisert(sti: tekst, sha: tekst, size: heiltall) {
+    krev(size > 0 og size <= 33554432)
+    la stat = fs.native_stat_sti(sti)
+    krev(felt(stat, "status") == "ok" og tal(stat, "value") == size)
+    la data = builtin.fil_les_binær(sti)
+    krev(lengde(data) == size og builtin.sha256_bytes(data) == sha)
+    returner data
+}
+
+funksjon base64_del(data, start: heiltall) -> tekst {
+    krev(start >= 0 og start < lengde(data) og start % 12288 == 0)
+    la slutt = start + 12288
+    hvis slutt > lengde(data) { slutt = lengde(data) }
+    la del: liste_heiltall = []
+    la i = start
+    mens i < slutt { legg_til(del, data[i]) i = i + 1 }
+    la kod = b64.kod_bytes(del)
+    krev(lengde(kod) <= 16384)
+    returner kod
+}
+
+funksjon base64_lengde(n: heiltall) -> heiltall {
+    returner ((n + 2) / 3) * 4
+}
+
+funksjon send_del(h, data: tekst, frist: heiltall) {
+    krev(lengde(data) > 0 og lengde(data) <= 16384)
+    la p = 0
+    mens p < lengde(data) {
+        krev(builtin.tid_ms() < frist)
+        la r = socket.native_skriv(h, builtin.slice(data, p, lengde(data)))
+        hvis felt(r, "status") == "ventende" { krev(http._http_wait(h, 2, 30000)) }
+        ellers {
+            krev(felt(r, "status") == "ok")
+            la n = tal(r, "value")
+            krev(n > 0 og n <= lengde(data) - p)
+            p = p + n
+        }
+    }
+}
+
+funksjon les_svar(h, frist: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la total = 0
+    mens builtin.tid_ms() < frist {
+        la r = socket.native_les(h, 16384)
+        hvis felt(r, "status") == "ventende" { krev(http._http_wait(h, 1, 30000)) }
+        ellers {
+            krev(felt(r, "status") == "ok" eller felt(r, "status") == "closed")
+            la data = felt(r, "data")
+            hvis data == "" { returner builtin.join(delar, "") }
+            total = total + lengde(data)
+            krev(total <= 2097152)
+            legg_til(delar, data)
+        }
+    }
+    krev(usann)
+    returner ""
+}
+
+funksjon post_blob(data, token: tekst, venta_sha: tekst) -> tekst {
+    la host = http._http_ipv4("api.github.com", 443)
+    la h = socket.native_tls_tilkoble(host, 443, "api.github.com", "/etc/ssl/certs/ca-certificates.crt")
+    prøv {
+        krev(felt(h, "status") != "feil")
+        hvis felt(h, "status") == "ventende" eller felt(h, "status") == "connecting" {
+            krev(http._http_wait(h, 2, 120000))
+        }
+        la tls = socket.native_tls_handshake(h)
+        mens felt(tls, "status") == "ventende" {
+            krev(http._http_wait(h, 1, 120000))
+            tls = socket.native_tls_handshake(h)
+        }
+        krev(felt(tls, "status") == "connected")
+        la prefix = "{\"encoding\":\"base64\",\"content\":\""
+        la suffix = "\"}"
+        la content_length = lengde(prefix) + base64_lengde(lengde(data)) + lengde(suffix)
+        la header = "POST /repos/Norscode/Norscode/git/blobs HTTP/1.1\r\nHost: api.github.com\r\n" +
+            "Authorization: Bearer " + token + "\r\nX-GitHub-Api-Version: 2026-03-10\r\n" +
+            "User-Agent: Norscode-Verified-ARM-Blob-Staging\r\nAccept: application/vnd.github+json\r\n" +
+            "Accept-Encoding: identity\r\nContent-Type: application/json\r\nConnection: close\r\n" +
+            "Content-Length: " + tekst(content_length) + "\r\n\r\n"
+        la frist = builtin.tid_ms() + 1200000
+        send_del(h, header, frist)
+        send_del(h, prefix, frist)
+        la p = 0
+        mens p < lengde(data) {
+            send_del(h, base64_del(data, p), frist)
+            p = p + 12288
+        }
+        send_del(h, suffix, frist)
+        la raw = les_svar(h, frist)
+        socket.native_lukk(h)
+        la result = svar_json(http._http_response(raw), 201)
+        la sha = felt(result, "sha")
+        krev(sha == venta_sha og hex_hash(sha, 40))
+        krev(felt(result, "url") == "https://api.github.com/repos/Norscode/Norscode/git/blobs/" + sha)
+        returner sha
+    } fang (e) {
+        prøv { socket.native_lukk(h) } fang (e2) {}
+        kast "ARM blob upload failed"
+    }
+    returner ""
+}
+
+funksjon dry_encode(data) -> heiltall {
+    la p = 0
+    la total = 0
+    mens p < lengde(data) {
+        total = total + lengde(base64_del(data, p))
+        p = p + 12288
+    }
+    krev(total == base64_lengde(lengde(data)))
+    returner total
+}
+
+funksjon upload_modus() -> boolsk {
+    la args = builtin.argv_operation({"abi": "norscode-argv-v1", "operation": "get"})["argv"]
+    hvis lengde(args) == 1 { returner usann }
+    krev(lengde(args) == 2)
+    krev(args[1] == "--dry-run" eller args[1] == "--upload")
+    returner args[1] == "--upload"
+}
+
+funksjon start() -> heiltall {
+    la phase = "configuration"
+    prøv {
+        la root = env("NORSCODE_ROOT")
+        hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+        la cfg = config(root)
+        la upload = upload_modus()
+        phase = "artifact validation"
+        la rapport_sti = root + "/build/arm-blob-stage/report/ci-runtime/build.json"
+        la rapport_stat = fs.native_stat_sti(rapport_sti)
+        krev(felt(rapport_stat, "status") == "ok" og tal(rapport_stat, "value") <= 65536)
+        verifiser_rapport(cfg, builtin.json_parse_raw(fil_les(rapport_sti)))
+        les_verifisert(root + "/dist/norscode_native", felt(cfg, "uploader_sha256"), tal(cfg, "uploader_size"))
+        la ncb_sti = root + "/build/arm-blob-stage/report/ci-runtime/nc_main_fullhost.ncb.json"
+        la ncb_stat = fs.native_stat_sti(ncb_sti)
+        krev(felt(ncb_stat, "status") == "ok" og tal(ncb_stat, "value") > 0 og tal(ncb_stat, "value") <= 16777216)
+        la ncb = builtin.fil_les_binær(ncb_sti)
+        krev(lengde(ncb) > 0 og lengde(ncb) <= 16777216 og builtin.sha256_bytes(ncb) == felt(cfg, "ncb_sha256"))
+        la data = [
+            les_verifisert(root + "/build/arm-blob-stage/linux/nc_main_arm64",
+                felt(cfg["candidates"][0], "sha256"), tal(cfg["candidates"][0], "size")),
+            les_verifisert(root + "/build/arm-blob-stage/macos/nc_main_macos_arm64",
+                felt(cfg["candidates"][1], "sha256"), tal(cfg["candidates"][1], "size"))
+        ]
+        la token = ""
+        hvis upload {
+            phase = "Actions authorization"
+            krev(env("GITHUB_ACTIONS") == "true" og env("GITHUB_REPOSITORY") == "Norscode/Norscode")
+            krev(env("GITHUB_REF") == felt(cfg, "staging_ref"))
+            la ca_stat = fs.native_stat_sti("/etc/ssl/certs/ca-certificates.crt")
+            krev(felt(ca_stat, "status") == "ok" og tal(ca_stat, "value") > 0)
+            phase = "unauthenticated TLS preflight"
+            verifiser_run(cfg, api_get("/actions/runs/" + felt(cfg, "source_run_id"), ""), usann)
+            token = env("GITHUB_TOKEN")
+            krev(lengde(token) >= 20 og lengde(token) <= 4096 og
+                 ikkje builtin.contains(token, "\r") og ikkje builtin.contains(token, "\n"))
+            phase = "source job and artifact verification"
+            verifiser_api(cfg, token)
+        }
+        la result = []
+        la i = 0
+        mens i < 2 {
+            la kandidat = cfg["candidates"][i]
+            la sha = felt(kandidat, "git_blob_sha")
+            phase = "bounded encoding"
+            la encoded = base64_lengde(lengde(data[i]))
+            hvis upload {
+                phase = "Git blob creation"
+                sha = post_blob(data[i], token, sha)
+            } ellers { encoded = dry_encode(data[i]) }
+            legg_til(result, {"platform": felt(kandidat, "platform"),
+                "sha256": felt(kandidat, "sha256"), "size": lengde(data[i]),
+                "git_blob_sha": sha, "base64_bytes": encoded})
+            i = i + 1
+        }
+        la output = builtin.json_skriv({"schema": "norscode-arm-blob-result-v1",
+            "uploaded": upload, "source_head": felt(cfg, "source_head"),
+            "source_commit": felt(cfg, "source_commit"),
+            "source_run_id": tal(cfg, "source_run_id"), "candidates": result})
+        fil_skriv(root + "/build/arm-blob-stage/blob-shas.json", output + "\n")
+        skriv(output + "\n")
+        returner 0
+    } fang (e) {
+        // Never print caught exception text, HTTP response, request body or token.
+        skriv("ARM blob staging failed during " + phase + "\n")
+        returner 1
+    }
+}
