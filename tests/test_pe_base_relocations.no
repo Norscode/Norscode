@@ -1,0 +1,122 @@
+// Rebase ekte HIGHLOW/DIR64-felt, inkludert eit felt over ei sidegrense. Identiske
+// talverdiar utan adressemetadata må vere urørte. Ingen byte-/verdisøk er tillate.
+bruk selfhost.native_execution.pe_emitter som pe
+bruk selfhost.native_execution.win64_asm som asm
+
+funksjon eksempel() {
+    la base: heiltall = 4194304
+    la adresse: heiltall = base + 12288
+    la a = asm.ny_pe()
+    asm.mov_adresse64(a, asm.RAX(), adresse)
+    asm.mov_i64(a, asm.RCX(), adresse) // SAME verdi, vanleg heiltal.
+    asm.call_abs(a, adresse)
+    asm.jmp_tabell(a, asm.RAX(), adresse)
+    la kode = asm.ferdig(a)
+    pe.pad_til(kode, 4094)
+    pe.legg_u64_le(kode, adresse)
+    pe.merk_adresse64(kode, 4094)
+    la data: liste = []
+    pe.legg_u64_le(data, adresse)
+    pe.merk_adresse64(data, 0)
+    pe.legg_u64_le(data, adresse) // Ikkje peikar, sjølv om byteverdiane er like.
+    pe.legg_u32_le(data, base + 16384)
+    pe.merk_adresse32(data, 16) // Peikar til BSS, som flyttar med PE-biletet.
+    pe.legg_u32_le(data, base + 16384)
+    returner {
+        "image_base": base, "entry_rva": 4096, "relokerbar": sann,
+        "seksjonar": [
+            pe.seksjon(".text", 4096, 8192, kode, pe.FLAGG_TEXT()),
+            pe.seksjon(".data", 12288, 4096, data, pe.FLAGG_DATA()),
+            pe.seksjon(".heap", 16384, 1048576, [], pe.FLAGG_BSS())
+        ],
+        "import_rva": 0, "import_size": 0, "iat_rva": 0, "iat_size": 0,
+        "stack_reserve": 16777216, "stack_commit": 16777216
+    }
+}
+
+funksjon felt(buf) -> liste {
+    la opt = pe.les_u32_le(buf, 60) + 24
+    la rva = pe.les_u32_le(buf, opt + 112 + 5 * 8)
+    la storleik = pe.les_u32_le(buf, opt + 112 + 5 * 8 + 4)
+    assert(rva > 0 og storleik > 0)
+    la p = pe.rva_til_fil(buf, rva)
+    assert(p >= 0)
+    la slutt = p + storleik
+    la resultat: liste = []
+    la førre_side: heiltall = -1
+    mens p < slutt {
+        la side = pe.les_u32_le(buf, p)
+        la blokk = pe.les_u32_le(buf, p + 4)
+        assert(side > førre_side og side % 4096 == 0)
+        assert(blokk >= 8 og blokk % 4 == 0 og p + blokk <= slutt)
+        førre_side = side
+        la q = p + 8
+        mens q < p + blokk {
+            la ord = pe.les_u16_le(buf, q)
+            hvis ord != 0 {
+                la type = ord >> 12
+                assert(type == 3 eller type == 10)
+                legg_til(resultat, [side + (ord & 4095), type])
+            }
+            q = q + 2
+        }
+        p = p + blokk
+    }
+    assert_eq(p, slutt)
+    returner resultat
+}
+
+funksjon rebase(buf, delta: heiltall) {
+    la ut: liste = []
+    pe.kopier_inn(ut, buf)
+    for f i felt(buf) {
+        la p = pe.rva_til_fil(buf, f[0])
+        assert(p >= 0)
+        la verdi = pe.les_u32_le(buf, p)
+        la breidd: heiltall = 4
+        hvis f[1] == 10 { verdi = pe.les_u64_le(buf, p) breidd = 8 }
+        verdi = verdi + delta
+        la j: heiltall = 0
+        mens j < breidd { ut[p + j] = (verdi >> (j * 8)) & 255 j = j + 1 }
+    }
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la spec = eksempel()
+    la image = pe.bygg_pe(spec)
+    assert_eq(builtin.sha256_bytes(image), builtin.sha256_bytes(pe.bygg_pe(spec)))
+    la info = pe.beskriv_pe(image)
+    assert_eq(info["karakteristikk"], 2) // EXECUTABLE, verken RELOCS_STRIPPED eller LAA.
+    assert_eq(info["dll_karakteristikk"], 33088) // DYNAMIC_BASE og NX, ikkje HIGHENTROPYVA.
+    assert_eq(info["stack_reserve"], 16777216)
+    assert_eq(info["stack_commit"], 16777216)
+    assert_eq(info["seksjonar"][3]["namn"], ".reloc")
+    assert_eq(info["seksjonar"][3]["flagg"], pe.FLAGG_RELOC())
+    assert_eq(felt(image), [[4098, 10], [4119, 3], [4126, 3], [8190, 10], [12288, 10], [12304, 3]])
+    for delta i [65536, 268435456] {
+        la flytta = rebase(image, delta)
+        for f i felt(image) {
+            la p = pe.rva_til_fil(image, f[0])
+            hvis f[1] == 3 { assert_eq(pe.les_u32_le(flytta, p), pe.les_u32_le(image, p) + delta) }
+            ellers { assert_eq(pe.les_u64_le(flytta, p), pe.les_u64_le(image, p) + delta) }
+        }
+        assert_eq(pe.les_u64_le(flytta, pe.rva_til_fil(flytta, 4108)), 4206592)
+        assert_eq(pe.les_u64_le(flytta, pe.rva_til_fil(flytta, 12296)), 4206592)
+        assert_eq(pe.les_u32_le(flytta, pe.rva_til_fil(flytta, 12308)), 4210688)
+    }
+    // Ukjende, overlappande og eksterne adressefelt skal aldri produsere ein PE.
+    for modus i ["ukjent", "overlapp", "ekstern", "utan-flagg"] {
+        la feil = eksempel()
+        la data = feil["seksjonar"][1]["data"]
+        hvis modus == "ukjent" { data[0] = data[0] | 4096 }
+        hvis modus == "overlapp" { pe.merk_adresse32(data, 1) }
+        hvis modus == "ekstern" { data[0] = 2560 data[1] = 0 data[2] = 0 data[3] = 0 }
+        hvis modus == "utan-flagg" { feil["relokerbar"] = usann }
+        la avvist = usann
+        prøv { pe.bygg_pe(feil) } fang (e) { avvist = sann }
+        assert(avvist)
+    }
+    skriv("test_pe_base_relocations OK (HIGHLOW/DIR64, BSS, sidegrense, konstante tal, validering)\n")
+    returner 0
+}

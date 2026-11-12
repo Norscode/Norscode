@@ -266,9 +266,9 @@ funksjon start() {
 // ════════════════════════════════════════════════════════════════════════════
 // W0 (docs/WINDOWS_SEED_PLAN.md): generell PE32+-byggjar med ekte importtabell.
 //
-// Biletet har fast ImageBase og er utan relokeringar (IMAGE_FILE_RELOCS_STRIPPED, ingen
-// DYNAMIC_BASE): Norscode-codegenen brukar absolutte adresser, so lastaren må leggje
-// seksjonane der codegenen rekna med. Seksjonane må vere samanhengande i VA.
+// Seksjonane må vere samanhengande i VA. `relokerbar` samlar eksplisitt merkte
+// adressefelt i ein ekte .reloc-katalog og aktiverer DYNAMIC_BASE. Vanlege tal og
+// relative offsettar blir aldri tolka som adresser, sjølv om byteverdiane er like.
 // ════════════════════════════════════════════════════════════════════════════
 
 funksjon SEKSJON_ALIGN() -> heiltall { returner 4096 }
@@ -277,8 +277,72 @@ funksjon FLAGG_TEXT() -> heiltall { returner 1610612768 }    // 0x60000020 CODE|
 funksjon FLAGG_RDATA() -> heiltall { returner 1073741888 }   // 0x40000040 INITIALIZED|READ
 funksjon FLAGG_DATA() -> heiltall { returner 3221225536 }    // 0xC0000040 INITIALIZED|READ|WRITE
 funksjon FLAGG_BSS() -> heiltall { returner 3221225600 }     // 0xC0000080 UNINITIALIZED|READ|WRITE
+funksjon FLAGG_RELOC() -> heiltall { returner 1107296320 }   // 0x42000040 INITIALIZED|READ|DISCARDABLE
 
 funksjon align_opp(v: heiltall, a: heiltall) -> heiltall { returner ((v + a - 1) / a) * a }
+
+// Mellomformatet er ei liste av heiltal: høge bitar på fyrste byte i eit eksplisitt
+// adressefelt ber PE-typen (3 = HIGHLOW, 10 = DIR64). Kopiering av kode/data bevarer
+// dermed metadata utan globale buffertilstandar. bygg_pe fjernar merka før skriving.
+// Dette er metadata frå emitteren, ikkje eit søk etter numeriske adresseverdiar.
+funksjon merk_adresse32(buf, pos: heiltall) { buf[pos] = (buf[pos] & 255) | 768 }
+funksjon merk_adresse64(buf, pos: heiltall) { buf[pos] = (buf[pos] & 255) | 2560 }
+
+funksjon reloc_blokk(ut, side: heiltall, felt) {
+    hvis lengde(felt) == 0 { returner }
+    legg_u32_le(ut, side)
+    legg_u32_le(ut, 8 + align_opp(lengde(felt) * 2, 4))
+    la i = 0
+    mens i < lengde(felt) { legg_u16_le(ut, felt[i]) i = i + 1 }
+    // IMAGE_REL_BASED_ABSOLUTE er padding, ikkje ei relokering av adresse 0.
+    hvis lengde(felt) % 2 != 0 { legg_u16_le(ut, 0) }
+}
+
+funksjon samle_relokeringar(seks, image_base: heiltall, image_slutt: heiltall, aktiv: boolsk) {
+    la ut: liste = []
+    la side: heiltall = -1
+    la felt: liste = []
+    la si: heiltall = 0
+    mens si < lengde(seks) {
+        la data = seks[si]["data"]
+        la p: heiltall = 0
+        mens p < lengde(data) {
+            la type: heiltall = data[p] >> 8
+            hvis type != 0 {
+                hvis ikkje aktiv { kast "PE: adressemetadata utan relokerbar container" }
+                la breidd: heiltall = 0
+                hvis type == 3 { breidd = 4 }
+                hvis type == 10 { breidd = 8 }
+                hvis breidd == 0 eller p + breidd > lengde(data) { kast "PE: ugyldig relokeringsfelt" }
+                la adresse: heiltall = data[p] & 255
+                la j: heiltall = 1
+                mens j < breidd {
+                    hvis data[p + j] < 0 eller data[p + j] > 255 { kast "PE: overlappande relokeringsfelt" }
+                    adresse = adresse | (data[p + j] << (j * 8))
+                    j = j + 1
+                }
+                hvis adresse < image_base eller adresse >= image_slutt {
+                    kast "PE: relokering peikar utanfor biletet"
+                }
+                la rva: heiltall = seks[si]["rva"] + p
+                la ny_side: heiltall = (rva / 4096) * 4096
+                hvis ny_side != side {
+                    reloc_blokk(ut, side, felt)
+                    felt = []
+                    side = ny_side
+                }
+                legg_til(felt, (type << 12) | (rva & 4095))
+                p = p + breidd
+            } ellers {
+                hvis data[p] < 0 eller data[p] > 255 { kast "PE: ugyldig byte" }
+                p = p + 1
+            }
+        }
+        si = si + 1
+    }
+    reloc_blokk(ut, side, felt)
+    returner ut
+}
 
 funksjon legg_bytes_tekst(buf, verdi: tekst) {
     la i = 0
@@ -399,9 +463,26 @@ funksjon seksjon(namn: tekst, rva: heiltall, vsize: heiltall, data, flagg: heilt
 }
 
 // spec: image_base, entry_rva, seksjonar (samanhengande, stigande RVA), import_rva,
-// import_size, iat_rva, iat_size, stack_reserve, stack_commit.
+// import_size, iat_rva, iat_size, stack_reserve, stack_commit. Valfri relokerbar=true
+// krev adressemetadata og brukar låg 2-GiB-adressering: native x86 sine abs32-operandar
+// er sign-/nullutvida. Windows garanterer dette når LARGE_ADDRESS_AWARE er av, også
+// med ASLR. HIGHENTROPYVA blir ikkje sett; NX og DYNAMIC_BASE blir bevarte.
 funksjon bygg_pe(spec) {
-    la seks = spec["seksjonar"]
+    la seks: liste = []
+    la si: heiltall = 0
+    mens si < lengde(spec["seksjonar"]) { legg_til(seks, spec["seksjonar"][si]) si = si + 1 }
+    la relokerbar: boolsk = finnes_nøkkel(spec, "relokerbar") og spec["relokerbar"]
+    la slutt: heiltall = seks[lengde(seks) - 1]["rva"] + seks[lengde(seks) - 1]["vsize"]
+    la reloc = samle_relokeringar(seks, spec["image_base"], spec["image_base"] + slutt, relokerbar)
+    la reloc_rva: heiltall = 0
+    hvis relokerbar {
+        hvis lengde(reloc) == 0 { kast "PE: relokerbar container utan adressefelt" }
+        reloc_rva = align_opp(slutt, SEKSJON_ALIGN())
+        legg_til(seks, seksjon(".reloc", reloc_rva, lengde(reloc), reloc, FLAGG_RELOC()))
+        hvis spec["image_base"] + align_opp(reloc_rva + lengde(reloc), SEKSJON_ALIGN()) > 2147483648 {
+            kast "PE: abs32-biletet må få plass under 2 GiB"
+        }
+    }
     la ns = lengde(seks)
     la hovud_storleik = 128 + 4 + 20 + 240 + ns * 40
     la hovud_fil = align_opp(hovud_storleik, FIL_ALIGN())
@@ -442,7 +523,8 @@ funksjon bygg_pe(spec) {
     legg_u32_le(fil, 0)
     legg_u32_le(fil, 0)
     legg_u16_le(fil, 240)
-    legg_u16_le(fil, 35)                    // RELOCS_STRIPPED|EXECUTABLE|LARGE_ADDRESS_AWARE
+    hvis relokerbar { legg_u16_le(fil, 2) } // EXECUTABLE; relocs finst, abs32 krev låg 2 GiB
+    ellers { legg_u16_le(fil, 35) }          // fast legacy/demo-bilete
     // Optional header (PE32+)
     legg_u16_le(fil, 523)
     legg_u8(fil, 1)
@@ -466,7 +548,8 @@ funksjon bygg_pe(spec) {
     legg_u32_le(fil, hovud_fil)
     legg_u32_le(fil, 0)                     // CheckSum
     legg_u16_le(fil, 3)                     // CONSOLE
-    legg_u16_le(fil, 33024)                 // 0x8100 NX_COMPAT|TERMINAL_SERVER_AWARE (ikkje DYNAMIC_BASE)
+    hvis relokerbar { legg_u16_le(fil, 33088) } // 0x8140 NX_COMPAT|TERMINAL_SERVER_AWARE|DYNAMIC_BASE
+    ellers { legg_u16_le(fil, 33024) }
     legg_u64_le(fil, spec["stack_reserve"])
     legg_u64_le(fil, spec["stack_commit"])
     legg_u64_le(fil, 1048576)
@@ -476,6 +559,7 @@ funksjon bygg_pe(spec) {
     i = 0
     mens i < 16 {
         hvis i == 1 { legg_datakatalog(fil, spec["import_rva"], spec["import_size"]) }
+        ellers hvis i == 5 { legg_datakatalog(fil, reloc_rva, lengde(reloc)) }
         ellers hvis i == 12 { legg_datakatalog(fil, spec["iat_rva"], spec["iat_size"]) }
         ellers { legg_datakatalog(fil, 0, 0) }
         i = i + 1
@@ -498,7 +582,10 @@ funksjon bygg_pe(spec) {
     mens i < ns {
         la d = seks[i]["data"]
         hvis lengde(d) > 0 {
-            kopier_inn(fil, d)
+            // Metadata er berre mellomformat. Ikkje endre inputbufferen: same spec
+            // skal kunne byggjast deterministisk fleire gonger.
+            la p: heiltall = 0
+            mens p < lengde(d) { legg_u8(fil, d[p]) p = p + 1 }
             pad_til(fil, align_opp(lengde(fil), FIL_ALIGN()))
         }
         i = i + 1

@@ -1,0 +1,115 @@
+// Test-only adapter. Applies the PE's actual base relocations, then
+// maps the resulting sections as ELF with Linux stand-ins for the OS table.
+// This exercises generated code at a different base; it does not test Windows.
+bruk selfhost.native_execution.pe_emitter som pe
+
+funksjon put(buf, pos: heiltall, v: heiltall, n: heiltall) {
+    la i = 0
+    mens i < n { buf[pos + i] = (v >> (i * 8)) & 255 i = i + 1 }
+}
+
+funksjon bygg(inn: tekst, ut: tekst, ny_base: heiltall) -> heiltall {
+    la b = builtin.fil_les_binær(inn)
+    la e = pe.les_u32_le(b, 60)
+    la opt = e + 24
+    la base = pe.les_u64_le(b, opt + 24)
+    assert(ny_base > 0 og ny_base + pe.les_u32_le(b, opt + 56) < 2147483648)
+    la delta = ny_base - base
+    la rr = pe.les_u32_le(b, opt + 112 + 5 * 8)
+    la rs = pe.les_u32_le(b, opt + 112 + 5 * 8 + 4)
+    assert(rr > 0 og rs > 0)
+    la p = pe.rva_til_fil(b, rr)
+    la slutt = p + rs
+    la n32 = 0
+    la n64 = 0
+    mens p < slutt {
+        la side = pe.les_u32_le(b, p)
+        la storleik = pe.les_u32_le(b, p + 4)
+        assert(storleik >= 8 og storleik % 4 == 0 og p + storleik <= slutt)
+        la j = p + 8
+        mens j < p + storleik {
+            la ord = pe.les_u16_le(b, j)
+            la type = ord >> 12
+            hvis type != 0 {
+                la off = pe.rva_til_fil(b, side + (ord & 4095))
+                assert(off >= 0)
+                hvis type == 3 { put(b, off, pe.les_u32_le(b, off) + delta, 4) n32 = n32 + 1 }
+                ellers hvis type == 10 { put(b, off, pe.les_u64_le(b, off) + delta, 8) n64 = n64 + 1 }
+                ellers { kast "Unsupported PE relocation" }
+            }
+            j = j + 2
+        }
+        p = p + storleik
+    }
+    assert_eq(p, slutt)
+    la ns = pe.les_u16_le(b, e + 6)
+    la tab = opt + pe.les_u16_le(b, e + 20)
+    la text_rva = pe.les_u32_le(b, tab + 12)
+    la text_raw = pe.les_u32_le(b, tab + 16)
+    la stub_va = ny_base + text_rva + text_raw
+    la stubs: liste = []
+    la nr = 0
+    mens nr < 512 {
+        // Only the Linux services exercised by this controlled probe are enabled.
+        hvis nr == 0 eller nr == 1 eller nr == 10 eller nr == 60 eller nr == 228 eller nr == 318 {
+            pe.legg_u8(stubs, 184) pe.legg_u32_le(stubs, nr)
+            pe.kopier_inn(stubs, [15, 5, 195])
+        } ellers { pe.kopier_inn(stubs, [72, 199, 192, 218, 255, 255, 255, 195]) }
+        pe.pad_til(stubs, (nr + 1) * 16)
+        nr = nr + 1
+    }
+    la setup_va = stub_va + lengde(stubs)
+    // PE entry retains Linux's original stack in r12. Synthesize argv/envp slots.
+    pe.kopier_inn(stubs, [73, 139, 60, 36, 73, 141, 116, 36, 8, 73, 187])
+    pe.legg_u64_le(stubs, 7798784 + delta)
+    pe.kopier_inn(stubs, [73, 137, 51, 73, 137, 123, 8, 73, 141, 20, 252, 72, 131, 194, 16, 73, 187])
+    pe.legg_u64_le(stubs, 7864328 + delta)
+    pe.kopier_inn(stubs, [73, 137, 19, 49, 192, 195])
+    assert(text_raw + lengde(stubs) <= pe.les_u32_le(b, tab + 8))
+    la ostab = pe.rva_til_fil(b, 7802880 - base)
+    assert(ostab >= 0)
+    nr = 0
+    mens nr < 512 { put(b, ostab + nr * 8, stub_va + nr * 16, 8) nr = nr + 1 }
+    put(b, ostab + 500 * 8, setup_va, 8)
+
+    la sections: liste = []
+    la off = 4096
+    la i = 0
+    mens i < ns {
+        la h = tab + i * 40
+        la raw = pe.les_u32_le(b, h + 16)
+        la ptr = pe.les_u32_le(b, h + 20)
+        la data: liste = []
+        la k = 0
+        mens k < raw { legg_til(data, b[ptr + k]) k = k + 1 }
+        hvis i == 0 { pe.kopier_inn(data, stubs) }
+        la mem = pe.les_u32_le(b, h + 8)
+        hvis mem < lengde(data) { mem = lengde(data) }
+        la f = pe.les_u32_le(b, h + 36)
+        la flags = 4
+        hvis (f & 2147483648) != 0 { flags = flags | 2 }
+        hvis (f & 536870912) != 0 { flags = flags | 1 }
+        legg_til(sections, {"va": ny_base + pe.les_u32_le(b, h + 12), "mem": mem, "flags": flags, "data": data, "off": off})
+        off = pe.align_opp(off + lengde(data), 4096)
+        i = i + 1
+    }
+    la elf: liste = [127, 69, 76, 70, 2, 1, 1, 0]
+    pe.pad_til(elf, 16)
+    pe.legg_u16_le(elf, 2) pe.legg_u16_le(elf, 62) pe.legg_u32_le(elf, 1)
+    pe.legg_u64_le(elf, ny_base + pe.les_u32_le(b, opt + 16))
+    pe.legg_u64_le(elf, 64) pe.legg_u64_le(elf, 0) pe.legg_u32_le(elf, 0)
+    pe.legg_u16_le(elf, 64) pe.legg_u16_le(elf, 56) pe.legg_u16_le(elf, ns)
+    pe.legg_u16_le(elf, 64) pe.legg_u16_le(elf, 0) pe.legg_u16_le(elf, 0)
+    for s i sections {
+        pe.legg_u32_le(elf, 1) pe.legg_u32_le(elf, s["flags"])
+        pe.legg_u64_le(elf, s["off"]) pe.legg_u64_le(elf, s["va"]) pe.legg_u64_le(elf, s["va"])
+        pe.legg_u64_le(elf, lengde(s["data"])) pe.legg_u64_le(elf, s["mem"]) pe.legg_u64_le(elf, 4096)
+    }
+    for s i sections {
+        hvis lengde(s["data"]) > 0 { pe.pad_til(elf, s["off"]) pe.kopier_inn(elf, s["data"]) }
+    }
+    builtin.fil_skriv_binær(ut, elf)
+    assert(builtin.fil_sett_kjorbar(ut))
+    skriv("PE→ELF test adapter: base=" + tekst(ny_base) + " HIGHLOW=" + tekst(n32) + " DIR64=" + tekst(n64) + " bytes=" + tekst(lengde(elf)) + "\n")
+    returner 0
+}
