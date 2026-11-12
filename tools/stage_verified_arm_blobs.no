@@ -5,6 +5,7 @@
 // fixed artifact provenance and candidate hashes before the token is used.
 bruk std.base64 som b64
 bruk std.http som http
+bruk std.dns som dns
 bruk std.socket som socket
 bruk std.runtime_filesystem som fs
 bruk tools.stage_verified_arm_blobs_19ee som pinned
@@ -13,6 +14,10 @@ funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
+
+// Fixed labels only: make a native signal diagnosable without exposing any
+// credential, request body, response body or caught exception.
+funksjon marker(namn: tekst) { skriv("ARM blob phase: " + namn + "\n") }
 
 funksjon krev(ok: boolsk) {
     hvis ikkje ok { kast "ARM blob staging precondition failed" }
@@ -230,15 +235,66 @@ funksjon svar_json(response: tekst, venta_status: heiltall) {
     returner builtin.json_parse_raw(body)
 }
 
+// Keep the port numeric. std.http._http_ipv4 in the pinned source converts
+// this integer with heltall_fra_tekst, which is invalid in native AOT.
+// Resolve directly and retain the same fixed TLS hostname and CA validation.
+funksjon api_tilkoble() {
+    marker("API DNS started")
+    la resolved = dns.resolve("api.github.com", 443)
+    krev(felt(resolved, "status") == "ok")
+    la host = ""
+    for address i resolved["addresses"] {
+        hvis host == "" og builtin.contains(tekst(address), ".") { host = tekst(address) }
+    }
+    krev(host != "")
+    marker("API DNS resolved")
+    la h = socket.native_tls_tilkoble(host, 443, "api.github.com", "/etc/ssl/certs/ca-certificates.crt")
+    prøv {
+        marker("API TLS connect returned")
+        krev(felt(h, "status") != "feil")
+        hvis felt(h, "status") == "ventende" eller felt(h, "status") == "connecting" {
+            krev(http._http_wait(h, 2, 120000))
+        }
+        marker("API TLS handshake started")
+        la frist = builtin.tid_ms() + 120000
+        la tls = socket.native_tls_handshake(h)
+        mens felt(tls, "status") == "ventende" {
+            krev(builtin.tid_ms() < frist og http._http_wait(h, 1, 30000))
+            tls = socket.native_tls_handshake(h)
+        }
+        krev(felt(tls, "status") == "connected" og tls["peer_verified"] == sann)
+        marker("API TLS peer verified")
+        returner h
+    } fang (e) {
+        prøv { socket.native_lukk(h) } fang (e2) {}
+        kast "ARM blob TLS connection failed"
+    }
+    returner {}
+}
+
 funksjon api_get(suffiks: tekst, token: tekst) {
     // Callers pass only paths built from pinned numeric run/artifact IDs.
     krev(builtin.starts_with(suffiks, "/actions/") og ikkje builtin.contains(suffiks, "\r") og
          ikkje builtin.contains(suffiks, "\n") og ikkje builtin.contains(suffiks, "://"))
-    la headers = {"X-GitHub-Api-Version": "2026-03-10", "Accept-Encoding": "identity"}
-    hvis token != "" { headers["Authorization"] = "Bearer " + token }
-    returner svar_json(http.request_full_ca("GET",
-        "https://api.github.com/repos/Norscode/Norscode" + suffiks,
-        headers, {}, "", 120000, "/etc/ssl/certs/ca-certificates.crt"), 200)
+    marker("TLS GET started")
+    la h = api_tilkoble()
+    prøv {
+        la request = "GET /repos/Norscode/Norscode" + suffiks + " HTTP/1.1\r\nHost: api.github.com\r\n" +
+            "User-Agent: Norscode-Verified-ARM-Blob-Staging\r\nAccept: application/vnd.github+json\r\n" +
+            "X-GitHub-Api-Version: 2026-03-10\r\nAccept-Encoding: identity\r\nConnection: close\r\n"
+        hvis token != "" { request = request + "Authorization: Bearer " + token + "\r\n" }
+        request = request + "\r\n"
+        la frist = builtin.tid_ms() + 120000
+        send_del(h, request, frist)
+        la raw = les_svar(h, frist)
+        socket.native_lukk(h)
+        marker("TLS GET returned")
+        returner svar_json(http._http_response(raw), 200)
+    } fang (e) {
+        prøv { socket.native_lukk(h) } fang (e2) {}
+        kast "ARM blob GET failed"
+    }
+    returner {}
 }
 
 funksjon verifiser_api(cfg, token: tekst) {
@@ -314,19 +370,11 @@ funksjon les_svar(h, frist: heiltall) -> tekst {
 }
 
 funksjon post_blob(data, token: tekst, venta_sha: tekst) -> tekst {
-    la host = http._http_ipv4("api.github.com", 443)
-    la h = socket.native_tls_tilkoble(host, 443, "api.github.com", "/etc/ssl/certs/ca-certificates.crt")
+    marker("POST TLS connect started")
+    la h = api_tilkoble()
     prøv {
-        krev(felt(h, "status") != "feil")
-        hvis felt(h, "status") == "ventende" eller felt(h, "status") == "connecting" {
-            krev(http._http_wait(h, 2, 120000))
-        }
-        la tls = socket.native_tls_handshake(h)
-        mens felt(tls, "status") == "ventende" {
-            krev(http._http_wait(h, 1, 120000))
-            tls = socket.native_tls_handshake(h)
-        }
-        krev(felt(tls, "status") == "connected")
+        marker("POST TLS connect returned")
+        marker("POST TLS verified")
         la prefix = "{\"encoding\":\"base64\",\"content\":\""
         la suffix = "\"}"
         la content_length = lengde(prefix) + base64_lengde(lengde(data)) + lengde(suffix)
@@ -344,12 +392,14 @@ funksjon post_blob(data, token: tekst, venta_sha: tekst) -> tekst {
             p = p + 12288
         }
         send_del(h, suffix, frist)
+        marker("POST bytes sent")
         la raw = les_svar(h, frist)
         socket.native_lukk(h)
         la result = svar_json(http._http_response(raw), 201)
         la sha = felt(result, "sha")
         krev(sha == venta_sha og hex_hash(sha, 40))
         krev(felt(result, "url") == "https://api.github.com/repos/Norscode/Norscode/git/blobs/" + sha)
+        marker("Git blob SHA verified")
         returner sha
     } fang (e) {
         prøv { socket.native_lukk(h) } fang (e2) {}
@@ -379,42 +429,53 @@ funksjon upload_modus() -> boolsk {
 
 funksjon start() -> heiltall {
     la phase = "configuration"
+    marker("configuration")
     prøv {
         la root = env("NORSCODE_ROOT")
         hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
         la cfg = config(root)
         la upload = upload_modus()
         phase = "artifact validation"
+        marker("artifact validation")
         la rapport_sti = root + "/build/arm-blob-stage/report/ci-runtime/build.json"
         la rapport_stat = fs.native_stat_sti(rapport_sti)
         krev(felt(rapport_stat, "status") == "ok" og tal(rapport_stat, "value") <= 65536)
         verifiser_rapport(cfg, builtin.json_parse_raw(fil_les(rapport_sti)))
+        marker("build report verified")
         les_verifisert(root + "/dist/norscode_native", felt(cfg, "uploader_sha256"), tal(cfg, "uploader_size"))
+        marker("uploader bytes verified")
         la ncb_sti = root + "/build/arm-blob-stage/report/ci-runtime/nc_main_fullhost.ncb.json"
         la ncb_stat = fs.native_stat_sti(ncb_sti)
         krev(felt(ncb_stat, "status") == "ok" og tal(ncb_stat, "value") > 0 og tal(ncb_stat, "value") <= 16777216)
         la ncb = builtin.fil_les_binær(ncb_sti)
         krev(lengde(ncb) > 0 og lengde(ncb) <= 16777216 og builtin.sha256_bytes(ncb) == felt(cfg, "ncb_sha256"))
+        marker("NCB bytes verified")
         la data = [
             les_verifisert(root + "/build/arm-blob-stage/linux/nc_main_arm64",
                 felt(cfg["candidates"][0], "sha256"), tal(cfg["candidates"][0], "size")),
             les_verifisert(root + "/build/arm-blob-stage/macos/nc_main_macos_arm64",
                 felt(cfg["candidates"][1], "sha256"), tal(cfg["candidates"][1], "size"))
         ]
+        marker("ARM candidate bytes verified")
         la token = ""
         hvis upload {
             phase = "Actions authorization"
+            marker("Actions authorization")
             krev(env("GITHUB_ACTIONS") == "true" og env("GITHUB_REPOSITORY") == "Norscode/Norscode")
             krev(env("GITHUB_REF") == felt(cfg, "staging_ref"))
             la ca_stat = fs.native_stat_sti("/etc/ssl/certs/ca-certificates.crt")
             krev(felt(ca_stat, "status") == "ok" og tal(ca_stat, "value") > 0)
             phase = "unauthenticated TLS preflight"
+            marker("unauthenticated TLS preflight")
             verifiser_run(cfg, api_get("/actions/runs/" + felt(cfg, "source_run_id"), ""), usann)
+            marker("unauthenticated TLS preflight passed")
             token = env("GITHUB_TOKEN")
             krev(lengde(token) >= 20 og lengde(token) <= 4096 og
                  ikkje builtin.contains(token, "\r") og ikkje builtin.contains(token, "\n"))
             phase = "source job and artifact verification"
+            marker("source job and artifact verification")
             verifiser_api(cfg, token)
+            marker("source job and artifact verification passed")
         }
         la result = []
         la i = 0
