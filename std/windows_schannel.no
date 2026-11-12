@@ -1,0 +1,464 @@
+// SChannel-klient med SSPI sine eigne nøklar og sertifikatkontroll.
+// SCH_CREDENTIALS v5 og TLS_PARAMETERS held klienten på TLS 1.3. Ingen
+// MANUAL_CRED_VALIDATION/NO_SERVERNAME_CHECK eller syntetiske peer-flagg.
+// Win64-layoutar: SCH_CREDENTIALS=72, TLS_PARAMETERS=40, SecHandle=16,
+// SecBuffer=16 og SecBufferDesc=16 byte.
+// https://learn.microsoft.com/windows/win32/api/schannel/ns-schannel-sch_credentials
+// https://learn.microsoft.com/windows/win32/secauthn/decryptmessage--schannel
+bruk std.windows_abi som win
+
+funksjon _signed32(value: heiltall) -> heiltall {
+    la n = value & 4294967295
+    hvis n >= 2147483648 { returner n - 4294967296 }
+    returner n
+}
+
+funksjon _text(req, key: tekst) -> tekst {
+    hvis finnes_nøkkel(req, key) og req[key] != null { returner tekst(req[key]) }
+    returner ""
+}
+
+funksjon _enabled(req, key: tekst) -> boolsk {
+    la value = _text(req, key)
+    returner value == "1" eller value == "true" eller value == "sann"
+}
+
+funksjon request_error(req) -> tekst {
+    la hostname = _text(req, "hostname")
+    hvis hostname == "" eller lengde(hostname) > 253 eller builtin.contains(hostname, "\u0000") {
+        returner "SChannel requires a nonempty verification hostname"
+    }
+    la unsupported = ["ca_file", "ca_path", "crl_file", "client_crl_file", "client_ca_file",
+        "cert_file", "key_file", "client_cert_file", "client_key_file",
+        "client_certificate_subject", "certificate_subject", "ocsp_response_file"]
+    la i: heiltall = 0
+    mens i < lengde(unsupported) {
+        la name = unsupported[i]
+        hvis _text(req, name) != "" {
+            returner "SChannel system-store client does not support requested " + name
+        }
+        i = i + 1
+    }
+    hvis _enabled(req, "require_ocsp") eller _enabled(req, "require_client_cert") {
+        returner "SChannel client cannot satisfy the requested explicit OCSP/client-certificate policy"
+    }
+    hvis finnes_nøkkel(req, "verify_peer") og ikkje _enabled(req, "verify_peer") {
+        returner "SChannel peer verification cannot be disabled"
+    }
+    hvis finnes_nøkkel(req, "verify_hostname") og ikkje _enabled(req, "verify_hostname") {
+        returner "SChannel hostname verification cannot be disabled"
+    }
+    returner ""
+}
+
+funksjon _result(state, status: tekst, data: tekst, value: heiltall, error: tekst) {
+    returner {"status": status, "data": data, "value": value, "error": error,
+        "tls_version": state["version"], "peer_verified": state["verified"],
+        "peer_cert_present": state["certificate"]}
+}
+
+funksjon _failure(state, error: tekst) {
+    state["error"] = error
+    state["verified"] = usann
+    returner _result(state, "feil", "", 0 - 1, error)
+}
+
+funksjon _copy(destination: heiltall, source: heiltall, n: heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < n {
+        builtin.raw_store8(destination + i, builtin.raw_load8(source + i))
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon _buffer(pointer: heiltall, kind: heiltall, data: heiltall, size: heiltall) -> heiltall {
+    win.u32(pointer, size)
+    win.u32(pointer + 4, kind)
+    builtin.raw_store64(pointer + 8, data)
+    returner 0
+}
+
+funksjon _descriptor(pointer: heiltall, buffers: heiltall, count: heiltall) -> heiltall {
+    win.u32(pointer, 0)
+    win.u32(pointer + 4, count)
+    builtin.raw_store64(pointer + 8, buffers)
+    returner 0
+}
+
+funksjon _now() -> heiltall { returner win.call("GetTickCount64", []) }
+
+// Rå WSAPoll på den same ikkje-blokkerande socketen; ingen ny tilkopling.
+funksjon _wait(state, write: boolsk, deadline: heiltall) -> heiltall {
+    la remaining = deadline - _now()
+    hvis remaining <= 0 { returner 0 }
+    hvis remaining > 1000 { remaining = 1000 }
+    la p = state["memory"] + 448
+    builtin.raw_store64(p, state["fd"])
+    la events: heiltall = 256
+    hvis write { events = 16 }
+    win.u32(p + 8, events)
+    la rc = _signed32(win.call("WSAPoll", [p, 1, remaining]))
+    hvis rc < 0 { state["error"] = "SChannel WSAPoll failed: " + tekst(win.last_error()) returner 0 - 1 }
+    hvis rc == 0 { returner 0 }
+    la revents = builtin.raw_load8(p + 10) | (builtin.raw_load8(p + 11) << 8)
+    hvis (revents & 4) != 0 { state["error"] = "SChannel socket is invalid" returner 0 - 1 }
+    returner 1
+}
+
+funksjon _send_all(state, pointer: heiltall, size: heiltall, deadline: heiltall) -> boolsk {
+    la sent: heiltall = 0
+    mens sent < size {
+        hvis _now() >= deadline { state["error"] = "SChannel send timed out" returner usann }
+        la rc = _signed32(win.call("send", [state["fd"], pointer + sent, size - sent, 0]))
+        hvis rc > 0 { sent = sent + rc } ellers {
+            la error = win.last_error()
+            hvis rc == 0 eller error != 10035 {
+                state["error"] = "SChannel send failed: " + tekst(error)
+                returner usann
+            }
+            hvis _wait(state, sann, deadline) < 0 { returner usann }
+        }
+    }
+    returner sann
+}
+
+// Returnerer 1 ved nye byte, 0 ved EWOULDBLOCK og -1 ved transportfeil.
+funksjon _receive(state, blocking: boolsk, deadline: heiltall) -> heiltall {
+    mens sann {
+        la used = state["received"]
+        hvis used < 0 eller used >= 262144 {
+            state["error"] = "SChannel encrypted input exceeds 256 KiB"
+            returner 0 - 1
+        }
+        la rc = _signed32(win.call("recv", [state["fd"], state["memory"] + 4096 + used, 262144 - used, 0]))
+        hvis rc > 0 { state["received"] = used + rc returner 1 }
+        hvis rc == 0 {
+            state["error"] = "TLS transport closed without close_notify"
+            returner 0 - 1
+        }
+        la error = win.last_error()
+        hvis error != 10035 {
+            state["error"] = "SChannel recv failed: " + tekst(error)
+            returner 0 - 1
+        }
+        hvis ikkje blocking { returner 0 }
+        hvis _now() >= deadline { state["error"] = "SChannel handshake timed out" returner 0 - 1 }
+        hvis _wait(state, usann, deadline) < 0 { returner 0 - 1 }
+    }
+    returner 0 - 1
+}
+
+// EXTRA viser byte som SSPI ikkje har brukt. Desse må overleve både eit
+// fullført handtrykk og ein fullført applikasjonsrecord, også ved samlesing.
+funksjon _keep_extra(state, buffers: heiltall, count: heiltall) -> boolsk {
+    la extra: heiltall = 0
+    la i: heiltall = 0
+    mens i < count {
+        la b = buffers + i * 16
+        hvis (win.read32(b + 4) & 268435455) == 5 { extra = win.read32(b) }
+        i = i + 1
+    }
+    la used = state["received"]
+    hvis extra > used { state["error"] = "SChannel returned an invalid EXTRA length" returner usann }
+    hvis extra > 0 {
+        la p = state["memory"] + 4096
+        _copy(p, p + used - extra, extra)
+    }
+    state["received"] = extra
+    returner sann
+}
+
+funksjon _release_tokens(state, send: boolsk, deadline: heiltall) -> boolsk {
+    la base = state["memory"] + 384
+    la ok = sann
+    la i: heiltall = 0
+    mens i < 3 {
+        la b = base + i * 16
+        la pointer = builtin.raw_load64(b + 8)
+        la size = win.read32(b)
+        la kind = win.read32(b + 4) & 268435455
+        hvis pointer != 0 {
+            hvis send og ok og kind == 2 og size > 0 {
+                hvis size > 1048576 { state["error"] = "SChannel output token exceeds 1 MiB" ok = usann } ellers {
+                    ok = _send_all(state, pointer, size, deadline)
+                }
+            }
+            win.call("FreeContextBuffer", [pointer])
+            builtin.raw_store64(b + 8, 0)
+        }
+        i = i + 1
+    }
+    returner ok
+}
+
+funksjon open(fd: heiltall, req) {
+    la state = {"memory": 0, "hostname": 0, "fd": fd, "credential": usann,
+        "context": usann, "connected": usann, "closed": usann, "eof": usann,
+        "received": 0, "plain": "", "version": "", "verified": usann,
+        "certificate": usann, "error": request_error(req)}
+    hvis state["error"] != "" { returner state }
+    la p = win.alloc(524288)
+    la hostname = win.wide(_text(req, "hostname"))
+    la package = win.wide("Microsoft Unified Security Protocol Provider")
+    hvis p == 0 eller hostname == 0 eller package == 0 {
+        win.free(p) win.free(hostname) win.free(package)
+        state["error"] = "SChannel credential allocation failed"
+        returner state
+    }
+    state["memory"] = p
+    state["hostname"] = hostname
+    win.u32(p, 5) // SCH_CREDENTIALS_VERSION
+    // AUTO_CRED_VALIDATION | NO_DEFAULT_CREDS | REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
+    // | SCH_USE_STRONG_CRYPTO. Systemlager + faktisk vertsnamn blir validerte av SSPI.
+    win.u32(p + 52, 4195376)
+    win.u32(p + 56, 1)
+    builtin.raw_store64(p + 64, p + 80)
+    // Alle protokollar unnateke SP_PROT_TLS1_3_CLIENT er eksplisitt sperra.
+    win.u32(p + 96, 4294959103)
+    la status = win.call("AcquireCredentialsHandleW", [0, package, 2, 0, p, 0, 0, p + 128, p + 168]) & 4294967295
+    win.free(package)
+    hvis status != 0 {
+        state["error"] = "AcquireCredentialsHandleW failed: " + tekst(status)
+        win.free(hostname) win.free(p)
+        state["hostname"] = 0 state["memory"] = 0
+        returner state
+    }
+    state["credential"] = sann
+    returner state
+}
+
+funksjon _attributes(state) -> boolsk {
+    la p = state["memory"]
+    la rc = win.call("QueryContextAttributesW", [p + 144, 4, p + 176]) & 4294967295
+    hvis rc != 0 { state["error"] = "SChannel stream-size query failed: " + tekst(rc) returner usann }
+    la header = win.read32(p + 176)
+    la trailer = win.read32(p + 180)
+    la maximum = win.read32(p + 184)
+    hvis maximum < 1 eller maximum > 65536 eller header + maximum + trailer > 131072 {
+        state["error"] = "SChannel returned unsupported stream bounds"
+        returner usann
+    }
+    rc = win.call("QueryContextAttributesW", [p + 144, 90, p + 208]) & 4294967295
+    hvis rc != 0 { state["error"] = "SChannel connection-info query failed: " + tekst(rc) returner usann }
+    la protocol = win.read32(p + 208)
+    hvis protocol != 8192 { state["error"] = "SChannel negotiated a protocol other than TLS 1.3: " + tekst(protocol) returner usann }
+    builtin.raw_store64(p + 240, 0)
+    rc = win.call("QueryContextAttributesW", [p + 144, 83, p + 240]) & 4294967295
+    la certificate = builtin.raw_load64(p + 240)
+    hvis rc != 0 eller certificate == 0 {
+        hvis certificate != 0 { win.call("CertFreeCertificateContext", [certificate]) }
+        state["error"] = "SChannel did not provide a verified peer certificate: " + tekst(rc)
+        returner usann
+    }
+    win.call("CertFreeCertificateContext", [certificate])
+    builtin.raw_store64(p + 240, 0)
+    // Berre SEC_E_OK med automatisk validering og ekte cert/protokollbevis når hit.
+    state["version"] = "TLSv1.3"
+    state["certificate"] = sann
+    state["verified"] = sann
+    state["connected"] = sann
+    returner sann
+}
+
+funksjon _negotiate(state, deadline: heiltall) -> boolsk {
+    la p = state["memory"]
+    la need_read = usann
+    la rounds: heiltall = 0
+    mens rounds < 1024 {
+        hvis _now() >= deadline { state["error"] = "SChannel handshake timed out" returner usann }
+        hvis need_read {
+            hvis _receive(state, sann, deadline) < 0 { returner usann }
+        }
+        la previous: heiltall = 0
+        la input: heiltall = 0
+        hvis state["context"] {
+            previous = p + 144
+            // Dette kallast også med ein tom TOKEN etter SEC_I_RENEGOTIATE.
+            // Ein post-handshake-token kan vere konsumert utan nokon EXTRA;
+            // SSPI må då få fullføre før meir nettverksdata blir venta på.
+            _buffer(p + 320, 2, p + 4096, state["received"])
+            _buffer(p + 336, 0, 0, 0)
+            _descriptor(p + 256, p + 320, 2)
+            input = p + 256
+        }
+        _buffer(p + 384, 2, 0, 0)
+        _buffer(p + 400, 17, 0, 0)
+        _buffer(p + 416, 0, 0, 0)
+        _descriptor(p + 272, p + 384, 3)
+        // REPLAY_DETECT | SEQUENCE_DETECT | CONFIDENTIALITY | ALLOCATE_MEMORY
+        // | EXTENDED_ERROR | STREAM. AUTO_CRED_VALIDATION ligg i credentialen.
+        la status = win.call("InitializeSecurityContextW", [p + 128, previous, state["hostname"],
+            49436, 0, 0, input, 0, p + 144, p + 272, p + 160, p + 168]) & 4294967295
+        hvis status == 0 eller status == 590610 eller status == 590611 eller status == 590612 {
+            state["context"] = sann
+        }
+        hvis status == 590611 eller status == 590612 {
+            la complete = win.call("CompleteAuthToken", [p + 144, p + 272]) & 4294967295
+            hvis complete != 0 {
+                _release_tokens(state, usann, deadline)
+                state["error"] = "CompleteAuthToken failed: " + tekst(complete)
+                returner usann
+            }
+            hvis status == 590611 { status = 0 } ellers { status = 590610 }
+        }
+        la tokens_ok = _release_tokens(state, status == 0 eller status == 590610, deadline)
+        hvis ikkje tokens_ok { returner usann }
+        hvis status == 2148074264 { // SEC_E_INCOMPLETE_MESSAGE: bevar heile input
+            need_read = sann
+        } ellers hvis status == 0 eller status == 590610 {
+            hvis input != 0 {
+                hvis ikkje _keep_extra(state, p + 320, 2) { returner usann }
+            }
+            hvis status == 0 { returner _attributes(state) }
+            need_read = state["received"] == 0
+        } ellers {
+            state["error"] = "InitializeSecurityContextW failed: " + tekst(status)
+            returner usann
+        }
+        rounds = rounds + 1
+    }
+    state["error"] = "SChannel handshake exceeded the record limit"
+    returner usann
+}
+
+funksjon handshake(state) {
+    hvis state["closed"] { returner _failure(state, "SChannel context is closed") }
+    hvis state["error"] != "" { returner _failure(state, state["error"]) }
+    hvis ikkje state["connected"] {
+        hvis ikkje _negotiate(state, _now() + 30000) { returner _failure(state, state["error"]) }
+    }
+    returner _result(state, "connected", "", 0, "")
+}
+
+funksjon _plain_result(state, maximum: heiltall) {
+    la data = state["plain"]
+    hvis lengde(data) > maximum {
+        state["plain"] = builtin.slice(data, maximum, lengde(data))
+        data = builtin.slice(data, 0, maximum)
+    } ellers { state["plain"] = "" }
+    returner _result(state, "ok", data, lengde(data), "")
+}
+
+funksjon read(state, maximum: heiltall) {
+    hvis state["closed"] { returner _failure(state, "SChannel context is closed") }
+    hvis state["error"] != "" { returner _failure(state, state["error"]) }
+    hvis ikkje state["connected"] { returner _failure(state, "SChannel handshake is not complete") }
+    hvis maximum < 1 eller maximum > 1048576 { returner _failure(state, "invalid SChannel read size") }
+    hvis state["plain"] != "" { returner _plain_result(state, maximum) }
+    hvis state["eof"] { returner _result(state, "eof", "", 0, "") }
+    la p = state["memory"]
+    la rounds: heiltall = 0
+    la need_read = state["received"] == 0
+    mens rounds < 64 {
+        hvis need_read {
+            la receive = _receive(state, usann, 0)
+            hvis receive < 0 { returner _failure(state, state["error"]) }
+            hvis receive == 0 { returner _result(state, "ventende", "", 0, "") }
+        }
+        _buffer(p + 320, 1, p + 4096, state["received"])
+        _buffer(p + 336, 0, 0, 0)
+        _buffer(p + 352, 0, 0, 0)
+        _buffer(p + 368, 0, 0, 0)
+        _descriptor(p + 256, p + 320, 4)
+        la status = win.call("DecryptMessage", [p + 144, p + 256, 0, 0]) & 4294967295
+        hvis status == 2148074264 { // ufullstendig TLS-record; legg til fleire byte
+            need_read = sann
+        } ellers hvis status == 0 eller status == 590625 eller status == 590615 {
+            la i: heiltall = 0
+            mens i < 4 {
+                la b = p + 320 + i * 16
+                hvis (win.read32(b + 4) & 268435455) == 1 og win.read32(b) > 0 {
+                    la source = builtin.raw_load64(b + 8)
+                    la n = win.read32(b)
+                    hvis source < p + 4096 eller source + n > p + 4096 + state["received"] {
+                        returner _failure(state, "SChannel plaintext lies outside the owned input buffer")
+                    }
+                    state["plain"] = state["plain"] + win.bytes_to_text(source, n)
+                }
+                i = i + 1
+            }
+            hvis ikkje _keep_extra(state, p + 320, 4) { returner _failure(state, state["error"]) }
+            hvis status == 590625 { // SEC_I_RENEGOTIATE, også TLS 1.3 post-handshake
+                state["connected"] = usann
+                hvis ikkje _negotiate(state, _now() + 30000) { returner _failure(state, state["error"]) }
+            }
+            hvis status == 590615 { state["eof"] = sann }
+            hvis state["plain"] != "" { returner _plain_result(state, maximum) }
+            hvis state["eof"] { returner _result(state, "eof", "", 0, "") }
+            need_read = state["received"] == 0
+        } ellers {
+            returner _failure(state, "DecryptMessage failed: " + tekst(status))
+        }
+        rounds = rounds + 1
+    }
+    returner _result(state, "ventende", "", 0, "")
+}
+
+funksjon write(state, data: tekst) {
+    hvis state["closed"] { returner _failure(state, "SChannel context is closed") }
+    hvis state["error"] != "" { returner _failure(state, state["error"]) }
+    hvis ikkje state["connected"] eller state["eof"] { returner _failure(state, "SChannel is not writable") }
+    hvis lengde(data) == 0 { returner _result(state, "ok", "", 0, "") }
+    la p = state["memory"]
+    la header = win.read32(p + 176)
+    la trailer = win.read32(p + 180)
+    la maximum = win.read32(p + 184)
+    la n = lengde(data)
+    hvis n > maximum { n = maximum }
+    la output = p + 266240
+    win.put_text(output + header, builtin.slice(data, 0, n))
+    _buffer(p + 320, 7, output, header)
+    _buffer(p + 336, 1, output + header, n)
+    _buffer(p + 352, 6, output + header + n, trailer)
+    _buffer(p + 368, 0, 0, 0)
+    _descriptor(p + 256, p + 320, 4)
+    la status = win.call("EncryptMessage", [p + 144, 0, p + 256, 0]) & 4294967295
+    hvis status != 0 { returner _failure(state, "EncryptMessage failed: " + tekst(status)) }
+    la deadline = _now() + 30000
+    la i: heiltall = 0
+    mens i < 3 {
+        la b = p + 320 + i * 16
+        la source = builtin.raw_load64(b + 8)
+        la size = win.read32(b)
+        hvis source < output eller source + size > output + 131072 {
+            returner _failure(state, "SChannel ciphertext lies outside the owned output buffer")
+        }
+        hvis ikkje _send_all(state, source, size, deadline) { returner _failure(state, state["error"]) }
+        i = i + 1
+    }
+    returner _result(state, "ok", "", n, "")
+}
+
+funksjon has_buffered_data(state) -> boolsk {
+    returner state["plain"] != "" eller state["received"] > 0 eller state["eof"]
+}
+
+funksjon close(state) -> heiltall {
+    hvis state["closed"] { returner 0 }
+    la p = state["memory"]
+    hvis p != 0 og state["context"] {
+        hvis state["connected"] og state["error"] == "" {
+            win.u32(p + 464, 1) // SCHANNEL_SHUTDOWN
+            _buffer(p + 320, 2, p + 464, 4)
+            _descriptor(p + 256, p + 320, 1)
+            la rc = win.call("ApplyControlToken", [p + 144, p + 256]) & 4294967295
+            hvis rc == 0 {
+                _buffer(p + 384, 2, 0, 0)
+                _buffer(p + 400, 17, 0, 0)
+                _buffer(p + 416, 0, 0, 0)
+                _descriptor(p + 272, p + 384, 3)
+                rc = win.call("InitializeSecurityContextW", [p + 128, p + 144, state["hostname"],
+                    49436, 0, 0, 0, 0, p + 144, p + 272, p + 160, p + 168]) & 4294967295
+                _release_tokens(state, rc == 0 eller rc == 590615, _now() + 2000)
+            }
+        }
+        win.call("DeleteSecurityContext", [p + 144])
+    }
+    hvis p != 0 og state["credential"] { win.call("FreeCredentialsHandle", [p + 128]) }
+    win.free(state["hostname"])
+    win.free(p)
+    state["hostname"] = 0 state["memory"] = 0
+    state["context"] = usann state["credential"] = usann state["closed"] = sann
+    returner 0
+}

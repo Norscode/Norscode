@@ -1,0 +1,680 @@
+// Ekte Win32-filsystem og OVERLAPPED/IOCP for norscode-native-filesystem-v1.
+// Norscode eig handtak, operasjons-ID-ar og bufferlevetid. Ingen shell/C-runtime.
+// Porten er kooperativ og brukar windows_abi sin eksplisitte éintrådskontrakt.
+bruk std.windows_abi som api
+
+la _filer = {}
+la _operasjonar = {}
+la _neste_fil: heiltall = 1
+la _neste_operasjon: heiltall = 1
+
+funksjon er_windows() -> boolsk {
+    prøv { returner api.er_windows() } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon felt(req, namn: tekst) -> tekst {
+    hvis req == null eller ikkje finnes_nøkkel(req, namn) { returner "" }
+    hvis req[namn] == null { returner "" }
+    returner tekst(req[namn])
+}
+
+funksjon tal(req, namn: tekst, standard: heiltall) -> heiltall {
+    la t = felt(req, namn)
+    hvis t == "" { returner standard }
+    prøv { returner heltall_fra_tekst(t) } fang (e) { returner standard }
+    returner standard
+}
+
+funksjon svar(status: tekst, data: tekst, verdi: heiltall, feil: tekst) -> ordbok {
+    returner {"abi": "norscode-native-filesystem-v1", "status": status,
+        "handle": "", "data": data, "value": verdi, "error": feil, "event_backend": "iocp"}
+}
+
+funksjon feilsvar(feil: tekst) -> ordbok { returner svar("feil", "", 0 - 1, feil) }
+funksjon winfeil(namn: tekst, kode: heiltall) -> ordbok {
+    returner feilsvar(namn + " feila (Win32 " + tekst(kode) + ")")
+}
+
+funksjon trygg_relativ(rel: tekst) -> boolsk {
+    la t = builtin.replace(rel, "\\", "/")
+    hvis builtin.starts_with(t, "/") eller builtin.contains(t, ":") eller
+       builtin.contains(t, "..") eller builtin.contains(t, "\u0000") eller
+       builtin.contains(t, "\n") eller builtin.contains(t, "\r") eller
+       builtin.contains(t, "*") eller builtin.contains(t, "?") { returner usann }
+    for del i builtin.split(t, "/") {
+        // Windows normaliserer avsluttande punktum/mellomrom før oppslag.
+        hvis del != "" og del != "." og
+           (builtin.ends_with(del, ".") eller builtin.ends_with(del, " ")) { returner usann }
+    }
+    returner sann
+}
+
+funksjon normal_rel(rel: tekst) -> tekst {
+    la delar: liste_tekst = []
+    for del i builtin.split(builtin.replace(rel, "\\", "/"), "/") {
+        hvis del != "" og del != "." { legg_til(delar, tekst(del)) }
+    }
+    returner builtin.join(delar, "/")
+}
+
+funksjon sti_saman(root: tekst, rel: tekst) -> tekst {
+    hvis rel == "" { returner root }
+    hvis builtin.ends_with(root, "/") eller builtin.ends_with(root, "\\") { returner root + rel }
+    returner root + "/" + rel
+}
+
+funksjon normal_full(sti: tekst) -> tekst {
+    la ut = builtin.lower(builtin.replace(sti, "\\", "/"))
+    mens lengde(ut) > 0 og builtin.ends_with(ut, "/") {
+        ut = builtin.slice(ut, 0, lengde(ut) - 1)
+    }
+    returner ut
+}
+
+funksjon innanfor(root: tekst, sti: tekst) -> boolsk {
+    la r = normal_full(root)
+    la s = normal_full(sti)
+    returner r != "" og (s == r eller builtin.starts_with(s, r + "/"))
+}
+
+funksjon absolutt_sti(sti: tekst) -> tekst {
+    la p = api.wide(sti)
+    la ut = api.alloc(65536)
+    hvis p == 0 eller ut == 0 { api.free(p) api.free(ut) returner "" }
+    la n = api.call("GetFullPathNameW", [p, 32768, ut, 0])
+    la result = ""
+    hvis n > 0 og n < 32768 { result = api.utf8(ut) }
+    api.free(ut)
+    api.free(p)
+    returner result
+}
+
+funksjon sluttsti(h: heiltall) -> tekst {
+    la p = api.alloc(65536)
+    hvis p == 0 { returner "" }
+    la n = api.call("GetFinalPathNameByHandleW", [h, p, 32768, 0])
+    la result = ""
+    hvis n > 0 og n < 32768 { result = api.utf8(p) }
+    api.free(p)
+    returner result
+}
+
+funksjon info(h: heiltall) -> ordbok {
+    hvis api.call("GetFileType", [h]) != 1 { returner feilsvar("ikkje eit diskfilhandtak") }
+    la p = api.alloc(64)
+    hvis p == 0 { returner feilsvar("minne til filmetadata manglar") }
+    la ok = api.call("GetFileInformationByHandle", [h, p])
+    la kode = api.last_error()
+    hvis ok == 0 { api.free(p) returner winfeil("GetFileInformationByHandle", kode) }
+    la attrs = api.read32(p)
+    la size = (api.read32(p + 32) << 32) | api.read32(p + 36)
+    la r = svar("ok", "", size, "")
+    r["attributes"] = attrs
+    r["kind"] = "file"
+    la mode = 32768 | 438
+    hvis (attrs & 16) != 0 { r["kind"] = "directory" mode = 16384 | 511 }
+    hvis (attrs & 1024) != 0 { r["kind"] = "symlink" mode = 40960 | 511 }
+    hvis (attrs & 1) != 0 { mode = mode & (0 - 1 - 146) }
+    r["mode"] = mode
+    r["inode"] = (api.read32(p + 44) << 32) | api.read32(p + 48)
+    r["device"] = api.read32(p + 28)
+    r["nlink"] = api.read32(p + 40)
+    r["uid"] = 0
+    r["gid"] = 0
+    r["ctime"] = (builtin.raw_load64(p + 4) - 116444736000000000) / 10000000
+    r["atime"] = (builtin.raw_load64(p + 12) - 116444736000000000) / 10000000
+    r["mtime"] = (builtin.raw_load64(p + 20) - 116444736000000000) / 10000000
+    api.free(p)
+    returner r
+}
+
+funksjon lukk_vakter(g) {
+    hvis ikkje finnes_nøkkel(g, "locks") { returner }
+    la hs = g["locks"]
+    la i = lengde(hs) - 1
+    mens i >= 0 { api.close(hs[i]) i = i - 1 }
+    g["locks"] = []
+}
+
+// Kataloghandtaka deler ikkje DELETE. Dermed kan foreldremappene ikkje bytast
+// ut med junctions eller flyttast medan den endelege stioperasjonen blir utført.
+// OPEN_REPARSE_POINT + metadata og final-path-kontroll avviser reparse-flukt.
+funksjon lås_mappe(sti: tekst) -> ordbok {
+    la p = api.wide(sti)
+    hvis p == 0 { returner feilsvar("ugyldig katalogsti") }
+    la h = api.call("CreateFileW", [p, 128, 3, 0, 3, 35651584, 0])
+    la kode = api.last_error()
+    api.free(p)
+    hvis h == 0 - 1 { returner winfeil("CreateFileW(katalog)", kode) }
+    la st = info(h)
+    hvis st["status"] != "ok" {
+        api.close(h)
+        returner st
+    }
+    hvis st["kind"] != "directory" {
+        api.close(h)
+        returner feilsvar("katalogsti er ikkje ei vanleg mappe (reparse avvist)")
+    }
+    la final = sluttsti(h)
+    hvis final == "" { api.close(h) returner feilsvar("katalogens endelege sti er ukjend") }
+    returner {"status": "ok", "native": h, "final": final}
+}
+
+funksjon vakt(root: tekst, rel: tekst, med_siste: boolsk, lag: boolsk) -> ordbok {
+    hvis ikkje trygg_relativ(rel) { returner feilsvar("invalid path") }
+    hvis root == "" { root = "." }
+    la full_root = absolutt_sti(root)
+    hvis full_root == "" { returner feilsvar("invalid root") }
+    la first = lås_mappe(full_root)
+    hvis first["status"] != "ok" { returner first }
+    la g = {"status": "ok", "locks": [first["native"]], "root": first["final"],
+        "path": sti_saman(full_root, normal_rel(rel))}
+    la delar = builtin.split(normal_rel(rel), "/")
+    la slutt = lengde(delar)
+    hvis ikkje med_siste { slutt = slutt - 1 }
+    la sti = full_root
+    la i = 0
+    mens i < slutt {
+        la del = tekst(delar[i])
+        hvis del != "" {
+            sti = sti_saman(sti, del)
+            hvis lag {
+                la p = api.wide(sti)
+                hvis p == 0 { lukk_vakter(g) returner feilsvar("ugyldig katalogsti") }
+                la ok = api.call("CreateDirectoryW", [p, 0])
+                la kode = api.last_error()
+                api.free(p)
+                hvis ok == 0 og kode != 183 {
+                    lukk_vakter(g)
+                    returner winfeil("CreateDirectoryW", kode)
+                }
+            }
+            la neste = lås_mappe(sti)
+            hvis neste["status"] != "ok" { lukk_vakter(g) returner neste }
+            legg_til(g["locks"], neste["native"])
+            hvis ikkje innanfor(tekst(g["root"]), tekst(neste["final"])) {
+                lukk_vakter(g)
+                returner feilsvar("katalogsti forlèt root")
+            }
+        }
+        i = i + 1
+    }
+    returner g
+}
+
+funksjon hent_fil(req) {
+    la id = felt(req, "handle")
+    hvis id == "" eller ikkje finnes_nøkkel(_filer, id) { returner null }
+    returner _filer[id]
+}
+
+funksjon opne(req, skriv: boolsk) -> ordbok {
+    la mode = felt(req, "mode")
+    hvis (ikkje skriv og mode != "read") eller
+       (skriv og mode != "write" og mode != "append") { returner feilsvar("open-modus bryt operasjonsklassen") }
+    la rel = felt(req, "relative")
+    hvis normal_rel(rel) == "" { returner feilsvar("invalid file path") }
+    la g = vakt(felt(req, "root"), rel, usann, usann)
+    hvis g["status"] != "ok" { returner g }
+    la p = api.wide(tekst(g["path"]))
+    hvis p == 0 { lukk_vakter(g) returner feilsvar("ugyldig filsti") }
+    la tilgang = 2147483648
+    la opning = 3
+    hvis skriv { tilgang = 1073741952 opning = 4 } // GENERIC_WRITE | FILE_READ_ATTRIBUTES
+    // OPEN_ALWAYS for skriv: trunkér først ETTER handtak-/confinement-kontroll.
+    la h = api.call("CreateFileW", [p, tilgang, 3, 0, opning, 1075839104, 0])
+    la kode = api.last_error()
+    api.free(p)
+    hvis h == 0 - 1 { lukk_vakter(g) returner winfeil("CreateFileW", kode) }
+    la st = info(h)
+    hvis st["status"] != "ok" eller st["kind"] != "file" eller
+       ikkje innanfor(tekst(g["root"]), sluttsti(h)) {
+        api.close(h)
+        lukk_vakter(g)
+        returner feilsvar("filhandtaket er ikkje ei vanleg fil innanfor root")
+    }
+    hvis mode == "write" {
+        la seek_ok = api.call("SetFilePointerEx", [h, 0, 0, 0])
+        la size_ok = 0
+        hvis seek_ok != 0 { size_ok = api.call("SetEndOfFile", [h]) }
+        kode = api.last_error()
+        hvis seek_ok == 0 eller size_ok == 0 {
+            api.close(h)
+            lukk_vakter(g)
+            returner winfeil("truncate", kode)
+        }
+    }
+    la nummer = _neste_fil
+    _neste_fil = _neste_fil + 1
+    la port = api.call("CreateIoCompletionPort", [h, 0, nummer, 1])
+    kode = api.last_error()
+    lukk_vakter(g)
+    hvis port == 0 { api.close(h) returner winfeil("CreateIoCompletionPort", kode) }
+    la id = "win-file-" + tekst(nummer)
+    la pos: heiltall = 0
+    hvis mode == "append" { pos = st["value"] }
+    _filer[id] = {"native": h, "port": port, "key": nummer, "skriv": skriv,
+        "pos": pos, "pending": 0, "overlaps": {}}
+    la r = svar("open", "", 0, "")
+    r["handle"] = id
+    returner r
+}
+
+funksjon op_svar(status: tekst, id: tekst, op, verdi: heiltall, feil: tekst) -> ordbok {
+    la r = svar(status, "", verdi, feil)
+    r["handle"] = op["file"]
+    r["operation_handle"] = id
+    r["operation_kind"] = op["kind"]
+    returner r
+}
+
+funksjon hent_op(req, h) {
+    la id = felt(req, "operation_handle")
+    hvis id == "" eller ikkje finnes_nøkkel(_operasjonar, id) { returner null }
+    la op = _operasjonar[id]
+    hvis op == null eller op["file"] != felt(req, "handle") { returner null }
+    returner op
+}
+
+funksjon start_io(req, skriv: boolsk, binær: boolsk) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis h["skriv"] != skriv { returner feilsvar("I/O-modus bryt filhandtaket") }
+    la offset = tal(req, "offset", 0 - 1)
+    hvis offset < 0 { returner feilsvar("ugyldig I/O-offset") }
+    la data = felt(req, "data")
+    la n = tal(req, "max", 65536)
+    hvis skriv { n = lengde(data) }
+    hvis n < 0 eller n > 67108863 { returner feilsvar("ugyldig I/O-bufferlengd") }
+    la buf = api.alloc(n + 1)
+    la ov = api.alloc(32)
+    hvis buf == 0 eller ov == 0 {
+        api.free(buf)
+        api.free(ov)
+        returner feilsvar("minne til OVERLAPPED-I/O manglar")
+    }
+    // Win64 OVERLAPPED: Internal@0, InternalHigh@8, Offset@16, OffsetHigh@20,
+    // hEvent@24. VirtualAlloc leverer nullstilte, private buffrar.
+    api.u32(ov + 16, offset & 4294967295)
+    api.u32(ov + 20, (offset >> 32) & 4294967295)
+    hvis skriv { api.put_text(buf, data) }
+    la kind = 5
+    la namn = "ReadFile"
+    hvis skriv { kind = 6 namn = "WriteFile" }
+    la id = "win-file-op-" + tekst(_neste_operasjon)
+    _neste_operasjon = _neste_operasjon + 1
+    la op = {"file": felt(req, "handle"), "buffer": buf, "overlapped": ov, "max": n,
+        "kind": kind, "binary": binær, "done": usann, "bytes": 0, "error_code": 0}
+    la ok = api.call(namn, [h["native"], buf, n, 0, ov])
+    la kode = api.last_error()
+    hvis ok == 0 og kode != 997 {
+        hvis ikkje skriv og kode == 38 {
+            // ReadFile har sjølv meldt EOF før noko asynkront arbeid vart starta.
+            op["done"] = sann
+        } ellers {
+            api.free(ov)
+            api.free(buf)
+            returner winfeil(namn, kode)
+        }
+    }
+    // TRUE er òg venta på IOCP: ingen SKIP_COMPLETION_PORT_ON_SUCCESS er sett.
+    // Hald begge buffrane til completion-pakken er henta og resultatet konsumert.
+    _operasjonar[id] = op
+    h["overlaps"][tekst(ov)] = id
+    h["pending"] = h["pending"] + 1
+    returner op_svar("ventende", id, op, 0, "")
+}
+
+funksjon konsumer(id: tekst, op, h) -> ordbok {
+    la kode: heiltall = op["error_code"]
+    la n: heiltall = op["bytes"]
+    la status = "klar"
+    la feil = ""
+    hvis kode == 995 { status = "kansellert" feil = "I/O kansellert (Win32 995)" }
+    ellers hvis kode != 0 { status = "feil" feil = "I/O feila (Win32 " + tekst(kode) + ")" }
+    hvis n < 0 eller n > op["max"] { status = "feil" feil = "ugyldig completion-byte-tal" n = 0 }
+    la r = op_svar(status, id, op, n, feil)
+    hvis status == "klar" og op["kind"] == 5 {
+        hvis op["binary"] {
+            la bytar = []
+            la i = 0
+            mens i < n { legg_til(bytar, builtin.raw_load8(op["buffer"] + i)) i = i + 1 }
+            r["data_bytes"] = builtin.bytes_from_list(bytar)
+        } ellers { r["data"] = api.bytes_to_text(op["buffer"], n) }
+    }
+    h["overlaps"][tekst(op["overlapped"])] = null
+    h["pending"] = h["pending"] - 1
+    api.free(op["overlapped"])
+    api.free(op["buffer"])
+    _operasjonar[id] = null
+    returner r
+}
+
+funksjon vent_io(req) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la op = hent_op(req, h)
+    hvis op == null { returner feilsvar("ukjent eller konsumert I/O-operasjon") }
+    la id = felt(req, "operation_handle")
+    hvis op["done"] { returner konsumer(id, op, h) }
+    la timeout = tal(req, "timeout_ms", 0)
+    hvis timeout < 0 eller timeout > 4294967295 { returner feilsvar("ugyldig ventetid") }
+    la deadline = api.call("GetTickCount64", []) + timeout
+    la p = api.alloc(24)
+    hvis p == 0 { returner feilsvar("minne til completion-venting manglar") }
+    la pakker = 0
+    // Ein pakke kan høyre til ei anna operasjon på same fil. Hugs det resultatet
+    // utan å stjele det frå eigaren; kvar operasjon blir konsumert nøyaktig éin gong.
+    mens pakker <= h["pending"] {
+        la att = timeout
+        hvis timeout != 4294967295 {
+            att = deadline - api.call("GetTickCount64", [])
+            hvis att < 0 { att = 0 }
+        }
+        builtin.raw_store64(p, 0)
+        builtin.raw_store64(p + 8, 0)
+        builtin.raw_store64(p + 16, 0)
+        la ok = api.call("GetQueuedCompletionStatus", [h["port"], p, p + 8, p + 16, att])
+        la kode = api.last_error()
+        la ov = builtin.raw_load64(p + 16)
+        hvis ov == 0 {
+            api.free(p)
+            hvis ok == 0 og kode == 258 { returner op_svar("ventende", id, op, 0, "") }
+            returner winfeil("GetQueuedCompletionStatus", kode)
+        }
+        la key = tekst(ov)
+        hvis builtin.raw_load64(p + 8) != h["key"] eller
+           ikkje finnes_nøkkel(h["overlaps"], key) eller h["overlaps"][key] == null {
+            api.free(p)
+            returner feilsvar("completion utan eigd OVERLAPPED/filnøkkel")
+        }
+        la ferdig_id = tekst(h["overlaps"][key])
+        la ferdig = _operasjonar[ferdig_id]
+        hvis ferdig == null eller ferdig["done"] {
+            api.free(p)
+            returner feilsvar("dobbel eller forelda completion")
+        }
+        ferdig["bytes"] = api.read32(p)
+        ferdig["error_code"] = 0
+        hvis ok == 0 {
+            hvis kode == 38 og ferdig["kind"] == 5 { ferdig["bytes"] = 0 }
+            ellers { ferdig["error_code"] = kode }
+        }
+        ferdig["done"] = sann
+        hvis ferdig_id == id {
+            api.free(p)
+            returner konsumer(id, op, h)
+        }
+        pakker = pakker + 1
+    }
+    api.free(p)
+    returner op_svar("ventende", id, op, 0, "")
+}
+
+funksjon kanseller(req) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la op = hent_op(req, h)
+    hvis op == null { returner feilsvar("ukjent eller konsumert I/O-operasjon") }
+    hvis ikkje op["done"] {
+        la ok = api.call("CancelIoEx", [h["native"], op["overlapped"]])
+        la kode = api.last_error()
+        // NOT_FOUND kan tyde at completion allereie ligg i køen.
+        hvis ok == 0 og kode != 1168 { returner winfeil("CancelIoEx", kode) }
+    }
+    // CancelIoEx ventar ikkje. Berre vent_io()/konsumer() frigjer kernel-eigd minne.
+    returner op_svar("ventende", felt(req, "operation_handle"), op, 0, "")
+}
+
+funksjon synkron(req, skriv: boolsk, binær: boolsk) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis h["pending"] != 0 { returner feilsvar("filhandtaket har uteståande I/O") }
+    la m = {"handle": felt(req, "handle"), "offset": h["pos"],
+        "data": felt(req, "data"), "max": tal(req, "max", 65536)}
+    la pending = start_io(m, skriv, binær)
+    hvis pending["status"] != "ventende" { returner pending }
+    la r = vent_io({"handle": felt(req, "handle"),
+        "operation_handle": pending["operation_handle"], "timeout_ms": 4294967295})
+    hvis r["status"] == "klar" {
+        h["pos"] = h["pos"] + r["value"]
+        r["status"] = "ok"
+    }
+    returner r
+}
+
+funksjon lukk(req) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis h["pending"] != 0 { returner feilsvar("filhandtaket har uteståande I/O") }
+    hvis h["native"] != 0 {
+        hvis ikkje api.close(h["native"]) { returner winfeil("CloseHandle(fil)", api.last_error()) }
+        h["native"] = 0
+    }
+    hvis h["port"] != 0 {
+        hvis ikkje api.close(h["port"]) { returner winfeil("CloseHandle(IOCP)", api.last_error()) }
+        h["port"] = 0
+    }
+    _filer[felt(req, "handle")] = null
+    la r = svar("closed", "", 0, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon handtak_operasjon(req) -> ordbok {
+    la h = hent_fil(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la op = felt(req, "operation")
+    la r = svar("ok", "", 0, "")
+    hvis op == "stat" { r = info(h["native"]) }
+    ellers hvis op == "seek" {
+        hvis h["pending"] != 0 { returner feilsvar("seek med uteståande I/O") }
+        la pos = tal(req, "position", 0 - 1)
+        hvis pos < 0 { returner feilsvar("ugyldig seek-posisjon") }
+        h["pos"] = pos
+        r["value"] = pos
+    } ellers hvis op == "ready" {
+        hvis h["pending"] == 0 { r["value"] = 1 }
+    } ellers hvis op == "flush" {
+        hvis ikkje h["skriv"] eller h["pending"] != 0 { returner feilsvar("flush krev ledig skrivehandtak") }
+        hvis api.call("FlushFileBuffers", [h["native"]]) == 0 {
+            returner winfeil("FlushFileBuffers", api.last_error())
+        }
+    } ellers { returner feilsvar("ukjend filhandtak-operasjon") }
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon stat_sti(req) -> ordbok {
+    la g = vakt(felt(req, "root"), felt(req, "relative"), usann, usann)
+    hvis g["status"] != "ok" { returner g }
+    la p = api.wide(tekst(g["path"]))
+    hvis p == 0 { lukk_vakter(g) returner feilsvar("ugyldig filsti") }
+    la h = api.call("CreateFileW", [p, 128, 3, 0, 3, 35651584, 0])
+    la kode = api.last_error()
+    api.free(p)
+    hvis h == 0 - 1 { lukk_vakter(g) returner winfeil("CreateFileW(stat)", kode) }
+    la r = info(h)
+    hvis ikkje innanfor(tekst(g["root"]), sluttsti(h)) { r = feilsvar("stat-sti forlèt root") }
+    api.close(h)
+    lukk_vakter(g)
+    returner r
+}
+
+funksjon katalog(req) -> ordbok {
+    la g = vakt(felt(req, "root"), felt(req, "relative"), sann, usann)
+    hvis g["status"] != "ok" { returner g }
+    la p = api.wide(sti_saman(tekst(g["path"]), "*"))
+    la data = api.alloc(592)
+    hvis p == 0 eller data == 0 {
+        api.free(p) api.free(data) lukk_vakter(g)
+        returner feilsvar("minne til kataloglisting manglar")
+    }
+    la h = api.call("FindFirstFileW", [p, data])
+    la kode = api.last_error()
+    api.free(p)
+    la entries = []
+    hvis h == 0 - 1 {
+        api.free(data) lukk_vakter(g)
+        hvis kode == 2 eller kode == 18 { returner {"status": "ok", "entries": entries} }
+        returner winfeil("FindFirstFileW", kode)
+    }
+    la vidare = sann
+    mens vidare {
+        la namn = api.utf8(data + 44)
+        hvis namn != "" og namn != "." og namn != ".." {
+            la attrs = api.read32(data)
+            la kind = "f"
+            hvis (attrs & 16) != 0 { kind = "d" }
+            hvis (attrs & 1024) != 0 { kind = "l" }
+            legg_til(entries, {"name": namn, "kind": kind})
+        }
+        hvis api.call("FindNextFileW", [h, data]) == 0 {
+            kode = api.last_error()
+            vidare = usann
+        }
+    }
+    api.call("FindClose", [h])
+    api.free(data)
+    lukk_vakter(g)
+    hvis kode != 18 { returner winfeil("FindNextFileW", kode) }
+    returner {"status": "ok", "entries": entries}
+}
+
+funksjon list_sti(req) -> ordbok {
+    la d = katalog(req)
+    hvis d["status"] != "ok" { returner d }
+    la delar: liste_tekst = []
+    for e i d["entries"] {
+        la linje = tekst(e["name"])
+        hvis felt(req, "operation") == "list_typed" { linje = tekst(e["kind"]) + "\t" + linje }
+        legg_til(delar, linje)
+    }
+    la data = ""
+    hvis lengde(delar) > 0 { data = builtin.join(delar, "\n") + "\n" }
+    returner svar("ok", data, lengde(delar), "")
+}
+
+funksjon gå(root: tekst, rel: tekst, suffixes: tekst, exclude: tekst, ut: liste_tekst, djup: heiltall) -> tekst {
+    hvis djup > 64 { returner "katalogdjupn over 64" }
+    la d = katalog({"root": root, "relative": rel})
+    hvis d["status"] != "ok" { returner tekst(d["error"]) }
+    for e i d["entries"] {
+        la namn = tekst(e["name"])
+        la barn = namn
+        hvis rel != "" { barn = rel + "/" + namn }
+        la hopp = usann
+        for prefiks i builtin.split(exclude, ",") {
+            la p = builtin.trim(tekst(prefiks))
+            hvis p != "" og builtin.starts_with(barn, p) { hopp = sann }
+        }
+        hvis ikkje hopp {
+            hvis e["kind"] == "d" {
+                la feil = gå(root, barn, suffixes, exclude, ut, djup + 1)
+                hvis feil != "" { returner feil }
+            } ellers hvis e["kind"] == "f" {
+                la ta = builtin.trim(suffixes) == ""
+                for ending i builtin.split(suffixes, ",") {
+                    la s = builtin.trim(tekst(ending))
+                    hvis s != "" og builtin.ends_with(namn, s) { ta = sann }
+                }
+                hvis ta { legg_til(ut, barn) }
+            }
+        }
+    }
+    returner ""
+}
+
+funksjon walk(req) -> ordbok {
+    la rel = felt(req, "relative")
+    hvis ikkje trygg_relativ(rel) { returner feilsvar("invalid directory path") }
+    la ut: liste_tekst = []
+    la feil = gå(felt(req, "root"), normal_rel(rel), felt(req, "suffixes"),
+        felt(req, "exclude_prefixes"), ut, 0)
+    hvis feil != "" { returner feilsvar(feil) }
+    la data = ""
+    hvis lengde(ut) > 0 { data = builtin.join(ut, "\n") + "\n" }
+    returner svar("ok", data, lengde(ut), "")
+}
+
+funksjon sti_skriv(req) -> ordbok {
+    la op = felt(req, "operation")
+    la rel = felt(req, "relative")
+    hvis op == "file_replace" { rel = felt(req, "source") }
+    hvis rel == "" eller ikkje trygg_relativ(rel) { returner feilsvar("invalid path") }
+    la g = vakt(felt(req, "root"), rel, op == "mkdir_p", op == "mkdir_p")
+    hvis g["status"] != "ok" { returner g }
+    hvis op == "mkdir_p" { lukk_vakter(g) returner svar("ok", "", 1, "") }
+    la p = api.wide(tekst(g["path"]))
+    hvis p == 0 { lukk_vakter(g) returner feilsvar("ugyldig filsti") }
+    la ok = 0
+    la kode = 0
+    la status = "deleted"
+    la verdi = 0
+    hvis op == "delete" { ok = api.call("DeleteFileW", [p]) kode = api.last_error() }
+    ellers hvis op == "rmdir" { ok = api.call("RemoveDirectoryW", [p]) kode = api.last_error() }
+    ellers hvis op == "chmod" {
+        la mode = tal(req, "mode", 0 - 1)
+        hvis mode >= 0 og mode <= 511 {
+            la attrs = api.call("GetFileAttributesW", [p]) & 4294967295
+            kode = api.last_error()
+            hvis attrs != 4294967295 og (attrs & 1024) == 0 {
+                // Windows har berre READONLY-projeksjonen av POSIX-modus.
+                hvis (mode & 146) == 0 { attrs = attrs | 1 }
+                ellers { attrs = attrs & 4294967294 }
+                ok = api.call("SetFileAttributesW", [p, attrs])
+                kode = api.last_error()
+            }
+        }
+        status = "ok"
+        verdi = mode
+    } ellers hvis op == "file_replace" {
+        la mål = felt(req, "target")
+        hvis mål != "" og trygg_relativ(mål) {
+            la dest = vakt(felt(req, "root"), mål, usann, usann)
+            hvis dest["status"] == "ok" {
+                la q = api.wide(tekst(dest["path"]))
+                hvis q != 0 { ok = api.call("MoveFileExW", [p, q, 9]) kode = api.last_error() }
+                api.free(q)
+                lukk_vakter(dest)
+            }
+        }
+        status = "replaced"
+        verdi = 1
+    }
+    api.free(p)
+    lukk_vakter(g)
+    hvis ok == 0 { returner winfeil(op, kode) }
+    returner svar(status, "", verdi, "")
+}
+
+funksjon operation(req, skriv: boolsk) -> ordbok {
+    hvis ikkje er_windows() { returner feilsvar("Windows-filsystem krev Windows") }
+    hvis felt(req, "abi") != "norscode-native-filesystem-v1" { returner feilsvar("invalid filesystem ABI") }
+    la op = felt(req, "operation")
+    hvis op == "open" { returner opne(req, skriv) }
+    hvis op == "close" { returner lukk(req) }
+    hvis op == "seek" eller op == "ready" eller (op == "stat" og felt(req, "handle") != "") {
+        returner handtak_operasjon(req)
+    }
+    hvis op == "wait_async" { returner vent_io(req) }
+    hvis op == "cancel_async" { returner kanseller(req) }
+    hvis skriv {
+        hvis op == "write" { returner synkron(req, sann, usann) }
+        hvis op == "write_async" { returner start_io(req, sann, usann) }
+        hvis op == "flush" { returner handtak_operasjon(req) }
+        hvis op == "delete" eller op == "rmdir" eller op == "mkdir_p" eller
+           op == "file_replace" eller op == "chmod" { returner sti_skriv(req) }
+        returner feilsvar("unsupported Windows disk.write operation: " + op)
+    }
+    hvis op == "read" eller op == "read_binary" { returner synkron(req, usann, op == "read_binary") }
+    hvis op == "read_async" { returner start_io(req, usann, usann) }
+    hvis op == "stat" eller op == "path_stat" { returner stat_sti(req) }
+    hvis op == "list" eller op == "list_typed" { returner list_sti(req) }
+    hvis op == "walk_files" { returner walk(req) }
+    returner feilsvar("unsupported Windows disk.read operation: " + op)
+}
+
+funksjon read_operation(req) -> ordbok { returner operation(req, usann) }
+funksjon write_operation(req) -> ordbok { returner operation(req, sann) }

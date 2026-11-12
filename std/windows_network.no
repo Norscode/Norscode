@@ -1,0 +1,720 @@
+// Winsock og overlapped socket-I/O for den CRT-frie Windows-runtimen.
+// Alle kall går gjennom den statiske Win64-allowlista i windows_abi.
+// IOCP-resultat kjem frå GetQueuedCompletionStatus; OVERLAPPED/bufferar blir
+// haldne i live til operasjonen er drenert, også etter CancelIoEx.
+bruk std.windows_abi som win
+bruk std.windows_schannel som schannel
+
+la _started = usann
+la _sockets = {}
+la _next_socket: heiltall = 1
+la _completion_port: heiltall = 0
+la _completion_buffer: heiltall = 0
+la _operations = {}
+la _operation_pointers = {}
+la _completed = {}
+la _next_operation: heiltall = 1
+
+funksjon _text(req, field: tekst, fallback: tekst) -> tekst {
+    hvis finnes_nøkkel(req, field) og req[field] != null { returner tekst(req[field]) }
+    returner fallback
+}
+
+funksjon _number(req, field: tekst, fallback: heiltall) -> heiltall {
+    hvis ikkje finnes_nøkkel(req, field) { returner fallback }
+    prøv { returner heiltall_fra_tekst(tekst(req[field])) } fang (e) { returner fallback }
+    returner fallback
+}
+
+funksjon _signed32(value: heiltall) -> heiltall {
+    la n = value & 4294967295
+    hvis n >= 2147483648 { returner n - 4294967296 }
+    returner n
+}
+
+funksjon _result(status: tekst, handle: tekst, data: tekst, value: heiltall,
+                 port: heiltall, error: tekst, backend: tekst) {
+    returner {"abi": "norscode-native-network-v1", "status": status,
+        "handle": handle, "data": data, "value": value, "port": port,
+        "error": error, "event_backend": backend, "operation_handle": "",
+        "operation_kind": 0, "peer_host": "", "peer_port": 0,
+        "tls_version": "", "peer_verified": usann, "peer_cert_present": usann}
+}
+
+funksjon _error(handle: tekst, message: tekst) {
+    returner _result("feil", handle, "", 0 - 1, 0, message, "wsapoll")
+}
+
+funksjon _start() -> boolsk {
+    hvis _started { returner sann }
+    la data = win.alloc(512)
+    hvis data == 0 { returner usann }
+    la rc = win.call("WSAStartup", [514, data]) & 4294967295
+    win.free(data)
+    hvis rc != 0 { returner usann }
+    _started = sann
+    returner sann
+}
+
+// ADDRINFOA er 48 byte på Win64. Vi ber eksplisitt om IPv4 og kopierer
+// sockaddr før freeaddrinfo; ingen peikar frå resolveren slepp ut av funksjonen.
+funksjon _address(host: tekst, port: heiltall, kind: heiltall) -> heiltall {
+    hvis host == "" eller lengde(host) > 253 eller port < 0 eller port > 65535 eller
+       builtin.contains(host, "\u0000") { returner 0 }
+    la p = win.alloc(512)
+    hvis p == 0 { returner 0 }
+    win.put_text(p, host)
+    win.put_text(p + 256, tekst(port))
+    win.u32(p + 292, 2) // hints.ai_family = AF_INET
+    win.u32(p + 296, kind)
+    la rc = _signed32(win.call("getaddrinfo", [p, p + 256, p + 288, p + 352]))
+    la ai = builtin.raw_load64(p + 352)
+    hvis rc != 0 eller ai == 0 { win.free(p) returner 0 }
+    la valid = builtin.raw_load64(ai + 16) >= 16 og win.read32(ai + 4) == 2
+    hvis valid {
+        la source = builtin.raw_load64(ai + 32)
+        hvis source == 0 { valid = usann } ellers {
+            la i: heiltall = 0
+            mens i < 16 { builtin.raw_store8(p + 384 + i, builtin.raw_load8(source + i)) i = i + 1 }
+        }
+    }
+    win.call("freeaddrinfo", [ai])
+    hvis ikkje valid { win.free(p) returner 0 }
+    returner p
+}
+
+funksjon _socket(kind: heiltall) -> heiltall {
+    hvis ikkje _start() { returner 0 - 1 }
+    // WSA_FLAG_OVERLAPPED er eksplisitt; også vanlege sockets kan pollast.
+    la fd = win.call("WSASocketW", [2, kind, 0, 0, 0, 1])
+    hvis fd == 0 - 1 { returner fd }
+    la p = win.alloc(16)
+    hvis p == 0 { win.call("closesocket", [fd]) returner 0 - 1 }
+    win.u32(p, 1)
+    la rc = _signed32(win.call("ioctlsocket", [fd, 2147772030, p])) // FIONBIO
+    win.free(p)
+    hvis rc != 0 { win.call("closesocket", [fd]) returner 0 - 1 }
+    returner fd
+}
+
+funksjon _register(fd: heiltall, kind: tekst, backend: tekst) -> tekst {
+    la handle = "win-socket:" + tekst(_next_socket) + ":1"
+    _next_socket = _next_socket + 1
+    _sockets[handle] = {"fd": fd, "kind": kind, "backend": backend,
+        "pending": 0, "buffer": 0, "connecting": usann, "tls": null}
+    returner handle
+}
+
+funksjon _buffer(slot) -> heiltall {
+    hvis slot["buffer"] == 0 { slot["buffer"] = win.alloc(65664) }
+    returner slot["buffer"]
+}
+
+funksjon _local_port(fd: heiltall) -> heiltall {
+    la p = win.alloc(32)
+    hvis p == 0 { returner 0 }
+    win.u32(p + 24, 16)
+    la rc = _signed32(win.call("getsockname", [fd, p, p + 24]))
+    la port: heiltall = 0
+    hvis rc == 0 { port = (builtin.raw_load8(p + 2) << 8) | builtin.raw_load8(p + 3) }
+    win.free(p)
+    returner port
+}
+
+funksjon _attach(fd: heiltall) -> boolsk {
+    hvis _completion_port == 0 {
+        _completion_port = win.call("CreateIoCompletionPort", [0 - 1, 0, 0, 1])
+    }
+    hvis _completion_port == 0 { returner usann }
+    returner win.call("CreateIoCompletionPort", [fd, _completion_port, 0, 0]) == _completion_port
+}
+
+funksjon _listen(req, iocp: boolsk, udp: boolsk) {
+    la port = _number(req, "port", 0)
+    la kind: heiltall = 1
+    hvis udp { kind = 2 }
+    la address = _address(_text(req, "host", "127.0.0.1"), port, kind)
+    hvis address == 0 { returner _error("", "invalid listen address") }
+    la fd = _socket(kind)
+    hvis fd == 0 - 1 { win.free(address) returner _error("", "WSASocketW failed") }
+    la rc = _signed32(win.call("bind", [fd, address + 384, 16]))
+    la error = win.last_error()
+    win.free(address)
+    hvis rc != 0 { win.call("closesocket", [fd]) returner _error("", "bind failed: " + tekst(error)) }
+    hvis ikkje udp {
+        la backlog = _number(req, "backlog", 128)
+        hvis backlog < 1 eller backlog > 65535 { backlog = 128 }
+        rc = _signed32(win.call("listen", [fd, backlog]))
+        error = win.last_error()
+        hvis rc != 0 { win.call("closesocket", [fd]) returner _error("", "listen failed: " + tekst(error)) }
+    }
+    la backend = "wsapoll"
+    hvis iocp {
+        backend = "iocp"
+        hvis ikkje _attach(fd) { win.call("closesocket", [fd]) returner _error("", "CreateIoCompletionPort failed") }
+    }
+    la name = "listen"
+    hvis udp { name = "udp" }
+    la handle = _register(fd, name, backend)
+    returner _result("listening", handle, "", 0, _local_port(fd), "", backend)
+}
+
+funksjon _connect(req, udp: boolsk) {
+    la port = _number(req, "port", 0)
+    hvis port < 1 eller port > 65535 { returner _error("", "invalid connect port") }
+    la kind: heiltall = 1
+    hvis udp { kind = 2 }
+    la address = _address(_text(req, "host", ""), port, kind)
+    hvis address == 0 { returner _error("", "invalid connect address") }
+    la fd = _socket(kind)
+    hvis fd == 0 - 1 { win.free(address) returner _error("", "WSASocketW failed") }
+    la rc = _signed32(win.call("connect", [fd, address + 384, 16]))
+    la error = win.last_error()
+    win.free(address)
+    hvis rc != 0 og error != 10035 og error != 10036 og error != 10037 {
+        win.call("closesocket", [fd])
+        returner _error("", "connect failed: " + tekst(error))
+    }
+    la name = "tcp"
+    hvis udp { name = "udp" }
+    la handle = _register(fd, name, "wsapoll")
+    la status = "connected"
+    hvis rc != 0 { status = "connecting" _sockets[handle]["connecting"] = sann }
+    returner _result(status, handle, "", 0, _local_port(fd), "", "wsapoll")
+}
+
+funksjon _poll(req, handle: tekst, slot) {
+    hvis (_number(req, "events", 1) & 1) != 0 og slot["tls"] != null {
+        hvis schannel.has_buffered_data(slot["tls"]) {
+            returner _result("klar", handle, "", 1, 0, "", slot["backend"])
+        }
+    }
+    la p = _buffer(slot)
+    hvis p == 0 { returner _error(handle, "poll allocation failed") }
+    la events = _number(req, "events", 1)
+    la timeout = _number(req, "timeout_ms", 0)
+    hvis timeout < 0 eller timeout > 600000 { returner _error(handle, "invalid poll timeout") }
+    la mask: heiltall = 0
+    hvis (events & 1) != 0 { mask = mask | 256 }
+    hvis (events & 2) != 0 { mask = mask | 16 }
+    builtin.raw_store64(p, slot["fd"])
+    win.u32(p + 8, mask) // events u16 @8, revents u16 @10, sizeof WSAPOLLFD=16
+    la rc = _signed32(win.call("WSAPoll", [p, 1, timeout]))
+    hvis rc < 0 { returner _error(handle, "WSAPoll failed: " + tekst(win.last_error())) }
+    la revents = builtin.raw_load8(p + 10) | (builtin.raw_load8(p + 11) << 8)
+    hvis (revents & 4) != 0 { returner _error(handle, "WSAPoll invalid socket") }
+    hvis slot["connecting"] og revents != 0 {
+        win.u32(p + 32, 0)
+        win.u32(p + 36, 4)
+        la gr = _signed32(win.call("getsockopt", [slot["fd"], 65535, 4103, p + 32, p + 36]))
+        hvis gr != 0 eller win.read32(p + 32) != 0 {
+            returner _error(handle, "connect completion failed: " + tekst(win.read32(p + 32)))
+        }
+        hvis (revents & 16) != 0 { slot["connecting"] = usann }
+    }
+    la ready: heiltall = 0
+    hvis (revents & 771) != 0 { ready = ready | 1 }
+    hvis (revents & 16) != 0 { ready = ready | 2 }
+    hvis ready == 0 { returner _result("ventende", handle, "", 0, 0, "", slot["backend"]) }
+    returner _result("klar", handle, "", ready, 0, "", slot["backend"])
+}
+
+funksjon _poll_many(req) {
+    la handles = []
+    hvis finnes_nøkkel(req, "handles") og builtin.type(req["handles"]) == "liste" { handles = req["handles"] }
+    hvis lengde(handles) > 1024 { returner _error("", "too many poll handles") }
+    la timeout = _number(req, "timeout_ms", 0)
+    hvis timeout < 0 eller timeout > 600000 { returner _error("", "invalid poll timeout") }
+    la owned = []
+    la ready = []
+    la i: heiltall = 0
+    mens i < lengde(handles) {
+        la handle = tekst(handles[i])
+        hvis finnes_nøkkel(_sockets, handle) {
+            legg_til(owned, handle)
+            la tls = _sockets[handle]["tls"]
+            hvis tls != null og schannel.has_buffered_data(tls) { legg_til(ready, handle) }
+        }
+        i = i + 1
+    }
+    hvis lengde(ready) > 0 { timeout = 0 }
+    hvis lengde(owned) > 0 {
+        la p = win.alloc(lengde(owned) * 16)
+        hvis p == 0 { returner _error("", "WSAPoll allocation failed") }
+        i = 0
+        mens i < lengde(owned) {
+            builtin.raw_store64(p + i * 16, _sockets[owned[i]]["fd"])
+            win.u32(p + i * 16 + 8, 256)
+            i = i + 1
+        }
+        la rc = _signed32(win.call("WSAPoll", [p, lengde(owned), timeout]))
+        la error = win.last_error()
+        hvis rc < 0 { win.free(p) returner _error("", "WSAPoll failed: " + tekst(error)) }
+        i = 0
+        mens i < lengde(owned) {
+            la events = builtin.raw_load8(p + i * 16 + 10) | (builtin.raw_load8(p + i * 16 + 11) << 8)
+            hvis (events & 775) != 0 {
+                la duplicate = usann
+                la j: heiltall = 0
+                mens j < lengde(ready) { hvis ready[j] == owned[i] { duplicate = sann } j = j + 1 }
+                hvis ikkje duplicate { legg_til(ready, owned[i]) }
+            }
+            i = i + 1
+        }
+        win.free(p)
+    }
+    la status = "ventende"
+    hvis lengde(ready) > 0 { status = "klar" }
+    la result = _result(status, "", "", lengde(ready), 0, "", "wsapoll")
+    result["klare"] = ready
+    returner result
+}
+
+funksjon _tls_result(handle: tekst, slot, tls_result) {
+    la result = _result(tls_result["status"], handle, tls_result["data"], tls_result["value"],
+        0, tls_result["error"], slot["backend"])
+    result["tls_version"] = tls_result["tls_version"]
+    result["peer_verified"] = tls_result["peer_verified"]
+    result["peer_cert_present"] = tls_result["peer_cert_present"]
+    returner result
+}
+
+funksjon _tls_connect(req) {
+    la error = schannel.request_error(req)
+    hvis error != "" { returner _error("", error) }
+    la result = _connect(req, usann)
+    hvis result["status"] == "feil" { returner result }
+    la handle = result["handle"]
+    la slot = _sockets[handle]
+    la tls = schannel.open(slot["fd"], req)
+    hvis tls["error"] != "" {
+        win.call("closesocket", [slot["fd"]])
+        fjern_nokkel(_sockets, handle)
+        returner _error("", tls["error"])
+    }
+    slot["kind"] = "tls"
+    slot["tls"] = tls
+    returner result
+}
+
+funksjon _tls_handshake(handle: tekst, slot) {
+    hvis slot["tls"] == null { returner _error(handle, "socket has no SChannel context") }
+    hvis slot["connecting"] {
+        la ready = _poll({"events": 2, "timeout_ms": 30000}, handle, slot)
+        hvis ready["status"] == "feil" { returner ready }
+        hvis slot["connecting"] { returner _error(handle, "TLS TCP connect timed out") }
+    }
+    returner _tls_result(handle, slot, schannel.handshake(slot["tls"]))
+}
+
+funksjon _tls_transfer(req, handle: tekst, slot, read: boolsk, hex: boolsk) {
+    hvis read {
+        la result = _tls_result(handle, slot, schannel.read(slot["tls"], _number(req, "max", 65536)))
+        hvis hex og result["status"] == "ok" {
+            la parts: liste_tekst = []
+            la data = result["data"]
+            la i: heiltall = 0
+            mens i < lengde(data) {
+                la b = builtin.char_code(data[i]) & 255
+                legg_til(parts, _hex_digit(b >> 4) + _hex_digit(b & 15))
+                i = i + 1
+            }
+            result["data"] = builtin.join(parts, "")
+        }
+        returner result
+    }
+    la data = _text(req, "data", "")
+    hvis hex {
+        hvis lengde(data) % 2 != 0 { returner _error(handle, "invalid TLS hex payload") }
+        la parts: liste_tekst = []
+        la i: heiltall = 0
+        mens i < lengde(data) {
+            la high = _hex_value(data[i])
+            la low = _hex_value(data[i + 1])
+            hvis high < 0 eller low < 0 { returner _error(handle, "invalid TLS hex payload") }
+            legg_til(parts, builtin.chr((high << 4) | low))
+            i = i + 2
+        }
+        data = builtin.join(parts, "")
+    }
+    returner _tls_result(handle, slot, schannel.write(slot["tls"], data))
+}
+
+funksjon _hex_digit(n: heiltall) -> tekst {
+    hvis n < 10 { returner builtin.chr(48 + n) }
+    returner builtin.chr(87 + n)
+}
+
+funksjon _hex_value(c: tekst) -> heiltall {
+    la n = builtin.char_code(c)
+    hvis n >= 48 og n <= 57 { returner n - 48 }
+    hvis n >= 65 og n <= 70 { returner n - 55 }
+    hvis n >= 97 og n <= 102 { returner n - 87 }
+    returner 0 - 1
+}
+
+funksjon _read(req, handle: tekst, slot, hex: boolsk, datagram: boolsk) {
+    la max = _number(req, "max", 65536)
+    hvis max < 1 eller max > 1048576 { returner _error(handle, "invalid read size") }
+    hvis max > 65536 { max = 65536 }
+    la p = _buffer(slot)
+    hvis p == 0 { returner _error(handle, "read allocation failed") }
+    la rc: heiltall = 0
+    hvis datagram {
+        win.u32(p + 65560, 16)
+        rc = _signed32(win.call("recvfrom", [slot["fd"], p, max, 0, p + 65536, p + 65560]))
+    } ellers { rc = _signed32(win.call("recv", [slot["fd"], p, max, 0])) }
+    hvis rc < 0 {
+        la error = win.last_error()
+        hvis error == 10035 { returner _result("ventende", handle, "", 0, 0, "", slot["backend"]) }
+        returner _error(handle, "recv failed: " + tekst(error))
+    }
+    hvis rc == 0 og ikkje datagram { returner _result("eof", handle, "", 0, 0, "", slot["backend"]) }
+    la data = ""
+    hvis hex {
+        la parts: liste_tekst = []
+        la i: heiltall = 0
+        mens i < rc {
+            la b = builtin.raw_load8(p + i)
+            legg_til(parts, _hex_digit(b >> 4) + _hex_digit(b & 15))
+            i = i + 1
+        }
+        data = builtin.join(parts, "")
+    } ellers { data = win.bytes_to_text(p, rc) }
+    la result = _result("ok", handle, data, rc, 0, "", slot["backend"])
+    hvis datagram {
+        result["peer_host"] = tekst(builtin.raw_load8(p + 65540)) + "." +
+            tekst(builtin.raw_load8(p + 65541)) + "." + tekst(builtin.raw_load8(p + 65542)) + "." +
+            tekst(builtin.raw_load8(p + 65543))
+        result["peer_port"] = (builtin.raw_load8(p + 65538) << 8) | builtin.raw_load8(p + 65539)
+    }
+    returner result
+}
+
+funksjon _write(req, handle: tekst, slot, hex: boolsk, datagram: boolsk) {
+    la data = _text(req, "data", "")
+    la n = lengde(data)
+    la p = _buffer(slot)
+    hvis p == 0 { returner _error(handle, "write allocation failed") }
+    hvis hex {
+        hvis n % 2 != 0 { returner _error(handle, "invalid hex payload") }
+        la i: heiltall = 0
+        mens i < n {
+            hvis _hex_value(data[i]) < 0 { returner _error(handle, "invalid hex payload") }
+            i = i + 1
+        }
+        n = n / 2
+        hvis n > 65536 { n = 65536 }
+        i = 0
+        mens i < n {
+            builtin.raw_store8(p + i, (_hex_value(data[i * 2]) << 4) | _hex_value(data[i * 2 + 1]))
+            i = i + 1
+        }
+    } ellers {
+        hvis n > 65536 { n = 65536 }
+        win.put_text(p, builtin.slice(data, 0, n))
+    }
+    la rc: heiltall = 0
+    hvis datagram {
+        la address = _address(_text(req, "host", _text(req, "peer_host", "")),
+            _number(req, "port", _number(req, "peer_port", 0)), 2)
+        hvis address == 0 { returner _error(handle, "invalid datagram address") }
+        rc = _signed32(win.call("sendto", [slot["fd"], p, n, 0, address + 384, 16]))
+        la error = win.last_error()
+        win.free(address)
+        hvis rc < 0 {
+            hvis error == 10035 { returner _result("ventende", handle, "", 0, 0, "", slot["backend"]) }
+            returner _error(handle, "sendto failed: " + tekst(error))
+        }
+    } ellers { rc = _signed32(win.call("send", [slot["fd"], p, n, 0])) }
+    hvis rc < 0 {
+        la error = win.last_error()
+        hvis error == 10035 { returner _result("ventende", handle, "", 0, 0, "", slot["backend"]) }
+        returner _error(handle, "send failed: " + tekst(error))
+    }
+    returner _result("ok", handle, "", rc, 0, "", slot["backend"])
+}
+
+// OVERLAPPED @0 (32 byte), bytes @32, flags @36, WSABUF @40,
+// payload @64. Buffera er VirtualAlloc-minne, aldri adresser til GC-objekt.
+funksjon _new_operation(handle: tekst, kind: heiltall, capacity: heiltall) {
+    hvis ikkje finnes_nøkkel(_sockets, handle) { returner null }
+    la slot = _sockets[handle]
+    hvis slot["pending"] >= 64 { returner null }
+    la p = win.alloc(capacity + 256)
+    hvis p == 0 { returner null }
+    la key = "win-iocp:" + tekst(_next_operation) + ":1"
+    _next_operation = _next_operation + 1
+    la op = {"key": key, "handle": handle, "kind": kind, "pointer": p,
+        "capacity": capacity, "address": 0, "listener": "", "submitted_fd": slot["fd"]}
+    _operations[key] = op
+    _operation_pointers[tekst(p)] = key
+    slot["pending"] = slot["pending"] + 1
+    returner op
+}
+
+funksjon _release_operation(key: tekst) -> heiltall {
+    hvis ikkje finnes_nøkkel(_operations, key) { returner 0 }
+    la op = _operations[key]
+    la handle = op["handle"]
+    hvis finnes_nøkkel(_sockets, handle) { _sockets[handle]["pending"] = _sockets[handle]["pending"] - 1 }
+    la listener = op["listener"]
+    hvis listener != "" og finnes_nøkkel(_sockets, listener) {
+        _sockets[listener]["pending"] = _sockets[listener]["pending"] - 1
+    }
+    fjern_nokkel(_operation_pointers, tekst(op["pointer"]))
+    win.free(op["pointer"])
+    win.free(op["address"])
+    fjern_nokkel(_operations, key)
+    hvis finnes_nøkkel(_completed, key) { fjern_nokkel(_completed, key) }
+    returner 0
+}
+
+funksjon _pending(op) {
+    la result = _result("ventende", op["handle"], "", 0, 0, "", "iocp")
+    result["operation_handle"] = op["key"]
+    result["operation_kind"] = op["kind"]
+    returner result
+}
+
+funksjon _iocp_accept(handle: tekst, listener) {
+    hvis listener["backend"] != "iocp" eller listener["kind"] != "listen" {
+        returner _error(handle, "iocp_accept requires an IOCP listener")
+    }
+    la fd = _socket(1)
+    hvis fd == 0 - 1 { returner _error(handle, "accept socket allocation failed") }
+    hvis ikkje _attach(fd) { win.call("closesocket", [fd]) returner _error(handle, "accept IOCP association failed") }
+    la accepted = _register(fd, "tcp", "iocp")
+    la op = _new_operation(accepted, 1, 64)
+    hvis op == null { win.call("closesocket", [fd]) fjern_nokkel(_sockets, accepted) returner _error(handle, "accept operation allocation failed") }
+    op["listener"] = handle
+    op["submitted_fd"] = listener["fd"]
+    listener["pending"] = listener["pending"] + 1
+    la p = op["pointer"]
+    la rc = win.call("AcceptEx", [listener["fd"], fd, p + 64, 0, 32, 32, p + 32, p])
+    la error = win.last_error()
+    hvis rc == 0 og error != 997 {
+        _release_operation(op["key"])
+        win.call("closesocket", [fd])
+        fjern_nokkel(_sockets, accepted)
+        returner _error(handle, "AcceptEx failed: " + tekst(error))
+    }
+    returner _pending(op)
+}
+
+funksjon _iocp_connect(req) {
+    la port = _number(req, "port", 0)
+    hvis port < 1 eller port > 65535 { returner _error("", "invalid connect port") }
+    la address = _address(_text(req, "host", ""), port, 1)
+    hvis address == 0 { returner _error("", "invalid connect address") }
+    la fd = _socket(1)
+    hvis fd == 0 - 1 { win.free(address) returner _error("", "connect socket allocation failed") }
+    // ConnectEx krev ein lokalt bunden socket. Eit nullstilt sockaddr med
+    // AF_INET er INADDR_ANY:0; adressa lever i same blokk som fjernadressa.
+    win.u32(address + 416, 2)
+    la br = _signed32(win.call("bind", [fd, address + 416, 16]))
+    hvis br != 0 eller ikkje _attach(fd) {
+        win.call("closesocket", [fd]) win.free(address)
+        returner _error("", "ConnectEx bind/IOCP association failed")
+    }
+    la handle = _register(fd, "tcp", "iocp")
+    la op = _new_operation(handle, 2, 0)
+    hvis op == null {
+        win.call("closesocket", [fd]) win.free(address) fjern_nokkel(_sockets, handle)
+        returner _error("", "connect operation allocation failed")
+    }
+    op["address"] = address
+    la p = op["pointer"]
+    la rc = win.call("ConnectEx", [fd, address + 384, 16, 0, 0, p + 32, p])
+    la error = win.last_error()
+    hvis rc == 0 og error != 997 {
+        _release_operation(op["key"])
+        win.call("closesocket", [fd]) fjern_nokkel(_sockets, handle)
+        returner _error("", "ConnectEx failed: " + tekst(error))
+    }
+    returner _pending(op)
+}
+
+funksjon _iocp_transfer(req, handle: tekst, slot, write: boolsk) {
+    hvis slot["backend"] != "iocp" eller slot["kind"] != "tcp" {
+        returner _error(handle, "overlapped transfer requires an IOCP stream socket")
+    }
+    la data = _text(req, "data", "")
+    la capacity = _number(req, "max", 65536)
+    la kind: heiltall = 3
+    hvis write { capacity = lengde(data) kind = 4 }
+    hvis capacity < 1 eller capacity > 1048576 { returner _error(handle, "invalid overlapped transfer size") }
+    la op = _new_operation(handle, kind, capacity)
+    hvis op == null { returner _error(handle, "overlapped allocation failed") }
+    la p = op["pointer"]
+    win.u32(p + 40, capacity)
+    builtin.raw_store64(p + 48, p + 64)
+    la rc: heiltall = 0
+    hvis write {
+        win.put_text(p + 64, data)
+        rc = _signed32(win.call("WSASend", [slot["fd"], p + 40, 1, p + 32, 0, p, 0]))
+    } ellers {
+        rc = _signed32(win.call("WSARecv", [slot["fd"], p + 40, 1, p + 32, p + 36, p, 0]))
+    }
+    la error = win.last_error()
+    hvis rc != 0 og error != 997 {
+        _release_operation(op["key"])
+        returner _error(handle, "overlapped transfer failed: " + tekst(error))
+    }
+    returner _pending(op)
+}
+
+funksjon _take_completion(key: tekst) {
+    la result = _completed[key]
+    _release_operation(key)
+    returner result
+}
+
+funksjon _iocp_wait(req) {
+    la wanted = _text(req, "operation_handle", "")
+    hvis wanted != "" og ikkje finnes_nøkkel(_operations, wanted) { returner _error("", "unknown or consumed IOCP operation") }
+    hvis wanted != "" og finnes_nøkkel(_completed, wanted) { returner _take_completion(wanted) }
+    hvis wanted == "" {
+        la ready = nøkler(_completed)
+        hvis lengde(ready) > 0 { returner _take_completion(tekst(ready[0])) }
+    }
+    hvis _completion_port == 0 { returner _error("", "IOCP is not initialized") }
+    la timeout = _number(req, "timeout_ms", 0)
+    hvis timeout < 0 eller timeout > 600000 { returner _error("", "invalid IOCP timeout") }
+    hvis _completion_buffer == 0 { _completion_buffer = win.alloc(32) }
+    la b = _completion_buffer
+    hvis b == 0 { returner _error("", "IOCP wait allocation failed") }
+    builtin.raw_store64(b + 16, 0)
+    la ok = win.call("GetQueuedCompletionStatus", [_completion_port, b, b + 8, b + 16, timeout])
+    la error = win.last_error()
+    la p = builtin.raw_load64(b + 16)
+    hvis p == 0 {
+        hvis ok == 0 og error != 258 { returner _error("", "GetQueuedCompletionStatus failed: " + tekst(error)) }
+        returner _result("ventende", "", "", 0, 0, "", "iocp")
+    }
+    hvis ikkje finnes_nøkkel(_operation_pointers, tekst(p)) {
+        returner _error("", "IOCP returned an unowned OVERLAPPED")
+    }
+    la key = _operation_pointers[tekst(p)]
+    la op = _operations[key]
+    la handle = op["handle"]
+    la transferred = win.read32(b)
+    la status = "klar"
+    la message = ""
+    la data = ""
+    hvis ok == 0 { status = "feil" message = "IOCP completion failed: " + tekst(error) }
+    hvis status == "klar" og op["kind"] == 1 {
+        la listener = _sockets[op["listener"]]
+        builtin.raw_store64(p + 192, listener["fd"])
+        hvis _signed32(win.call("setsockopt", [_sockets[handle]["fd"], 65535, 28683, p + 192, 8])) != 0 {
+            status = "feil" message = "SO_UPDATE_ACCEPT_CONTEXT failed: " + tekst(win.last_error())
+        }
+    }
+    hvis status == "klar" og op["kind"] == 2 {
+        hvis _signed32(win.call("setsockopt", [_sockets[handle]["fd"], 65535, 28688, 0, 0])) != 0 {
+            status = "feil" message = "SO_UPDATE_CONNECT_CONTEXT failed: " + tekst(win.last_error())
+        }
+    }
+    hvis op["kind"] == 3 {
+        hvis transferred > op["capacity"] { status = "feil" message = "IOCP byte count exceeds owned buffer" }
+        hvis status == "klar" { data = win.bytes_to_text(p + 64, transferred) }
+    }
+    la result = _result(status, handle, data, transferred, 0, message, "iocp")
+    result["operation_handle"] = key
+    result["operation_kind"] = op["kind"]
+    _completed[key] = result
+    hvis wanted == "" eller wanted == key { returner _take_completion(key) }
+    returner _result("ventende", "", "", 0, 0, "", "iocp")
+}
+
+funksjon _iocp_cancel(req) {
+    la key = _text(req, "operation_handle", "")
+    hvis ikkje finnes_nøkkel(_operations, key) { returner _error("", "unknown or consumed IOCP operation") }
+    la op = _operations[key]
+    hvis finnes_nøkkel(_completed, key) { returner _pending(op) }
+    la rc = win.call("CancelIoEx", [op["submitted_fd"], op["pointer"]])
+    la error = win.last_error()
+    la result = _pending(op)
+    // ERROR_NOT_FOUND tyder at fullføringspakka alt er på veg. I begge tilfelle
+    // må eigaren drenere IOCP før OVERLAPPED eller socket kan frigjerast.
+    hvis rc == 0 og error != 1168 { result["error"] = "CancelIoEx failed: " + tekst(error) }
+    returner result
+}
+
+funksjon operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _error("", "invalid request") }
+    hvis _text(req, "abi", "") != "norscode-native-network-v1" { returner _error("", "invalid network ABI") }
+    hvis ikkje win.er_windows() { returner _error("", "Windows network requires Windows") }
+    hvis ikkje _start() { returner _error("", "WSAStartup failed") }
+    la op = _text(req, "operation", "")
+    hvis op == "listen" { returner _listen(req, usann, usann) }
+    hvis op == "udp_listen" { returner _listen(req, usann, sann) }
+    hvis op == "connect" { returner _connect(req, usann) }
+    hvis op == "udp_connect" { returner _connect(req, sann) }
+    hvis op == "tls_connect" { returner _tls_connect(req) }
+    hvis op == "poll_mange" { returner _poll_many(req) }
+    hvis op == "iocp_listen" { returner _listen(req, sann, usann) }
+    hvis op == "iocp_connect" { returner _iocp_connect(req) }
+    hvis op == "iocp_wait" { returner _iocp_wait(req) }
+    hvis op == "iocp_cancel" { returner _iocp_cancel(req) }
+    la handle = _text(req, "handle", "")
+    hvis ikkje finnes_nøkkel(_sockets, handle) { returner _error(handle, "unknown or closed socket handle") }
+    la slot = _sockets[handle]
+    hvis op == "tls_upgrade_client" {
+        hvis slot["tls"] != null eller slot["kind"] != "tcp" eller slot["pending"] > 0 {
+            returner _error(handle, "TLS upgrade requires an idle stream socket")
+        }
+        la error = schannel.request_error(req)
+        hvis error != "" { returner _error(handle, error) }
+        la tls = schannel.open(slot["fd"], req)
+        hvis tls["error"] != "" { returner _error(handle, tls["error"]) }
+        slot["kind"] = "tls"
+        slot["tls"] = tls
+        returner _result("connected", handle, "", 0, 0, "", slot["backend"])
+    }
+    hvis op == "tls_handshake" { returner _tls_handshake(handle, slot) }
+    hvis slot["tls"] != null {
+        hvis op == "read" eller op == "read_hex" { returner _tls_transfer(req, handle, slot, sann, op == "read_hex") }
+        hvis op == "write" eller op == "write_hex" { returner _tls_transfer(req, handle, slot, usann, op == "write_hex") }
+        hvis op == "sendto" eller op == "recvfrom" eller builtin.starts_with(op, "iocp_") {
+            returner _error(handle, "raw socket operations cannot bypass an active SChannel context")
+        }
+    }
+    hvis op == "iocp_accept" { returner _iocp_accept(handle, slot) }
+    hvis op == "iocp_read" { returner _iocp_transfer(req, handle, slot, usann) }
+    hvis op == "iocp_write" { returner _iocp_transfer(req, handle, slot, sann) }
+    hvis op == "poll" { returner _poll(req, handle, slot) }
+    hvis op == "read" eller op == "read_hex" eller op == "recvfrom" {
+        returner _read(req, handle, slot, op == "read_hex", op == "recvfrom")
+    }
+    hvis op == "write" eller op == "write_hex" eller op == "sendto" {
+        returner _write(req, handle, slot, op == "write_hex", op == "sendto")
+    }
+    hvis op == "accept" {
+        la fd = win.call("accept", [slot["fd"], 0, 0])
+        hvis fd == 0 - 1 {
+            la error = win.last_error()
+            hvis error == 10035 { returner _result("ventende", handle, "", 0, 0, "", "wsapoll") }
+            returner _error(handle, "accept failed: " + tekst(error))
+        }
+        // Ein vanleg accept arvar den ikkje-blokkerande modusen frå listeneren.
+        la accepted = _register(fd, "tcp", "wsapoll")
+        returner _result("connected", accepted, "", 0, _local_port(fd), "", "wsapoll")
+    }
+    hvis op == "shutdown" {
+        hvis slot["tls"] != null { schannel.close(slot["tls"]) }
+        la rc = _signed32(win.call("shutdown", [slot["fd"], 2]))
+        hvis rc != 0 { returner _error(handle, "shutdown failed: " + tekst(win.last_error())) }
+        returner _result("ok", handle, "", 0, 0, "", slot["backend"])
+    }
+    hvis op == "close" {
+        hvis slot["pending"] > 0 { returner _error(handle, "socket has undrained overlapped operations") }
+        hvis slot["tls"] != null { schannel.close(slot["tls"]) }
+        la rc = _signed32(win.call("closesocket", [slot["fd"]]))
+        hvis rc != 0 { returner _error(handle, "closesocket failed: " + tekst(win.last_error())) }
+        win.free(slot["buffer"])
+        fjern_nokkel(_sockets, handle)
+        returner _result("closed", handle, "", 0, 0, "", slot["backend"])
+    }
+    returner _error(handle, "unsupported Windows network operation: " + op)
+}

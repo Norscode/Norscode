@@ -17,6 +17,7 @@
 
 bruk selfhost.native_execution.win64_asm som asm
 bruk selfhost.native_execution.pe_emitter som pe
+bruk std.windows_abi som wabi
 
 // Linux x86-64-systemkallnummer som Windows-målet emulerer (delmengd; resten fail-closed).
 funksjon NR_READ() -> heiltall { returner 0 }
@@ -51,6 +52,7 @@ funksjon NR_SETUP_ARGV() -> heiltall { returner 500 }
 // → rax = barnet sin exit-kode (0..) eller −1 ved spawn-feil. Windows har ingen fork,
 // so std.native_gap sin windows-grein kallar denne i staden for POSIX-fork/execve.
 funksjon NR_WIN_SPAWN() -> heiltall { returner 501 }
+funksjon NR_WIN_API() -> heiltall { returner 502 }
 funksjon OSTAB_LEN() -> heiltall { returner 512 }
 
 // DLL-ar og funksjonar OS-rutinane treng (W1-delmengd).
@@ -64,7 +66,7 @@ funksjon os_importar() {
 // VirtualProtect = mprotect (GC-vaktside, PAGE_NOACCESS); GetSystemTimePreciseAsFileTime =
 // clock_gettime. Fleire (GetCommandLineW/… for argv) kjem når _start får full argv-syntese.
 funksjon os_importar_full() {
-    returner [
+    la ut = [
         // KUN importar som ein IMPLEMENTERT OS-rutine faktisk kallar. Loadaren resolverer
         // kvart namn ved lasting; eit namn som ikkje er eksportert av DLL-en → STATUS_
         // ENTRYPOINT_NOT_FOUND (0xC0000139) FØR programmet køyrer. MERK: WaitOnAddress/
@@ -85,6 +87,23 @@ funksjon os_importar_full() {
         ["ADVAPI32.dll", ["SystemFunction036"]],
         ["SHELL32.dll", ["CommandLineToArgvW"]]
     ]
+    // Same allowliste som runtime-kallaren. Extension-GUIDane har ingen IAT-import.
+    for e i wabi.api_entries() {
+        la dll = tekst(e[1])
+        hvis dll != "" {
+            la funne = usann
+            for d i ut {
+                hvis d[0] == dll {
+                    la namn_finst = usann
+                    for n i d[1] { hvis n == e[2] { namn_finst = sann } }
+                    hvis ikkje namn_finst { legg_til(d[1], e[2]) }
+                    funne = sann
+                }
+            }
+            hvis ikkje funne { legg_til(ut, [dll, [e[2]]]) }
+        }
+    }
+    returner ut
 }
 
 // win — call [IAT-slot]-adresse frå eit slot-kart (base + slot).
@@ -1040,6 +1059,104 @@ funksjon emit_win_spawn(a, slot, base: heiltall) -> heiltall {
 // Emitter heile OS-rutinesettet i rekkjefølgje inn i assemblarstaten `a` og returnerer
 // tabellen [[linux_nr, etikett], …] so kallaren kan fylle OSTAB. os_enosys er standardfyllet
 // for alle andre slottar. Same rutinar som native_codegen_v2 emitterer inn i .text (W1).
+// Tolv argument: RCX/RDX/R8/R9, deretter [rsp+32..88]. Lagring av
+// Linux-registera skjer i prolog/epilog; Win64 bevarer dei andre nonvolatile.
+funksjon win_api_args(a) -> heiltall {
+    asm.ld(a, asm.R11(), asm.RBP(), 0 - 16)
+    la i: heiltall = 4
+    mens i < 12 {
+        asm.ld(a, asm.RAX(), asm.R11(), i * 8)
+        asm.st(a, asm.RSP(), 32 + (i - 4) * 8, asm.RAX())
+        i = i + 1
+    }
+    asm.ld(a, asm.RCX(), asm.R11(), 0)
+    asm.ld(a, asm.RDX(), asm.R11(), 8)
+    asm.ld(a, asm.R8(), asm.R11(), 16)
+    asm.ld(a, asm.R9(), asm.R11(), 24)
+    returner 0
+}
+
+funksjon emit_win_api(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_win_api")
+    prolog(a)
+    asm.sub_i(a, asm.RSP(), 160) // totalt 224 byte; argument, retur, GUID og pointer
+    asm.tst(a, asm.RSI(), asm.RSI())
+    asm.jcc(a, asm.CC_E(), "os_win_api_invalid")
+    win_api_args(a)
+    la entries = wabi.api_entries()
+    for e i entries {
+        asm.cmp_i(a, asm.RDI(), e[0])
+        asm.jcc(a, asm.CC_E(), "os_win_api_" + tekst(e[0]))
+    }
+    asm.mov_i32(a, asm.RAX(), 87) // ERROR_INVALID_PARAMETER
+    asm.ld(a, asm.R11(), asm.RBP(), 0 - 16)
+    asm.st(a, asm.R11(), 96, asm.RAX())
+    asm.jmp(a, "os_win_api_invalid")
+    for e i entries {
+        asm.merk(a, "os_win_api_" + tekst(e[0]))
+        hvis e[0] == 89 eller e[0] == 90 {
+            // WSAID_ACCEPTEX og WSAID_CONNECTEX. Ingen brukarstyrt funksjonsptr.
+            la guid = [0xF1,0x7D,0x36,0xB5,0xAC,0xCB,0xCF,0x11,0x95,0xCA,0,0x80,0x5F,0x48,0xA1,0x92]
+            hvis e[0] == 90 { guid = [0xB9,0x07,0xA2,0x25,0xF3,0xDD,0x60,0x46,0x8E,0xE9,0x76,0xE5,0x8C,0x74,0x06,0x3E] }
+            la gi: heiltall = 0
+            mens gi < 16 { asm.st8_i(a, asm.RSP(), 112 + gi, guid[gi]) gi = gi + 1 }
+            asm.st_i(a, asm.RSP(), 104, 0)
+            asm.st_i(a, asm.RSP(), 128, 0)
+            // Socket er argument 1, framleis RCX. WSAIoctl har ni argument.
+            asm.mov_i32(a, asm.RDX(), 3355443206)
+            asm.lea(a, asm.R8(), asm.RSP(), 112)
+            asm.mov_i32(a, asm.R9(), 16)
+            asm.lea(a, asm.RAX(), asm.RSP(), 104)
+            asm.st(a, asm.RSP(), 32, asm.RAX())
+            asm.st_i(a, asm.RSP(), 40, 8)
+            asm.lea(a, asm.RAX(), asm.RSP(), 128)
+            asm.st(a, asm.RSP(), 48, asm.RAX())
+            asm.st_i(a, asm.RSP(), 56, 0)
+            asm.st_i(a, asm.RSP(), 64, 0)
+            iat(a, slot, base, "WS2_32.dll!WSAIoctl")
+            asm.tst(a, asm.RAX(), asm.RAX())
+            asm.jcc(a, asm.CC_NE(), "os_win_api_extension_failed")
+            asm.ld(a, asm.RAX(), asm.RSP(), 104)
+            asm.tst(a, asm.RAX(), asm.RAX())
+            asm.jcc(a, asm.CC_E(), "os_win_api_extension_missing")
+            win_api_args(a)
+            asm.ld(a, asm.RAX(), asm.RSP(), 104)
+            asm.bs(a, [0xFF, 0xD0]) // call rax: berre pointer frå fast extension-GUID
+            asm.jmp(a, "os_win_api_wsa_error")
+        } ellers {
+            iat(a, slot, base, tekst(e[1]) + "!" + tekst(e[2]))
+            hvis e[1] == "WS2_32.dll" { asm.jmp(a, "os_win_api_wsa_error") }
+            ellers { asm.jmp(a, "os_win_api_error") }
+        }
+    }
+    asm.merk(a, "os_win_api_extension_failed")
+    asm.xor(a, asm.RAX(), asm.RAX())
+    asm.jmp(a, "os_win_api_wsa_error")
+    asm.merk(a, "os_win_api_extension_missing")
+    asm.mov_i32(a, asm.RAX(), 10045) // WSAEOPNOTSUPP
+    asm.ld(a, asm.R11(), asm.RBP(), 0 - 16)
+    asm.st(a, asm.R11(), 96, asm.RAX())
+    asm.xor(a, asm.RAX(), asm.RAX()) // BOOL-funksjonane AcceptEx/ConnectEx
+    asm.jmp(a, "os_win_api_return")
+    asm.merk(a, "os_win_api_wsa_error")
+    asm.st(a, asm.RSP(), 96, asm.RAX())
+    iat(a, slot, base, "WS2_32.dll!WSAGetLastError")
+    asm.jmp(a, "os_win_api_save_error")
+    asm.merk(a, "os_win_api_error")
+    asm.st(a, asm.RSP(), 96, asm.RAX())
+    iat(a, slot, base, "KERNEL32.dll!GetLastError")
+    asm.merk(a, "os_win_api_save_error")
+    asm.ld(a, asm.R11(), asm.RBP(), 0 - 16)
+    asm.st(a, asm.R11(), 96, asm.RAX())
+    asm.ld(a, asm.RAX(), asm.RSP(), 96)
+    asm.jmp(a, "os_win_api_return")
+    asm.merk(a, "os_win_api_invalid")
+    asm.mov_is(a, asm.RAX(), 0 - 22)
+    asm.merk(a, "os_win_api_return")
+    epilog(a)
+    returner 0
+}
+
 funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp_store_va: heiltall) {
     emit_write(a, slot, base)
     emit_read(a, slot, base)
@@ -1064,6 +1181,7 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
     emit_rename(a, slot, base)
     emit_mmap(a, slot, base)
     emit_win_spawn(a, slot, base)
+    emit_win_api(a, slot, base)
     emit_enosys(a)
     returner [
         [NR_WRITE(), "os_write"], [NR_READ(), "os_read"], [NR_EXIT(), "os_exit"],
@@ -1074,7 +1192,7 @@ funksjon emit_os_routines(a, slot, base: heiltall, argv_store_va: heiltall, envp
         [NR_UNLINK(), "os_unlink"], [NR_RMDIR(), "os_rmdir"], [NR_MKDIR(), "os_mkdir"],
         [NR_CHMOD(), "os_chmod"], [NR_UNAME(), "os_uname"], [NR_NANOSLEEP(), "os_nanosleep"],
         [NR_GETCWD(), "os_getcwd"], [NR_READLINK(), "os_readlink"], [NR_RENAME(), "os_rename"],
-        [NR_MMAP(), "os_mmap"], [NR_WIN_SPAWN(), "os_win_spawn"]
+        [NR_MMAP(), "os_mmap"], [NR_WIN_SPAWN(), "os_win_spawn"], [NR_WIN_API(), "os_win_api"]
         // getdents64(217)/futex(202)/clone(56): OSTAB-slot → os_enosys (W4/dir, treng ekte
         // Windows for verifikasjon); sitane blir ruta so ingen rå syscall står att.
     ]

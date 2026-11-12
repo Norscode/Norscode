@@ -21,16 +21,17 @@ bruk selfhost.native_execution.win64_asm som wasm
 bruk std.desimaltall_tekst som dtt
 
 // ─── Adressar ────────────────────────────────────────────────────────────────
-funksjon TEXT_VA()   { returner 4198400 }
-// 0x580000 held full nc_main-texten skild frå konstantsegmentet. Den gamle
-// 0x500000-basen overlappa dei siste ~70 KiB av full-host-texten og gav SIGSEGV;
-// 0x540000 var berre ~13 KiB over seed6-texten og sprakk («.text overlappar .data»)
-// med sandkasse-koden. 0x580000 gjev .text ~275 KiB meir og .data (~210 KiB) held
-// seg godt under verts-ABI-sida på 0x5f0000 (alle overlapp blir sjekka nedanfor).
+// Small images retain the original layout. Large images lower only the image/text
+// base, keeping the data, host ABI and heap addresses unchanged. Selection uses
+// measured native sizes and is reset for each independent compilation.
+la native_text_va: heiltall = 4198400
+funksjon TEXT_VA()   { returner native_text_va }
+// Konstantsegmentet og verts-ABI-sida held faste adressar i begge tekstlayoutar.
+// Byggarane nedanfor avviser overlapp mellom alle fil- og minnesegment.
 funksjon DATA_VA()   { returner 7340032 }
 // Eige skrivebart verts-ABI-segment for rå prosesspekere. Konstantsegmentet
 // held fram som read-only, og GC-/heap-kontrollblokka blir ikkje overlagd.
-funksjon HOST_ABI_VA() { returner 7798784 } // 0x5f0000
+funksjon HOST_ABI_VA() { returner 7798784 } // 0x770000
 // Private slottar på TOPPEN av verts-ABI-sida (globalar veks frå +16 og oppover):
 // HEAP_VA+56 (0x600038) er GC-live-map-teljaren (sweep skriv der!) og heap-kontroll-
 // blokka elles er rt_init_heap sin — difor IKKJE der. ENV_OVERLAY: NcVal-map for
@@ -5686,7 +5687,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x49, 0x89, 0xC4])                       // mov r12,rax
     copy(bytes, [0x49, 0x8B, 0x5C, 0x24, 0x08])           // mov rbx,[r12+8] (payload)
     copy(bytes, [0x4C, 0x8B, 0x2B])                       // mov r13,[rbx] (len)
-    call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())           // rax = tom liste (som argv_list)
+    // Fillengda er kjend før vi byggjer bytes-lista. GC kan ikkje køyre midt
+    // inne i dette atomet; geometrisk vekst lét alle gamle peikarbufferar leve
+    // til returen og gav OOM ved gjenteken lesing av store seed-filer.
+    // Reservér éin buffer i GC-modus. GC-av-emisjonen er byte-identisk.
+    la flb_cap_call: heiltall = -1
+    hvis gc_mode == "1" {
+        copy(bytes, [0x4C, 0x89, 0xEF])                  // mov rdi,r13
+        copy(bytes, [0x48, 0x83, 0xFF, 0x08])            // cmp rdi,8
+        copy(bytes, [0x73, 0x05])                        // jae +5
+        copy(bytes, [0xBF, 0x08, 0x00, 0x00, 0x00])      // mov edi,8
+        legg_til(bytes, 0xE8)
+        flb_cap_call = lengde(bytes)
+        u32(bytes, 0)                                    // list_new_cap blir emitert seinare
+    } ellers {
+        call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())       // rax = tom liste (som argv_list)
+    }
     copy(bytes, [0x49, 0x89, 0xC6])                       // mov r14,rax
     copy(bytes, [0x45, 0x31, 0xFF])                       // xor r15d,r15d
     la flb_loop = lengde(bytes)
@@ -7762,6 +7778,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     emit_ascii_upper_runtime(bytes, atomics["str_new"])
 
     atomics["list_new_cap"] = TEXT_VA() + lengde(bytes)
+    hvis flb_cap_call >= 0 { patch_jump(bytes, flb_cap_call, lengde(bytes)) }
     copy(bytes, [0x53])                                     // push rbx
     copy(bytes, [0x41, 0x54])                               // push r12
     copy(bytes, [0x49, 0x89, 0xFC])                         // mov r12,rdi
@@ -10637,6 +10654,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // den raske layouten (304 116 objekt); dei andre er forsvar i djupna. Flagg AV: uendra
     // bytar (collect køyrer aldri der; paritet).
     la mrt_has = hl.HEAP_ALLOC_START(X86_MAL())
+    // Største moglege elementbuffer innan den eksisterande heapen/vaktsida.
+    // Ei ekte bytes-liste kan ha meir enn 16M element; vilkårleg len-tak
+    // frigav då både payload og elementbuffer sjølv om boksen var levande.
+    la mrt_liste_cap = (hl.GC_HEAP_LIMIT(X86_MAL()) - 4096 - mrt_has) >> 3
     la mrt_lo4: liste = _heap_abs4(64)
     hvis gc_mode == "1" { mrt_lo4 = [mrt_has & 255, (mrt_has >> 8) & 255, (mrt_has >> 16) & 255, (mrt_has >> 24) & 255] }
     // DFS-drain (som gc_mark_native):
@@ -10888,13 +10909,16 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     }
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (len)
-    // v3: taket var 65536 → levande lister > 65536 element (token-lister o.l.) uverna.
-    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000 (16M)
-    copy(bytes, [0x0F, 0x87])                      // ja loop (len for stor → falsk liste)
-    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    // GC-av held den historiske emisjonen. Med GC blir len validert mot
+    // faktisk cap nedanfor, i tillegg til payload-, adresse- og endegrensene.
+    hvis gc_mode != "1" {
+        copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000
+        copy(bytes, [0x0F, 0x87])                  // ja loop
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     hvis gc_mode == "1" {
         copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
-        copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x04]) // cmp rdx,0x4000000 (v8: cap ≤ 64M)
+        copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, mrt_liste_cap) // cap*8 innan uendra heap
         copy(bytes, [0x0F, 0x87])                  // ja loop
         u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
         copy(bytes, [0x48, 0x39, 0xD0])            // cmp rax,rdx
@@ -10914,13 +10938,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // v5e (2026-09-06): INLINE lister (elem_ptr innanfor payload) kan vere større enn 88 B når
     // ein bygg-rutine allokerer 24+n*8 med n > 8 (t.d. native_fs_stat 10 element) → fast 88
     // under-rekna → halen frigjord → attbruk (test_filops_native SIGSEGV @RT_SKRIV). No:
-    // inline → max(88, 24 + cap*8) (cap ≤ 16M, elles 88); ekstern (grodd) → 88.
+    // inline → max(88, 24 + cap*8), innan eksisterande heap; ekstern → 88.
     copy(bytes, [0x48, 0x8B, 0x4E, 0x10])          // mov rcx,[rsi+16] (elem_ptr)
     copy(bytes, [0x48, 0x29, 0xF1])                // sub rcx,rsi
     copy(bytes, [0x48, 0x83, 0xF9, 0x58])          // cmp rcx,88
     la mrt_lext = emit_jcc_placeholder(bytes, 0x83) // jae ekstern (→ 88)
     copy(bytes, [0x48, 0x8B, 0x56, 0x08])          // mov rdx,[rsi+8] (cap)
-    copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x01]) // cmp rdx,0x1000000
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, mrt_liste_cap)
+    } ellers {
+        copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x01])
+    }
     la mrt_lcapbad = emit_jcc_placeholder(bytes, 0x87) // ja ekstern (falsk cap → 88)
     copy(bytes, [0x48, 0xC1, 0xE2, 0x03])          // shl rdx,3
     copy(bytes, [0x48, 0x83, 0xC2, 0x18])          // add rdx,24
@@ -13523,7 +13551,7 @@ funksjon bygg_pe_bilete(entry_va: heltall, text, data_bytes, ncb_json) -> liste 
     hvis miljo_hent("NORSCODE_GC_ALLOC") != "1" {
         kast "native_codegen_v2: windows-x86_64 krev NORSCODE_GC_ALLOC=1 (WINDOWS_SEED_PLAN §2.1)"
     }
-    la image_base: heltall = 4194304                       // 0x400000
+    la image_base: heltall = TEXT_VA() - 4096              // 0x400000 or 0x100000
     la heap_va: heltall = hl.HEAP_VA(X86_MAL())
     la text_rva: heltall = TEXT_VA() - image_base          // 0x1000
     la rdata_rva: heltall = DATA_VA() - image_base
@@ -13595,7 +13623,205 @@ funksjon bygg_pe_bilete(entry_va: heltall, text, data_bytes, ncb_json) -> liste 
     returner image
 }
 
+// Identical entry sequence for size measurement and final emission. Its calls
+// have fixed-width rel32 encoding, so a scratch buffer gives the exact size.
+funksjon emit_start_v2(text, argv_store_va: heiltall, envp_store_va: heiltall,
+                       fn_vas: ordbok, module_initializers: liste, start_fn: tekst) {
+    // On Linux _start entry: rsp → argc, rsp+8 → argv[0], ..., NULL, envp[0], ...
+    // Kopier original rsp til r12 for lesing, og align den faktiske stacken før
+    // første call inn i runtime.
+    // mov r12, rsp
+    legg_til(text, 0x49)
+    legg_til(text, 0x89)
+    legg_til(text, 0xE4)
+    // GC F3 rot-skann: lagra initiell rsp (stakk-base, høg adresse) i kontrollblokk-
+    // slot HEAP_VA+48. stack_base() les denne som øvre grense for rot-skann.
+    legg_til(text, 0x4C)              // mov [moffs32], r12
+    legg_til(text, 0x89)
+    legg_til(text, 0x24)
+    legg_til(text, 0x25)
+    u32(text, hl.HEAP_VA(X86_MAL()) + 48)
+    // GC-layout v3: vaktside (PROT_NONE) rett under GC_HEAP_LIMIT — ei rå-bump-løype som
+    // rømmer forbi taket mellom to safepoints SIGSEGV-ar reint (rdi≈0x405FF000) i staden
+    // for å overskrive bitmapen. mprotect(0x405FF000, 4096, PROT_NONE); rax daud her.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(text, [0xBF]) u32(text, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)               // mov edi,vaktside
+        copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
+        copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
+        // W1: Windows → OSTAB[10] = os_mprotect (VirtualProtect PAGE_NOACCESS). edi/esi
+        // urørte; os_mprotect les rdi/rsi. 7 B ↔ 7 B, so vaktprolog-hoppa held.
+        hvis ER_WINDOWS() {
+            emit_syscall_site(text, 10)                                    // call [OSTAB+10*8]
+        } ellers {
+            copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                     // mov eax,10 (mprotect)
+            copy(text, [0x0F, 0x05])                                       // syscall
+        }
+    }
+    // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
+    // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
+    // FANGBART «For djup rekursjon» (AOT-VM-en hadde inga vakt → SIGSEGV; C-seeden
+    // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
+    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - STAKK_GRENSE_BYTE()) & 0xFFFFFFFF)  // lea rax,[r12-7MiB] (norscodeos: NC_STAKK_KIB)
+    copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())             // mov [limit],rax
+    hvis ER_WINDOWS() {
+        // W1: Windows-entry har inga startstakk. os_setup_argv (OSTAB[NR_SETUP_ARGV]=500)
+        // syntetiserer argv frå GetCommandLineW og skriv {argv**, argc} @argv_store_va (+8)
+        // og envp → null-slot (tomt miljø) @envp_store_va. Køyrer FØR rt_init_heap (som
+        // bevarer kontrollblokk-slottane), akkurat som Linux-vegen les stakken.
+        emit_syscall_site(text, 500)                        // call [OSTAB+500*8] → os_setup_argv
+    } ellers {
+    // mov rdi, [r12] = argc
+    legg_til(text, 0x49)
+    legg_til(text, 0x8B)
+    legg_til(text, 0x3C)
+    legg_til(text, 0x24)
+    // lea rsi, [r12+8] → argv
+    legg_til(text, 0x49)
+    legg_til(text, 0x8D)
+    legg_til(text, 0x74)
+    legg_til(text, 0x24)
+    legg_til(text, 0x08)
+    // Store {argv**, argc} i den reserverte verts-ABI-sida.
+    legg_til(text, 0x49)
+    legg_til(text, 0xBB)
+    u64(text, argv_store_va)
+    legg_til(text, 0x49)
+    legg_til(text, 0x89)
+    legg_til(text, 0x33)
+    legg_til(text, 0x49)
+    legg_til(text, 0x89)
+    legg_til(text, 0x7B)
+    legg_til(text, 0x08)
+    // Skip argv: lea rdx, [r12 + rdi*8] + 16 → envp
+    // lea rdx, [r12 + rdi*8]
+    legg_til(text, 0x49)
+    legg_til(text, 0x8D)
+    legg_til(text, 0x14)
+    legg_til(text, 0xFC)  // lea rdx, [r12+rdi*8]
+    legg_til(text, 0x48)
+    legg_til(text, 0x83)
+    legg_til(text, 0xC2)
+    legg_til(text, 0x10)   // add rdx, 16
+    // Store envp i ein ekte skrivebar .data-slot.
+    // mov r11, envp_store_va
+    legg_til(text, 0x49)
+    legg_til(text, 0xBB)
+    u64(text, envp_store_va)
+    // mov [r11], rdx
+    legg_til(text, 0x49)
+    legg_til(text, 0x89)
+    legg_til(text, 0x13)
+    }
+    // and rsp, -16
+    legg_til(text, 0x48)
+    legg_til(text, 0x83)
+    legg_til(text, 0xE4)
+    legg_til(text, 0xF0)
+    // code_va for call_rel32 MÅ vera VA for buf[0] = TEXT_VA(), ikkje entry_va
+    // Call rt_init_heap (no args)
+    call_rel32(text, RT_INIT_HEAP(), TEXT_VA())
+
+    // Køyr modulinitialisatorane i den deterministiske rekkjefølgja frå
+    // NCB-metadata før hovud-entry. Returverdien ligg i rax og blir med vilje
+    // overskriven av neste kall; initialisatorane tek ingen argument.
+    la entry_init_i: heiltall = 0
+    mens entry_init_i < lengde(module_initializers) {
+        la entry_init_namn: tekst = module_initializers[entry_init_i]
+        la entry_init_va: heiltall = fn_vas[entry_init_namn]
+        call_rel32(text, entry_init_va, TEXT_VA())
+        entry_init_i = entry_init_i + 1
+    }
+
+    // Call start()
+    la main_va: heltall = fn_vas[start_fn]
+    hvis main_va == 0 {
+        // Feilbar tryggleik: kunne ikkje slå opp start-funksjon.
+        // I staden for call til 0 (kan gi illegal instruction), avslutt
+        // med avgrensa feilstatus.
+        hvis ER_WINDOWS() {
+            legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC7) u32(text, 4)  // mov rdi,4
+            emit_syscall_site(text, 60)   // call [OSTAB+60*8] → os_exit (ExitProcess)
+        } ellers {
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC0)
+            u32(text, 60)   // mov rax, 60
+            legg_til(text, 0x48)
+            legg_til(text, 0xC7)
+            legg_til(text, 0xC7)
+            u32(text, 4)    // mov rdi, 4
+            legg_til(text, 0x0F)
+            legg_til(text, 0x05)  // syscall
+        }
+    }
+    call_rel32(text, main_va, TEXT_VA())
+
+    // sys_exit(start-returverdien): AOT-program skal ha same prosesskontrakt
+    // som VM-løypa, også når returverdien kjem frå kart-/tekst-runtime.
+    // Berre eit heiltal (NcVal-type 1) blir exit-kode; null og alle andre typar gjev 0.
+    // Før vart payload-ordet brukt uansett type, so ein start() som returnerte tekst
+    // (t.d. testar med «… OK») fekk den låge byten av ein peikar som exit-kode
+    // (160/176/192/208/224) og såg ut som feil.
+    legg_til(text, 0x31)
+    legg_til(text, 0xFF)  // xor edi,edi (exit 0)
+    legg_til(text, 0x48)
+    legg_til(text, 0x85)
+    legg_til(text, 0xC0)  // test rax,rax
+    legg_til(text, 0x74)
+    legg_til(text, 0x0A)  // je exit (null)
+    legg_til(text, 0x48)
+    legg_til(text, 0x83)
+    legg_til(text, 0x38)
+    legg_til(text, 0x01)  // cmp qword [rax],1 (heiltal?)
+    legg_til(text, 0x75)
+    legg_til(text, 0x04)  // jne exit
+    legg_til(text, 0x48)
+    legg_til(text, 0x8B)
+    legg_til(text, 0x78)
+    legg_til(text, 0x08)  // mov rdi,[rax+8]
+    // W1: Windows avsluttar via OSTAB[60] = os_exit → ExitProcess(rdi & 255). Siste
+    // instruksjon i _start; ingenting hoppar over han, so lengda er fri. je/jne over
+    // inspeksjonen peikar hit uansett (avstanden deira er uendra).
+    hvis ER_WINDOWS() {
+        emit_syscall_site(text, 60)   // call [OSTAB+60*8]
+    } ellers {
+        legg_til(text, 0x48)
+        legg_til(text, 0xC7)
+        legg_til(text, 0xC0)
+        u32(text, 60) // mov rax, 60
+        legg_til(text, 0x0F)
+        legg_til(text, 0x05)  // syscall
+    }
+}
+
+funksjon windows_tail_bytes() -> heiltall {
+    hvis ikkje ER_WINDOWS() { returner 0 }
+    la image_base: heiltall = TEXT_VA() - 4096
+    la imp = pe.bygg_importar(win64.os_importar_full(), IMPORT_VA() - image_base)
+    la a = wasm.ny()
+    win64.emit_os_routines(a, imp["slot"], image_base,
+        HOST_ABI_VA(), hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET())
+    returner lengde(wasm.ferdig(a))
+}
+
+// No heap expansion or overlapping segments: either layout must fit exactly.
+// NorscodeOS retains its existing user-image base and its previous hard bound.
+funksjon vel_text_va(rt_size: heiltall, sizes: ordbok, fn_vas: ordbok,
+                      module_initializers: liste, start_fn: tekst) -> heiltall {
+    la storleik: heiltall = rt_size
+    for namn i nøkler(sizes) { storleik = storleik + sizes[namn] }
+    la prolog: liste = []
+    emit_start_v2(prolog, HOST_ABI_VA(), hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET(),
+        fn_vas, module_initializers, start_fn)
+    storleik = storleik + lengde(prolog) + windows_tail_bytes()
+    hvis 4198400 + storleik <= DATA_VA() { returner 4198400 }
+    hvis ikkje ER_NOS() og 1052672 + storleik <= DATA_VA() { returner 1052672 }
+    kast "native codegen: .text overlappar .data (" + tekst_fra_heltall(storleik) + " bytes)"
+    returner 4198400
+}
+
 funksjon kompiler_v2(ncb_json) {
+    native_text_va = 4198400
     native_codegen_trace("parse start")
     nos_krev_utan_gc()
     // F3.6: ncb_json kan vere JSON-tekst eller binær NCB-tekst (magic 0x93). Binær går
@@ -13765,6 +13991,25 @@ funksjon kompiler_v2(ncb_json) {
         fi2 = fi2 + 1
     }
 
+    la vald_text_va = vel_text_va(rt_size, fn_sizes, fn_vas, module_initializers, start_fn)
+    hvis vald_text_va != TEXT_VA() {
+        native_text_va = vald_text_va
+        rt_package = bygg_runtime_v2(argv_store_va)
+        rt = rt_package[0]
+        atomic_vas = rt_package[1]
+        lapp_r2_closure_nokler(rt, atomic_vas, rd_offs)
+        hvis lengde(rt) != rt_size { kast "native codegen: layout endra runtime-storleiken" }
+        gc_safepoint_va = atomic_vas["gc_safepoint"]
+        curr_off = rt_size
+        fi2 = 0
+        mens fi2 < lengde(sorted) {
+            la e_fn: tekst = sorted[fi2]
+            fn_vas[e_fn] = TEXT_VA() + curr_off
+            curr_off = curr_off + fn_sizes[e_fn]
+            fi2 = fi2 + 1
+        }
+    }
+
     // Valfri symboloversikt for feilsøking av sjølvstendige binærar. ELF-en
     // er med vilje utan eksterne symboltabellar, så kartet blir berre skrive
     // når byggaren uttrykkeleg ber om det.
@@ -13835,171 +14080,7 @@ funksjon kompiler_v2(ncb_json) {
     // _start: capture envp, init heap, call main, exit(0)
     la entry_va: heltall = TEXT_VA() + lengde(text)
 
-    // On Linux _start entry: rsp → argc, rsp+8 → argv[0], ..., NULL, envp[0], ...
-    // Kopier original rsp til r12 for lesing, og align den faktiske stacken før
-    // første call inn i runtime.
-    // mov r12, rsp
-    legg_til(text, 0x49)
-    legg_til(text, 0x89)
-    legg_til(text, 0xE4)
-    // GC F3 rot-skann: lagra initiell rsp (stakk-base, høg adresse) i kontrollblokk-
-    // slot HEAP_VA+48. stack_base() les denne som øvre grense for rot-skann.
-    legg_til(text, 0x4C)              // mov [moffs32], r12
-    legg_til(text, 0x89)
-    legg_til(text, 0x24)
-    legg_til(text, 0x25)
-    u32(text, hl.HEAP_VA(X86_MAL()) + 48)
-    // GC-layout v3: vaktside (PROT_NONE) rett under GC_HEAP_LIMIT — ei rå-bump-løype som
-    // rømmer forbi taket mellom to safepoints SIGSEGV-ar reint (rdi≈0x405FF000) i staden
-    // for å overskrive bitmapen. mprotect(0x405FF000, 4096, PROT_NONE); rax daud her.
-    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
-        copy(text, [0xBF]) u32(text, hl.GC_HEAP_LIMIT(X86_MAL()) - 4096)               // mov edi,vaktside
-        copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
-        copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
-        // W1: Windows → OSTAB[10] = os_mprotect (VirtualProtect PAGE_NOACCESS). edi/esi
-        // urørte; os_mprotect les rdi/rsi. 7 B ↔ 7 B, so vaktprolog-hoppa held.
-        hvis ER_WINDOWS() {
-            emit_syscall_site(text, 10)                                    // call [OSTAB+10*8]
-        } ellers {
-            copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                     // mov eax,10 (mprotect)
-            copy(text, [0x0F, 0x05])                                       // syscall
-        }
-    }
-    // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
-    // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
-    // FANGBART «For djup rekursjon» (AOT-VM-en hadde inga vakt → SIGSEGV; C-seeden
-    // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
-    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - STAKK_GRENSE_BYTE()) & 0xFFFFFFFF)  // lea rax,[r12-7MiB] (norscodeos: NC_STAKK_KIB)
-    copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())             // mov [limit],rax
-    hvis ER_WINDOWS() {
-        // W1: Windows-entry har inga startstakk. os_setup_argv (OSTAB[NR_SETUP_ARGV]=500)
-        // syntetiserer argv frå GetCommandLineW og skriv {argv**, argc} @argv_store_va (+8)
-        // og envp → null-slot (tomt miljø) @envp_store_va. Køyrer FØR rt_init_heap (som
-        // bevarer kontrollblokk-slottane), akkurat som Linux-vegen les stakken.
-        emit_syscall_site(text, 500)                        // call [OSTAB+500*8] → os_setup_argv
-    } ellers {
-    // mov rdi, [r12] = argc
-    legg_til(text, 0x49)
-    legg_til(text, 0x8B)
-    legg_til(text, 0x3C)
-    legg_til(text, 0x24)
-    // lea rsi, [r12+8] → argv
-    legg_til(text, 0x49)
-    legg_til(text, 0x8D)
-    legg_til(text, 0x74)
-    legg_til(text, 0x24)
-    legg_til(text, 0x08)
-    // Store {argv**, argc} i den reserverte verts-ABI-sida.
-    legg_til(text, 0x49)
-    legg_til(text, 0xBB)
-    u64(text, argv_store_va)
-    legg_til(text, 0x49)
-    legg_til(text, 0x89)
-    legg_til(text, 0x33)
-    legg_til(text, 0x49)
-    legg_til(text, 0x89)
-    legg_til(text, 0x7B)
-    legg_til(text, 0x08)
-    // Skip argv: lea rdx, [r12 + rdi*8] + 16 → envp
-    // lea rdx, [r12 + rdi*8]
-    legg_til(text, 0x49)
-    legg_til(text, 0x8D)
-    legg_til(text, 0x14)
-    legg_til(text, 0xFC)  // lea rdx, [r12+rdi*8]
-    legg_til(text, 0x48)
-    legg_til(text, 0x83)
-    legg_til(text, 0xC2)
-    legg_til(text, 0x10)   // add rdx, 16
-    // Store envp i ein ekte skrivebar .data-slot.
-    // mov r11, envp_store_va
-    legg_til(text, 0x49)
-    legg_til(text, 0xBB)
-    u64(text, envp_store_va)
-    // mov [r11], rdx
-    legg_til(text, 0x49)
-    legg_til(text, 0x89)
-    legg_til(text, 0x13)
-    }
-    // and rsp, -16
-    legg_til(text, 0x48)
-    legg_til(text, 0x83)
-    legg_til(text, 0xE4)
-    legg_til(text, 0xF0)
-    // code_va for call_rel32 MÅ vera VA for buf[0] = TEXT_VA(), ikkje entry_va
-    // Call rt_init_heap (no args)
-    call_rel32(text, RT_INIT_HEAP(), TEXT_VA())
-
-    // Køyr modulinitialisatorane i den deterministiske rekkjefølgja frå
-    // NCB-metadata før hovud-entry. Returverdien ligg i rax og blir med vilje
-    // overskriven av neste kall; initialisatorane tek ingen argument.
-    la entry_init_i: heiltall = 0
-    mens entry_init_i < lengde(module_initializers) {
-        la entry_init_namn: tekst = module_initializers[entry_init_i]
-        la entry_init_va: heiltall = fn_vas[entry_init_namn]
-        call_rel32(text, entry_init_va, TEXT_VA())
-        entry_init_i = entry_init_i + 1
-    }
-
-    // Call start()
-    la main_va: heltall = fn_vas[start_fn]
-    hvis main_va == 0 {
-        // Feilbar tryggleik: kunne ikkje slå opp start-funksjon.
-        // I staden for call til 0 (kan gi illegal instruction), avslutt
-        // med avgrensa feilstatus.
-        hvis ER_WINDOWS() {
-            legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC7) u32(text, 4)  // mov rdi,4
-            emit_syscall_site(text, 60)   // call [OSTAB+60*8] → os_exit (ExitProcess)
-        } ellers {
-            legg_til(text, 0x48)
-            legg_til(text, 0xC7)
-            legg_til(text, 0xC0)
-            u32(text, 60)   // mov rax, 60
-            legg_til(text, 0x48)
-            legg_til(text, 0xC7)
-            legg_til(text, 0xC7)
-            u32(text, 4)    // mov rdi, 4
-            legg_til(text, 0x0F)
-            legg_til(text, 0x05)  // syscall
-        }
-    }
-    call_rel32(text, main_va, TEXT_VA())
-
-    // sys_exit(start-returverdien): AOT-program skal ha same prosesskontrakt
-    // som VM-løypa, også når returverdien kjem frå kart-/tekst-runtime.
-    // Berre eit heiltal (NcVal-type 1) blir exit-kode; null og alle andre typar gjev 0.
-    // Før vart payload-ordet brukt uansett type, so ein start() som returnerte tekst
-    // (t.d. testar med «… OK») fekk den låge byten av ein peikar som exit-kode
-    // (160/176/192/208/224) og såg ut som feil.
-    legg_til(text, 0x31)
-    legg_til(text, 0xFF)  // xor edi,edi (exit 0)
-    legg_til(text, 0x48)
-    legg_til(text, 0x85)
-    legg_til(text, 0xC0)  // test rax,rax
-    legg_til(text, 0x74)
-    legg_til(text, 0x0A)  // je exit (null)
-    legg_til(text, 0x48)
-    legg_til(text, 0x83)
-    legg_til(text, 0x38)
-    legg_til(text, 0x01)  // cmp qword [rax],1 (heiltal?)
-    legg_til(text, 0x75)
-    legg_til(text, 0x04)  // jne exit
-    legg_til(text, 0x48)
-    legg_til(text, 0x8B)
-    legg_til(text, 0x78)
-    legg_til(text, 0x08)  // mov rdi,[rax+8]
-    // W1: Windows avsluttar via OSTAB[60] = os_exit → ExitProcess(rdi & 255). Siste
-    // instruksjon i _start; ingenting hoppar over han, so lengda er fri. je/jne over
-    // inspeksjonen peikar hit uansett (avstanden deira er uendra).
-    hvis ER_WINDOWS() {
-        emit_syscall_site(text, 60)   // call [OSTAB+60*8]
-    } ellers {
-        legg_til(text, 0x48)
-        legg_til(text, 0xC7)
-        legg_til(text, 0xC0)
-        u32(text, 60) // mov rax, 60
-        legg_til(text, 0x0F)
-        legg_til(text, 0x05)  // syscall
-    }
+    emit_start_v2(text, argv_store_va, envp_store_va, fn_vas, module_initializers, start_fn)
     native_codegen_trace("post-emit start-prolog ferdig")
 
     // Desimaltall-krokane i to_text/json_stringify (sjå lapp_desimal_tekst_krokar).
@@ -14146,6 +14227,7 @@ funksjon kompiler_v2(ncb_json) {
 
 // Rekomputer alt oppsettet unntatt fn_vas. Returnerer ei ordbok med delane.
 funksjon ncval_x86_setup(ncb) {
+    native_text_va = 4198400
     la fns = ncb["functions"]
     annoter_lambda_fangst(fns)
 
@@ -14247,7 +14329,7 @@ funksjon ncval_x86_setup(ncb) {
         "rd_offs": rd_offs, "rt": rt, "atomic_vas": atomic_vas,
         "gc_safepoint_va": gc_safepoint_va, "rt_size": rt_size,
         "sorted": sorted, "start_fn": start_fn,
-        "module_initializers": module_initializers
+        "module_initializers": module_initializers, "text_va": TEXT_VA()
     }
 }
 
@@ -14261,6 +14343,7 @@ funksjon ncval_x86_plan(ncb) -> ordbok_tekst {
 // Eksakt fn_vas-kart frå sizes (namn→storleik). Speglar kompiler_v2 sitt andre
 // VA-oppsett: TEXT_VA + rt_size + kumulativ storleik i sorted-rekkjefølgje.
 funksjon ncval_x86_fn_vas(oppsett, sizes) -> ordbok {
+    native_text_va = oppsett["text_va"]
     la sorted = oppsett["sorted"]
     la fn_vas: ordbok = {}
     la off: heltall = oppsett["rt_size"]
@@ -14281,6 +14364,7 @@ funksjon ncval_x86_measure(ncb, start: heiltall, count: heiltall) -> ordbok_teks
     returner ncval_x86_measure_with(ncval_x86_setup(ncb), start, count)
 }
 funksjon ncval_x86_measure_with(oppsett, start: heiltall, count: heiltall) -> ordbok_tekst {
+    native_text_va = oppsett["text_va"]
     la fns = oppsett["fns"]
     la sorted = oppsett["sorted"]
     la rd_offs = oppsett["rd_offs"]
@@ -14307,6 +14391,29 @@ funksjon ncval_x86_measure_with(oppsett, start: heiltall, count: heiltall) -> or
     returner {"ok": "sann", "error": "", "sizes": sizes}
 }
 
+// Batches run in separate processes; derive the same layout from the measured
+// sizes in every emitting/linking process, without trusting ambient state.
+funksjon ncval_x86_vel_layout(oppsett, sizes) {
+    la fn_vas = ncval_x86_fn_vas(oppsett, sizes)
+    la vald = vel_text_va(oppsett["rt_size"], sizes, fn_vas,
+        oppsett["module_initializers"], oppsett["start_fn"])
+    hvis vald == TEXT_VA() { returner }
+    native_text_va = vald
+    // A cached batch can enter here without ncval_x86_setup in this process.
+    // Restore the runtime variant before regenerating its address-dependent code.
+    green_i_bruk = 0
+    hvis finnes_nøkkel(oppsett["fns"], "std.native_gap._gr_inngang") { green_i_bruk = 1 }
+    la pakke = bygg_runtime_v2(HOST_ABI_VA())
+    la rt = pakke[0]
+    la atom = pakke[1]
+    lapp_r2_closure_nokler(rt, atom, oppsett["rd_offs"])
+    hvis lengde(rt) != oppsett["rt_size"] { kast "native codegen: batch-layout endra runtime-storleiken" }
+    oppsett["rt"] = rt
+    oppsett["atomic_vas"] = atom
+    oppsett["gc_safepoint_va"] = atom["gc_safepoint"]
+    oppsett["text_va"] = vald
+}
+
 // Emitpass for utsnittet [start, start+count): kompiler kvar funksjon med
 // EKSAKTE adressar (frå sizes) og returner den konkatenerte byte-lista for
 // utsnittet. Byta blir plasserte i order-rekkjefølgje av linkaren.
@@ -14314,6 +14421,7 @@ funksjon ncval_x86_emit(ncb, sizes, start: heiltall, count: heiltall) -> ordbok_
     returner ncval_x86_emit_with(ncval_x86_setup(ncb), sizes, start, count)
 }
 funksjon ncval_x86_emit_with(oppsett, sizes, start: heiltall, count: heiltall) -> ordbok_tekst {
+    ncval_x86_vel_layout(oppsett, sizes)
     la fns = oppsett["fns"]
     la sorted = oppsett["sorted"]
     la rd_offs = oppsett["rd_offs"]
@@ -14346,6 +14454,7 @@ funksjon ncval_x86_link(ncb_json, ncb, sizes, frag_byte_lists) -> ordbok_tekst {
     returner ncval_x86_link_with(ncb_json, ncval_x86_setup(ncb), sizes, frag_byte_lists)
 }
 funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbok_tekst {
+    ncval_x86_vel_layout(oppsett, sizes)
     nos_krev_utan_gc()
     la data_bytes = oppsett["data_bytes"]
     la rt = oppsett["rt"]
