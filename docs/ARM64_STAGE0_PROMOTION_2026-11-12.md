@@ -9,6 +9,14 @@ var committed stage0 ulik kandidatane, og dei to obligatoriske byte-paritetsjobb
 feila korrekt. Endeleg PR-status krev ei ny køyring på promoteringscommiten.
 Ingen testport, bytekontroll eller unntaksgrense er svekt.
 
+Promoteringa er deretter verifisert på PR-head
+[`5a8b175ace9fd4fbdad19aa875a2cde56c4a8030`](https://github.com/Norscode/Norscode/commit/5a8b175ace9fd4fbdad19aa875a2cde56c4a8030):
+[ARM64-køyring 43278692411](https://github.com/Norscode/Norscode/actions/runs/43278692411)
+fullførte med alle ni jobbar grøne. Dette omfattar kryssbygget, begge uendra
+stage0-byteparitetsportane og alle seks seed-testskår på ekte Linux ARM64 og
+macOS ARM64. Desse resultata verifiserer ARM64-promoteringa; samla PR-status
+må framleis kontrollerast på den endelege PR-headen.
+
 ## Kjeldebinding
 
 Beviset kjem frå [ARM64-køyring 43267262599](https://github.com/Norscode/Norscode/actions/runs/43267262599)
