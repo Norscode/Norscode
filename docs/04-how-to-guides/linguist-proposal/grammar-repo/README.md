@@ -16,7 +16,8 @@ The command is written in Norscode. It creates these **generated** files under
 
 - `package.json`: small VS Code/TextMate grammar manifest
 - `syntaxes/norscode.tmLanguage.json`: copied from `vscode-norscode/syntaxes/norscode.tmLanguage.json`
-- `LICENSE`: copied from the repository's Apache-2.0 root license
+- `LICENSE`: copied from the repository's `LICENSE-APACHE` (Apache-2.0)
+- `NOTICE`: original-project attribution, source revision and grammar source URL
 - `README.md`: copied from this document
 
 The exporter performs read-back comparisons and returns a non-zero exit code
@@ -42,6 +43,9 @@ GitHub CI runs this Norscode exporter on pull requests.
 **Scope:** `source.norscode`, **extension:** `.no`,
 **license:** Apache-2.0.
 
+The grammar remains Apache-2.0 even though the Norscode compiler/tooling uses
+MPL-2.0. This standalone package contains the Apache-licensed grammar only.
+
 Official recognition in GitHub does not occur until the Linguist maintainers
 accept a change and GitHub.com deploys the relevant Linguist release.
 
@@ -52,14 +56,17 @@ staging area for the future GitHub Linguist PR. Its
 `samples/Norscode/` subdirectory contains byte-identical copies of four real
 source files from this repository, renamed for clarity:
 
-- `compiler_runtime.no` from `compiler/compiler.no`
+- `dictionary.no` from `std/ordbok.no`
 - `toml_parser.no` from `std/tomllib.no`
 - `ghash.no` from `std/ghash.no`
-- `package_cache.no` from `toolchain/norspkg/cache.no`
+- `text_helpers.no` from `std/tekst.no`
 
 `SAMPLE_ORIGINS.md` records original source paths, repository links, and the
-Apache-2.0 repository license. Verify every file's own headers before
-submitting upstream, and attach an exact source commit and original links.
+Apache-2.0 license that applies to these standard-library files. The sample
+staging area includes its own `LICENSE`, copied from `LICENSE-APACHE`.
+Its `NOTICE` preserves the original-project attribution and refers to the sample origins.
+Verify every file's own headers before submitting upstream, and attach an
+exact source commit and original links.
 
 Copy these files to `samples/Norscode/` in the separate **upstream Linguist
 checkout**, not into the standalone grammar Git repository. Add genuine

@@ -104,7 +104,15 @@ Når `./bin/nc local-green --strict` er grøn, er normalflata lokalt kontrollert
 
 ## Lisens
 
-Apache-2.0. Sjå [LICENSE](LICENSE).
+Kompilatoren og utviklingsverktøya brukar **MPL-2.0**, med eksplisitte
+**Apache-2.0**-område for runtime, standardbibliotek, native kodegeneratorar,
+prosjektmalar og grammatikk. Sjå [lisensfordelinga](LICENSING.md),
+[MPL-teksten](LICENSE) og [Apache-teksten](LICENSE-APACHE).
+
+Eigne program skrivne i Norscode kan framleis ha lukka kjeldekode og seljast.
+Ved distribusjon av endra MPL-komponentar må den tilhøyrande kjeldekoden vere
+tilgjengeleg for mottakarane. Tidlegare innvilga Apache-rettar blir ståande.
+Sjå [bidragsrettleiinga](CONTRIBUTING.md) for nye bidrag.
 
 ## Forfattar
 
