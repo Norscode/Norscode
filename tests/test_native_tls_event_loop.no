@@ -1,6 +1,11 @@
 bruk std.socket som socket
 bruk std.sched som sched
 bruk std.tls_http som tls
+bruk std.tls13_klient som klokke
+bruk std.base64 som base64
+bruk std.x509_chain som der
+bruk std.filops som filops
+bruk tests.fixtures.tls_revocation_vectors som vectors
 
 funksjon krev_tls(vilkår: boolsk, fase: tekst) {
     hvis ikkje vilkår { kast "TLS event loop: " + fase }
@@ -48,21 +53,84 @@ funksjon handshake_pair(listener: ordbok_tekst, client: ordbok_tekst) -> ordbok_
     returner {"server": server, "client_future": client_future, "server_future": server_future, "scheduler": hs}
 }
 
+funksjon pem(label: tekst, data: liste_heiltall) -> tekst {
+    returner "-----BEGIN " + label + "-----\n" + base64.kod_bytes(data) + "\n-----END " + label + "-----\n"
+}
+funksjon revocation_loopback() {
+    // Ferske, signerte data gjer at CI testar policyen utan å vere avhengig av
+    // utløpsdatoen til historiske PEM-/OCSP-fixtures i repoet.
+    la dir = "build/tls-revocation-" + builtin.random_hex(8)
+    assert(filops.lag_katalogar(dir))
+    la ca_file = dir + "/ca.pem"
+    la cert_file = dir + "/leaf.pem"
+    la key_file = dir + "/key.pem"
+    builtin.fil_skriv(ca_file, pem("CERTIFICATE", vectors.cert({"ca": sann})))
+    builtin.fil_skriv(cert_file, pem("CERTIFICATE", vectors.cert({})))
+    la pkcs8 = der._tlv(48, vectors.saman(vectors.saman(der._int([0]), vectors.alg()), der._tlv(4, der._tlv(4, vectors.seed(2)))))
+    builtin.fil_skriv(key_file, pem("PRIVATE KEY", pkcs8))
+    la now = builtin.tid_ms()
+    la this_update = builtin.replace(builtin.replace(builtin.replace(klokke.iso_frå_epoke_ms(now - 60000), "-", ""), ":", ""), "T", "")
+    la next_update = builtin.replace(builtin.replace(builtin.replace(klokke.iso_frå_epoke_ms(now + 86400000), "-", ""), ":", ""), "T", "")
+    la good_crl = vectors.crl({"this_update": this_update, "next_update": next_update})
+    la bad_crl = vectors.crl({"this_update": this_update, "next_update": next_update, "serials": [[16]]})
+    builtin.fil_skriv(dir + "/good.crl", pem("X509 CRL", good_crl))
+    builtin.fil_skriv(dir + "/revoked.crl", pem("X509 CRL", bad_crl))
+    la good_ocsp = vectors.ocsp({"this_update": this_update, "next_update": next_update, "produced_at": this_update})
+    builtin.fil_skriv_binær(dir + "/good.ocsp", good_ocsp)
+    la bad_ocsp: liste_heiltall = []
+    for b i good_ocsp { legg_til(bad_ocsp, b) }
+    bad_ocsp[lengde(bad_ocsp) - 1] = bad_ocsp[lengde(bad_ocsp) - 1] ^ 1
+    builtin.fil_skriv_binær(dir + "/bad.ocsp", bad_ocsp)
+    for mode i ["good", "client-crl", "server-crl", "ocsp-signature"] {
+        la server_crl = dir + "/good.crl"
+        la client_crl = dir + "/good.crl"
+        la ocsp_file = dir + "/good.ocsp"
+        hvis mode == "server-crl" { server_crl = dir + "/revoked.crl" }
+        hvis mode == "client-crl" { client_crl = dir + "/revoked.crl" }
+        hvis mode == "ocsp-signature" { ocsp_file = dir + "/bad.ocsp" }
+        la listener = builtin.network_operation({"abi": socket.native_versjon(), "operation": "tls_listen",
+            "host": "127.0.0.1", "port": "0", "cert_file": cert_file, "key_file": key_file,
+            "require_client_cert": "1", "client_ca_file": ca_file,
+            "client_crl_file": server_crl, "ocsp_response_file": ocsp_file})
+        krev_tls(listener["status"] == "listening", mode + " listener: " + tekst(listener["error"]))
+        la client = builtin.network_operation({"abi": socket.native_versjon(), "operation": "tls_connect",
+            "host": "127.0.0.1", "port": tekst(listener["port"]), "hostname": "localhost", "ca_file": ca_file,
+            "client_cert_file": cert_file, "client_key_file": key_file, "require_ocsp": "1",
+            "crl_file": client_crl})
+        krev_tls(client["status"] != "feil", mode + " client: " + tekst(client["error"]))
+        la pair = handshake_pair(listener, client)
+        la hs = pair["scheduler"]
+        hvis mode == "good" {
+            krev_tls(sched.future_status(hs, pair["client_future"]) == "ferdig", "CRL/OCSP client: " + sched.future_feil(hs, pair["client_future"]))
+            krev_tls(sched.future_status(hs, pair["server_future"]) == "ferdig", "CRL/OCSP server: " + sched.future_feil(hs, pair["server_future"]))
+            la result = sched.future_resultat(hs, pair["client_future"])
+            assert_eq(result["ocsp_status"], "good")
+            assert(result["ocsp_stapled"])
+            assert(result["peer_verified"])
+            assert(sched.future_resultat(hs, pair["server_future"])["peer_verified"])
+        } ellers {
+            la future = hvis mode == "server-crl" da pair["server_future"] ellers pair["client_future"]
+            assert_eq(sched.future_status(hs, future), "feil")
+            la expected = hvis mode == "ocsp-signature" da "OCSP signature invalid" ellers "CRL certificate revoked"
+            krev_tls(builtin.contains(sched.future_feil(hs, future), expected), mode + ": " + sched.future_feil(hs, future))
+        }
+        socket.native_lukk(client)
+        socket.native_lukk(pair["server"])
+        socket.native_lukk(listener)
+        skriv("TLS revocation " + mode + " OK\n")
+    }
+    for name i ["ca.pem", "leaf.pem", "key.pem", "good.crl", "revoked.crl", "good.ocsp", "bad.ocsp"] { filops.slett_fil(dir + "/" + name) }
+}
+
 funksjon start() -> heiltall {
     skriv("TLS kandidat: " + tekst(builtin.system_info()["executable"]) + "\n")
     la cert = "tests/fixtures/tls/localhost-ed25519.crt"
     la key = "tests/fixtures/tls/localhost-ed25519.key"
     la secure_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
     la listen_rc = tls.lytt_secure(secure_server)
-    hvis listen_rc != 0 og builtin.contains(secure_server["error"], "unavailable") {
-        // Testen PASSERTE ved å korrekt oppdage + handtere utilgjengeleg TLS-
-        // backend (t.d. macOS-CI-runnaren). Inkluder OK-markøren så attestasjonen
-        // (som grep-ar etter "test_native_tls_event_loop OK") godtek den lovlege
-        // skip-en i staden for å feile på ei rein CI-miljøavgrensing.
-        skriv("test_native_tls_event_loop OK (SKIP: backend unavailable)\n")
-        returner 0
-    }
-    assert_eq(listen_rc, 0)
+    // Same test er eit runtime-attestasjonskrav på Linux og macOS. Ein
+    // utilgjengeleg backend er ikkje prov på ein fungerande TLS-handshake.
+    hvis listen_rc != 0 { kast "TLS listener: " + tekst(secure_server["error"]) }
     assert_eq(secure_server["transport_backend"], "norscode-tls13")
     la listener = secure_server["listener"]
     assert_eq(listener["status"], "listening")
@@ -119,22 +187,14 @@ funksjon start() -> heiltall {
     assert_eq(mtls_server_tls["peer_verified"], sann)
     assert_inneholder(mtls_server_tls["peer_subject"], "CN=localhost")
 
-    la revoked_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
-    tls.krev_klientsertifikat_med_crl(revoked_server, cert, "tests/fixtures/tls/revoked-client-ed25519.crl.pem")
-    // Dei gamle testane tolka ein signatur/listelesar som full CRL-policy og
-    // eit uautentisert OCSP «good»-felt som revokasjonsbevis. Desse krava skal
-    // no avvisast ved oppsett, til CRL-tid/struktur og OCSP-signatur/CertID/tid finst.
-    la revoked_rc = tls.lytt_secure(revoked_server)
-    krev_tls(revoked_rc != 0, "CRL-tenarpolicy vart akseptert: rc=" + tekst(revoked_rc) + " error=" + tekst(revoked_server["error"]))
-    krev_tls(builtin.contains(revoked_server["error"], "TLS server CRL verification unsupported"), "CRL-tenarpolicy gav feil avvisingsgrunn: " + tekst(revoked_server["error"]))
-    la crl_client = socket.native_tls_tilkoble_med_crl("127.0.0.1", port, "localhost", cert,
-        "tests/fixtures/tls/revoked-client-ed25519.crl.pem")
-    assert_eq(crl_client["status"], "feil")
-    krev_tls(builtin.contains(crl_client["error"], "TLS client CRL verification unsupported"), "CRL-klientpolicy gav feil avvisingsgrunn: " + tekst(crl_client["error"]))
+    revocation_loopback()
     la ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", port, "localhost", cert)
-    assert_eq(ocsp_client["status"], "feil")
-    krev_tls(builtin.contains(ocsp_client["error"], "TLS OCSP verification unsupported"), "OCSP-policy gav feil avvisingsgrunn: " + tekst(ocsp_client["error"]))
-    skriv("CRL/OCSP-policy avvist som ustøtta OK\n")
+    krev_tls(ocsp_client["status"] != "feil", "OCSP klientoppsett")
+    la missing_pair = handshake_pair(listener, ocsp_client)
+    assert_eq(sched.future_status(missing_pair["scheduler"], missing_pair["client_future"]), "feil")
+    krev_tls(builtin.contains(sched.future_feil(missing_pair["scheduler"], missing_pair["client_future"]), "OCSP staple required"), "manglande OCSP-staple gav feil avvisingsgrunn")
+    socket.native_lukk(ocsp_client)
+    socket.native_lukk(missing_pair["server"])
 
     la no_cert_client = socket.native_tls_tilkoble("127.0.0.1", mtls_port, "localhost", cert)
     la no_cert_pair = handshake_pair(mtls_listener, no_cert_client)

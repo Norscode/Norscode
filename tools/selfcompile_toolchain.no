@@ -1,0 +1,389 @@
+// Cold whole-toolchain rebuild from ONE allowlist-pinned native runtime.
+// Only .no source enters the disposable workspaces. Gen0 interprets the
+// codegen source; no prebuilt codegen, bytecode, fragment or cache is copied.
+// Gen1/2/3 each use the preceding runtime and codegen, with closed environment
+// and PATH=/nonexistent. Compare both NCBs AND both native binaries at Gen2/3.
+// Nothing under dist/ or the repository's bootstrap/ is promoted or rewritten.
+
+bruk std.filops som filops
+bruk std.runtime_filesystem som fs
+bruk std.runtime.process_abi som process_abi
+bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk tools.refresh_native_codegen som refresh
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon hash_fil(sti: tekst) -> tekst {
+    la stat = fs.native_stat_sti(sti)
+    hvis stat["status"] != "ok" eller stat["kind"] != "file" {
+        kast "toolchain: manglar vanleg fil " + sti
+    }
+    la storleik = heiltall_fra_tekst(tekst(stat["value"]))
+    la bytes = builtin.fil_les_binær(sti)
+    hvis storleik < 0 eller lengde(bytes) != storleik {
+        kast "toolchain: ufullstendig lesing " + sti
+    }
+    la sha = tekst(builtin.sha256_bytes(bytes))
+    hvis ikkje refresh.hash_gyldig(sha) { kast "toolchain: ugyldig filhash " + sti }
+    returner sha
+}
+
+funksjon samanlikn(a: tekst, b: tekst) -> tekst {
+    la ha = hash_fil(a)
+    la hb = hash_fil(b)
+    hvis ha != hb eller builtin.fil_les(a) != builtin.fil_les(b) {
+        kast "toolchain: ulikt fikspunkt " + a + " / " + b
+    }
+    returner ha
+}
+
+funksjon trygt_namn(namn: tekst) -> boolsk {
+    returner namn != "" og namn != "." og namn != ".." og
+        ikkje builtin.contains(namn, "/") og ikkje builtin.contains(namn, "\\") og
+        ikkje builtin.contains(namn, "\n") og ikkje builtin.contains(namn, "\t")
+}
+
+funksjon kjeldefiler(root: tekst) -> liste_tekst {
+    la kø: liste_tekst = ["selfhost", "std", "tools"]
+    la filer: liste_tekst = []
+    la qi: heiltall = 0
+    mens qi < lengde(kø) {
+        la rel = kø[qi]
+        la listing = fs.native_list_typed(root, rel)
+        hvis listing["status"] != "ok" { kast "toolchain: kan ikkje liste kjelde " + rel }
+        for record i builtin.split(tekst(listing["data"]), "\n") {
+            hvis record != "" {
+                hvis lengde(record) < 3 eller builtin.slice(record, 1, 2) != "\t" {
+                    kast "toolchain: ugyldig typa katalogoppføring"
+                }
+                la kind = builtin.slice(record, 0, 1)
+                la namn = builtin.slice(record, 2, lengde(record))
+                hvis ikkje trygt_namn(namn) { kast "toolchain: utrygt kjeldenamn" }
+                la sti = rel + "/" + namn
+                hvis kind == "d" { legg_til(kø, sti) }
+                ellers hvis kind == "l" { kast "toolchain: symlink i kjeldetreet " + sti }
+                ellers hvis kind == "f" og builtin.ends_with(namn, ".no") { legg_til(filer, sti) }
+            }
+        }
+        qi = qi + 1
+    }
+    hvis lengde(filer) == 0 { kast "toolchain: tomt kjeldetre" }
+    returner filer
+}
+
+// Existing output is an error, not an invitation to reuse warm artifacts.
+funksjon kopier_kjelder(root: tekst, mål: tekst, filer: liste_tekst) -> tekst {
+    hvis builtin.fil_finnes(mål) eller filops.katalog_finnes(mål) {
+        kast "toolchain: kald arbeidsmappe finst alt " + mål
+    }
+    hvis ikkje filops.lag_katalogar(mål) { kast "toolchain: kan ikkje opprette arbeidsmappe" }
+    la manifest: tekst = ""
+    for rel i filer {
+        hvis ikkje builtin.ends_with(rel, ".no") eller builtin.contains(rel, "..") eller
+           builtin.starts_with(rel, "/") {
+            kast "toolchain: berre relativ .no-kjelde kan kopierast"
+        }
+        la inn = builtin.fil_les(root + "/" + rel)
+        la sha = hash_fil(root + "/" + rel)
+        hvis ikkje filops.lag_katalogar(filops.katalog(mål + "/" + rel)) {
+            kast "toolchain: kan ikkje opprette kjeldemappe"
+        }
+        builtin.fil_skriv(mål + "/" + rel, inn)
+        hvis hash_fil(mål + "/" + rel) != sha { kast "toolchain: kjeldekopi endra byte " + rel }
+        manifest = manifest + rel + " " + sha + "\n"
+    }
+    builtin.fil_skriv(mål + "/sources.manifest", manifest)
+    returner builtin.sha256(manifest)
+}
+
+funksjon krev_kjelder(root: tekst, filer: liste_tekst, venta: tekst) {
+    // Re-list the physical tree too: hashing only the original paths would
+    // overlook an added source file or a new symlink after the snapshot.
+    la noverande = kjeldefiler(root)
+    hvis lengde(noverande) != lengde(filer) {
+        kast "toolchain: kjeldeinventaret endra seg under bygget " + root
+    }
+    la venta_filer: ordbok_tekst = {}
+    for rel i filer { venta_filer[rel] = "1" }
+    for rel i noverande {
+        hvis venta_filer[rel] != "1" {
+            kast "toolchain: kjeldestien endra seg under bygget " + root + "/" + rel
+        }
+    }
+    la manifest: tekst = ""
+    for rel i filer { manifest = manifest + rel + " " + hash_fil(root + "/" + rel) + "\n" }
+    hvis builtin.sha256(manifest) != venta {
+        kast "toolchain: kjeldene endra seg under bygget " + root
+    }
+}
+
+funksjon commit_gyldig(commit: tekst) -> boolsk {
+    hvis lengde(commit) != 40 og lengde(commit) != 64 { returner usann }
+    for c i commit {
+        hvis builtin.index_of("0123456789abcdef", c) < 0 { returner usann }
+    }
+    returner sann
+}
+
+funksjon krev_hash(sti: tekst, venta: tekst) {
+    hvis ikkje refresh.hash_gyldig(venta) eller hash_fil(sti) != venta {
+        kast "toolchain: inputbinær endra seg " + sti
+    }
+}
+
+funksjon kopier_binær(kjelde: tekst, mål: tekst, sha: tekst) {
+    krev_hash(kjelde, sha)
+    hvis ikkje filops.lag_katalogar(filops.katalog(mål)) eller
+       ikkje filops.kopier2(kjelde, mål) eller hash_fil(mål) != sha eller
+       ikkje builtin.fil_sett_kjorbar(mål) {
+        kast "toolchain: kunne ikkje kopiere inputbinær " + mål
+    }
+}
+
+funksjon miljø(root: tekst, runtime: tekst) -> ordbok_tekst {
+    la commit = env("GITHUB_SHA")
+    hvis commit != "" og ikkje commit_gyldig(commit) { kast "toolchain: ugyldig GITHUB_SHA" }
+    returner {"PATH": "/nonexistent", "NORSCODE_ROOT": root, "GITHUB_SHA": commit,
+        "NORSCODE_NATIVE_BIN": runtime, "NC_NATIVE": runtime,
+        "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1", "NORSCODE_GC_ALLOC": "1",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "0", "NORSCODE_USE_PRECOMPILED_STDLIB": "0",
+        "NORSCODE_VM_FAST": "1", "NORSCODE_NATIVE_TOOL_CACHE": "0",
+        "NORSCODE_BOOTSTRAP_CACHE": root + "/build/empty-bootstrap-cache",
+        "NC_FULLHOST_REUSE": "0", "NC_NATIVE_EXTERNAL_EMBED_NCB": "",
+        "NC_BUILTIN_REPORT": "1", "NC_BUILTIN_KVITLISTE": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.",
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_TARGET_DISK_ROOT": root + ",."}
+}
+
+funksjon køyr(root: tekst, logg: tekst, exe: tekst, argv: liste_tekst,
+               m: ordbok_tekst, timeout: heiltall) -> tekst {
+    skriv("[toolchain] " + logg + "\n")
+    la req = process_abi.request(exe, argv, root, "", timeout, 33554432)
+    // Closed environment also applies transitively to children of the builder.
+    req = process_abi.sett_sandbox(req, "none", 0, 1024, usann)
+    req = process_abi.sett_environment(req, m)
+    la res = builtin.process_spawn_argv(req)
+    la ut = tekst(res["stdout"]) + tekst(res["stderr"])
+    la slutt = "status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) +
+        " wall_ms=" + tekst(res["wall_ms"])
+    builtin.fil_skriv(logg, slutt + "\n" + ut)
+    skriv("[toolchain] " + logg + " " + slutt + "\n")
+    hvis tekst(res["status"]) != "ferdig" eller tekst(res["exit_code"]) != "0" {
+        kast "toolchain: barn feila " + logg + " status=" + tekst(res["status"]) +
+            " exit=" + tekst(res["exit_code"])
+    }
+    returner ut
+}
+
+funksjon bundle_codegen(root: tekst, runtime: tekst, ncb: tekst, logg: tekst) {
+    la m = miljø(root, runtime)
+    // One-module bundle is nc_compile; the explicit environment contract also
+    // works on a bootstrap whose argv surface predates the current CLI.
+    m["NORSCODE_CMD"] = "compile"
+    m["NORSCODE_FILE"] = root + "/selfhost/native_execution/native_codegen_v2.no"
+    m["NORSCODE_OUTPUT"] = ncb
+    køyr(root, logg, runtime, ["compile", m["NORSCODE_FILE"], ncb], m, 1800000)
+    hvis filops.fil_storleik(ncb) <= 0 { kast "toolchain: codegen-bundle manglar" }
+}
+
+funksjon bygg_codegen(root: tekst, runtime: tekst, førre: tekst, ncb: tekst,
+                       ut: tekst, logg: tekst) {
+    la m = miljø(root, runtime)
+    m["NC_INPUT"] = ncb
+    m["NC_OUTPUT"] = ut
+    m["NC_TARGET"] = "linux-x86_64"
+    la exe = førre
+    la args: liste_tekst = []
+    hvis førre == "" {
+        // The FIRST codegen is interpreted from source by the sole seed.
+        exe = runtime
+        m["NORSCODE_CMD"] = "run"
+        m["NORSCODE_FILE"] = root + "/selfhost/native_execution/native_codegen_v2.no"
+        args = ["run", m["NORSCODE_FILE"]]
+    }
+    la loggtekst = køyr(root, logg, exe, args, m, 7200000)
+    refresh.krev_nullrapportar(loggtekst, 1)
+    hvis ikkje builtin.contains(loggtekst, "BUILTIN-RAPPORT uløyste=0 uventa=0") eller
+       filops.fil_storleik(ut) <= 0 eller ikkje builtin.fil_sett_kjorbar(ut) {
+        kast "toolchain: codegen manglar køyrbar output eller rein builtin-rapport"
+    }
+}
+
+funksjon installer_codegen(root: tekst, cg: tekst, sha: tekst) {
+    la rel = "bootstrap/native_codegen_x86_64.elf"
+    kopier_binær(cg, root + "/" + rel, sha)
+    builtin.fil_skriv(root + "/" + rel + ".srchash", cgp.srchash(root, "linux-x86_64") + "\n")
+    builtin.fil_skriv(root + "/" + rel + ".depshash", cgp.depshash(root, "linux-x86_64") + "\n")
+    la runtime = root + "/bootstrap/stage0/norscode-linux-x86_64"
+    builtin.fil_skriv(root + "/tools/active_surface_allowlist.txt",
+        "# Isolated generated inputs; provenance is in the parent toolchain report.\n" +
+        "godkjend binær bootstrap/stage0/norscode-linux-x86_64 sha256=" + hash_fil(runtime) + "\n" +
+        "godkjend binær " + rel + " sha256=" + sha + "\n")
+    la val = cgp.vel(root, "linux-x86_64", "linux-x86_64")
+    hvis val["status"] != "ok" { kast "toolchain: generert codegen vart avvist" }
+}
+
+funksjon bygg_runtime(root: tekst, runtime: tekst, logg: tekst, ut: tekst, kjede: ordbok,
+                       generasjon: tekst) -> ordbok {
+    la m = miljø(root, runtime)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = root + "/tools/build_ci_runtime_candidate.no"
+    køyr(root, logg, runtime, ["run", m["NORSCODE_FILE"]], m, 7200000)
+    fase_skriv(ut, kjede, generasjon + ":runtime-validation")
+    la report = builtin.json_parse_raw(builtin.fil_les(root + "/build/ci-runtime/build.json"))
+    hvis report["schema"] != "norscode-ci-runtime-v1" eller report["status"] != "ok" eller
+       report["selftest"] != "passed" eller report["l5_byte_parity"] != sann eller
+       report["unresolved_builtins"] != 0 eller report["unexpected_builtins"] != 0 eller
+       report["source_commit"] != env("GITHUB_SHA") eller
+       report["ncb_sha256"] != hash_fil(root + "/build/ci-runtime/nc_main_fullhost.ncb.json") eller
+       report["candidate_sha256"] != hash_fil(root + "/build/ci-runtime/norscode_native") eller
+       report["bootstrap_sha256"] != hash_fil(runtime) eller
+       report["codegen_sha256"] != hash_fil(root + "/bootstrap/native_codegen_x86_64.elf") {
+        kast "toolchain: manglande eller feil runtimebyggbevis"
+    }
+    returner report
+}
+
+funksjon lagre(ut: tekst, report: ordbok) {
+    builtin.fil_skriv(ut + "/report.json", builtin.json_skriv(report) + "\n")
+}
+
+funksjon fase_skriv(ut: tekst, report: ordbok, namn: tekst) {
+    report["step"] = namn
+    report["last_progress_at_ms"] = builtin.tid_ms()
+    report["elapsed_ms"] = report["last_progress_at_ms"] - report["started_at_ms"]
+    lagre(ut, report)
+    skriv("[toolchain] " + namn + " elapsed_ms=" + tekst(report["elapsed_ms"]) + "\n")
+}
+
+funksjon bygg(root: tekst, ut: tekst, report: ordbok) {
+    fase_skriv(ut, report, "validate-inputs")
+    hvis cgp.vert_plattform() != "linux-x86_64" { kast "toolchain: krev Linux x86-64" }
+    la seed_rel = "bootstrap/stage0/norscode-linux-x86_64"
+    la seed = root + "/" + seed_rel
+    la pin = refresh.pin_les(builtin.fil_les(root + "/tools/active_surface_allowlist.txt"), seed_rel)
+    hvis hash_fil(seed) != pin { kast "toolchain: feil bootstrap-pin" }
+    la filer = kjeldefiler(root)
+    report["bootstrap_sha256"] = pin
+    report["source_file_count"] = lengde(filer)
+    la commit = env("GITHUB_SHA")
+    hvis commit != "" og ikkje commit_gyldig(commit) { kast "toolchain: ugyldig GITHUB_SHA" }
+    // Commit identity comes from the CI checkout; the manifest below is the
+    // direct source-content binding, including for local uncommitted runs.
+    report["source_commit"] = commit
+    la gen0 = ut + "/gen0"
+    fase_skriv(ut, report, "gen0:source-snapshot")
+    la manifest_sha = kopier_kjelder(root, gen0, filer)
+    report["source_manifest_sha256"] = manifest_sha
+    kopier_binær(seed, gen0 + "/" + seed_rel, pin)
+    la runtime = gen0 + "/" + seed_rel
+    la runtime_sha = pin
+    la cg0_ncb = gen0 + "/codegen.ncb.json"
+    fase_skriv(ut, report, "gen0:bundle-codegen")
+    bundle_codegen(gen0, runtime, cg0_ncb, gen0 + "/bundle-codegen.log")
+    la cg = gen0 + "/codegen.elf"
+    fase_skriv(ut, report, "gen0:single-seed-codegen")
+    bygg_codegen(gen0, runtime, "", cg0_ncb, cg, gen0 + "/codegen.log")
+    fase_skriv(ut, report, "gen0:verify-sources")
+    krev_kjelder(gen0, filer, manifest_sha)
+    la codegen_sha = hash_fil(cg)
+    report["initial_codegen_sha256"] = codegen_sha
+    report["initial_codegen_from_source_vm"] = sann
+    la generasjonar: liste = []
+    report["generations"] = generasjonar
+    la g: heiltall = 1
+    mens g <= 3 {
+        la generasjon = "gen" + tekst(g)
+        la work = ut + "/" + generasjon
+        fase_skriv(ut, report, generasjon + ":source-snapshot")
+        hvis kopier_kjelder(gen0, work, filer) != manifest_sha { kast "toolchain: kjeldekopi divergerte" }
+        // Retain the hashes validated when the preceding generation finished.
+        // Re-hashing into a new expected value would accept changed inputs.
+        la input_runtime_sha = runtime_sha
+        la input_codegen_sha = codegen_sha
+        kopier_binær(runtime, work + "/" + seed_rel, input_runtime_sha)
+        runtime = work + "/" + seed_rel
+        kopier_binær(cg, work + "/input-codegen.elf", input_codegen_sha)
+        la cg_ncb = work + "/codegen.ncb.json"
+        fase_skriv(ut, report, generasjon + ":bundle-codegen")
+        bundle_codegen(work, runtime, cg_ncb, work + "/bundle-codegen.log")
+        cg = work + "/codegen.elf"
+        fase_skriv(ut, report, generasjon + ":native-codegen")
+        bygg_codegen(work, runtime, work + "/input-codegen.elf", cg_ncb, cg, work + "/codegen.log")
+        codegen_sha = hash_fil(cg)
+        installer_codegen(work, cg, codegen_sha)
+        fase_skriv(ut, report, generasjon + ":runtime-build")
+        la runtime_report = bygg_runtime(work, runtime, work + "/runtime.log", ut, report, generasjon)
+        runtime_sha = tekst(runtime_report["candidate_sha256"])
+        fase_skriv(ut, report, generasjon + ":verify-sources")
+        krev_kjelder(work, filer, manifest_sha)
+        la output_runtime = work + "/build/ci-runtime/norscode_native"
+        krev_hash(cg, codegen_sha)
+        krev_hash(output_runtime, runtime_sha)
+        legg_til(generasjonar, {"generation": g, "workspace": work,
+            "input_runtime_sha256": input_runtime_sha, "input_codegen_sha256": input_codegen_sha,
+            "codegen_ncb_sha256": hash_fil(cg_ncb), "codegen_sha256": codegen_sha,
+            "runtime_ncb_sha256": hash_fil(work + "/build/ci-runtime/nc_main_fullhost.ncb.json"),
+            "runtime_sha256": runtime_sha, "runtime_build": runtime_report})
+        runtime = output_runtime
+        fase_skriv(ut, report, generasjon + ":complete")
+        g = g + 1
+    }
+    la gen2 = ut + "/gen2"
+    la gen3 = ut + "/gen3"
+    fase_skriv(ut, report, "verify-generation-artifacts")
+    for resultat i generasjonar {
+        la work = tekst(resultat["workspace"])
+        krev_hash(work + "/codegen.ncb.json", tekst(resultat["codegen_ncb_sha256"]))
+        krev_hash(work + "/codegen.elf", tekst(resultat["codegen_sha256"]))
+        krev_hash(work + "/build/ci-runtime/nc_main_fullhost.ncb.json", tekst(resultat["runtime_ncb_sha256"]))
+        krev_hash(work + "/build/ci-runtime/norscode_native", tekst(resultat["runtime_sha256"]))
+    }
+    fase_skriv(ut, report, "compare-gen2-gen3")
+    report["codegen_ncb_sha256"] = samanlikn(gen2 + "/codegen.ncb.json", gen3 + "/codegen.ncb.json")
+    report["codegen_sha256"] = samanlikn(gen2 + "/codegen.elf", gen3 + "/codegen.elf")
+    report["runtime_ncb_sha256"] = samanlikn(gen2 + "/build/ci-runtime/nc_main_fullhost.ncb.json", gen3 + "/build/ci-runtime/nc_main_fullhost.ncb.json")
+    report["runtime_sha256"] = samanlikn(gen2 + "/build/ci-runtime/norscode_native", gen3 + "/build/ci-runtime/norscode_native")
+    fase_skriv(ut, report, "verify-original-inputs")
+    krev_kjelder(root, filer, manifest_sha)
+    krev_kjelder(gen0, filer, manifest_sha)
+    hvis hash_fil(seed) != pin eller
+       refresh.pin_les(builtin.fil_les(root + "/tools/active_surface_allowlist.txt"), seed_rel) != pin {
+        kast "toolchain: opphavleg seed eller pin endra seg"
+    }
+    report["source_tree_unchanged"] = sann
+    report["fixed_point"] = sann
+    report["status"] = "ok"
+    fase_skriv(ut, report, "complete")
+    skriv("=== Heil verktøykjede: BESTÅTT (éin seed, kjelde, Gen2 == Gen3) ===\n")
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" eller root == "." { root = tekst(builtin.system_info()["cwd"]) }
+    la ut = root + "/build/toolchain-rebuild/" + builtin.random_hex(8)
+    la report: ordbok = {"schema": "norscode-toolchain-fixed-point-v1", "status": "running",
+        "fixed_point": usann, "initial_binary_count": 1, "prebuilt_codegen_input_count": 0,
+        "copied_bytecode_count": 0, "promoted": usann, "started_at_ms": builtin.tid_ms()}
+    prøv {
+        hvis ikkje builtin.starts_with(root, "/") { kast "toolchain: NORSCODE_ROOT må vere absolutt" }
+        hvis ikkje filops.lag_katalogar(ut) { kast "toolchain: kan ikkje opprette rapportmappe" }
+        builtin.fil_skriv(root + "/build/toolchain-rebuild/latest.txt", ut + "\n")
+        lagre(ut, report)
+        bygg(root, ut, report)
+    } fang (e) {
+        report["status"] = "failed"
+        report["error"] = tekst(e)
+        prøv { lagre(ut, report) } fang (e2) {}
+        skriv("[toolchain] FEIL: " + tekst(e) + "\n")
+        builtin.exit(1)
+        returner 1
+    }
+    returner 0
+}

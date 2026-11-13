@@ -1,0 +1,71 @@
+// Alle bytegrenser i full checkpoint før atomisk publisering, og ekte I/O-feil
+// som må halde både gammal checkpoint og den kvitterte WAL-en intakte.
+bruk std.norsdb_motor som motor
+bruk std.runtime_filesystem som fs
+
+funksjon sjekk(sti: tekst) {
+    la h = motor.db_åpne(sti)
+    assert_eq(motor.db_tel(h, "t"), 3)
+    assert_eq(motor.db_hent(h, "t", 1)["v"], "før")
+    assert_eq(motor.db_hent(h, "t", 2)["v"], "også før")
+    assert_eq(motor.db_hent(h, "t", 3)["v"], "kvittert commit")
+}
+
+funksjon start() -> heiltall {
+    la dir = "build/norsdb-durable-" + builtin.random_hex(8)
+    builtin.mkdir_p(dir)
+    la sti = dir + "/db"
+    la h = motor.db_ny(sti)
+    motor.db_opprett_tabell(h, "t", [{"navn": "v", "tag": motor.tag_tekst()}])
+    motor.db_sett_inn(h, "t", ["før"])
+    motor.db_sett_inn(h, "t", ["også før"])
+    motor.db_checkpoint_full(h)
+    la gammal = builtin.fil_les(sti + ".cp")
+    motor.db_tx_start(h)
+    motor.db_sett_inn(h, "t", ["kvittert commit"])
+    motor.db_tx_slutt(h)
+    la wal = builtin.fil_les(sti + ".wal")
+    sjekk(sti)
+
+    // Ein katalog på mellombels filnamn tvingar ein ekte OS-feil før rename.
+    builtin.mkdir_p(sti + ".cp2")
+    la stoppa = usann
+    prøv { motor.db_checkpoint_full(h) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    assert_eq(builtin.fil_les(sti + ".cp"), gammal)
+    assert_eq(builtin.fil_les(sti + ".wal"), wal)
+    stoppa = usann
+    prøv { motor.db_sett_inn(h, "t", ["må ikkje kvitterast"]) } fang (e) { stoppa = sann }
+    assert(stoppa)
+    assert_eq(fs.native_slett_mappe(dir, "db.cp2")["status"], "deleted")
+    sjekk(sti)
+
+    la g = motor.db_åpne(sti)
+    motor.db_checkpoint_full(g)
+    la ny = builtin.fil_les(sti + ".cp")
+    la kutt = 0
+    mens kutt <= lengde(ny) {
+        la rest = dir + "/crash"
+        builtin.fil_skriv(rest + ".cp", gammal)
+        builtin.fil_skriv(rest + ".wal", wal)
+        builtin.fil_skriv(rest + ".cp2", builtin.slice(ny, 0, kutt))
+        sjekk(rest)
+        assert(ikkje builtin.fil_finnes(rest + ".cp2"))
+        kutt = kutt + 1
+    }
+    // Etter atomisk rename kan gammal WAL framleis liggje der ved avbrot.
+    builtin.fil_skriv(sti + ".wal", wal)
+    sjekk(sti)
+    assert(ikkje builtin.fil_finnes(sti + ".wal"))
+    assert_eq(builtin.fil_les(sti + ".cp"), ny)
+    for base i ["db", "crash"] {
+        for ending i [".cp", ".wal", ".cp2"] {
+            hvis builtin.fil_finnes(dir + "/" + base + ending) {
+                assert_eq(fs.native_slett_varig(dir + "/" + base + ending)["status"], "deleted")
+            }
+        }
+    }
+    assert_eq(fs.native_slett_mappe("build", builtin.slice(dir, 6, lengde(dir)))["status"], "deleted")
+    skriv("test_norsdb_durable_checkpoint OK (" + tekst(lengde(ny) + 1) + " bytegrenser)\n")
+    returner 0
+}

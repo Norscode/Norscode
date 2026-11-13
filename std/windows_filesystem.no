@@ -209,7 +209,7 @@ funksjon hent_fil(req) {
     returner _filer[id]
 }
 
-funksjon opne(req, skriv: boolsk) -> ordbok {
+funksjon opne_med_val(req, skriv: boolsk, berre_eksisterande: boolsk) -> ordbok {
     la mode = felt(req, "mode")
     hvis (ikkje skriv og mode != "read") eller
        (skriv og mode != "write" og mode != "append") { returner feilsvar("open-modus bryt operasjonsklassen") }
@@ -222,6 +222,7 @@ funksjon opne(req, skriv: boolsk) -> ordbok {
     la tilgang = 2147483648
     la opning = 3
     hvis skriv { tilgang = 1073741952 opning = 4 } // GENERIC_WRITE | FILE_READ_ATTRIBUTES
+    hvis berre_eksisterande { opning = 3 } // OPEN_EXISTING: flush må aldri lage ei manglande kjelde.
     // OPEN_ALWAYS for skriv: trunkér først ETTER handtak-/confinement-kontroll.
     la h = api.call("CreateFileW", [p, tilgang, 3, 0, opning, 1075839104, 0])
     la kode = api.last_error()
@@ -259,6 +260,10 @@ funksjon opne(req, skriv: boolsk) -> ordbok {
     la r = svar("open", "", 0, "")
     r["handle"] = id
     returner r
+}
+
+funksjon opne(req, skriv: boolsk) -> ordbok {
+    returner opne_med_val(req, skriv, usann)
 }
 
 funksjon op_svar(status: tekst, id: tekst, op, verdi: heiltall, feil: tekst) -> ordbok {
@@ -649,6 +654,59 @@ funksjon sti_skriv(req) -> ordbok {
     returner svar(status, "", verdi, "")
 }
 
+// Same HANDLE frå WriteFile til FlushFileBuffers fangar òg forseinka I/O-feil.
+// Dette er Windows sin dokumenterte filbarriere. Det er ikkje ei påstand om
+// POSIX-lik katalog-fsync eller ei fysisk straumbrotprøve.
+funksjon skriv_varig(req) -> ordbok {
+    la h = opne(req, sann)
+    hvis h["status"] != "open" { returner h }
+    la id = h["handle"]
+    la data = felt(req, "data")
+    la off = 0
+    la r = svar("ok", "", 0, "")
+    mens off < lengde(data) og r["status"] == "ok" {
+        la n = lengde(data) - off
+        hvis n > 65536 { n = 65536 }
+        r = synkron({"handle": id, "data": builtin.slice(data, off, off + n)}, sann, usann)
+        hvis r["status"] == "ok" og r["value"] != n { r = feilsvar("ufullstendig varig filskriving") }
+        off = off + n
+    }
+    hvis r["status"] == "ok" { r = handtak_operasjon({"handle": id, "operation": "flush"}) }
+    la lukka = lukk({"handle": id})
+    hvis r["status"] != "ok" { returner r }
+    hvis lukka["status"] != "closed" { returner lukka }
+    returner svar("ok", "", lengde(data), "")
+}
+
+funksjon erstatt_varig(req) -> ordbok {
+    la kjelde = normal_rel(felt(req, "source"))
+    la mål = normal_rel(felt(req, "target"))
+    la a = builtin.split(kjelde, "/")
+    la b = builtin.split(mål, "/")
+    hvis kjelde == "" eller mål == "" eller kjelde == mål eller lengde(a) != lengde(b) {
+        returner feilsvar("ugyldig varig rename")
+    }
+    la i = 0
+    mens i < lengde(a) - 1 {
+        hvis a[i] != b[i] { returner feilsvar("ulik katalog ved varig rename") }
+        i = i + 1
+    }
+    // Gjenoppretting kan publisere ei komplett .cp2 frå ein avbroten prosess.
+    // Flush sjølve kjelda òg: WRITE_THROUGH på MoveFileEx dokumenterer ikkje
+    // at usynkroniserte fildata frå ein tidlegare prosess blir varige ved rename.
+    la h = opne_med_val({"root": felt(req, "root"), "relative": felt(req, "source"),
+        "mode": "append"}, sann, sann)
+    hvis h["status"] != "open" { returner h }
+    la r = handtak_operasjon({"handle": h["handle"], "operation": "flush"})
+    la lukka = lukk({"handle": h["handle"]})
+    hvis r["status"] != "ok" { returner r }
+    hvis lukka["status"] != "closed" { returner lukka }
+    // Lukk før rename: skrivehandtaket deler ikkje DELETE. sti_skriv held
+    // katalogane låste og brukar REPLACE_EXISTING | WRITE_THROUGH.
+    returner sti_skriv({"operation": "file_replace", "root": felt(req, "root"),
+        "source": felt(req, "source"), "target": felt(req, "target")})
+}
+
 funksjon operation(req, skriv: boolsk) -> ordbok {
     hvis ikkje er_windows() { returner feilsvar("Windows-filsystem krev Windows") }
     hvis felt(req, "abi") != "norscode-native-filesystem-v1" { returner feilsvar("invalid filesystem ABI") }
@@ -661,6 +719,11 @@ funksjon operation(req, skriv: boolsk) -> ordbok {
     hvis op == "wait_async" { returner vent_io(req) }
     hvis op == "cancel_async" { returner kanseller(req) }
     hvis skriv {
+        hvis op == "write_durable" { returner skriv_varig(req) }
+        hvis op == "file_replace_durable" { returner erstatt_varig(req) }
+        hvis op == "delete_durable" {
+            returner sti_skriv({"operation": "delete", "root": felt(req, "root"), "relative": felt(req, "relative")})
+        }
         hvis op == "write" { returner synkron(req, sann, usann) }
         hvis op == "write_async" { returner start_io(req, sann, usann) }
         hvis op == "flush" { returner handtak_operasjon(req) }
