@@ -105,18 +105,25 @@ funksjon kompiler_test(namn: tekst, prefix: tekst, bm: ordbok_tekst, testnamn: t
     returner køyr(namn, prefix + "/dist/norscode_native", [], root, m)
 }
 
-// Mål-triplet for `nc bygg-native` på verten ferda køyrer på.
+// Berre eit uttrykkeleg støtta OS/arkitektur-par kan attestere native-bygg.
+// Ein ukjend vert skal ikkje bli Linux x86-64, eller ein Intel-Mac ARM64.
+funksjon native_mål(os: tekst, maskin: tekst) -> tekst {
+    la arch = builtin.lower(maskin)
+    la x86 = arch == "x86_64" eller arch == "amd64"
+    la arm = arch == "aarch64" eller arch == "arm64"
+    hvis os == "Darwin" og arm { returner "macos-arm64" }
+    hvis os == "Linux" og arm { returner "linux-arm64" }
+    hvis os == "Linux" og x86 { returner "linux-x86_64" }
+    hvis os == "Windows" og x86 { returner "windows-x86_64" }
+    returner ""
+}
+
 funksjon vert_mål() -> tekst {
-    la os = ""
-    la arch = ""
     prøv {
         la info = builtin.system_info()
-        os = tekst(info["system"])
-        arch = tekst(info["machine"])
+        returner native_mål(tekst(info["system"]), tekst(info["machine"]))
     } fang (e) { }
-    hvis os == "Darwin" { returner "macos-arm64" }
-    hvis arch == "aarch64" eller arch == "arm64" { returner "linux-arm64" }
-    returner "linux-x86_64"
+    returner ""
 }
 
 funksjon kopier(kjelde: tekst, mål: tekst) -> bool {
@@ -145,9 +152,72 @@ funksjon ikkje_tom(sti: tekst) -> bool {
     returner usann
 }
 
+// Ei delvis eller gammal utfil kan overleve ein feila kodegenerator. Både
+// prosessresultatet og den nye artefakten må vere gyldige før vi går vidare.
+funksjon native_bygg_ok(resultat: ordbok_tekst, sti: tekst) -> bool {
+    returner prosess.ok(resultat) og ikkje_tom(sti)
+}
+
+funksjon native_smoke_ok(resultat: ordbok_tekst) -> bool {
+    returner tekst(resultat["status"]) == "ferdig" og
+        tekst(resultat["exit_code"]) == "42" og
+        tekst(resultat["stdout"]) == "release-native-selfhost-ok"
+}
+
+// Den installerte kompilatoren må produsere eit program som faktisk køyrer.
+// App-prosjektet over kan vere ein tenar; ein separat liten kjeldeprobe gjev
+// ei avgrensa sluttmarkør og exitkode utan nettverk eller bakgrunnsprosessar.
+funksjon native_smoke(prefix: tekst, base: tekst, root: tekst, bm: ordbok_tekst) -> bool {
+    la kjelde = base + "/native-smoke.no"
+    la ncb = base + "/native-smoke.ncb"
+    la program = base + "/native-smoke"
+    hvis vert_mål() == "windows-x86_64" { program = program + ".exe" }
+    prøv {
+        builtin.fil_skriv(kjelde,
+            "funksjon start() -> heiltall { skriv(\"release-native-selfhost-ok\"); returner 42 }\n")
+    } fang (e) { returner usann }
+    la cm = kopi(bm)
+    cm["NORSCODE_CMD"] = "compile"
+    cm["NORSCODE_FILE"] = kjelde
+    cm["NORSCODE_OUTPUT"] = ncb
+    hvis ikkje køyr("native smoke (compile)", prefix + "/dist/norscode_native", [], root, cm) { returner usann }
+    skriv("[JOURNEY] native smoke (AOT)\n")
+    la aot = køyr_rå(prefix + "/bin/nc",
+        ["bygg-native", "--target", vert_mål(), "--ncb", ncb, program], root, kopi(bm))
+    skriv_ut(aot)
+    hvis ikkje native_bygg_ok(aot, program) {
+        skriv("[FAIL] brukarferd: native smoke (AOT)\n")
+        returner usann
+    }
+    skriv("[JOURNEY] native smoke (køyring utan PATH-verktøy)\n")
+    la miljø = {
+        "PATH": "/nonexistent", "NORSCODE_ROOT": "",
+        "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+        "NORSCODE_RUN_CMD": "", "NORSCODE_RUN_FILE": "",
+        "NORSCODE_NCB_FILE": "", "NORSCODE_HOST_NCB_FILE": ""
+    }
+    la køyrt = {}
+    prøv { køyrt = prosess.køyr(program, [], base, miljø, 30000) }
+    fang (e) {
+        skriv("[FAIL] brukarferd: native smoke kunne ikkje startast: " + tekst(e) + "\n")
+        returner usann
+    }
+    skriv_ut(køyrt)
+    hvis ikkje native_smoke_ok(køyrt) {
+        skriv("[FAIL] brukarferd: native smoke (køyring) status=" +
+            tekst(køyrt["status"]) + " exit=" + tekst(køyrt["exit_code"]) + "\n")
+        returner usann
+    }
+    returner sann
+}
+
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
     hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
+    hvis vert_mål() == "" {
+        skriv("[FAIL] brukarferd: verten har ikkje eit støtta native-mål\n")
+        returner 1
+    }
     la run_id = builtin.random_hex(8)
     la base = root + "/build/completion-journey-" + run_id
     la prefix = base + "/install"
@@ -189,9 +259,8 @@ funksjon start() -> heiltall {
     testmiljø["NORSCODE_FILE"] = project + "/tests/test_app.no"
     hvis ikkje køyr("prosjekttest", prefix + "/dist/norscode_native", [], root, testmiljø) { returner 1 }
 
-    // Native build: kompiler, så AOT. Den gamle forma var
-    // «compile … && (aot … || test -s <out>)» — altså: AOT-steget får feile so
-    // lenge det faktisk produserte ei ikkje-tom fil. Same semantikk her.
+    // Native build: både kompilering og AOT må lykkast. Ei ikkje-tom utfil
+    // åleine er aldri bevis for at bygginga er fullført.
     la bm = bygg_miljø(prefix, base)
     la cm = kopi(bm)
     cm["NORSCODE_CMD"] = "compile"
@@ -204,10 +273,11 @@ funksjon start() -> heiltall {
     skriv("[JOURNEY] native build (AOT)\n")
     la aot = køyr_rå(prefix + "/bin/nc", ["bygg-native", "--target", vert_mål(), "--ncb", base + "/project.ncb", base + "/app-native"], root, am)
     skriv_ut(aot)
-    hvis ikkje prosess.ok(aot) og ikkje ikkje_tom(base + "/app-native") {
+    hvis ikkje native_bygg_ok(aot, base + "/app-native") {
         skriv("[FAIL] brukarferd: native build (AOT)\n")
         returner 1
     }
+    hvis ikkje native_smoke(prefix, base, root, bm) { returner 1 }
 
     // Web- og DB-testane blir kompilerte frå kjelde med den installerte runtimen
     // (ingen committa test-NCB-ar).

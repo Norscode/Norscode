@@ -1,0 +1,96 @@
+// Eit eige CRT-fritt PE-barn. Raa Win32 I/O provar OS-handhevingen og
+// pipe-livslopet utan at VM-capabilities kan skjule manglande isolasjon.
+bruk std.windows_abi som api
+
+funksjon skriv_bytes(h: heiltall, buf: heiltall, count: heiltall, io: heiltall) -> boolsk {
+    la pos: heiltall = 0
+    mens pos < count {
+        hvis api.call("WriteFile", [h, buf + pos, count - pos, io, 0]) == 0 { returner usann }
+        la wrote = api.read32(io)
+        hvis wrote <= 0 eller wrote > count - pos { returner usann }
+        pos = pos + wrote
+    }
+    returner sann
+}
+
+funksjon nett_nekta(buf: heiltall) -> heiltall {
+    hvis (api.call("WSAStartup", [514, buf]) & 4294967295) != 0 { returner 20 }
+    la sock = api.call("WSASocketW", [2, 1, 6, 0, 0, 0])
+    hvis sock == 0 - 1 { returner 21 }
+    la addr = buf + 512
+    api.u32(addr, 2)
+    builtin.raw_store8(addr + 3, 9)
+    builtin.raw_store8(addr + 4, 127)
+    builtin.raw_store8(addr + 7, 1)
+    la connected = api.call("connect", [sock, addr, 16])
+    // OSTAB-porten fangar WSAGetLastError rett etter connect, foer
+    // Norscode-runtime/GC kan gjere eit nytt OS-kall. Eit nytt API-kall
+    // her ville lese den seinare traadtilstanden, ikkje connect-feilen.
+    la err = api.last_error()
+    api.call("closesocket", [sock])
+    // WSAEACCES, ikkje ECONNREFUSED/timeout mot ein tilfeldig ubrukt port.
+    hvis connected == 0 eller err != 10013 {
+        skriv("network-denial failed: connect=" + tekst(connected) + " wsa_error=" + tekst(err) + "\n")
+        returner 22
+    }
+    skriv("network-denied-ok")
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la mode = miljo_hent("NORSCODE_WINDOWS_IO_MODE")
+    la input = api.call("GetStdHandle", [0 - 10])
+    la output = api.call("GetStdHandle", [0 - 11])
+    la errors = api.call("GetStdHandle", [0 - 12])
+    la buf = api.alloc(4096)
+    la io = api.alloc(32)
+    hvis buf == 0 eller io == 0 { returner 1 }
+    hvis mode == "busy" {
+        // Ingen lesing: forelder maa kunne stoppe ein full stdin-pipe.
+        api.call("Sleep", [20000])
+        returner 2
+    }
+    hvis mode == "closed" {
+        hvis ikkje api.close(input) { returner 3 }
+        api.call("Sleep", [50])
+        skriv("stdin-closed-ok")
+        api.free(buf)
+        api.free(io)
+        returner 0
+    }
+    hvis mode == "network" {
+        la result = nett_nekta(buf)
+        api.free(buf)
+        api.free(io)
+        returner result
+    }
+    hvis mode == "duplex" eller mode == "output-limit" {
+        // Begge fang-roeyra overstig pipe-kvoten FOER barnet les stdin.
+        // Ein synkron forelder som skriv heile stdin fyrst vil deadlocke.
+        for stream i [output, errors] {
+            la byte: heiltall = 79
+            hvis stream == errors { byte = 69 }
+            la i: heiltall = 0
+            mens i < 4096 { builtin.raw_store8(buf + i, byte) i = i + 1 }
+            la round: heiltall = 0
+            mens round < 16 {
+                hvis ikkje skriv_bytes(stream, buf, 4096, io) { returner 4 }
+                round = round + 1
+            }
+        }
+    }
+    hvis mode != "echo" og mode != "duplex" og mode != "output-limit" { returner 5 }
+    mens sann {
+        la read = api.call("ReadFile", [input, buf, 4096, io, 0])
+        hvis read == 0 {
+            hvis api.last_error() == 109 { bryt }
+            returner 6
+        }
+        la count = api.read32(io)
+        hvis count == 0 { bryt }
+        hvis count > 4096 eller ikkje skriv_bytes(output, buf, count, io) { returner 7 }
+    }
+    api.free(buf)
+    api.free(io)
+    returner 0
+}

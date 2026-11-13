@@ -1,0 +1,219 @@
+// POSIX-skrivehandtak og varig lagring, i rein Norscode over OS-atomet sys6.
+// Hald SAME fd frå write til fsync: ein ny open etter skriving kan miste
+// writeback-feil som operativsystemet alt har rapportert til den gamle fd-en.
+// Katalogane blir opna komponentvis med openat/O_NOFOLLOW, utan sjekk/bruk-race.
+// Linux: fsync(fil), fsync(forelder). Darwin: begge, så F_FULLFSYNC(fil).
+// Primærkontraktar: man7.org/linux/man-pages/man2/fsync.2.html;
+// developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html.
+bruk std.native_sys som nsys
+
+funksjon _feil(m: tekst) -> ordbok {
+    returner {"status": "feil", "error": m, "value": 0 - 1}
+}
+
+funksjon _ok(n: heiltall) -> ordbok {
+    returner {"status": "ok", "error": "", "value": n}
+}
+
+funksjon _cstr(b: heiltall, s: tekst) {
+    la i = 0
+    mens i < lengde(s) {
+        builtin.raw_store8(b + i, builtin.char_code(builtin.slice(s, i, i + 1)) & 255)
+        i = i + 1
+    }
+    builtin.raw_store8(b + i, 0)
+}
+
+funksjon _close(fd: heiltall) -> heiltall {
+    hvis fd < 0 { returner 0 }
+    // Aldri prøv close igjen etter EINTR: fd-nummeret kan vere gjenbrukt.
+    returner builtin.sys6(nsys._nr("close"), fd, 0, 0, 0, 0, 0)
+}
+
+funksjon _free(b: heiltall) {
+    hvis b > 0 { builtin.sys6(nsys._nr("munmap"), b, 8192, 0, 0, 0, 0) }
+}
+
+funksjon _openat(parent: heiltall, b: heiltall, flagg: heiltall) -> heiltall {
+    la r = builtin.sys6(nsys._nr("openat"), parent, b, flagg, 384, 0, 0)
+    mens r == 0 - nsys._errno("EINTR") {
+        r = builtin.sys6(nsys._nr("openat"), parent, b, flagg, 384, 0, 0)
+    }
+    returner r
+}
+
+funksjon opne(root: tekst, rel: tekst, modus: tekst) -> ordbok {
+    hvis root == "" { root = "." }
+    hvis lengde(root) >= 4096 eller builtin.contains(root, builtin.chr(0)) eller
+       rel == "" eller lengde(rel) >= 4096 eller builtin.starts_with(rel, "/") eller
+       builtin.contains(rel, builtin.chr(0)) eller builtin.contains(rel, "\\") {
+        returner _feil("ugyldig POSIX-filbane")
+    }
+    la delar = []
+    for d i builtin.split(rel, "/") {
+        hvis d == ".." { returner _feil("filbane forlèt root") }
+        hvis d != "" og d != "." { legg_til(delar, d) }
+    }
+    hvis lengde(delar) == 0 eller (modus != "write" og modus != "append" og modus != "sync") {
+        returner _feil("ugyldig POSIX-skrivemodus")
+    }
+    la b = builtin.sys6(nsys._nr("mmap"), 0, 8192,
+        nsys._flagg("PROT_READ") | nsys._flagg("PROT_WRITE"),
+        nsys._flagg("MAP_PRIVATE") | nsys._flagg("MAP_ANONYMOUS"), 0 - 1, 0)
+    hvis b <= 0 { returner _feil("minne til POSIX-filhandtak manglar") }
+    la dirflagg = nsys._flagg("O_DIRECTORY") | nsys._flagg("O_NOFOLLOW") | nsys._flagg("O_CLOEXEC")
+    _cstr(b, root)
+    la parent = _openat(nsys._flagg("AT_FDCWD"), b, dirflagg)
+    hvis parent < 0 { _free(b) returner _feil("open root feila: " + tekst(parent)) }
+    la i = 0
+    mens i < lengde(delar) - 1 {
+        _cstr(b, delar[i])
+        la ny = _openat(parent, b, dirflagg)
+        _close(parent)
+        parent = ny
+        hvis parent < 0 { _free(b) returner _feil("open katalog feila: " + tekst(parent)) }
+        i = i + 1
+    }
+    _cstr(b, delar[lengde(delar) - 1])
+    la flagg = nsys._flagg("O_WRONLY") | nsys._flagg("O_NOFOLLOW") |
+        nsys._flagg("O_CLOEXEC") | nsys._flagg("O_NONBLOCK")
+    hvis modus != "sync" { flagg = flagg | nsys._flagg("O_CREAT") }
+    la fd = _openat(parent, b, flagg)
+    hvis fd < 0 { _close(parent) _free(b) returner _feil("open fil feila: " + tekst(fd)) }
+    la st = builtin.sys6(nsys._nr_kompat("fstat"), fd, b + 4096, 0, 0, 0, 0)
+    la mask = 65535
+    hvis nsys._layout("stat", "mode_breidd") == 4 { mask = 4294967295 }
+    la mode = builtin.raw_load64(b + 4096 + nsys._layout("stat", "mode")) & mask
+    hvis st < 0 eller (mode & 61440) != 32768 {
+        _close(fd) _close(parent) _free(b)
+        returner _feil("skrivehandtaket er ikkje ei vanleg fil")
+    }
+    la size = builtin.raw_load64(b + 4096 + nsys._layout("stat", "size"))
+    hvis modus == "write" {
+        la t = builtin.sys6(nsys._nr("ftruncate"), fd, 0, 0, 0, 0, 0)
+        hvis t < 0 { _close(fd) _close(parent) _free(b) returner _feil("ftruncate feila: " + tekst(t)) }
+        size = 0
+    }
+    returner {"status": "ok", "error": "", "fd": fd, "parent": parent, "buffer": b, "size": size}
+}
+
+funksjon skriv_data(h, data: tekst, pos: heiltall) -> ordbok {
+    hvis h["fd"] < 0 eller pos < 0 { returner _feil("lukka fil eller negativ skriveposisjon") }
+    la fd = h["fd"]
+    la søkt = builtin.sys6(nsys._nr("lseek"), fd, pos, 0, 0, 0, 0)
+    hvis søkt != pos { returner _feil("lseek feila: " + tekst(søkt)) }
+    la b = h["buffer"]
+    la off = 0
+    mens off < lengde(data) {
+        la n = lengde(data) - off
+        hvis n > 4096 { n = 4096 }
+        _cstr(b, builtin.slice(data, off, off + n))
+        la ferdig = 0
+        mens ferdig < n {
+            la w = builtin.sys6(nsys._nr("write"), fd, b + ferdig, n - ferdig, 0, 0, 0)
+            hvis w == 0 - nsys._errno("EINTR") {
+                // Avbrot før ei skriving: prøv dei same byte igjen.
+            } ellers hvis w <= 0 { returner _feil("write feila: " + tekst(w)) }
+            ellers { ferdig = ferdig + w }
+        }
+        off = off + n
+    }
+    returner _ok(lengde(data))
+}
+
+funksjon _fsync(fd: heiltall) -> heiltall {
+    la r = builtin.sys6(nsys._nr("fsync"), fd, 0, 0, 0, 0, 0)
+    mens r == 0 - nsys._errno("EINTR") {
+        r = builtin.sys6(nsys._nr("fsync"), fd, 0, 0, 0, 0, 0)
+    }
+    returner r
+}
+
+funksjon synkroniser(h) -> ordbok {
+    hvis h["fd"] < 0 { returner _feil("flush på lukka fil") }
+    la r = _fsync(h["fd"])
+    hvis r < 0 { returner _feil("fsync fil feila: " + tekst(r)) }
+    r = _fsync(h["parent"])
+    hvis r < 0 { returner _feil("fsync katalog feila: " + tekst(r)) }
+    hvis nsys._har_flagg("F_FULLFSYNC") {
+        // Gjer diskbuffer-barrieren ETTER katalogmetadata. Ingen stille nedgradering
+        // til vanleg fsync dersom filsystemet ikkje støttar F_FULLFSYNC.
+        r = builtin.sys6(nsys._nr("fcntl"), h["fd"], nsys._flagg("F_FULLFSYNC"), 0, 0, 0, 0)
+        mens r == 0 - nsys._errno("EINTR") {
+            r = builtin.sys6(nsys._nr("fcntl"), h["fd"], nsys._flagg("F_FULLFSYNC"), 0, 0, 0, 0)
+        }
+        hvis r < 0 { returner _feil("F_FULLFSYNC feila: " + tekst(r)) }
+    }
+    returner _ok(0)
+}
+
+funksjon lukk(h) -> ordbok {
+    la r = _close(h["fd"])
+    la p = _close(h["parent"])
+    _free(h["buffer"])
+    h["fd"] = 0 - 1
+    h["parent"] = 0 - 1
+    h["buffer"] = 0
+    hvis r < 0 eller p < 0 { returner _feil("close feila etter fil-I/O") }
+    returner _ok(0)
+}
+
+funksjon skriv_varig(root: tekst, rel: tekst, data: tekst, modus: tekst) -> ordbok {
+    la h = opne(root, rel, modus)
+    hvis h["status"] != "ok" { returner h }
+    la pos = 0
+    hvis modus == "append" { pos = h["size"] }
+    la r = skriv_data(h, data, pos)
+    hvis r["status"] == "ok" { r = synkroniser(h) }
+    la lukka = lukk(h)
+    hvis r["status"] != "ok" { returner r }
+    hvis lukka["status"] != "ok" { returner lukka }
+    returner _ok(lengde(data))
+}
+
+// Kjelde og mål må vere i SAME katalog. Dermed bind same parent-fd begge
+// namna, og ei vellukka fsync bekreftar publiseringa før WAL kan slettast.
+funksjon erstatt_varig(root: tekst, kjelde: tekst, mål: tekst) -> ordbok {
+    la a = builtin.split(kjelde, "/")
+    la b = builtin.split(mål, "/")
+    hvis lengde(a) != lengde(b) eller kjelde == mål { returner _feil("ulik katalog ved varig rename") }
+    la i = 0
+    mens i < lengde(a) - 1 {
+        hvis a[i] != b[i] { returner _feil("ulik katalog ved varig rename") }
+        i = i + 1
+    }
+    la namn = b[lengde(b) - 1]
+    hvis namn == "" eller namn == "." eller namn == ".." eller lengde(namn) >= 4096 eller
+       builtin.contains(namn, builtin.chr(0)) eller builtin.contains(namn, "\\") {
+        returner _feil("ugyldig mål ved varig rename")
+    }
+    la h = opne(root, kjelde, "sync")
+    hvis h["status"] != "ok" { returner h }
+    la r = synkroniser(h)
+    hvis r["status"] == "ok" {
+        _cstr(h["buffer"], a[lengde(a) - 1])
+        _cstr(h["buffer"] + 4096, namn)
+        la n = builtin.sys6(nsys._nr("renameat"), h["parent"], h["buffer"], h["parent"], h["buffer"] + 4096, 0, 0)
+        hvis n < 0 { r = _feil("renameat feila: " + tekst(n)) }
+        ellers { r = synkroniser(h) }
+    }
+    la lukka = lukk(h)
+    hvis r["status"] != "ok" { returner r }
+    hvis lukka["status"] != "ok" { returner lukka }
+    returner _ok(1)
+}
+
+funksjon slett_varig(root: tekst, rel: tekst) -> ordbok {
+    la h = opne(root, rel, "sync")
+    hvis h["status"] != "ok" { returner h }
+    la delar = builtin.split(rel, "/")
+    _cstr(h["buffer"], delar[lengde(delar) - 1])
+    la n = builtin.sys6(nsys._nr("unlinkat"), h["parent"], h["buffer"], 0, 0, 0, 0)
+    la r = _ok(0)
+    hvis n < 0 { r = _feil("unlinkat feila: " + tekst(n)) }
+    ellers { r = synkroniser(h) }
+    la lukka = lukk(h)
+    hvis r["status"] != "ok" { returner r }
+    hvis lukka["status"] != "ok" { returner lukka }
+    returner _ok(0)
+}

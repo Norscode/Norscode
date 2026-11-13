@@ -2,7 +2,11 @@
 // gaar gjennom den faste Win32-allowlista i windows_abi / OSTAB 502.
 // Barn blir oppretta suspendert i eit Job Object. Ingen brukar-kode kan koyre
 // foer job-medlemskap, minnegrense og eventuelt AppContainer-token er verifiserte.
-// no-network har INGEN network capabilities. no-write/pure er framleis avviste.
+// no-network har INGEN network capabilities. Skriveprofilane er fail-closed:
+// restricted/pure tyder baade no-network og no-write, ikkje berre ressursgrenser.
+// AppContainer har eiga skrivbar lagring; ein WRITE_RESTRICTED-token er ikkje
+// eit globalt filskrivingsforbod (m.a. NULL-DACL). Ingen av dei blir presentert
+// som no-write. Stdin blir pumpa med overlapped I/O i same avgrensa venteloekke.
 
 bruk std.windows_abi som api
 bruk std.runtime.process_abi som process_abi
@@ -116,6 +120,156 @@ funksjon _pipe(st, read_key: tekst, write_key: tekst, io: heiltall) -> boolsk {
     returner api.call("SetHandleInformation", [st[read_key], 1, 0]) != 0
 }
 
+funksjon stdin_limit_bytes() -> heiltall { returner 16777216 }
+
+// Parent og barn skal ha kvar si pipe-ende, og berre barnet si leseende blir
+// arva. Synkron WriteFile paa eit anonymt roeyr kan blokkere foer forelder
+// faar drenert stdout eller handheva tidsfristen. Eit lokalt byte-roeyr med
+// overlapped skriveende held alt paa den eine Norscode-traaden.
+funksjon _stdin_pipe(st, input: tekst) -> boolsk {
+    la io = st["io"]
+    st["in_total"] = lengde(input)
+    hvis lengde(input) == 0 {
+        hvis ikkje _pipe(st, "in_read", "in_write", io) { returner usann }
+        hvis api.call("SetHandleInformation", [st["in_read"], 1, 1]) == 0 { returner usann }
+        returner _close(st, "in_write")
+    }
+    la random = _alloc(st, 16)
+    st["in_ov"] = _alloc(st, 32)
+    st["in_buf"] = _alloc(st, 16384)
+    hvis random == 0 eller st["in_ov"] == 0 eller st["in_buf"] == 0 { returner usann }
+    hvis api.call("SystemFunction036", [random, 16]) == 0 { returner usann }
+    la digits = "0123456789abcdef"
+    la name = "\\\\.\\pipe\\LOCAL\\Norscode.Stdin."
+    la i: heiltall = 0
+    mens i < 16 {
+        la b = builtin.raw_load8(random + i)
+        name = name + digits[b >> 4] + digits[b & 15]
+        i = i + 1
+    }
+    la name_w = _wide(st, name)
+    hvis name_w == 0 { returner usann }
+    // OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED;
+    // PIPE_REJECT_REMOTE_CLIENTS, byte mode, eitt instans og 16 KiB kvote.
+    st["in_write"] = api.call("CreateNamedPipeW", [name_w, 1074266114, 8, 1, 16384, 16384, 0, 0])
+    hvis st["in_write"] == 0 eller st["in_write"] == 0 - 1 { returner usann }
+    st["in_event"] = api.call("CreateEventW", [0, 1, 0, 0])
+    hvis st["in_event"] == 0 { returner usann }
+    builtin.raw_store64(st["in_ov"] + 24, st["in_event"])
+    la connected = api.call("ConnectNamedPipe", [st["in_write"], st["in_ov"]])
+    hvis connected == 0 {
+        hvis api.last_error() != 997 { returner usann } // ERROR_IO_PENDING
+        st["in_pending"] = sann
+    }
+    la sa = io + 64
+    api.u32(sa, 24)
+    builtin.raw_store64(sa + 8, 0)
+    api.u32(sa + 16, 1)
+    // GENERIC_READ, OPEN_EXISTING, SECURITY_SQOS_PRESENT/ANONYMOUS. Ingen
+    // ekstern klient skal kunne vinne namne-racet eller faa stdin-innhald.
+    st["in_read"] = api.call("CreateFileW", [name_w, 2147483648, 0, sa, 3, 1048704, 0])
+    hvis st["in_read"] == 0 eller st["in_read"] == 0 - 1 { returner usann }
+    hvis st["in_pending"] {
+        hvis (api.call("WaitForSingleObject", [st["in_event"], 5000]) & 4294967295) != 0 { returner usann }
+        hvis api.call("GetOverlappedResult", [st["in_write"], st["in_ov"], io + 40, 0]) == 0 { returner usann }
+        st["in_pending"] = usann
+    }
+    hvis api.call("GetNamedPipeClientProcessId", [st["in_write"], io + 40]) == 0 { returner usann }
+    hvis api.read32(io + 40) != (api.call("GetCurrentProcessId", []) & 4294967295) { returner usann }
+    st["in_backend"] = "overlapped-named-pipe"
+    returner sann
+}
+
+// TRUE tyder anten ferdig I/O eller at ho enno ventar. Ingen blokkering.
+// Bytes blir bokfoerte berre etter at Windows har meldt fullfoering.
+funksjon _stdin_complete(st) -> boolsk {
+    hvis ikkje st["in_pending"] { returner sann }
+    la io = st["io"]
+    la completed = api.call("GetOverlappedResult", [st["in_write"], st["in_ov"], io + 40, 0])
+    hvis completed == 0 {
+        la e = api.last_error()
+        hvis e == 996 { returner sann } // ERROR_IO_INCOMPLETE
+        st["in_pending"] = usann
+        hvis e == 109 eller e == 232 { // barnet har lukka stdin
+            st["in_peer_closed"] = sann
+            returner _close(st, "in_write")
+        }
+        returner usann
+    }
+    st["in_pending"] = usann
+    la wrote = api.read32(io + 40)
+    hvis wrote <= 0 eller wrote > st["in_chunk"] { returner usann }
+    st["in_pos"] = st["in_pos"] + wrote
+    returner sann
+}
+
+funksjon _stdin_feed(st, input: tekst) -> boolsk {
+    hvis st["in_write"] == 0 { returner sann }
+    hvis ikkje _stdin_complete(st) { returner usann }
+    hvis st["in_pending"] eller st["in_write"] == 0 { returner sann }
+    hvis st["in_pos"] == st["in_total"] { returner _close(st, "in_write") }
+    la count = st["in_total"] - st["in_pos"]
+    hvis count > 16384 { count = 16384 }
+    la i: heiltall = 0
+    mens i < count {
+        builtin.raw_store8(st["in_buf"] + i, builtin.char_code(input[st["in_pos"] + i]) & 255)
+        i = i + 1
+    }
+    st["in_chunk"] = count
+    hvis api.call("ResetEvent", [st["in_event"]]) == 0 { returner usann }
+    // OVERLAPPED kan berre brukast om att etter fullfoering. hEvent blir.
+    builtin.raw_store64(st["in_ov"], 0)
+    builtin.raw_store64(st["in_ov"] + 8, 0)
+    builtin.raw_store64(st["in_ov"] + 16, 0)
+    la wrote = api.call("WriteFile", [st["in_write"], st["in_buf"], count, 0, st["in_ov"]])
+    hvis wrote == 0 {
+        la e = api.last_error()
+        hvis e == 109 eller e == 232 {
+            st["in_peer_closed"] = sann
+            returner _close(st, "in_write")
+        }
+        hvis e != 997 { returner usann }
+    }
+    st["in_pending"] = sann
+    returner _stdin_complete(st)
+}
+
+// CancelIoEx er berre ein forespoernad. OVERLAPPED/buffer maa leve til den
+// endelege fullfoeringa, ogsaa om barnet aldri las ein byte eller vart drepe.
+funksjon _stdin_stop(st) -> boolsk {
+    hvis st["in_write"] == 0 eller st["in_write"] == 0 - 1 { returner sann }
+    la ok = sann
+    hvis st["in_pending"] {
+        st["in_cancelled"] = sann
+        la cancelled = api.call("CancelIoEx", [st["in_write"], st["in_ov"]])
+        hvis cancelled == 0 og api.last_error() != 1168 { ok = usann } // ERROR_NOT_FOUND: completion vann racet
+        hvis (api.call("WaitForSingleObject", [st["in_event"], 5000]) & 4294967295) != 0 {
+            st["security_error"] = "stdin cancellation fullfoerte ikkje"
+            // Ein defekt OS-driver skal ikkje faa ein use-after-free. Berre
+            // dei to kernel-eigde bufferane blir haldne att ved denne feilen.
+            st["in_quarantined"] = sann
+            returner usann
+        }
+        la completed = api.call("GetOverlappedResult", [st["in_write"], st["in_ov"], st["io"] + 40, 0])
+        la e = api.last_error()
+        hvis completed == 0 og e == 996 {
+            st["security_error"] = "stdin fullfoeringssignal utan fullfoering"
+            st["in_quarantined"] = sann
+            returner usann
+        }
+        st["in_pending"] = usann
+        st["in_quarantined"] = usann
+        hvis completed != 0 og st["in_chunk"] > 0 {
+            la wrote = api.read32(st["io"] + 40)
+            hvis wrote > st["in_chunk"] { ok = usann }
+            ellers { st["in_pos"] = st["in_pos"] + wrote }
+        }
+        hvis completed == 0 og e != 995 og e != 109 og e != 232 { ok = usann }
+    }
+    hvis ikkje _close(st, "in_write") { ok = usann }
+    returner ok
+}
+
 funksjon _attribute(attrs: heiltall, key: heiltall, value: heiltall, size: heiltall) -> boolsk {
     returner api.call("UpdateProcThreadAttribute", [attrs, 0, key, value, size, 0, 0]) != 0
 }
@@ -213,10 +367,7 @@ funksjon _run(st, req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
     hvis api.call("SetInformationJobObject", [st["job"], 9, limits, 144]) == 0 { returner _api_feil("SetInformationJobObject") }
     hvis profile == "no-network" og ikkje _profile(st, cwd_w, exe_w) { returner feil("AppContainer profil/lesetilgang: " + st["security_error"]) }
     hvis ikkje _pipe(st, "out_read", "out_write", io) eller ikkje _pipe(st, "err_read", "err_write", io) { returner _api_feil("CreatePipe") }
-    // Stdin er eksplisitt EOF, ikkje eit arva terminal-/filhandtak.
-    hvis ikkje _pipe(st, "in_read", "in_write", io) { returner _api_feil("stdin-pipe") }
-    hvis api.call("SetHandleInformation", [st["in_read"], 1, 1]) == 0 { returner _api_feil("stdin inherit") }
-    hvis ikkje _close(st, "in_write") { returner _api_feil("stdin EOF") }
+    hvis ikkje _stdin_pipe(st, req["stdin"]) { returner _api_feil("stdin-pipe") }
     la attr_count: heiltall = 2
     hvis profile == "no-network" { attr_count = 3 }
     builtin.raw_store64(io + 48, 0)
@@ -289,9 +440,16 @@ funksjon _run(st, req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
                 bryt
             }
         }
+        hvis ikkje _stdin_feed(st, req["stdin"]) {
+            status = "feil"
+            detail = "Windows stdin write failed"
+            api.call("TerminateJobObject", [st["job"], 1])
+            bryt
+        }
         api.call("Sleep", [1])
     }
     hvis (api.call("WaitForSingleObject", [st["process"], 5000]) & 4294967295) != 0 { returner feil("Windows-jobben vart ikkje avslutta") }
+    hvis ikkje _stdin_stop(st) { returner feil("Windows stdin cancellation/cleanup feila") }
     // Full drenering etter prosess-slutt. PIPE har ingen andre arva skrivarar.
     la before: heiltall = 0 - 1
     mens before != st["out_n"] + st["err_n"] {
@@ -327,6 +485,10 @@ funksjon _run(st, req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
     r["job_verified"] = st["job_verified"]
     r["appcontainer_verified"] = st["appcontainer_verified"]
     r["open_file_limit_backend"] = "process-handle-watchdog"
+    r["stdin_backend"] = st["in_backend"]
+    r["stdin_bytes_written"] = tekst(st["in_pos"])
+    r["stdin_cancelled"] = st["in_cancelled"]
+    r["stdin_peer_closed"] = st["in_peer_closed"]
     hvis finnes_nøkkel(req, "capture_stdout") og req["capture_stdout"] == "usann" { r["stdout"] = "" }
     hvis finnes_nøkkel(req, "capture_stderr") og req["capture_stderr"] == "usann" { r["stderr"] = "" }
     returner r
@@ -343,7 +505,11 @@ funksjon _cleanup(st) -> boolsk {
             hvis (api.call("WaitForSingleObject", [st["process"], 5000]) & 4294967295) != 0 { ok = usann }
         }
     }
-    for key i ["token", "thread", "process", "out_read", "out_write", "err_read", "err_write", "in_read", "in_write", "job"] {
+    // Ogsaa oppsettsfeil kan ha ei ufullfoert ConnectNamedPipe-operasjon.
+    // Lukk den lokale klientenden foer cancellation og vent paa kvittering.
+    hvis ikkje _close(st, "in_read") { ok = usann }
+    hvis ikkje _stdin_stop(st) { ok = usann }
+    for key i ["token", "thread", "process", "out_read", "out_write", "err_read", "err_write", "in_write", "in_event", "job"] {
         hvis ikkje _close(st, key) { ok = usann }
     }
     for grant i st["grants"] {
@@ -355,7 +521,11 @@ funksjon _cleanup(st) -> boolsk {
         la deleted = api.call("DeleteAppContainerProfile", [st["profile_name"]]) & 4294967295
         hvis deleted != 0 { st["security_error"] = "DeleteAppContainerProfile HRESULT=" + tekst(deleted) ok = usann }
     }
-    for p i st["alloc"] { hvis ikkje api.free(p) { ok = usann } }
+    for p i st["alloc"] {
+        hvis ikkje st["in_quarantined"] eller (p != st["in_ov"] og p != st["in_buf"]) {
+            hvis ikkje api.free(p) { ok = usann }
+        }
+    }
     returner ok
 }
 
@@ -363,15 +533,21 @@ funksjon _cleanup(st) -> boolsk {
 // validerte Windows-argv/miljovegen som den vanlege CRT-frie process.exec.
 funksjon spawn(req, cmd: tekst, cwd: tekst, env_utf8: heiltall) {
     hvis ikkje gyldig(req) { returner feil("ugyldig Windows sandbox-request") }
-    hvis req["sandbox"] != "restricted" og req["sandbox"] != "no-network" { returner feil("AppContainer-policy er ikkje implementert: " + tekst(req["sandbox"])) }
+    hvis req["sandbox"] == "restricted" eller req["sandbox"] == "no-write" eller req["sandbox"] == "pure" {
+        returner feil("AppContainer kan ikkje handheve global no-write: " + tekst(req["sandbox"]))
+    }
+    hvis req["sandbox"] != "no-network" { returner feil("AppContainer-policy er ikkje implementert: " + tekst(req["sandbox"])) }
     hvis cwd == "" { returner feil("Windows sandbox krev eksplisitt arbeidsrot") }
-    hvis req["stdin"] != "" { returner feil("Windows sandbox stdin er berre implementert som EOF") }
+    hvis lengde(req["stdin"]) > stdin_limit_bytes() { returner feil("Windows sandbox stdin er for stort") }
     la maximum = heltall_fra_tekst(req["max_output_bytes"])
     hvis maximum > 16777216 { returner feil("Windows sandbox fang-buffer er for stort") }
     la st = {"alloc": [], "grants": [], "job": 0, "process": 0, "thread": 0, "token": 0,
         "in_read": 0, "in_write": 0, "out_read": 0, "out_write": 0, "err_read": 0, "err_write": 0,
         "sid": 0, "profile_name": 0, "profile_created": usann, "attrs": 0, "attrs_ready": usann,
         "job_verified": usann, "appcontainer_verified": usann, "out_n": 0, "err_n": 0,
+        "in_ov": 0, "in_buf": 0, "in_event": 0, "in_pending": usann, "in_quarantined": usann,
+        "in_pos": 0, "in_total": 0, "in_chunk": 0, "in_cancelled": usann,
+        "in_peer_closed": usann, "in_backend": "pipe-eof",
         "output_limit": usann, "pid": -1, "security_error": "oppsett feila"}
     la result = feil("Windows sandbox vart ikkje starta")
     prøv { result = _run(st, req, cmd, cwd, env_utf8) } fang (e) { result = feil("Windows sandbox: " + tekst(e)) }

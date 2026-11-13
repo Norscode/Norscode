@@ -19,6 +19,7 @@
 
 bruk std.bytes som bytes
 bruk std.filops som filops
+bruk std.runtime_filesystem som lagring
 bruk std.png_enkel som png
 
 // ── Type-tags ────────────────────────────────────────────────────────
@@ -1140,8 +1141,10 @@ funksjon _rad_verdiar(t, rad) -> liste {
 // Utanfor transaksjonar blir kvar endring lagd til WAL-fila. Første post i ei ny WAL
 // er E <epoke>; checkpoint-fila hugsar kva epoke ho har absorbert, så ei WAL som
 // alt er med i checkpointet (krasj midt i checkpoint) blir hoppa over ved open.
-// fil_append lukkar fila, men native_flush er ikkje fsync. Dette gjev atomisk
-// gjenoppretting etter prosessavbrot, ikkje ei lovnad om varigheit ved straumbrot.
+// Ein WAL-append blir ikkje kvittert før same skrivehandtak er synkronisert.
+// POSIX krev fsync for fil og katalog, Darwin òg F_FULLFSYNC; Windows brukar
+// FlushFileBuffers. Hardware/filsystem må halde OS-kontrakten. Windows har ikkje
+// ein dokumentert POSIX-lik katalog-fsync; sjå docs/NORSDB_DURABILITY.md.
 funksjon db_sjekk_skrivbar(db) {
     hvis finnes_nøkkel(db, "_wal_feil") {
         kast "NorsDB: usikker lagring; opne databasen på nytt: " + db["_wal_feil"]
@@ -1173,8 +1176,8 @@ funksjon _wal_append(db, post: tekst) {
     hvis ikke db["_wal_hovud"] {
         ut = "E" + builtin.chr(31) + tekst_fra_heltall(db["_epoke"]) + rs + ut
     }
-    prøv { builtin.fil_append(sti, ut) }
-    fang (e) { _wal_bryt(db, "WAL-append feila: " + sti) }
+    prøv { _skriv_varig(sti, ut, sann) }
+    fang (e) { _wal_bryt(db, "WAL-append/synkronisering feila: " + sti + ": " + tekst(e)) }
     hvis filops.fil_storleik(sti) != før + lengde(ut) {
         _wal_bryt(db, "ufullstendig WAL-append: " + sti)
     }
@@ -2051,6 +2054,25 @@ funksjon db_replay(db, payload) {
 
 funksjon _cp_hovud() -> tekst { returner "NORSDB2" }
 
+// Gjenoppretting les òg vilkårlege bytekutt. Ei halv epoke må avvisast
+// som data, ikkje sendast til heiltall-builtin-en som stoppar native VM.
+// Rekn siffer for siffer med grense FØR multiplikasjon, utan overløp.
+funksjon _lagrings_epoke(t: tekst) -> heiltall {
+    la n = lengde(t)
+    hvis n == 0 eller n > 19 { returner -1 }
+    hvis n > 1 og builtin.slice(t, 0, 1) == "0" { returner -1 }
+    la e: heiltall = 0
+    la i = 0
+    mens i < n {
+        la siffer = builtin.char_code(builtin.slice(t, i, i + 1)) - 48
+        hvis siffer < 0 eller siffer > 9 { returner -1 }
+        hvis e > 922337203685477580 eller (e == 922337203685477580 og siffer > 7) { returner -1 }
+        e = e * 10 + siffer
+        i = i + 1
+    }
+    returner e
+}
+
 // Er teksten eit gyldig NORSDB2-checkpoint med minst eitt komplett segment?
 // Krev ekte S/Z-segmentpar. cp2 frå full kompaktering må ha nøyaktig eitt
 // komplett segment og ingen ekstra postar etter Z. Eit ordinært .cp kan ha
@@ -2067,14 +2089,20 @@ funksjon _cp_siste_epoke(t: tekst, krev_heil_fil: boolsk) -> heiltall {
     la i = 1
     mens i < lengde(postar) {
         la p = postar[i]
+        // Utan siste RS er posten avbroten, også når avbrotet skjer i
+        // sjølve S-/Z-epoka. Eit eldre komplett segment er framleis gyldig.
+        hvis i == lengde(postar) - 1 og p != "" {
+            hvis krev_heil_fil { returner -1 }
+            returner siste
+        }
         hvis p == "" {
             hvis i != lengde(postar) - 1 { returner -1 }
         } ellers hvis builtin.starts_with(p, "S" + us) {
             hvis aktiv >= 0 { returner -1 }
             hvis krev_heil_fil og fullførte > 0 { returner -1 }
             la epoketekst = builtin.slice(p, 2, lengde(p))
-            la e = builtin.heltall_fra_tekst(epoketekst)
-            hvis e < 0 eller tekst_fra_heltall(e) != epoketekst eller e <= siste { returner -1 }
+            la e = _lagrings_epoke(epoketekst)
+            hvis e < 0 eller e <= siste { returner -1 }
             aktiv = e
             seg_start = i
         } ellers hvis builtin.starts_with(p, "Z" + us) {
@@ -2082,8 +2110,8 @@ funksjon _cp_siste_epoke(t: tekst, krev_heil_fil: boolsk) -> heiltall {
             la f = builtin.split(p, us)
             hvis lengde(f) != 2 og lengde(f) != 3 { returner -1 }
             la epoketekst = f[1]
-            la e = builtin.heltall_fra_tekst(epoketekst)
-            hvis tekst_fra_heltall(e) != epoketekst eller e != aktiv { returner -1 }
+            la e = _lagrings_epoke(epoketekst)
+            hvis e < 0 eller e != aktiv { returner -1 }
             hvis lengde(f) == 3 {
                 // Nytt format: CRC32 over S + data-postar, inklusive siste RS.
                 la kontroll = builtin.join(builtin.slice(postar, seg_start, i), rs) + rs
@@ -2112,8 +2140,30 @@ funksjon _cp_gyldig(t: tekst) -> boolsk {
 
 // Oppdater aldri WAL-/epokestatus om skrivinga feilar eller er forkorta.
 // Storleikskontroll les normalt metadata frå native stat (filops fallback).
+funksjon _skriv_varig(sti: tekst, innhald: tekst, append: boolsk) {
+    la r = lagring.native_skriv_varig(sti, innhald, append)
+    hvis r["status"] != "ok" eller r["value"] != lengde(innhald) {
+        kast "NorsDB: skrive-/synkroniseringsfeil: " + sti + ": " + tekst(r["error"])
+    }
+}
+
+funksjon _slett_varig(sti: tekst) {
+    hvis ikkje builtin.fil_finnes(sti) { returner 0 }
+    la r = lagring.native_slett_varig(sti)
+    hvis r["status"] != "deleted" { kast "NorsDB: sletting/synkronisering feila: " + sti + ": " + tekst(r["error"]) }
+    returner 0
+}
+
+funksjon _publiser_cp(kjelde: tekst, mål: tekst) {
+    la a = lagring.native_sti_rot_relativ(kjelde)
+    la b = lagring.native_sti_rot_relativ(mål)
+    hvis a["root"] != b["root"] { kast "NorsDB: checkpoint må vere på same filsystem" }
+    la r = lagring.native_erstatt_fil_varig(a["root"], a["relative"], b["relative"])
+    hvis r["status"] != "replaced" { kast "NorsDB: checkpoint-publisering feila: " + tekst(r["error"]) }
+}
+
 funksjon _skriv_cp_kontrollert(sti: tekst, innhald: tekst) {
-    prøv { builtin.fil_skriv(sti, innhald) }
+    prøv { _skriv_varig(sti, innhald, usann) }
     fang (e) { kast "NorsDB: checkpoint-skriving feila: " + sti }
     hvis filops.fil_storleik(sti) != lengde(innhald) {
         kast "NorsDB: ufullstendig checkpoint-skriving: " + sti
@@ -2124,7 +2174,9 @@ funksjon _skriv_cp_kontrollert(sti: tekst, innhald: tekst) {
 funksjon _les_cp_tekst(db, t: tekst) {
     la poster = builtin.split(t, builtin.chr(30))
     // Siste komplette segment-slutt.
-    la siste_z = lengde(poster) - 1
+    // Siste element er anten tomt eller ein avbroten post. Valideringa
+    // godkjenner aldri ein uterminert Z, så han må ikkje spelast av her.
+    la siste_z = lengde(poster) - 2
     mens siste_z > 0 og ikkje builtin.starts_with(poster[siste_z], "Z" + builtin.chr(31)) { siste_z = siste_z - 1 }
     la base = 0
     la delta = 0
@@ -2172,9 +2224,9 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             e1 = _cp_siste_epoke(builtin.fil_les(sti + ".cp"), usann)
         }
         hvis e2 >= 0 og e2 >= e1 {
-            _skriv_cp_kontrollert(sti + ".cp", t2)
+            _publiser_cp(sti + ".cp2", sti + ".cp")
         }
-        builtin.fil_slett(sti + ".cp2")
+        _slett_varig(sti + ".cp2")
     }
     hvis builtin.fil_finnes(sti + ".cp") {
         la t = builtin.fil_les(sti + ".cp")
@@ -2211,13 +2263,13 @@ funksjon db_åpne(sti: tekst) -> ordbok_tekst {
             hvis n > 1 og builtin.slice(poster[0], 0, 1) == "E" {
                 la h = _felt(poster[0])
                 hvis lengde(h) != 2 { kast "NorsDB: ugyldig WAL-hovud" }
-                epoke = builtin.heltall_fra_tekst(h[1])
-                hvis epoke < 0 eller tekst_fra_heltall(epoke) != h[1] { kast "NorsDB: ugyldig WAL-epoke" }
+                epoke = _lagrings_epoke(h[1])
+                hvis epoke < 0 { kast "NorsDB: ugyldig WAL-epoke" }
                 start = 1
             }
             hvis epoke >= 0 og epoke <= db["_absorbert"] {
                 // Alt absorbert i checkpointet (krasj etter checkpoint, før WAL-sletting).
-                builtin.fil_slett(sti + ".wal")
+                _slett_varig(sti + ".wal")
             } ellers {
                 la i = start
                 mens i < n - 1 {
@@ -2267,13 +2319,14 @@ funksjon db_checkpoint(db) {
     seg = seg + "Z" + us + e + us + tekst_fra_heltall(png.crc32(seg)) + rs
     la før = filops.fil_storleik(sti + ".cp")
     hvis før < 0 { _wal_bryt(db, "kan ikkje lese checkpoint-storleik: " + sti) }
-    prøv { builtin.fil_append(sti + ".cp", seg) }
-    fang (e) { _wal_bryt(db, "checkpoint-append feila: " + sti) }
+    prøv { _skriv_varig(sti + ".cp", seg, sann) }
+    fang (e) { _wal_bryt(db, "checkpoint-append/synkronisering feila: " + sti + ": " + tekst(e)) }
     hvis filops.fil_storleik(sti + ".cp") != før + lengde(seg) {
         // WAL finst framleis og kan brukast ved neste opning.
         _wal_bryt(db, "ufullstendig checkpoint-append: " + sti)
     }
-    builtin.fil_slett(sti + ".wal")
+    prøv { _slett_varig(sti + ".wal") }
+    fang (e) { _wal_bryt(db, "WAL-sletting feila: " + tekst(e)) }
     db["_cp_delta"] = db["_cp_delta"] + lengde(seg)
     db["_absorbert"] = db["_epoke"]
     db["_epoke"] = db["_epoke"] + 1
@@ -2283,7 +2336,8 @@ funksjon db_checkpoint(db) {
 }
 
 // Full checkpoint (kompaktering): skriv heile databasen som eitt base-segment.
-// Skriv først <sti>.cp2 ferdig, så <sti>.cp, så slett .cp2 og WAL.
+// Skriv og synkroniser .cp2, publiser atomisk som .cp og synkroniser katalogen,
+// så slett WAL. Den gamle .cp blir aldri trunkert før den nye er varig.
 funksjon db_checkpoint_full(db) {
     _utan_aktiv_tx(db)
     hvis db["sti"] == "" { returner 0 }
@@ -2296,10 +2350,9 @@ funksjon db_checkpoint_full(db) {
     la innhald = _cp_hovud() + rs + kropp + "Z" + us + e + us + tekst_fra_heltall(png.crc32(kropp)) + rs
     prøv {
         _skriv_cp_kontrollert(sti + ".cp2", innhald)
-        _skriv_cp_kontrollert(sti + ".cp", innhald)
-    } fang (e) { _wal_bryt(db, "full checkpoint feila: " + sti) }
-    builtin.fil_slett(sti + ".cp2")
-    hvis builtin.fil_finnes(sti + ".wal") { builtin.fil_slett(sti + ".wal") }
+        _publiser_cp(sti + ".cp2", sti + ".cp")
+        _slett_varig(sti + ".wal")
+    } fang (e) { _wal_bryt(db, "full checkpoint feila: " + sti + ": " + tekst(e)) }
     db["_cp_base"] = lengde(innhald)
     db["_cp_delta"] = 0
     db["_absorbert"] = db["_epoke"]
@@ -2317,5 +2370,6 @@ funksjon db_backup(db, sti: tekst) {
     la rs = builtin.chr(30)
     la kropp = "S" + us + "0" + rs + db_serialiser(db)
     la innhald = _cp_hovud() + rs + kropp + "Z" + us + "0" + us + tekst_fra_heltall(png.crc32(kropp)) + rs
-    _skriv_cp_kontrollert(sti, innhald)
+    _skriv_cp_kontrollert(sti + ".cp2", innhald)
+    _publiser_cp(sti + ".cp2", sti)
 }
