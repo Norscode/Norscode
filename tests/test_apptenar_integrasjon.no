@@ -9,12 +9,99 @@ funksjon vent_ms(s: ordbok_tekst, ms: heltall) -> heltall {
     returner 0
 }
 
+funksjon samandrag(data: tekst) -> tekst {
+    returner builtin.replace(builtin.replace(builtin.slice(data, 0, 512), "\r", "\\r"), "\n", "\\n")
+}
+
+# Kompakt nc_test-logg viser berre første stdout-linje og siste ERROR-linje.
+# Fasen og den faktiske verdien må difor vere med i sjølve unntaket.
+funksjon krev(vilkår: bool, fase: tekst, faktisk: tekst) -> heiltall {
+    hvis ikkje vilkår { kast "apptenar-integrasjon [" + fase + "]: " + faktisk }
+    returner 0
+}
+
 funksjon krev_status(namn: tekst, r: ordbok, venta: heltall) -> heltall {
     hvis r["status"] != venta {
-        skriv(namn + ": venta " + tekst(venta) + ", fekk " + tekst(r["status"]) + " body=" + tekst(r["body"]) + "\n")
-        assert(usann)
+        kast "apptenar-integrasjon [" + namn + "]: venta HTTP " + tekst(venta) + ", fekk " + tekst(r["status"]) + " body=" + samandrag(tekst(r["body"]))
     }
     returner 0
+}
+
+funksjon les_sse_til(s: ordbok_tekst, buf: tekst, ramme: tekst, ms: heiltall) -> ordbok {
+    krev(builtin.ends_with(ramme, "\n\n"), "SSE lesemarkør", "markøren manglar avsluttande blanklinje: " + samandrag(ramme))
+    returner ah.les_til(s, buf, ramme, ms)
+}
+
+# TCP kan dele blanklinja frå resten av ei SSE-hending. Prefikset er alt lese
+# før terminatoren blir send, så testen er uavhengig av segmentering og søvn.
+funksjon sse_fragment_regresjon() -> heiltall {
+    la lyttar = socket.native_lytt("127.0.0.1", 0, 4)
+    assert_eq(lyttar["status"], "listening")
+    la klient = socket.native_tilkoble("127.0.0.1", heiltall_fra_tekst(tekst(lyttar["port"])))
+    la tenar = {"handle": "", "status": "ventende"}
+    prøv {
+        assert_eq(klient["status"], "connected")
+        la frist = builtin.tid_ms() + 3000
+        mens tenar["status"] == "ventende" og builtin.tid_ms() < frist {
+            la att = frist - builtin.tid_ms()
+            hvis att <= 0 { bryt }
+            socket.native_poll_vent(lyttar, 1, att)
+            tenar = socket.native_aksepter(lyttar)
+        }
+        krev(tenar["status"] == "connected", "SSE fragment aksept", samandrag(tekst(tenar)))
+        la prefiks = "event: melding\ndata: x1"
+        la ramme = prefiks + "\n\n"
+        assert_eq(ah.send(tenar, prefiks), lengde(prefiks))
+        la del = ah.les_til(klient, "", "data: x1", 3000)
+        assert_eq(del["data"], prefiks)
+        assert_eq(ah.send(tenar, "\n\n"), 2)
+        la heil = les_sse_til(klient, del["data"], ramme, 3000)
+        krev(heil["data"] == ramme, "SSE fragmentert ramme", "eof=" + tekst(heil["eof"]) + " data=" + samandrag(tekst(heil["data"])))
+    } fang (e) {
+        socket.native_lukk(tenar)
+        socket.native_lukk(klient)
+        socket.native_lukk(lyttar)
+        kast e
+    }
+    socket.native_lukk(tenar)
+    socket.native_lukk(klient)
+    socket.native_lukk(lyttar)
+    returner 0
+}
+
+# /status-førespurnaden tel sjølv som éi tilkopling. Etter klientlukk kan
+# tenaren framleis ha gamle tilkoplingar å rydde, eller mellombels svare 503.
+# Kvar prøve eig og lukkar sin socket; alle prøvene deler den same fristen.
+funksjon vent_tom_tenar(port: heiltall, fase: tekst) -> tekst {
+    la frist = builtin.tid_ms() + 10000
+    la siste = ""
+    mens builtin.tid_ms() < frist {
+        la s = ah.koble(port)
+        la req = ah.førespurnad("GET", "/status", {}, "", usann)
+        la sendt = 0
+        la svar = {"data": "", "eof": usann}
+        prøv {
+            sendt = ah.send(s, req)
+            la att = frist - builtin.tid_ms()
+            hvis att > 0 {
+                svar = ah.les_til(s, "", "\r\n\r\ntilk=1 sse=0 ", att)
+            }
+        } fang (e) {
+            socket.native_lukk(s)
+            kast e
+        }
+        socket.native_lukk(s)
+        siste = tekst(svar["data"])
+        krev(sendt == lengde(req), fase, "sendte " + tekst(sendt) + " av " + tekst(lengde(req)) + " byte til /status")
+        hvis builtin.starts_with(siste, "HTTP/1.1 200 ") og builtin.index_of(siste, "\r\n\r\ntilk=1 sse=0 ") >= 0 {
+            returner builtin.slice(siste, builtin.index_of(siste, "\r\n\r\n") + 4, lengde(siste))
+        }
+        hvis builtin.tid_ms() >= frist { bryt }
+        krev(builtin.starts_with(siste, "HTTP/1.1 200 ") eller builtin.starts_with(siste, "HTTP/1.1 503 "), fase,
+             "uventa /status-svar: eof=" + tekst(svar["eof"]) + " data=" + samandrag(siste))
+        builtin.vent.sov(20)
+    }
+    kast "apptenar-integrasjon [" + fase + "]: ingen tom tilkoplingsbaseline innan 10000 ms; siste svar=" + samandrag(siste)
 }
 
 funksjon køyr(port: heltall, data: tekst) -> heltall {
@@ -25,7 +112,7 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     krev_status("keep-alive 1", r1, 200)
     assert_eq(ah.hdr(r1, "connection"), "keep-alive")
     assert_eq(ah.hdr(r1, "x-mw"), "ja")
-    assert(ah.hdr(r1, "date") != "")
+    krev(ah.hdr(r1, "date") != "", "keep-alive Date", "Date-headeren er tom")
     # HEAD på same socket: same Content-Length og Content-Type, ingen kropp
     ah.send(s, ah.førespurnad("HEAD", "/", {}, "", sann))
     la rh = ah.les_svar(s, r1["rest"], sann, 10000)
@@ -52,7 +139,7 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     assert_eq(r3["body"], "om")
     assert_eq(ah.hdr(r3, "connection"), "close")
     # Romsleg frist: tenaren er eit barne-`nc run` og kan bli forseinka på ein travel CI-runnar.
-    assert(ah.lukka_innan(s2, 10000))
+    krev(ah.lukka_innan(s2, 10000), "fleirsegment lukking", "ikkje EOF/feil innan 10000 ms etter Connection: close")
     socket.native_lukk(s2)
     skriv("fleirsegment: headeren i to segment med 300 ms mellom gav 200\n")
 
@@ -63,20 +150,20 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     la dt = builtin.tid_ms() - t0
     krev_status("under ledig socket", r4, 200)
     skriv("ledig socket: GET /om svara etter " + tekst(dt) + " ms medan ein annan socket var open utan å sende noko\n")
-    assert(dt < 1000)
+    krev(dt < 1000, "ledig socket framgang", "GET /om tok " + tekst(dt) + " ms; krav < 1000 ms")
     # Tidsgrensa for headeren (1,5 s i testen) lukkar den ledige socketen
     la t1 = builtin.tid_ms()
-    assert(ah.lukka_innan(ledig, 10000))
+    krev(ah.lukka_innan(ledig, 10000), "ledig socket lukking", "ikkje EOF/feil innan 10000 ms")
     la lukk_ms = builtin.tid_ms() - t0
     skriv("tidsgrense: den ledige socketen vart lukka etter " + tekst(lukk_ms) + " ms\n")
-    assert(lukk_ms >= 1000)
+    krev(lukk_ms >= 1000, "ledig socket minste levetid", "lukka etter " + tekst(lukk_ms) + " ms; krav >= 1000 ms")
     socket.native_lukk(ledig)
     # Ufullstendig header etter fristen gjev 408 og lukking
     la halv = ah.koble(port)
     ah.send(halv, "GET / HTTP/1.1\r\n")
     la r5 = ah.les_til(halv, "", "\r\n\r\n", 10000)
-    assert(builtin.starts_with(r5["data"], "HTTP/1.1 408 "))
-    assert(ah.lukka_innan(halv, 10000))
+    krev(builtin.starts_with(r5["data"], "HTTP/1.1 408 "), "halv header 408", "eof=" + tekst(r5["eof"]) + " data=" + samandrag(tekst(r5["data"])))
+    krev(ah.lukka_innan(halv, 10000), "halv header lukking", "ikkje EOF/feil innan 10000 ms etter 408")
     socket.native_lukk(halv)
     skriv("tidsgrense: halv header gav 408 og lukka socket\n")
 
@@ -101,12 +188,12 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     krev_status("vakt nei", ah.kall(port, "GET", "/vakt/nei", {}, ""), 403)
     la r7 = ah.kall(port, "GET", "/kastar", {}, "")
     krev_status("handlar kastar", r7, 500)
-    assert(builtin.index_of(r7["body"], "med vilje") < 0)
+    krev(builtin.index_of(r7["body"], "med vilje") < 0, "handlarfeil skjult", "500-kroppen inneheld intern feiltekst: " + samandrag(tekst(r7["body"])))
     krev_status("etter handlar-unntak", ah.kall(port, "GET", "/om", {}, ""), 200)
     la r8 = ah.kall(port, "GET", "/tekst", {}, "")
     krev_status("tekstretur", r8, 200)
     assert_eq(r8["body"], "berre tekst")
-    assert(builtin.starts_with(ah.hdr(r8, "content-type"), "text/plain"))
+    krev(builtin.starts_with(ah.hdr(r8, "content-type"), "text/plain"), "tekstretur Content-Type", "fekk " + ah.hdr(r8, "content-type") + "; krav text/plain")
     skriv("vakter: unntak i vakt og handlar gav 500 (utan feilteksten i kroppen) og neste førespurnad 200\n")
 
     # ── Modulglobalar lever mellom førespurnader ──
@@ -121,7 +208,7 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     assert_eq(fil_les(data + "/inne.txt"), "skrive i datamappa")
     krev_status("disk ute", ah.kall(port, "GET", "/disk/ute", {}, ""), 500)
     la utanfor = ah.root() + "/build/apptenar-test/utanfor.txt"
-    assert(ikkje fil_finnes(utanfor))
+    krev(ikkje fil_finnes(utanfor), "disk-scope", "fil utanfor datamappa finst: " + utanfor)
     krev_status("disk les ute", ah.kall(port, "GET", "/disk/les", {}, ""), 500)
     krev_status("spawn", ah.kall(port, "GET", "/spawn", {}, ""), 500)
     skriv("caps: skriving i datamappa 200; skriving utanfor, lesing av /etc/hosts og prosess nekta (500)\n")
@@ -146,7 +233,7 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     la ec = ah.koble(port)
     ah.send(ec, "POST /ekko HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
     la c100 = ah.les_til(ec, "", "\r\n\r\n", 3000)
-    assert(builtin.starts_with(c100["data"], "HTTP/1.1 100 Continue\r\n\r\n"))
+    krev(builtin.starts_with(c100["data"], "HTTP/1.1 100 Continue\r\n\r\n"), "100-continue", "eof=" + tekst(c100["eof"]) + " data=" + samandrag(tekst(c100["data"])))
     ah.send(ec, "hallo")
     la r100 = ah.les_svar(ec, builtin.slice(c100["data"], 25, lengde(c100["data"])), usann, 5000)
     krev_status("etter 100-continue", r100, 200)
@@ -156,21 +243,25 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     # ── SSE: heartbeat, hending, tak per kanal ──
     la e = ah.koble(port)
     ah.send(e, ah.førespurnad("GET", "/hendingar", {}, "", sann))
-    la se = ah.les_til(e, "", "data: start", 5000)
-    assert(builtin.index_of(se["data"], "text/event-stream") >= 0)
-    la hb = ah.les_til(e, se["data"], ": hb", 3000)
-    assert(builtin.index_of(hb["data"], ": hb") >= 0)
+    la start_hending = "event: hei\ndata: start\n\n"
+    la se = les_sse_til(e, "", start_hending, 5000)
+    krev(builtin.index_of(se["data"], "text/event-stream") >= 0 og builtin.index_of(se["data"], start_hending) >= 0, "SSE oppstart", "eof=" + tekst(se["eof"]) + " data=" + samandrag(tekst(se["data"])))
+    la hb_hending = ": hb\n\n"
+    la hb = les_sse_til(e, se["data"], hb_hending, 3000)
+    krev(builtin.index_of(hb["data"], hb_hending) >= 0, "SSE heartbeat", "eof=" + tekst(hb["eof"]) + " data=" + samandrag(tekst(hb["data"])))
     la rs = ah.kall(port, "POST", "/send", {}, "x1")
     krev_status("send", rs, 200)
     assert_eq(rs["body"], "1")
-    la ev = ah.les_til(e, hb["data"], "data: x1", 3000)
-    assert(builtin.index_of(ev["data"], "event: melding\ndata: x1\n\n") >= 0)
+    la melding_hending = "event: melding\ndata: x1\n\n"
+    la ev = les_sse_til(e, hb["data"], melding_hending, 3000)
+    krev(builtin.index_of(ev["data"], melding_hending) >= 0, "SSE melding x1", "eof=" + tekst(ev["eof"]) + " data=" + samandrag(tekst(ev["data"])))
     la ekstra = []
     i = 0
     mens i < 3 {
         la x = ah.koble(port)
         ah.send(x, ah.førespurnad("GET", "/hendingar", {}, "", sann))
-        assert(builtin.index_of(ah.les_til(x, "", "data: start", 5000)["data"], "200 OK") >= 0)
+        la ekstra_svar = les_sse_til(x, "", start_hending, 5000)
+        krev(builtin.index_of(ekstra_svar["data"], "200 OK") >= 0 og builtin.index_of(ekstra_svar["data"], start_hending) >= 0, "SSE ekstra " + tekst(i + 1), "eof=" + tekst(ekstra_svar["eof"]) + " data=" + samandrag(tekst(ekstra_svar["data"])))
         legg_til(ekstra, x)
         i = i + 1
     }
@@ -187,32 +278,65 @@ funksjon køyr(port: heltall, data: tekst) -> heltall {
     skriv("SSE: heartbeat og hending kom fram; straum nr. 5 på same kanal gav 503\n")
 
     # ── Tak på tilkoplingar (8 i testen): nr. 9 får 503 ──
-    vent_ms(ah.koble(port), 200)
-    la st = ah.kall(port, "GET", "/status", {}, "")
-    skriv("status før taket: " + st["body"] + "\n")
+    skriv("status før taket: " + vent_tom_tenar(port, "tom tenar før taket") + "\n")
     la opne = []
-    i = 0
-    mens i < 8 {
-        legg_til(opne, ah.koble(port))
-        i = i + 1
+    la niande = {"handle": ""}
+    prøv {
+        # Eit 100-svar stadfestar at kvar socket er akseptert. Den uferdige
+        # kroppen held plassen utan å rase mot headerfristen på 1,5 sekund.
+        la vent_kropp = "POST /ekko HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+        la fortset = "HTTP/1.1 100 Continue\r\n\r\n"
+        # Alle åtte og avvisinga må dele den uendra kroppsfristen på 10 sekund.
+        la oppsett_frist = builtin.tid_ms() + 10000
+        i = 0
+        mens i < 8 {
+            la x = ah.koble(port)
+            legg_til(opne, x)
+            la sendt = ah.send(x, vent_kropp)
+            krev(sendt == lengde(vent_kropp), "tilkoplingstak oppsett " + tekst(i + 1), "sendte " + tekst(sendt) + " av " + tekst(lengde(vent_kropp)) + " header-byte")
+            la att = oppsett_frist - builtin.tid_ms()
+            krev(att > 0, "tilkoplingstak oppsett " + tekst(i + 1), "felles kroppsfrist på 10000 ms er brukt opp")
+            hvis att > 3000 { att = 3000 }
+            la akseptert = ah.les_til(x, "", fortset, att)
+            krev(akseptert["data"] == fortset, "tilkoplingstak akseptert " + tekst(i + 1), "eof=" + tekst(akseptert["eof"]) + " data=" + samandrag(tekst(akseptert["data"])))
+            i = i + 1
+        }
+        i = 0
+        mens i < lengde(opne) {
+            la framleis = socket.native_les(opne[i], 4096)
+            krev(framleis["status"] == "ventende", "tilkoplingstak open " + tekst(i + 1), samandrag(tekst(framleis)))
+            i = i + 1
+        }
+        krev(builtin.tid_ms() < oppsett_frist, "tilkoplingstak niande", "felles kroppsfrist på 10000 ms er brukt opp")
+        niande = ah.koble(port)
+        la att = oppsett_frist - builtin.tid_ms()
+        krev(att > 0, "tilkoplingstak niande", "felles kroppsfrist på 10000 ms er brukt opp")
+        hvis att > 5000 { att = 5000 }
+        la r12 = ah.les_svar(niande, "", usann, att)
+        krev_status("tilkopling over taket", r12, 503)
+    } fang (e) {
+        hvis niande["handle"] != "" { socket.native_lukk(niande) }
+        i = 0
+        mens i < lengde(opne) {
+            socket.native_lukk(opne[i])
+            i = i + 1
+        }
+        kast e
     }
-    vent_ms(opne[0], 200)
-    la niande = ah.koble(port)
-    la r12 = ah.les_svar(niande, "", usann, 5000)
-    krev_status("tilkopling over taket", r12, 503)
     socket.native_lukk(niande)
     i = 0
     mens i < lengde(opne) {
         socket.native_lukk(opne[i])
         i = i + 1
     }
-    vent_ms(ah.koble(port), 300)
+    vent_tom_tenar(port, "tom tenar etter taket")
     krev_status("etter taket", ah.kall(port, "GET", "/om", {}, ""), 200)
     skriv("tilkoplingstak: tilkopling nr. 9 fekk 503, og tenaren svarar etterpå\n")
     returner 0
 }
 
 funksjon start() -> heltall {
+    sse_fragment_regresjon()
     la data = ah.ny_datamappe("integrasjon")
     la app = ah.start_app("tests/fixtures/apptenar_app.no", data, {
         "APPTENAR_DATA": data,
@@ -223,17 +347,28 @@ funksjon start() -> heltall {
         "APPTENAR_MS": "150000"
     })
     hvis app["status"] != "kjorer" {
-        skriv("apptenaren starta ikkje:\n" + tekst(app["ut"]) + "\n")
-        assert(usann)
+        kast "apptenar-integrasjon [oppstart]: status=" + tekst(app["status"]) + " ut=" + samandrag(tekst(app["ut"]))
     }
     la h = app["h"]
-    køyr(app["port"], data)
-    la logg = app["ut"] + ah.les_ut(h)
-    assert(builtin.index_of(logg, "manglar capability process.exec") >= 0)
-    assert(builtin.index_of(logg, "path outside disk scope") >= 0)
-    # Stopp via ruta: prosessen avsluttar med 0
-    krev_status("stopp", ah.kall(app["port"], "POST", "/stopp", {}, ""), 200)
-    assert_eq(ah.vent_slutt(h, 10000), 0)
+    prøv {
+        køyr(app["port"], data)
+        la logg = app["ut"] + ah.les_ut(h)
+        krev(builtin.index_of(logg, "manglar capability process.exec") >= 0, "barneloggen process.exec", "forventa capability-avvising manglar; logg=" + samandrag(logg))
+        krev(builtin.index_of(logg, "path outside disk scope") >= 0, "barneloggen disk-scope", "forventa disk-avvising manglar; logg=" + samandrag(logg))
+        # Stopp via ruta: prosessen avsluttar med 0
+        krev_status("stopp", ah.kall(app["port"], "POST", "/stopp", {}, ""), 200)
+        assert_eq(ah.vent_slutt(h, 10000), 0)
+    } fang (e) {
+        prøv {
+            skriv("apptenar-barn ved testfeil:\n" + tekst(app["ut"]) + ah.les_ut(h) + "\n")
+        } fang (loggfeil) {
+            skriv("kunne ikkje lese apptenar-barnet: " + tekst(loggfeil) + "\n")
+        }
+        prøv { ah.stopp(h) } fang (stoppfeil) {
+            skriv("kunne ikkje rydde apptenar-barnet: " + tekst(stoppfeil) + "\n")
+        }
+        kast e
+    }
     ah.stopp(h)
     skriv("test_apptenar_integrasjon OK\n")
     returner 0
