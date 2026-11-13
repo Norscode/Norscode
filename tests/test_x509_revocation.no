@@ -1,107 +1,104 @@
-bruk std.x509_revocation som rev
-bruk std.x509_chain som der
-bruk std.x509 som x509
-bruk tests.fixtures.tls_revocation_vectors som v
+// Heile CRL-/OCSP-matrisa blir kompilert og køyrd som native Norscode.
+// Dei signerte vektorane og alle byteavkortingane ligg uendra i proben.
+// Rein VM-tolking av alle Ed25519-signeringane gjekk over 1200 s på både
+// Linux og macOS. Dette er ein kryptoregresjon, ikkje ein VM-bokhaldstest.
+bruk tools.process_runner som prosess
+bruk tools.refresh_native_codegen som rapport
+bruk std.filops som filops
+bruk selfhost.native_execution.codegen_prebuilt som cgp
 
-funksjon avvist(r: ordbok, årsak: tekst) {
-    hvis r["status"] != "feil" eller ikkje builtin.contains(r["error"], årsak) {
-        kast "Tilbakekalling skulle avvise " + årsak + ": " + tekst(r)
+funksjon krev_ok(r) {
+    hvis ikkje prosess.ok(r) {
+        prosess.skriv_resultat(r)
+        assert_eq(tekst(r["status"]) + "/" + tekst(r["exit_code"]), "ferdig/0")
     }
 }
-funksjon eksisterande_fixtures() {
-    # Uavhengige, historiske DER/PEM-vektorar frå repoet; datoen er eksplisitt
-    # bunden til då svara vart signerte. Dette er ikkje eit nettverks-tidsunntak.
-    for suffix i ["", "-ed25519"] {
-        la issuer = x509.pem_til_der(builtin.fil_les("tests/fixtures/tls/localhost" + suffix + ".crt"))
-        la leaf = x509.pem_til_der(builtin.fil_les("tests/fixtures/tls/ocsp-server" + suffix + ".crt"))
-        la revoked = x509.pem_til_der(builtin.fil_les("tests/fixtures/tls/revoked-client" + suffix + ".crt"))
-        la now = hvis suffix == "" da "2026-08-22T00:00:00Z" ellers "2026-09-20T00:00:00Z"
-        la good = builtin.fil_les_binær("tests/fixtures/tls/ocsp-good" + suffix + ".der")
-        la bad = builtin.fil_les_binær("tests/fixtures/tls/ocsp-revoked" + suffix + ".der")
-        la r = rev.valider_ocsp(good, leaf, issuer, now)
-        hvis r["status"] != "ok" { kast "Historisk OCSP-vektor " + suffix + ": " + r["error"] }
-        avvist(rev.valider_ocsp(bad, revoked, issuer, now), "revoked")
-        avvist(rev.valider_ocsp(good, revoked, issuer, now), "CertID mismatch")
-        la crl = x509.crl_pem_til_der(builtin.fil_les("tests/fixtures/tls/revoked-client" + suffix + ".crl.pem"))
-        hvis suffix == "" {
-            avvist(rev.valider_crl(crl, revoked, issuer, now), "revoked")
-            assert_eq(rev.valider_crl(crl, leaf, issuer, now)["status"], "ok")
-        } ellers {
-            # Den historiske Ed25519-CA-en manglar cRLSign. Ein gyldig
-            # matematisk signatur er dermed ikkje nok til å godta denne CRL-en.
-            avvist(rev.valider_crl(crl, revoked, issuer, now), "cRLSign")
-        }
+
+funksjon køyr_codegen(root: tekst, runtime: tekst, target: tekst, env: ordbok) -> ordbok {
+    la val = cgp.vel(root, target, cgp.vert_plattform())
+    hvis tekst(val["status"]) == "ok" {
+        returner prosess.køyr(tekst(val["sti"]), [], root, env, 300000)
     }
+    // Windows og Linux ARM64 har ikkje ein committa codegen for eigen vert.
+    // Køyr den same .no-kjelda i Norscode-VM-en; resultatet er framleis ein
+    // ekte native probe. NC_TARGET vel òg PE i native_codegen_v2.start().
+    // bygg-native sin eldre Windows-fallback avviser dette før kjelda blir
+    // køyrd, so bruk den dokumenterte NC_INPUT/NC_OUTPUT-inngangen direkte.
+    la kjelde = cgp.codegen_kjelde(target)
+    assert(kjelde != "")
+    skriv("x509-revocation: kjelde-codegen for " + target + ": " + tekst(val["melding"]) + "\n")
+    la barn = {}
+    for nøkkel i nøkler(env) { barn[nøkkel] = env[nøkkel] }
+    barn["NORSCODE_CMD"] = "run"
+    barn["NORSCODE_FILE"] = root + "/" + kjelde
+    // Tolka heilprogram-codegen treng meir minne enn sjølve kryptoproben.
+    // Same eksplisitte grense som test_linux_arm64_aot_cli, med eiga tidsgrense.
+    barn["NORSCODE_PROCESS_MAX_MEMORY_BYTES"] = "12884901888"
+    returner prosess.køyr_med_grenser(runtime, ["run", root + "/" + kjelde],
+        root, barn, 900000, 12884901888, 64)
 }
+
 funksjon start() -> heiltall {
-    eksisterande_fixtures()
-    la no_iso = "2026-11-13T12:00:00Z"
-    la ca = v.cert({"ca": sann})
-    la leaf = v.cert({})
-    assert(x509.verifiser_signert_av(leaf, ca))
-    la wrong_alg = der._tlv(48, der._tlv(6, [42, 3, 4]))
-    assert(ikkje x509.verifiser_signert_av(v.cert({"inner_algorithm": wrong_alg, "outer_algorithm": wrong_alg}), ca))
-    assert(ikkje x509.verifiser_signert_av(v.cert({"outer_algorithm": wrong_alg}), ca))
-    assert(rev.sertifikat_felt(ca)["ca"])
-    assert_eq(rev.finn_utferdar([leaf], [ca], no_iso), ca)
-    la good_crl = v.crl({})
-    assert_eq(rev.valider_crl(good_crl, leaf, ca, no_iso)["status"], "ok")
-    assert_eq(rev.valider_crl(v.crl({"serials": [[17]]}), leaf, ca, no_iso)["status"], "ok")
-    avvist(rev.valider_crl(v.crl({"serials": [[16]]}), leaf, ca, no_iso), "revoked")
-    avvist(rev.valider_crl(v.crl({"serials": [[16], [16]]}), leaf, ca, no_iso), "duplicate serial")
-    avvist(rev.valider_crl(v.crl({"issuer_name": "Other CA"}), leaf, ca, no_iso), "issuer name mismatch")
-    avvist(rev.valider_crl(v.crl({"signer_seed": v.seed(3)}), leaf, ca, no_iso), "signature invalid")
-    avvist(rev.valider_crl(v.crl({"next_update": ""}), leaf, ca, no_iso), "nextUpdate required")
-    avvist(rev.valider_crl(good_crl, leaf, ca, "2026-11-12T12:00:00Z"), "update window")
-    avvist(rev.valider_crl(good_crl, leaf, ca, "2026-11-15T12:00:00Z"), "update window")
-    avvist(rev.valider_crl(v.crl({"next_update": "20260230000000Z"}), leaf, ca, no_iso), "update window")
-    avvist(rev.valider_crl(good_crl, leaf, ca, "2026-99-13T12:00:00Z"), "validity")
-    la no_crl_sign = v.cert({"ca": sann, "usage": 132})
-    avvist(rev.valider_crl(good_crl, leaf, no_crl_sign, no_iso), "cRLSign")
-    for oid i [[85, 29, 27], [85, 29, 28], [85, 29, 29], [85, 29, 46]] {
-        avvist(rev.valider_crl(v.crl({"extensions": v.ext(oid, [48, 0], sann)}), leaf, ca, no_iso), "scoped or indirect")
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la runtime = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis runtime == "" { runtime = tekst(builtin.system_info()["executable"]) }
+    la info = builtin.system_info()
+    la system = tekst(info["system"])
+    la maskin = builtin.lower(tekst(info["machine"]))
+    la target = ""
+    hvis system == "Windows" og (maskin == "amd64" eller maskin == "x86_64" eller maskin == "x64") { target = "windows-x86_64" }
+    hvis system == "Darwin" og (maskin == "arm64" eller maskin == "aarch64") { target = "macos-arm64" }
+    hvis system == "Linux" {
+        hvis maskin == "amd64" eller maskin == "x86_64" { target = "linux-x86_64" }
+        hvis maskin == "arm64" eller maskin == "aarch64" { target = "linux-arm64" }
     }
-    la indirect = v.cert({"extra_extensions": v.ext([85, 29, 31], der._tlv(48, der._tlv(48, der._tlv(162, der._tlv(164, der._cn_name("Other CA"))))), usann)})
-    avvist(rev.valider_crl(good_crl, indirect, ca, no_iso), "distribution scope")
-    la critical = v.ext([42, 3, 4], [5, 0], sann)
-    avvist(rev.valider_crl(v.crl({"extensions": critical}), leaf, ca, no_iso), "critical")
-    la remove = v.ext([85, 29, 21], [10, 1, 8], usann)
-    avvist(rev.valider_crl(v.crl({"serials": [[17]], "entry_extensions": remove}), leaf, ca, no_iso), "reason")
-    avvist(rev.valider_crl(v.crl({"inner_algorithm": der._tlv(48, der._tlv(6, [42, 3, 4]))}), leaf, ca, no_iso), "algorithms differ")
-    la good = v.ocsp({})
-    assert_eq(rev.valider_ocsp(good, leaf, ca, no_iso)["status"], "ok")
-    assert_eq(rev.valider_ocsp(v.ocsp({"sha256": sann, "by_key": sann}), leaf, ca, no_iso)["status"], "ok")
-    for status i ["revoked", "unknown"] { avvist(rev.valider_ocsp(v.ocsp({"status": status}), leaf, ca, no_iso), "certificate " + status) }
-    avvist(rev.valider_ocsp(v.ocsp({"signer_seed": v.seed(3)}), leaf, ca, no_iso), "signature invalid")
-    avvist(rev.valider_ocsp(v.ocsp({"serial": [17]}), leaf, ca, no_iso), "CertID mismatch")
-    avvist(rev.valider_ocsp(v.ocsp({"issuer_name_hash": rev._del(v.seed(9), 0, 20)}), leaf, ca, no_iso), "CertID mismatch")
-    avvist(rev.valider_ocsp(v.ocsp({"issuer_key_hash": rev._del(v.seed(9), 0, 20)}), leaf, ca, no_iso), "CertID mismatch")
-    avvist(rev.valider_ocsp(v.ocsp({"duplicate": sann}), leaf, ca, no_iso), "duplicate status")
-    avvist(rev.valider_ocsp(v.ocsp({"next_update": ""}), leaf, ca, no_iso), "nextUpdate required")
-    avvist(rev.valider_ocsp(v.ocsp({"produced_at": "20261114000000Z"}), leaf, ca, no_iso), "producedAt")
-    avvist(rev.valider_ocsp(v.ocsp({"this_update": "20261113020000Z"}), leaf, ca, no_iso), "update window")
-    avvist(rev.valider_ocsp(good, leaf, ca, "2026-11-15T12:00:00Z"), "update window")
-    avvist(rev.valider_ocsp(v.ocsp({"this_update": "20261101000000Z", "next_update": "20261201000000Z"}), leaf, ca, no_iso), "too old")
-    avvist(rev.valider_ocsp(v.ocsp({"extensions": critical}), leaf, ca, no_iso), "critical")
-    avvist(rev.valider_ocsp(v.ocsp({"single_extensions": critical}), leaf, ca, no_iso), "critical")
-    avvist(rev.valider_ocsp(v.ocsp({"responder": der._tlv(161, der._cn_name("Other CA"))}), leaf, ca, no_iso), "responder name mismatch")
-    avvist(rev.valider_ocsp(v.ocsp({"responder": der._tlv(162, der._tlv(4, rev._del(v.seed(9), 0, 20)))}), leaf, ca, no_iso), "responder key mismatch")
-    la tampered = rev._del(good, 0, lengde(good))
-    tampered[lengde(tampered) - 1] = tampered[lengde(tampered) - 1] ^ 1
-    avvist(rev.valider_ocsp(tampered, leaf, ca, no_iso), "signature invalid")
-    avvist(rev.valider_ocsp(v.saman(good, [0]), leaf, ca, no_iso), "DER")
-    avvist(rev.valider_crl(v.saman(good_crl, [0]), leaf, ca, no_iso), "DER")
-    # Alle byteavkortingar av to gyldige signerte meldingar må bli avviste.
-    la i = 0
-    mens i < lengde(good) {
-        assert_eq(rev.valider_ocsp(rev._del(good, 0, i), leaf, ca, no_iso)["status"], "feil")
-        i = i + 1
+    assert(target != "")
+    la ut = root + "/build/x509-revocation-probe-" + tekst(builtin.tid_ms())
+    hvis builtin.starts_with(target, "windows-") { ut = ut + ".exe" }
+    la kjelde = ut + ".no"
+    la ncb = ut + ".ncb.json"
+    // Eksplisitt AOT-bunt gjer rapportflagget uavhengig av ein eldre nc_main
+    // som ikkje vidaresender NC_BUILTIN_REPORT frå bygg-native til codegen.
+    // Proben er uendra; denne inngangen legg berre til AOT-runtime-importane.
+    la inngang = "bruk tests.fixtures.x509_revocation_native_probe som probe\n" +
+        "bruk std.desimaltall_tekst som desimal\n"
+    hvis target == "linux-x86_64" eller target == "windows-x86_64" {
+        inngang = inngang + "bruk std.native_gap som native_gap\n"
     }
-    i = 0
-    mens i < lengde(good_crl) {
-        assert_eq(rev.valider_crl(rev._del(good_crl, 0, i), leaf, ca, no_iso)["status"], "feil")
-        i = i + 1
-    }
+    builtin.fil_skriv(kjelde, inngang + "funksjon start() -> heiltall { returner probe.start() }\n")
+    la env = {"NORSCODE_ROOT": root, "NORSCODE_CMD": "", "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "", "NORSCODE_GC_ALLOC": "1", "NC_BUILTIN_REPORT": "1",
+        "NC_BUILTIN_KVITLISTE": "", "NORSCODE_VM_FAST": "1",
+        "NORSCODE_NATIVE_TOOL_CACHE": "0", "NORSCODE_VM_HOSTED": "0",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "0", "NORSCODE_USE_PRECOMPILED_STDLIB": "0",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"}
+    krev_ok(prosess.køyr(runtime, ["bundle", "--output", ncb, kjelde], root, env, 300000))
+    assert(builtin.fil_finnes(ncb))
+    env["NC_INPUT"] = ncb
+    env["NC_OUTPUT"] = ut
+    env["NC_TARGET"] = target
+    la bygd = køyr_codegen(root, runtime, target, env)
+    krev_ok(bygd)
+    la bygglogg = tekst(bygd["stdout"]) + tekst(bygd["stderr"])
+    // x86 har uventa=; ARM64 har stubba=. Den felles rapportlesaren krev
+    // nøyaktig éin rapport og null uløyste/uventa, utan plattformgissing.
+    prosess.skriv_resultat(bygd)
+    rapport.krev_nullrapportar(bygglogg, 1)
+    assert(ikkje builtin.contains(bygglogg, "STOPPA    "))
+    // Denne reine kryptoproben skal ikkje byggje på NATIV-GAP-stubbar.
+    hvis builtin.contains(bygglogg, "stubba=") { assert_eq(rapport.rapport_tal(bygglogg, "stubba"), 0) }
+    assert(builtin.fil_finnes(ut))
+    assert(builtin.fil_sett_kjorbar(ut))
+    la r = prosess.køyr(ut, [], root, env, 600000)
+    krev_ok(r)
+    prosess.skriv_resultat(r)
+    assert(builtin.contains(tekst(r["stdout"]), "test_x509_revocation OK"))
+    filops.slett_fil(ut)
+    filops.slett_fil(ncb)
+    filops.slett_fil(kjelde)
     skriv("test_x509_revocation OK\n")
     returner 0
 }

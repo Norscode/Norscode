@@ -74,8 +74,40 @@ kilder skal gjøre kildekontrollen rød.
 - Den siste sporede v9400-bytekodebunten er fjernet. Fire ubrukte shellmaler
   for prosjektstarteren er også fjernet; prosjektgeneratoren materialiserer
   allerede en ekte native-starter.
+- Både kjedeorkestratoren og runtimebyggeren hasher store filer i kortlivede
+  barn av den kjørende Norscode-binæren. Det hindrer at boksede byte-lister fra
+  flere generasjoner samles i byggerens heap. Filtype, størrelse, full digest
+  og alle eksisterende kilde- og rapportkrav kontrolleres fortsatt. Manglende
+  filer kan ikke få samme godkjenning som en ekte tom fil.
+- Windows-portene bevarer syscall-registrene gjennom Win32-kall, også på
+  feilveier. Den uavhengige maskinkodeprøven ødelegger bevisst Win32s volatile
+  registre og shadow space. Den dekker filoperasjoner, søking, venting,
+  katalogspørring, minneallokering og tidlig feil ved prosessopprettelse.
+  Linux-kjøring av denne prøven erstatter ikke verifikasjon på Windows.
+- Hele den signerte CRL-/OCSP-matrisen kjøres som et native Norscode-program.
+  De opprinnelige vektorene og alle byteavkortingskontrollene er bevart i
+  `tests/fixtures/x509_revocation_native_probe.no`. Byggeren må rapportere
+  null uløste/uventede builtins, og proben må faktisk kjøres til sluttmarkøren.
 
 ## Verifikasjonsstatus
+
+Et fullt lokalt kaldbygg har bestått på revisjon
+`bb2998b438d8795dac241eb327a173b335e05741`.
+[Den komplette lokale rapporten](proofs/toolchain-fixed-point-bb2998b.json)
+viser én opprinnelig binær, null forhåndsbygde kodegeneratorer, null kopierte
+bytekodebunter, 1047 kildefiler og uendret kildeinventar gjennom hele løpet.
+Alle tre generasjoner fullførte L5-byteparitet, runtimebygg, selvtest og
+sluttvalidering. Gen2 og Gen3 er byte- og hashidentiske for kodegenerator-NCB,
+kodegenerator-binær, runtime-NCB og runtime-binær. Prosessen avsluttet med
+status 0 etter 1162682 ms.
+
+Etter denne revisjonen er ARM64-ruten for `builtin.kompiler_fil` rettet til
+den eksisterende, bundla Norscode-kompilatoren. Kodegen- og VM-regresjonene
+består lokalt, og både Linux ARM64- og macOS ARM64-kandidatene er bygd på nytt.
+Deres rapporter viser null uløste builtins og tre gjenværende tråd-/kontekst-
+stubber; `kompiler_fil` er ikke lenger en stub. Vanlig og aktiv kompilator-ABI
+holdes adskilt. Den lokale kaldbyggrapporten over gjelder uttrykkelig
+`bb2998b`, før denne ARM64-endringen.
 
 Lokalt er kildebygd Linux x86-64-runtime, full x86-runtime-probe, faktisk
 native-bygg/kjøring i installert mappestruktur, kald bootstrap-materialisering,

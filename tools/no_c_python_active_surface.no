@@ -472,87 +472,197 @@ funksjon shell_baseline_bad(root: tekst, flate: liste_tekst) -> liste_tekst {
 }
 
 funksjon er_norscode_shell_linje(rein: tekst) -> bool {
-    returner builtin.starts_with(rein, "shell:") og
-        builtin.contains(rein, "tools/ci_shell_runner.no {0}") og
-        (builtin.contains(rein, "bootstrap/stage0/norscode-") eller
-         builtin.contains(rein, "/dist/norscode_native run ") eller
-         // Windows W-fase: den frittståande nc_main-kandidaten er sin eigen adapter-vert.
-         // Han KAN ikkje vere ein committa stage0-seed før W7-promotering (den committa
-         // windows-seeden er framleis C-vert og ignorerer adapter-argumenta), men køyrer
-         // likevel den committa ci_shell_runner.no → invarianten (ingen rå shell, alt
-         // gjennom Norscode-adapteren) held. Fjernast når W7 promoterer kandidaten.
-         builtin.contains(rein, "build/windows/nc_main_freestanding_win.exe run "))
+    // Godta berre ein heil adapterkommando med ein kjend Norscode-vert.
+    // Eit shell, ekstra argument eller ein kommentar som nemner seedstien
+    // skal ikkje kunne passere nullporten med eit delstrengtreff.
+    la prefix = "shell: ${{ github.workspace }}/"
+    la suffix = " run ${{ github.workspace }}/tools/ci_shell_runner.no {0}"
+    for vert i ["bootstrap/stage0/norscode-linux-x86_64",
+                 "bootstrap/stage0/norscode-linux-arm64",
+                 "bootstrap/stage0/norscode-macos-arm64",
+                 "bootstrap/stage0/norscode-windows-x86_64.exe",
+                 "bootstrap/stage0/norscode-${{ matrix.host }}",
+                 "bootstrap/stage0/norscode-linux-${{ matrix.arch }}",
+                 "dist/norscode_native",
+                 "build/windows/nc_main_freestanding_win.exe",
+                 "build/windows/norscode_native_windows_x86_64.exe"] {
+        hvis rein == prefix + vert + suffix { returner sann }
+    }
+    returner usann
+}
+
+// Avgrensa YAML-lesar for jobs/defaults/steps. Andre felt blir hoppa over
+// som heile innrykksblokker; env.shell og heredoc-tekst er aldri shell-val.
+// Alias, merge, flow-mapping og escapa nøklar i styringsflata blir avviste,
+// i staden for å late som ein generell YAML-parser har forstått dei.
+funksjon ci_yaml_krev_einlinja_sitat(verdi: tekst) {
+    la sitat = builtin.slice(verdi, 0, 1)
+    hvis sitat == "&" eller sitat == "*" eller sitat == "!" {
+        kast "CI-shell: YAML-anker, alias og taggar er ikkje støtta i styringsflata"
+    }
+    hvis sitat != "'" og sitat != "\"" { returner }
+    la i = 1
+    mens i < lengde(verdi) {
+        la c = builtin.slice(verdi, i, i + 1)
+        hvis sitat == "\"" og c == builtin.chr(92) { i = i + 2  fortsett }
+        hvis c == sitat {
+            hvis sitat == "'" og builtin.slice(verdi, i + 1, i + 2) == "'" { i = i + 2  fortsett }
+            la rest = trim_tekst(builtin.slice(verdi, i + 1, lengde(verdi)))
+            hvis rest != "" og ikkje builtin.starts_with(rest, "#") { kast "CI-shell: ugyldig sitert YAML-verdi" }
+            returner
+        }
+        i = i + 1
+    }
+    // Ei quoted name/run-verdi kan halde fram på same innrykk som eit
+    // shell-felt. Avvis forma før innhaldet kan bli tolka som nye felt.
+    kast "CI-shell: fleirlinja siterte YAML-verdiar er ikkje støtta"
+}
+
+funksjon ci_yaml_felt(rein: tekst) -> ordbok {
+    la kolon = builtin.index_of(rein, ":")
+    hvis kolon < 1 { kast "CI-shell: krev eit enkelt YAML-felt: " + rein }
+    la nøkkel = trim_tekst(builtin.slice(rein, 0, kolon))
+    la verdi = trim_tekst(builtin.slice(rein, kolon + 1, lengde(rein)))
+    la fyrste = builtin.slice(nøkkel, 0, 1)
+    hvis fyrste == "'" eller fyrste == "\"" {
+        hvis lengde(nøkkel) < 2 eller builtin.slice(nøkkel, lengde(nøkkel) - 1, lengde(nøkkel)) != fyrste {
+            kast "CI-shell: ugyldig sitert YAML-nøkkel"
+        }
+        nøkkel = builtin.slice(nøkkel, 1, lengde(nøkkel) - 1)
+        hvis builtin.contains(nøkkel, fyrste) eller builtin.contains(nøkkel, builtin.chr(92)) {
+            kast "CI-shell: escapa YAML-nøklar er ikkje støtta"
+        }
+    }
+    hvis nøkkel == "" eller nøkkel == "<<" eller builtin.contains(nøkkel, " ") eller
+       builtin.contains(nøkkel, "{") eller builtin.contains(nøkkel, "[") eller
+       builtin.starts_with(nøkkel, "?") eller builtin.starts_with(nøkkel, "!") eller builtin.starts_with(nøkkel, "&") eller
+       builtin.starts_with(nøkkel, "*") {
+        kast "CI-shell: ikkje støtta YAML-styringsfelt: " + nøkkel
+    }
+    hvis builtin.starts_with(verdi, "#") { verdi = "" }
+    ci_yaml_krev_einlinja_sitat(verdi)
+    returner {"key": nøkkel, "value": verdi}
+}
+
+funksjon ci_yaml_krev_blokk(verdi: tekst) {
+    hvis verdi != "" { kast "CI-shell: krev YAML-blokk utan alias, anker eller flow-mapping" }
+}
+
+funksjon ci_shell_val(verdi: tekst) -> tekst {
+    hvis er_norscode_shell_linje("shell: " + verdi) { returner "norscode" }
+    returner "anna"
+}
+
+funksjon ci_workflow_runs(data: tekst) -> liste {
+    la rammer = [{"indent": -1, "kind": "root", "job": -1, "step": -1}]
+    la jobbar = []
+    la stegdata = []
+    la workflow_shell = ""
+    la linjer = builtin.split(data, "\n")
+    la j = 0
+    mens j < lengde(linjer) {
+        la linjenr = j + 1
+        la rå = linjer[j]
+        j = j + 1
+        la rein = trim_tekst(rå)
+        hvis rein == "" eller builtin.starts_with(rein, "#") { fortsett }
+        la innrykk = 0
+        mens innrykk < lengde(rå) og builtin.slice(rå, innrykk, innrykk + 1) == " " { innrykk = innrykk + 1 }
+        hvis builtin.slice(rå, innrykk, innrykk + 1) == "\t" { kast "CI-shell: tabulator i YAML-innrykk" }
+        la listepunkt = rein == "-" eller builtin.starts_with(rein, "- ")
+        mens lengde(rammer) > 1 og innrykk <= rammer[lengde(rammer) - 1]["indent"] {
+            // YAML tillèt ein sekvens på same innrykk som steps-nøkkelen.
+            hvis listepunkt og rammer[lengde(rammer) - 1]["kind"] == "steps" og
+               innrykk == rammer[lengde(rammer) - 1]["indent"] { bryt }
+            fjern_siste(rammer)
+        }
+        la ramme = rammer[lengde(rammer) - 1]
+        la kind = ramme["kind"]
+        hvis kind == "other" { fortsett }
+        // Ei ekstra innrykkslinje kan halde fram ein plain YAML-scalar.
+        // Ho må ikkje utvide ein allereie godkjend adapterkommando.
+        hvis kind == "shell_scalar" { kast "CI-shell: fleirlinja adapterkommando er ikkje støtta" }
+        hvis kind == "root" og rein == "---" { fortsett }
+        la jobb = ramme["job"]
+        la steg_id = ramme["step"]
+        la felt_innrykk = innrykk
+        hvis listepunkt {
+            hvis kind != "steps" { kast "CI-shell: uventa sekvens i YAML-styringsflata" }
+            steg_id = lengde(stegdata)
+            legg_til(stegdata, {"job": jobb, "shell": "", "run": "", "linje": 0})
+            ramme = {"indent": innrykk, "kind": "step", "job": jobb, "step": steg_id}
+            legg_til(rammer, ramme)
+            kind = "step"
+            rein = trim_tekst(builtin.slice(rein, 1, lengde(rein)))
+            felt_innrykk = innrykk + 2
+            hvis rein == "" { fortsett }
+        } ellers hvis kind == "steps" {
+            kast "CI-shell: steps krev ein eksplisitt YAML-sekvens"
+        }
+        hvis kind == "step" og felt_innrykk != ramme["indent"] + 2 {
+            kast "CI-shell: ugyldig innrykk for steg-felt"
+        }
+        la felt = ci_yaml_felt(rein)
+        la nøkkel = felt["key"]
+        la verdi = felt["value"]
+        la neste = "other"
+        hvis kind == "root" og nøkkel == "jobs" {
+            ci_yaml_krev_blokk(verdi)
+            neste = "jobs"
+        } ellers hvis kind == "jobs" {
+            ci_yaml_krev_blokk(verdi)
+            jobb = lengde(jobbar)
+            legg_til(jobbar, {"shell": ""})
+            neste = "job"
+        } ellers hvis (kind == "root" eller kind == "job") og nøkkel == "defaults" {
+            ci_yaml_krev_blokk(verdi)
+            hvis kind == "root" { workflow_shell = "" } ellers { jobbar[jobb]["shell"] = "" }
+            neste = "defaults"
+        } ellers hvis kind == "defaults" og nøkkel == "run" {
+            ci_yaml_krev_blokk(verdi)
+            neste = "default_run"
+        } ellers hvis kind == "default_run" og nøkkel == "shell" {
+            la val = ci_shell_val(verdi)
+            hvis jobb < 0 { workflow_shell = val } ellers { jobbar[jobb]["shell"] = val }
+            hvis val == "norscode" { neste = "shell_scalar" }
+        } ellers hvis kind == "job" og nøkkel == "steps" {
+            ci_yaml_krev_blokk(verdi)
+            neste = "steps"
+        } ellers hvis kind == "step" og nøkkel == "shell" {
+            stegdata[steg_id]["shell"] = ci_shell_val(verdi)
+            hvis stegdata[steg_id]["shell"] == "norscode" { neste = "shell_scalar" }
+        } ellers hvis kind == "step" og nøkkel == "run" {
+            hvis stegdata[steg_id]["linje"] != 0 { kast "CI-shell: fleire run-felt i eitt steg" }
+            hvis verdi == "" eller builtin.starts_with(verdi, "*") eller builtin.starts_with(verdi, "&") eller
+               builtin.starts_with(verdi, "{") eller builtin.starts_with(verdi, "[") {
+                kast "CI-shell: run krev eksplisitt tekst eller blokkscalar"
+            }
+            stegdata[steg_id]["run"] = verdi
+            stegdata[steg_id]["linje"] = linjenr
+        }
+        legg_til(rammer, {"indent": felt_innrykk, "kind": neste, "job": jobb, "step": steg_id})
+    }
+    // YAML-feltrekkjefølgja skal ikkje avgjere defaulten. Løys arving først
+    // etter at både workflow, jobbar og heile stega er lesne.
+    la ut = []
+    for s i stegdata {
+        hvis s["linje"] != 0 {
+            la val = s["shell"]
+            hvis val == "" { val = jobbar[s["job"]]["shell"] }
+            hvis val == "" { val = workflow_shell }
+            legg_til(ut, {"linje": s["linje"], "run": s["run"], "norscode": val == "norscode"})
+        }
+    }
+    returner ut
 }
 
 funksjon ci_shell_count(root: tekst) -> heiltall {
-    // Tel run-blokker som ikkje køyrer gjennom Norscode-adapteren. Eit steg-lokalt
-    // `shell:` (t.d. `shell: bash`) overstyrer jobbdefaulten og blir vurdert per
-    // steg — elles kunne eit bash-steg gøyme seg i ein jobb som elles brukar
-    // ci_shell_runner (slik seks steg gjorde fram til 2026-09-10).
     la filer = walk_files_filtrert([root + "/.github/workflows"], usann, ".yml,.yaml")
-    la shell: heiltall = 0
-    la i: heiltall = 0
-    mens i < lengde(filer) {
-        la data = ""
-        prøv { data = builtin.fil_les(filer[i]) } fang (e) { data = "" }
-        la lines = builtin.split(data, "\n")
-        la jobb_har_norscode_shell = usann
-        la i_steg = usann
-        la steg_innrykk: heiltall = -1
-        la steg_har_run = usann
-        // "" = jobbdefault gjeld, "norscode" = steget brukar adapteren, "anna" = anna shell
-        la steg_shell = ""
-        la j: heiltall = 0
-        mens j <= lengde(lines) {
-            la rein = ""
-            la spaces: heiltall = 0
-            la ny_jobb = usann
-            la nytt_steg = j == lengde(lines)
-            hvis j < lengde(lines) {
-                rein = trim_tekst(lines[j])
-                mens spaces < lengde(lines[j]) og builtin.slice(lines[j], spaces, spaces + 1) == " " {
-                    spaces = spaces + 1
-                }
-                ny_jobb = spaces == 2 og builtin.ends_with(rein, ":")
-                hvis i_steg og builtin.starts_with(rein, "- ") {
-                    hvis steg_innrykk < 0 { steg_innrykk = spaces }
-                    hvis spaces == steg_innrykk { nytt_steg = sann }
-                }
-            }
-            hvis (ny_jobb eller nytt_steg) og steg_har_run {
-                la via_norscode = steg_shell == "norscode" eller (steg_shell == "" og jobb_har_norscode_shell)
-                hvis ikkje via_norscode { shell = shell + 1 }
-            }
-            hvis ny_jobb eller nytt_steg {
-                steg_har_run = usann
-                steg_shell = ""
-            }
-            hvis ny_jobb {
-                jobb_har_norscode_shell = usann
-                i_steg = usann
-                steg_innrykk = -1
-            }
-            hvis rein == "steps:" { i_steg = sann }
-            hvis builtin.starts_with(rein, "shell:") {
-                hvis i_steg {
-                    hvis er_norscode_shell_linje(rein) { steg_shell = "norscode" } ellers { steg_shell = "anna" }
-                } ellers hvis er_norscode_shell_linje(rein) {
-                    jobb_har_norscode_shell = sann
-                }
-            }
-            la verdi = ""
-            la er_run = usann
-            hvis builtin.starts_with(rein, "- run:") {
-                verdi = trim_tekst(builtin.slice(rein, 6, lengde(rein)))
-                er_run = sann
-            } ellers hvis builtin.starts_with(rein, "run:") {
-                verdi = trim_tekst(builtin.slice(rein, 4, lengde(rein)))
-                er_run = sann
-            }
-            hvis er_run og verdi != "" { steg_har_run = sann }
-            j = j + 1
+    la shell = 0
+    for fil i filer {
+        for r i ci_workflow_runs(builtin.fil_les(fil)) {
+            hvis ikkje r["norscode"] { shell = shell + 1 }
         }
-        i = i + 1
     }
     returner shell
 }
@@ -606,20 +716,7 @@ funksjon ci_child_binding_count(root: tekst, felt: tekst) -> heiltall {
 funksjon ci_run_block_count(root: tekst) -> heiltall {
     la filer = walk_files_filtrert([root + "/.github/workflows"], usann, ".yml,.yaml")
     la tal = 0
-    la i = 0
-    mens i < lengde(filer) {
-        la data = ""
-        prøv { data = builtin.fil_les(filer[i]) } fang (e) { data = "" }
-        la linjer = builtin.split(data, "\n")
-        la j = 0
-        mens j < lengde(linjer) {
-            la rein = trim_tekst(linjer[j])
-            hvis (builtin.starts_with(rein, "run:") og lengde(rein) > 4) eller
-               (builtin.starts_with(rein, "- run:") og lengde(rein) > 6) { tal = tal + 1 }
-            j = j + 1
-        }
-        i = i + 1
-    }
+    for fil i filer { tal = tal + lengde(ci_workflow_runs(builtin.fil_les(fil))) }
     returner tal
 }
 

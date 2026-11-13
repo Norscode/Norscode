@@ -1,4 +1,138 @@
 bruk std.tekst som t
+bruk std.filops som filops
+bruk std.runtime_filesystem som runtime_fs
+bruk tools.no_c_python_active_surface som flate
+bruk tools.ci_shell_surface_inventory som inventar
+
+funksjon sjekk_workflow(root: tekst, data: tekst, venta: heiltall, totalt: heiltall) {
+    builtin.fil_skriv(root + "/.github/workflows/probe.yml", data)
+    assert_eq(flate.ci_shell_count(root), venta)
+    la rapport = inventar.samle(root)
+    assert_eq(rapport["run_total"], totalt)
+    assert_eq(rapport["shell_execution"], venta)
+    assert_eq(rapport["norscode_custom_shell"], totalt - venta)
+    assert_eq(flate.ci_shell_baseline(root), 0)
+}
+
+funksjon sjekk_avvist_workflow(root: tekst, data: tekst) {
+    builtin.fil_skriv(root + "/.github/workflows/probe.yml", data)
+    la port_avvist = usann
+    prøv { flate.ci_shell_count(root) } fang (e) { port_avvist = sann }
+    assert(port_avvist)
+    la inventar_avvist = usann
+    prøv { inventar.samle(root) } fang (e) { inventar_avvist = sann }
+    assert(inventar_avvist)
+    assert_eq(flate.ci_shell_baseline(root), 0)
+}
+
+funksjon sjekk_shell_teljing() {
+    la temp = runtime_fs.native_tempområde("build", "ci-shell-flate-")
+    assert_eq(temp["status"], "created")
+    la root = "build/" + temp["relative"]
+    assert(filops.lag_katalogar(root + "/.github/workflows"))
+    la kandidat = "shell: ${{ github.workspace }}/build/windows/norscode_native_windows_x86_64.exe run ${{ github.workspace }}/tools/ci_shell_runner.no {0}"
+    assert(flate.er_norscode_shell_linje(kandidat))
+    assert(inventar.er_norscode_custom_shell("        " + kandidat))
+    la jobb = "jobs:\n  probe:\n    runs-on: windows-latest\n"
+    la standard = "    defaults:\n      run:\n        "
+    la teststeg = "    steps:\n      - run: ./bin/nc selftest\n      - name: andre\n        run: ./bin/nc verify-seed\n"
+    sjekk_workflow(root, jobb + standard + kandidat + "\n" + teststeg, 0, 2)
+    // Delstrengar i ein eldre stage0-/dist-kommando må heller ikkje frikjenne
+    // bash, shelloperatorar eller ein utbytt adapter.
+    for vert i ["bootstrap/stage0/norscode-linux-x86_64",
+                 "bootstrap/stage0/norscode-linux-arm64",
+                 "bootstrap/stage0/norscode-macos-arm64",
+                 "bootstrap/stage0/norscode-windows-x86_64.exe",
+                 "bootstrap/stage0/norscode-${{ matrix.host }}",
+                 "bootstrap/stage0/norscode-linux-${{ matrix.arch }}",
+                 "dist/norscode_native", "build/windows/nc_main_freestanding_win.exe"] {
+        la adapter = "shell: ${{ github.workspace }}/" + vert +
+            " run ${{ github.workspace }}/tools/ci_shell_runner.no {0}"
+        assert(flate.er_norscode_shell_linje(adapter))
+        for ugyldig i ["shell: bash " + builtin.slice(adapter, 7, lengde(adapter)),
+                        adapter + " && echo ekstra", adapter + " # kommentar",
+                        builtin.replace(adapter, "tools/ci_shell_runner.no", "tools/annan.no")] {
+            assert(ikkje flate.er_norscode_shell_linje(ugyldig))
+            assert(ikkje inventar.er_norscode_custom_shell(ugyldig))
+        }
+    }
+    for shell i ["shell: bash", "shell: pwsh", "shell: powershell",
+                  "shell: bash " + builtin.slice(kandidat, 7, lengde(kandidat)),
+                  kandidat + " && echo ekstra",
+                  builtin.replace(kandidat, "norscode_native_windows_x86_64.exe", "annan.exe")] {
+        assert(ikkje flate.er_norscode_shell_linje(shell))
+        assert(ikkje inventar.er_norscode_custom_shell(shell))
+        sjekk_workflow(root, jobb + standard + shell + "\n" + teststeg, 2, 2)
+    }
+    // Både shell før/etter run og neste steg utan overstyring må teljast rett.
+    la blanda = "    steps:\n      - run: ./bin/nc selftest\n" +
+        "      - name: bash-overstyring\n        shell: bash\n        run: ./bin/nc selftest\n" +
+        "      - run: ./bin/nc selftest\n        shell: pwsh\n" +
+        "      - run: ./bin/nc selftest\n"
+    sjekk_workflow(root, jobb + standard + kandidat + "\n" + blanda, 2, 4)
+    // Eit steg med eksplisitt adapter skal ikkje frikjenne resten av jobben.
+    sjekk_workflow(root, jobb + "    steps:\n      - run: ./bin/nc selftest\n        " +
+        kandidat + "\n      - run: ./bin/nc selftest\n", 1, 2)
+    // Heller ikkje ein seinare jobb skal arve adapteren frå den førre.
+    sjekk_workflow(root, jobb + standard + kandidat + "\n" + teststeg +
+        "  utan_adapter:\n    runs-on: windows-latest\n    steps:\n      - run: ./bin/nc selftest\n", 1, 3)
+    // Fyrste felt i eit steg er òg eit shell-val. Enkle siterte YAML-nøklar
+    // må ikkje skjule ei overstyring eller ein faktisk run-blokk.
+    sjekk_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "      - shell: bash\n        run: echo eksempel\n", 1, 1)
+    sjekk_workflow(root, jobb + "    steps:\n      - " + kandidat +
+        "\n        run: ./bin/nc selftest\n", 0, 1)
+    for sitat i ["'", "\""] {
+        sjekk_workflow(root, jobb + standard + kandidat + "\n    steps:\n      - " +
+            sitat + "shell" + sitat + ": bash\n        " + sitat + "run" + sitat + ": echo eksempel\n", 1, 1)
+        sjekk_workflow(root, jobb + "    steps:\n      - " + sitat + "run" + sitat +
+            ": ./bin/nc selftest\n        " + sitat + "shell" + sitat +
+            builtin.slice(kandidat, 5, lengde(kandidat)) + "\n", 0, 1)
+    }
+    // env.shell og tekst inne i YAML-blokkskalarar er aldri shell-val.
+    sjekk_workflow(root, jobb + "    env:\n      " + kandidat + "\n" + teststeg, 2, 2)
+    sjekk_workflow(root, jobb + "    steps:\n      - env:\n          " + kandidat +
+        "\n        run: echo eksempel\n", 1, 1)
+    sjekk_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "      - run: ./bin/nc selftest\n        env:\n          shell: bash\n", 0, 1)
+    sjekk_workflow(root, jobb + "    steps:\n      - run: |\n" +
+        "          cat <<'EOF'\n          " + kandidat +
+        "\n          run: echo berre tekst\n          EOF\n", 1, 1)
+    sjekk_workflow(root, jobb + "    steps:\n      - uses: actions/example@v1\n" +
+        "        with:\n          script: |\n            " + kandidat +
+        "\n            run: echo berre tekst\n", 0, 0)
+    // YAML-feltrekkjefølgje endrar ikkje defaulten. Workflow-default kan
+    // arvast, men ein eksplisitt jobbdefault skal framleis overstyre han.
+    sjekk_workflow(root, jobb + teststeg + standard + kandidat + "\n", 0, 2)
+    la workflow_default = "defaults:\n  run:\n    " + kandidat + "\n"
+    sjekk_workflow(root, workflow_default + jobb + teststeg, 0, 2)
+    sjekk_workflow(root, workflow_default + jobb + standard + "shell: bash\n" + teststeg, 2, 2)
+    // Ein YAML-sekvens kan liggje på same innrykk som steps-nøkkelen.
+    sjekk_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "    - shell: bash\n      run: echo eksempel\n", 1, 1)
+    // Alias, merge, flow-mapping og escapa styringsnøklar ligg utanfor den
+    // avgrensa lesaren. Dei må feile lukka, ikkje bli ein nullrapport.
+    sjekk_avvist_workflow(root, jobb + "    steps: *skjulte_steg\n")
+    sjekk_avvist_workflow(root, jobb + "    <<: *skjult_jobb\n" + teststeg)
+    sjekk_avvist_workflow(root, jobb + "    steps:\n      - {run: echo eksempel, shell: bash}\n")
+    sjekk_avvist_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "      - run: echo eksempel\n        \"sh\\u0065ll\": bash\n")
+    sjekk_avvist_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "      - run: echo eksempel\n        !<tag:yaml.org,2002:str> shell: bash\n")
+    sjekk_avvist_workflow(root, jobb + standard + kandidat + "\n          --ekstra-argument\n" + teststeg)
+    sjekk_avvist_workflow(root, jobb + "    steps:\n      - shell: bash\n" +
+        "        name: \"fleirlinja\n        " + kandidat +
+        "\n        note: slutt\"\n        run: echo eksempel\n")
+    for prefiks i ["&namn ", "!!str ", "!<tag:yaml.org,2002:str> "] {
+        sjekk_avvist_workflow(root, jobb + "    steps:\n      - shell: bash\n" +
+            "        name: " + prefiks + "\"fleirlinja\n        " + kandidat +
+            "\n        note: slutt\"\n        run: echo eksempel\n")
+    }
+    sjekk_workflow(root, jobb + standard + kandidat + "\n    steps:\n" +
+        "      - name: 'can''t override shell' # gyldig sitert verdi\n" +
+        "        run: ./bin/nc selftest\n", 0, 1)
+    assert(filops.slett_tre(root))
+}
 
 funksjon start() -> heiltall {
     la src = builtin.fil_les("tools/ci_shell_surface_inventory.no")
@@ -8,12 +142,13 @@ funksjon start() -> heiltall {
     assert(t.inneholder(src, "shellorkestrering"))
     assert(t.inneholder(src, "shell_execution"))
     assert(t.inneholder(src, "norscode_custom_shell"))
-    assert(t.inneholder(src, "tools/ci_shell_runner.no {0}"))
+    assert(t.inneholder(src, "flate.er_norscode_shell_linje"))
     assert(t.inneholder(src, "direkte_norscode"))
     assert(t.inneholder(src, "./bin/nc"))
     assert(t.inneholder(src, "./bootstrap/stage0/norscode-"))
     assert(t.inneholder(src, "./build/windows/norscode_native_"))
     assert(t.inneholder(src, "FEIL: aktiv CI inneheld shell-eksekverte run-blokker"))
+    sjekk_shell_teljing()
     skriv("test_ci_shell_surface_inventory_contract OK")
     returner 0
 }

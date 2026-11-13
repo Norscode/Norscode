@@ -79,22 +79,21 @@ funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
         hvis er_katalog { returner feilsvar("ikkje ei vanleg fil: " + sti) }
         // Les innhaldet ved open, so handtaket berre kan opnast for ei lesbar fil.
         prøv { innhald = builtin.fil_les(sti) } fang (e) { returner feilsvar("ikkje ei lesbar fil: " + sti) }
-    } ellers hvis mode == "append" {
-        // Append: last eksisterande innhald i bufferen og sett posisjonen til slutten
-        // slik at seek/skriv arbeider mot heile fila (positioned write).
-        prøv { hvis builtin.fil_finnes(sti) { innhald = builtin.fil_les(sti) } } fang (e) { innhald = "" }
-        startpos = lengde(innhald)
     }
     la native = null
+    la storleik = lengde(innhald)
     hvis skriv {
         native = posix_fs.opne(felt(req, "root"), felt(req, "relative"), mode)
         hvis native["status"] != "ok" { returner feilsvar(native["error"]) }
+        storleik = native["size"]
+        hvis mode == "append" { startpos = storleik }
     }
     la id = "fh-" + tekst_fra_heltall(_fh_neste)
     _fh_neste = _fh_neste + 1
-    // lasta=sann: innhald er den autoritative bufferen (lese-handtak lasta ved open,
-    // skrive-handtak held bufferen som blir skriven til fila ved kvar skriv).
-    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "lasta": sann, "innhald": innhald, "native": native}
+    // Berre lesehandtak held ein innhaldsbuffer. Skrivehandtak held OS-fd,
+    // posisjon og storleik, så seek forbi EOF ikkje treng ein stor nullbuffer.
+    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "size": storleik,
+        "lasta": sann, "innhald": innhald, "native": native}
     la r = svar("open", "", 0, "")
     r["handle"] = id
     returner r
@@ -160,29 +159,22 @@ funksjon fh_skriv(req) -> ordbok_tekst {
     hvis h == null { returner feilsvar("ukjent filhandtak") }
     hvis ikkje h["skriv"] { returner feilsvar("handtaket er ope for lesing") }
     la data = felt(req, "data")
-    // Posisjonert skriving: skriv `data` inn i bufferen ved pos (overskriv/utvid) i
-    // staden for rein append, so seek + skriv gjev same semantikk som lseek+write.
-    la buf: tekst = h["innhald"]
+    // Skriv ved den faktiske seek-posisjonen. OS-et fyller eit eventuelt hol
+    // med nullbyte; ein seek forbi EOF må aldri klemmast tilbake til filslutt.
     la pos: heiltall = h["pos"]
-    la buflen: heiltall = lengde(buf)
-    la prefiks = ""
-    hvis pos < buflen { prefiks = builtin.slice(buf, 0, pos) }
-    ellers { prefiks = buf pos = buflen }
-    la etter_start: heiltall = pos + lengde(data)
-    la suffiks = ""
-    hvis etter_start < buflen { suffiks = builtin.slice(buf, etter_start, buflen) }
-    la nybuf = prefiks + data + suffiks
+    la slutt: heiltall = pos + lengde(data)
+    hvis slutt < pos { returner feilsvar("skriveposisjonen er for stor") }
     la skrive = posix_fs.skriv_data(h["native"], data, pos)
     hvis skrive["status"] != "ok" { returner feilsvar(skrive["error"]) }
-    h["innhald"] = nybuf
-    h["pos"] = pos + lengde(data)
+    h["pos"] = slutt
+    hvis lengde(data) > 0 og slutt > h["size"] { h["size"] = slutt }
     la r = svar("ok", "", lengde(data), "")
     r["handle"] = felt(req, "handle")
     returner r
 }
 
-// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Native seed
-// har ikkje eit eige seek-primitiv; posisjonen lever i handtaket sin buffer.
+// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Posisjonen
+// blir halden separat og brukt av lesebufferen eller neste OS-skriving.
 funksjon fh_seek(req) -> ordbok_tekst {
     la h = fh_hent(req)
     hvis h == null { returner feilsvar("ukjent filhandtak") }
@@ -207,7 +199,7 @@ funksjon fh_ready(req) -> ordbok_tekst {
 funksjon fh_stat(req) -> ordbok_tekst {
     la h = fh_hent(req)
     hvis h == null { returner feilsvar("ukjent filhandtak") }
-    la r = svar("ok", "", lengde(tekst(h["innhald"])), "")
+    la r = svar("ok", "", h["size"], "")
     r["handle"] = felt(req, "handle")
     returner r
 }
@@ -470,7 +462,7 @@ funksjon read_operation(req) -> ordbok_tekst {
     hvis op == "close" { returner fh_lukk(req) }
     hvis op == "seek" { returner fh_seek(req) }
     hvis op == "ready" { returner fh_ready(req) }
-    // Handtak-basert stat (native_stat på eit ope handtak): returner buffer-lengda.
+    // Handtak-basert stat (native_stat på eit ope handtak): returner filstorleiken.
     hvis op == "stat" og felt(req, "handle") != "" { returner fh_stat(req) }
     hvis op == "stat" eller op == "path_stat" {
         la sti = full_sti(req)
