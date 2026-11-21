@@ -21,6 +21,17 @@ funksjon nett_probe(buf: heiltall, denied: boolsk) -> heiltall {
     hvis (api.call("WSAStartup", [514, buf]) & 4294967295) != 0 { returner 20 }
     la sock = api.call("WSASocketW", [2, 1, 6, 0, 0, 0])
     hvis sock == 0 - 1 { returner 21 }
+    // AppContainer kan la eit blokkande loopback-connect vente til timeout
+    // utan å returnere WSAEACCES. Prøv same ekte Windows-sokkel utan å
+    // blokkere, og observer SO_ERROR etter ei avgrensa WSAPoll-venting.
+    // Politikken må framleis avvise med WSAEACCES (10013); timeout,
+    // connection-refused og vellukka tilkopling er ikkje godkjende.
+    api.u32(buf + 640, 1)
+    hvis api.call("ioctlsocket", [sock, 2147772030, buf + 640]) != 0 {
+        skriv("network FIONBIO failed: " + tekst(api.last_error()) + "\n")
+        api.call("closesocket", [sock])
+        returner 25
+    }
     la addr = buf + 512
     api.u32(addr, 2)
     builtin.raw_store8(addr + 2, (port >> 8) & 255)
@@ -28,10 +39,29 @@ funksjon nett_probe(buf: heiltall, denied: boolsk) -> heiltall {
     builtin.raw_store8(addr + 4, 127)
     builtin.raw_store8(addr + 7, 1)
     la connected = api.call("connect", [sock, addr, 16])
-    // OSTAB-porten fangar WSAGetLastError rett etter connect, foer
-    // Norscode-runtime/GC kan gjere eit nytt OS-kall. Eit nytt API-kall
-    // her ville lese den seinare traadtilstanden, ikkje connect-feilen.
+    // OSTAB-porten fangar WSAGetLastError rett etter connect.
     la err = api.last_error()
+    hvis connected != 0 og (err == 10035 eller err == 10036 eller err == 10037) {
+        la pollfd = buf + 768
+        builtin.raw_store64(pollfd, sock)
+        api.u32(pollfd + 8, 16) // POLLWRNORM; WSAPOLLFD.revents = 0
+        la ready = api.call("WSAPoll", [pollfd, 1, 3000])
+        hvis ready > 0 {
+            api.u32(buf + 800, 0)
+            api.u32(buf + 808, 4)
+            hvis api.call("getsockopt", [sock, 65535, 4103, buf + 800, buf + 808]) == 0 {
+                err = api.read32(buf + 800) // SO_ERROR, ikkje siste trådfeil
+                hvis err == 0 { connected = 0 } ellers { connected = 0 - 1 }
+            } ellers {
+                err = api.last_error()
+                connected = 0 - 1
+            }
+        } ellers {
+            hvis ready == 0 { err = 10060 } // WSAETIMEDOUT er ikkje bevis på isolasjon
+            ellers { err = api.last_error() }
+            connected = 0 - 1
+        }
+    }
     api.call("closesocket", [sock])
     hvis ikkje denied {
         hvis connected != 0 {
