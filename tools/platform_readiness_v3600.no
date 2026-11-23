@@ -31,41 +31,73 @@ funksjon native_executable(root: tekst) -> tekst {
     returner root + "/dist/norscode_native"
 }
 
-// Éi lesing per fil: sha256 og innebygd-NCB-markør blir rekna på same byte-buffer
-// og cacha per sti. Tidlegare las fil_sha256 og har_embedded_ncb kvar fil for
-// seg, og fleire filer vart lesne to gonger (rapporter + *_attestasjon_ok). På
-// fersk seed flyttar kvar heil-fil-lesing bump-heapen eit 64 MiB-steg, så etter
-// ~13 lesingar døydde verktøyet med «GC-heap full (1 GiB levande) – exit 199».
-// Filer over 64 MiB blir hoppa over; dei vanlege fullhost-kandidatane er mindre.
-//
-// `cache` er ein LOKAL parameter (ordbok) trådd frå main() — IKKJE ein modulglobal.
-// Modulglobalar er ikkje pålitelege i kjelde-køyrde verktøy på fersk seed: oppslag
-// etter eit kryssmodulkall («prøv { native_fs.… } fang») feilar med «Ukjent
-// (global) variabel: _fil_info» (både «std.runtime_filesystem._fil_info» på Linux
-// og «_fil_info» på macOS-attestasjonen). Ein trådd lokal parameter unngår heile
-// namneoppslaget. cache == null er òg gyldig (les utan memoisering).
+funksjon filstorleik(sti: tekst) -> heiltall {
+    la st = native_fs.native_stat_sti(sti)
+    hvis st["status"] != "ok" eller st["kind"] != "file" { returner 0 - 1 }
+    returner heltall_fra_tekst(tekst(st["value"]))
+}
+
+// Same innlesing eig både digest og trailer. Leselengda må samsvare med stat.
+funksjon inspiser_fil(sti: tekst, storleik: heiltall) {
+    la info = {"sha": "", "emb": usann}
+    hvis storleik < 0 eller storleik > 67108864 { returner info }
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        hvis lengde(bytes) != storleik eller filstorleik(sti) != storleik { returner info }
+        prøv { info["sha"] = builtin.sha256_bytes(bytes) } fang (e) {
+            info["sha"] = sha256.hash_bytes(bytes)
+        }
+        info["emb"] = sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
+            sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1") eller har_native_seed_ncb(bytes)
+    } fang (e) {}
+    returner info
+}
+
+// Den kommitterte seeden får plass til éin stor kandidat, men fleire slike
+// bytebufferar i samleporten fylte 1 GiB-heapen. Ein kortliva prosess per
+// stor fil gir attende berre SHA-256 og trailerstatus til forelderen.
+funksjon inspiser_isolert(sti: tekst) {
+    la tom = {"sha": "", "emb": usann}
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" eller root == "." { root = tekst(builtin.system_info()["cwd"]) }
+    la native = tekst(builtin.system_info()["executable"])
+    hvis native == "" { returner tom }
+    la kjelde = root + "/tools/platform_readiness_file_info.no"
+    la caps = "env.read,disk.read"
+    la disk = root + ",.," + sti
+    hvis systemfelt("system") == "darwin" og builtin.starts_with(sti, "/tmp/") {
+        disk = disk + ",/private" + sti
+    }
+    la resultat = prosess.køyr(native, ["run", kjelde], root, {
+        "NORSCODE_ROOT": root, "NORSCODE_CMD": "run", "NORSCODE_FILE": kjelde,
+        "NORSCODE_OUTPUT": "", "NORSCODE_HOST_NCB_FILE": "", "NORSCODE_NCB_FILE": "",
+        "NORSCODE_VM_SOURCE": "0", "NORSCODE_VM_FAST": "1",
+        "NORSCODE_VM_CAPABILITIES": caps, "NORSCODE_VM_DISK_ROOT": disk,
+        "NORSCODE_VM_TARGET_CAPABILITIES": caps, "NORSCODE_VM_TARGET_DISK_ROOT": disk,
+        "NORSCODE_VM_REQUESTED_POLICY": "1", "NORSCODE_VM_REQUESTED_CAPABILITIES": caps,
+        "NORSCODE_VM_REQUESTED_DISK_ROOT": disk, "NORSCODE_PLATFORM_INSPECT_FILE": sti
+    }, 120000)
+    hvis ikkje prosess.ok(resultat) { returner tom }
+    la prefiks = "NORSCODE_PLATFORM_FILE_INFO "
+    for line i builtin.split(tekst(resultat["stdout"]), "\n") {
+        hvis builtin.starts_with(line, prefiks) {
+            la data = builtin.json_parse_raw(builtin.slice(line, lengde(prefiks), lengde(line)))
+            la sha = tekst(data["sha"])
+            hvis lengde(sha) == 64 og gyldig_commit(sha) og builtin.type(data["emb"]) == "boolsk" { returner data }
+        }
+    }
+    returner tom
+}
+
 funksjon fil_info(sti: tekst, cache) {
     hvis cache != null og finnes_nøkkel(cache, sti) { returner cache[sti] }
     la info = {"sha": "", "emb": usann}
-    la for_stor = usann
     prøv {
-        la st = native_fs.native_stat_sti(sti)
-        // 64 MiB: den Norscode-bygde macOS-seeden med innebygde payloadar er ~17,5 MB. Med
-        // 16 MiB-grensa vart sha aldri rekna, og macOS-attestasjonen kunne aldri stemme.
-        hvis st["status"] == "ok" og heltall_fra_tekst(tekst(st["value"])) > 67108864 { for_stor = sann }
-    } fang (e0) {}
-    hvis ikkje for_stor {
-        prøv {
-            la bytes = builtin.fil_les_binær(sti)
-            prøv { info["sha"] = builtin.sha256_bytes(bytes) } fang (e1) {
-                prøv { info["sha"] = sha256.hash_bytes(bytes) } fang (e2) { info["sha"] = "" }
-            }
-            info["emb"] = sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
-                sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1") eller har_native_seed_ncb(bytes)
-            bytes = []
-        } fang (e) {}
-        prøv { builtin.gc_collect() } fang (e3) {}
-    }
+        la storleik = filstorleik(sti)
+        hvis storleik > 1048576 og storleik <= 67108864 { info = inspiser_isolert(sti) }
+        ellers { info = inspiser_fil(sti, storleik) }
+        hvis filstorleik(sti) != storleik { info = {"sha": "", "emb": usann} }
+    } fang (e) {}
     hvis cache != null { cache[sti] = info }
     returner info
 }
@@ -331,8 +363,7 @@ funksjon start() -> heiltall {
     la krev_windows_attestasjon = env("NORSCODE_REQUIRE_WINDOWS_ATTESTATION") == "1"
     la host_os = systemfelt("system")
     hvis host_os == "" { host_os = systemfelt("os") }
-    // Lokal éin-lesing-per-fil-cache, trådd som parameter (ikkje modulglobal — sjå
-    // fil_info). Held toppminnet under 1 GiB GC-heapen på fersk seed.
+    // Lokal cache med digest og trailerstatus, trådd som parameter.
     la cache = {}
     la macos_ready = "false"
     hvis har_embedded_ncb(macos_candidate, cache) og
