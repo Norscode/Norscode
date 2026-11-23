@@ -56,7 +56,7 @@ funksjon inspiser_fil(sti: tekst, storleik: heiltall) {
 // Den kommitterte seeden får plass til éin stor kandidat, men fleire slike
 // bytebufferar i samleporten fylte 1 GiB-heapen. Ein kortliva prosess per
 // stor fil gir attende berre SHA-256 og trailerstatus til forelderen.
-funksjon inspiser_isolert(sti: tekst) {
+funksjon inspiser_isolert(sti: tekst, storleik: heiltall) {
     la tom = {"sha": "", "emb": usann}
     la root = env("NORSCODE_ROOT")
     hvis root == "" eller root == "." { root = tekst(builtin.system_info()["cwd"]) }
@@ -68,15 +68,38 @@ funksjon inspiser_isolert(sti: tekst) {
     hvis systemfelt("system") == "darwin" og builtin.starts_with(sti, "/tmp/") {
         disk = disk + ",/private" + sti
     }
-    la resultat = prosess.køyr(native, ["run", kjelde], root, {
+    la miljø = {
         "NORSCODE_ROOT": root, "NORSCODE_CMD": "run", "NORSCODE_FILE": kjelde,
         "NORSCODE_OUTPUT": "", "NORSCODE_HOST_NCB_FILE": "", "NORSCODE_NCB_FILE": "",
         "NORSCODE_VM_SOURCE": "0", "NORSCODE_VM_FAST": "1",
         "NORSCODE_VM_CAPABILITIES": caps, "NORSCODE_VM_DISK_ROOT": disk,
         "NORSCODE_VM_TARGET_CAPABILITIES": caps, "NORSCODE_VM_TARGET_DISK_ROOT": disk,
         "NORSCODE_VM_REQUESTED_POLICY": "1", "NORSCODE_VM_REQUESTED_CAPABILITIES": caps,
-        "NORSCODE_VM_REQUESTED_DISK_ROOT": disk, "NORSCODE_PLATFORM_INSPECT_FILE": sti
-    }, 120000)
+        "NORSCODE_VM_REQUESTED_DISK_ROOT": disk, "NORSCODE_PLATFORM_INSPECT_FILE": sti,
+        "NORSCODE_PLATFORM_STREAM_FILE": "0"
+    }
+    la resultat = null
+    hvis storleik > 33554432 og systemfelt("system") == "linux" og systemfelt("machine") == "x86_64" {
+        // Éi 35 MiB-fil fyller åleine byte-lista til den kommitterte ELF-seeden.
+        // Bruk det eksisterande inkrementelle SHA-256-laget gjennom native
+        // kodegen, slik at 64 KiB-blokkene kan behandlast innan CI-fristen.
+        la bin = root + "/build/platform-file-info-" + builtin.random_hex(8)
+        la bygg = prosess.køyr(native, ["bygg-native", "--target", "linux-x86_64", kjelde, bin], root, {
+            "NORSCODE_ROOT": root, "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+            "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+            "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp"
+        }, 120000)
+        hvis prosess.ok(bygg) {
+            miljø["NORSCODE_CMD"] = ""
+            miljø["NORSCODE_FILE"] = ""
+            miljø["NORSCODE_PLATFORM_STREAM_FILE"] = "1"
+            resultat = prosess.køyr(bin, [], root, miljø, 180000)
+        }
+        prøv { builtin.fil_slett(bin) } fang (e) {}
+        hvis resultat == null { returner tom }
+    } ellers {
+        resultat = prosess.køyr(native, ["run", kjelde], root, miljø, 120000)
+    }
     hvis ikkje prosess.ok(resultat) { returner tom }
     la prefiks = "NORSCODE_PLATFORM_FILE_INFO "
     for line i builtin.split(tekst(resultat["stdout"]), "\n") {
@@ -94,7 +117,7 @@ funksjon fil_info(sti: tekst, cache) {
     la info = {"sha": "", "emb": usann}
     prøv {
         la storleik = filstorleik(sti)
-        hvis storleik > 1048576 og storleik <= 67108864 { info = inspiser_isolert(sti) }
+        hvis storleik > 1048576 og storleik <= 67108864 { info = inspiser_isolert(sti, storleik) }
         ellers { info = inspiser_fil(sti, storleik) }
         hvis filstorleik(sti) != storleik { info = {"sha": "", "emb": usann} }
     } fang (e) {}
@@ -127,6 +150,10 @@ funksjon har_native_seed_ncb(bytes) -> boolsk {
 }
 
 funksjon har_native_seed_ncb_magic(bytes, magic: tekst) -> boolsk {
+    returner har_seed_trailer(bytes, lengde(bytes), magic)
+}
+
+funksjon har_seed_trailer(bytes, storleik: heiltall, magic: tekst) -> boolsk {
     la trailer = lengde(magic) + 8
     hvis lengde(bytes) < trailer { returner usann }
     la start = lengde(bytes) - trailer
@@ -141,7 +168,7 @@ funksjon har_native_seed_ncb_magic(bytes, magic: tekst) -> boolsk {
         n = n * 256 + bytes[lengde(bytes) - 8 + j]
         j = j - 1
     }
-    returner n > 0 og n <= start
+    returner n > 0 og n <= storleik - trailer
 }
 
 funksjon har_embedded_ncb(sti: tekst, cache) -> boolsk {
