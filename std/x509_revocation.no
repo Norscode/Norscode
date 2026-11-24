@@ -1,0 +1,527 @@
+# Autentisert tilbakekalling i rein Norscode.
+# RFC 5280 §§5/6.3: direkte, full CRL; ikkje delta, indirekte eller delvis CRL.
+# RFC 6960 §§3.2/4.2: BasicOCSPResponse signert av sertifikatutferdaren sjølv.
+# https://www.rfc-editor.org/rfc/rfc5280.html
+# https://www.rfc-editor.org/rfc/rfc6960.html
+# Begge profilar krev nextUpdate; OCSP thisUpdate kan vere høgst sju dagar gamal.
+# Ukjende kritiske utvidingar, feil DER,
+# feil issuer/CertID, ukjend status og utgått/framtidig informasjon blir avvist.
+# Tillitskjede og vertsnamn må framleis kontrollerast av TLS-kallaren.
+bruk std.x509 som x509
+bruk std.ed25519 som eddsa
+bruk std.rsa som rsa
+bruk std.sha1 som sha1
+
+funksjon _feil(s: tekst) -> ordbok { returner {"status": "feil", "error": s, "certificate_status": "unknown"} }
+funksjon _ok() -> ordbok { returner {"status": "ok", "error": "", "certificate_status": "good"} }
+funksjon _del(d: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    mens a < b { legg_til(ut, d[a]) a = a + 1 }
+    returner ut
+}
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+# Streng DER, korte taggar, minimalt koda lengd og ei grense på 1 MiB.
+funksjon _node(d: liste_heiltall, p: heiltall, end: heiltall) -> ordbok {
+    la feil = {"ok": usann, "tag": -1, "pos": p, "start": 0, "end": 0, "next": 0}
+    hvis end > lengde(d) eller end > 1048576 eller p < 0 eller p + 2 > end { returner feil }
+    la tag = d[p]
+    hvis tag < 0 eller tag > 254 eller (tag & 31) == 31 { returner feil }
+    la n = d[p + 1]
+    la h = 2
+    hvis n >= 128 {
+        la k = n & 127
+        hvis k < 1 eller k > 3 eller p + 2 + k > end eller d[p + 2] == 0 { returner feil }
+        n = 0
+        la i = 0
+        mens i < k { n = n * 256 + d[p + 2 + i] i = i + 1 }
+        hvis n < 128 { returner feil }
+        h = h + k
+    }
+    hvis n < 0 eller p + h + n > end { returner feil }
+    returner {"ok": sann, "tag": tag, "pos": p, "start": p + h, "end": p + h + n, "next": p + h + n}
+}
+funksjon _heil(d: liste_heiltall, p: heiltall, end: heiltall, tag: heiltall) -> ordbok {
+    la n = _node(d, p, end)
+    hvis n["tag"] != tag eller n["next"] != end { n["ok"] = usann }
+    returner n
+}
+funksjon _raw(d: liste_heiltall, n: ordbok) -> liste_heiltall { returner _del(d, n["pos"], n["end"]) }
+funksjon _value(d: liste_heiltall, n: ordbok) -> liste_heiltall { returner _del(d, n["start"], n["end"]) }
+funksjon _oid(d: liste_heiltall, n: ordbok) -> tekst {
+    hvis ikkje n["ok"] eller n["tag"] != 6 eller n["end"] == n["start"] { returner "" }
+    returner x509._hex(d, n["start"], n["end"], usann)
+}
+funksjon _serial(d: liste_heiltall, n: ordbok) -> tekst {
+    hvis ikkje n["ok"] eller n["tag"] != 2 { returner "" }
+    la a = n["start"]
+    la tal = n["end"] - a
+    hvis tal < 1 eller tal > 21 eller d[a] >= 128 { returner "" }
+    hvis tal > 1 og d[a] == 0 {
+        hvis d[a + 1] < 128 { returner "" }
+        a = a + 1
+    }
+    returner x509._hex(d, a, n["end"], usann)
+}
+funksjon _dato(raw: tekst) -> tekst {
+    hvis lengde(raw) != 15 eller builtin.slice(raw, 14, 15) != "Z" { returner "" }
+    la i = 0
+    mens i < 14 {
+        la c = builtin.char_code(builtin.slice(raw, i, i + 1))
+        hvis c < 48 eller c > 57 { returner "" }
+        i = i + 1
+    }
+    la y = heltall_fra_tekst(builtin.slice(raw, 0, 4))
+    la m = heltall_fra_tekst(builtin.slice(raw, 4, 6))
+    la day = heltall_fra_tekst(builtin.slice(raw, 6, 8))
+    hvis y < 1 eller m < 1 eller m > 12 { returner "" }
+    la dagar = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    hvis (y % 4 == 0 og y % 100 != 0) eller y % 400 == 0 { dagar[1] = 29 }
+    hvis day < 1 eller day > dagar[m - 1] { returner "" }
+    hvis heltall_fra_tekst(builtin.slice(raw, 8, 10)) > 23 eller heltall_fra_tekst(builtin.slice(raw, 10, 12)) > 59 eller heltall_fra_tekst(builtin.slice(raw, 12, 14)) > 59 { returner "" }
+    returner x509._tid_iso(raw)
+}
+funksjon _tid(d: liste_heiltall, n: ordbok) -> tekst {
+    hvis ikkje n["ok"] eller (n["tag"] != 23 og n["tag"] != 24) { returner "" }
+    la raw = x509._ascii(d, n["start"], n["end"])
+    hvis n["tag"] == 23 {
+        hvis lengde(raw) != 13 { returner "" }
+        la yy = builtin.slice(raw, 0, 2)
+        la prefix = hvis yy < "50" da "20" ellers "19"
+        raw = prefix + raw
+    }
+    returner _dato(raw)
+}
+funksjon _no_gyldig(no_iso: tekst) -> boolsk {
+    hvis lengde(no_iso) != 20 { returner usann }
+    la raw = builtin.replace(builtin.replace(builtin.replace(no_iso, "-", ""), ":", ""), "T", "")
+    returner _dato(raw) == no_iso
+}
+funksjon _sekund(iso: tekst) -> heiltall {
+    la y = heltall_fra_tekst(builtin.slice(iso, 0, 4))
+    la m = heltall_fra_tekst(builtin.slice(iso, 5, 7))
+    la prior = y - 1
+    la dagar = prior * 365 + prior / 4 - prior / 100 + prior / 400
+    la md = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    hvis (y % 4 == 0 og y % 100 != 0) eller y % 400 == 0 { md[1] = 29 }
+    la i = 1
+    mens i < m { dagar = dagar + md[i - 1] i = i + 1 }
+    dagar = dagar + heltall_fra_tekst(builtin.slice(iso, 8, 10)) - 1
+    returner dagar * 86400 + heltall_fra_tekst(builtin.slice(iso, 11, 13)) * 3600 + heltall_fra_tekst(builtin.slice(iso, 14, 16)) * 60 + heltall_fra_tekst(builtin.slice(iso, 17, 19))
+}
+# AlgorithmIdentifier: Ed25519/ECDSA utan parameter, RSA/SHA med NULL eller inga.
+funksjon _alg(d: liste_heiltall, n: ordbok) -> tekst {
+    hvis ikkje n["ok"] eller n["tag"] != 48 { returner "" }
+    la o = _node(d, n["start"], n["end"])
+    la oid = _oid(d, o)
+    hvis oid == "" { returner "" }
+    hvis o["next"] != n["end"] {
+        la z = _heil(d, o["next"], n["end"], 5)
+        hvis ikkje z["ok"] eller z["start"] != z["end"] { returner "" }
+        hvis oid == "2B6570" eller oid == "2A8648CE3D040302" { returner "" }
+    }
+    returner oid
+}
+funksjon _extensions(d: liste_heiltall, seq: ordbok) -> ordbok {
+    la ut: liste = []
+    la sett: ordbok = {}
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"ok": usann, "items": ut} }
+    la p = seq["start"]
+    mens p < seq["end"] {
+        hvis lengde(ut) >= 64 { returner {"ok": usann, "items": []} }
+        la e = _node(d, p, seq["end"])
+        hvis ikkje e["ok"] eller e["tag"] != 48 { returner {"ok": usann, "items": []} }
+        la o = _node(d, e["start"], e["end"])
+        la oid = _oid(d, o)
+        hvis oid == "" eller finnes_nøkkel(sett, oid) { returner {"ok": usann, "items": []} }
+        sett[oid] = sann
+        la v = _node(d, o["next"], e["end"])
+        la critical = usann
+        hvis v["ok"] og v["tag"] == 1 {
+            hvis v["end"] - v["start"] != 1 eller d[v["start"]] != 255 { returner {"ok": usann, "items": []} }
+            critical = sann
+            v = _node(d, v["next"], e["end"])
+        }
+        hvis ikkje v["ok"] eller v["tag"] != 4 eller v["next"] != e["end"] { returner {"ok": usann, "items": []} }
+        legg_til(ut, {"oid": oid, "critical": critical, "value": _value(d, v)})
+        p = e["next"]
+    }
+    returner {"ok": sann, "items": ut}
+}
+# Felt vert bundne til dei faktiske DER-byta, aldri eit rendera issuer-CN.
+funksjon sertifikat_felt(d: liste_heiltall) -> ordbok {
+    la feil = {"ok": usann}
+    la cert = _heil(d, 0, lengde(d), 48)
+    hvis ikkje cert["ok"] { returner feil }
+    la tbs = _node(d, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner feil }
+    la alg = _node(d, tbs["next"], cert["end"])
+    la sig = _heil(d, alg["next"], cert["end"], 3)
+    hvis _alg(d, alg) == "" eller ikkje sig["ok"] eller sig["end"] - sig["start"] < 2 eller d[sig["start"]] != 0 { returner feil }
+    la n = _node(d, tbs["start"], tbs["end"])
+    hvis n["tag"] == 160 {
+        la v = _heil(d, n["start"], n["end"], 2)
+        hvis ikkje v["ok"] eller v["end"] - v["start"] != 1 eller d[v["start"]] > 2 { returner feil }
+        n = _node(d, n["next"], tbs["end"])
+    }
+    la serial = _serial(d, n)
+    hvis serial == "" { returner feil }
+    n = _node(d, n["next"], tbs["end"])
+    hvis ikkje _lik(_raw(d, n), _raw(d, alg)) { returner feil }
+    la issuer = _node(d, n["next"], tbs["end"])
+    hvis ikkje issuer["ok"] eller issuer["tag"] != 48 { returner feil }
+    la validity = _node(d, issuer["next"], tbs["end"])
+    hvis ikkje validity["ok"] eller validity["tag"] != 48 { returner feil }
+    la before = _node(d, validity["start"], validity["end"])
+    la after = _node(d, before["next"], validity["end"])
+    la not_before = _tid(d, before)
+    la not_after = _tid(d, after)
+    hvis not_before == "" eller not_after == "" eller not_before > not_after eller after["next"] != validity["end"] { returner feil }
+    la subject = _node(d, validity["next"], tbs["end"])
+    hvis ikkje subject["ok"] eller subject["tag"] != 48 { returner feil }
+    la spki = _node(d, subject["next"], tbs["end"])
+    hvis ikkje spki["ok"] eller spki["tag"] != 48 { returner feil }
+    la ka = _node(d, spki["start"], spki["end"])
+    hvis ikkje ka["ok"] eller ka["tag"] != 48 { returner feil }
+    la ko = _node(d, ka["start"], ka["end"])
+    la keyoid = _oid(d, ko)
+    hvis keyoid == "2A8648CE3D0201" {
+        la curve = _heil(d, ko["next"], ka["end"], 6)
+        hvis ikkje curve["ok"] eller _oid(d, curve) != "2A8648CE3D030107" { returner feil }
+    } ellers hvis keyoid == "2B6570" {
+        hvis ko["next"] != ka["end"] { returner feil }
+    } ellers hvis keyoid == "2A864886F70D010101" {
+        hvis _alg(d, ka) != keyoid { returner feil }
+    } ellers { returner feil }
+    la kb = _heil(d, ka["next"], spki["end"], 3)
+    hvis ikkje kb["ok"] eller kb["end"] - kb["start"] < 2 eller d[kb["start"]] != 0 { returner feil }
+    la ut = {"ok": sann, "serial": serial, "issuer": _raw(d, issuer), "subject": _raw(d, subject),
+        "public_key": _del(d, kb["start"] + 1, kb["end"]), "not_before": not_before, "not_after": not_after,
+        "tbs": _raw(d, tbs), "algorithm": _alg(d, alg), "signature": _del(d, sig["start"] + 1, sig["end"]),
+        "ca": usann, "has_key_usage": usann, "crl_sign": sann, "digital_signature": sann, "cert_sign": sann,
+        "direct_crl_scope": sann}
+    la p = spki["next"]
+    la har_ext = usann
+    mens p < tbs["end"] {
+        n = _node(d, p, tbs["end"])
+        hvis ikkje n["ok"] { returner feil }
+        hvis n["tag"] == 163 og ikkje har_ext {
+            har_ext = sann
+            la ext = _extensions(d, _heil(d, n["start"], n["end"], 48))
+            hvis ikkje ext["ok"] eller n["next"] != tbs["end"] { returner feil }
+            for e i ext["items"] {
+                la value = e["value"]
+                hvis e["oid"] == "551D0F" {
+                    la bits = _heil(value, 0, lengde(value), 3)
+                    hvis ikkje bits["ok"] eller bits["end"] - bits["start"] < 2 eller bits["end"] - bits["start"] > 3 { returner feil }
+                    la unused = value[bits["start"]]
+                    hvis unused > 7 eller (value[bits["end"] - 1] & ((1 << unused) - 1)) != 0 { returner feil }
+                    la b = value[bits["start"] + 1]
+                    ut["has_key_usage"] = sann
+                    ut["crl_sign"] = (b & 2) != 0
+                    ut["cert_sign"] = (b & 4) != 0
+                    ut["digital_signature"] = (b & 128) != 0
+                } ellers hvis e["oid"] == "551D13" {
+                    la bc = _heil(value, 0, lengde(value), 48)
+                    hvis ikkje bc["ok"] { returner feil }
+                    hvis bc["start"] < bc["end"] {
+                        la flag = _node(value, bc["start"], bc["end"])
+                        hvis flag["tag"] != 1 eller flag["end"] - flag["start"] != 1 eller value[flag["start"]] != 255 { returner feil }
+                        ut["ca"] = sann
+                        hvis flag["next"] < bc["end"] {
+                            la plen = _heil(value, flag["next"], bc["end"], 2)
+                            hvis _serial(value, plen) == "" { returner feil }
+                        }
+                    }
+                } ellers hvis e["oid"] == "551D2E" {
+                    ut["direct_crl_scope"] = usann
+                } ellers hvis e["oid"] == "551D1F" {
+                    la points = _heil(value, 0, lengde(value), 48)
+                    hvis ikkje points["ok"] { returner feil }
+                    la dp = points["start"]
+                    mens dp < points["end"] {
+                        la point = _node(value, dp, points["end"])
+                        hvis ikkje point["ok"] eller point["tag"] != 48 { returner feil }
+                        la fp = point["start"]
+                        mens fp < point["end"] {
+                            la field = _node(value, fp, point["end"])
+                            hvis ikkje field["ok"] { returner feil }
+                            hvis field["tag"] == 129 eller field["tag"] == 162 {
+                                # reason-maske eller delegert cRLIssuer krev den
+                                # fulle distribusjonspunkt-algoritmen i RFC 5280.
+                                ut["direct_crl_scope"] = usann
+                            } ellers hvis field["tag"] != 160 { returner feil }
+                            fp = field["next"]
+                        }
+                        dp = point["next"]
+                    }
+                }
+            }
+        } ellers hvis n["tag"] != 129 og n["tag"] != 130 { returner feil }
+        p = n["next"]
+    }
+    returner ut
+}
+funksjon _signatur(cert: liste_heiltall, alg: tekst, data: liste_heiltall, sig: liste_heiltall) -> boolsk {
+    la key = x509.hent_offentleg_nøkkel(cert)
+    hvis key["status"] != "ok" { returner usann }
+    hvis alg == "2B6570" og key["type"] == "ed25519" { returner eddsa.verify(key["pub"], data, sig) }
+    hvis alg == "2A864886F70D01010B" og key["type"] == "rsa" { returner rsa.rsa_verify(key["n"], key["e"], data, sig) }
+    hvis alg == "2A8648CE3D040302" og key["type"] == "ec" {
+        la seq = _heil(sig, 0, lengde(sig), 48)
+        hvis ikkje seq["ok"] { returner usann }
+        la r = _node(sig, seq["start"], seq["end"])
+        la s = _heil(sig, r["next"], seq["end"], 2)
+        # r og s kan vere 33 byte (forteiknsbyte + 256 bit).
+        hvis ikkje r["ok"] eller r["tag"] != 2 eller ikkje s["ok"] { returner usann }
+        hvis r["end"] - r["start"] < 1 eller r["end"] - r["start"] > 33 eller s["end"] - s["start"] < 1 eller s["end"] - s["start"] > 33 { returner usann }
+        hvis sig[r["start"]] >= 128 eller sig[s["start"]] >= 128 { returner usann }
+        hvis r["end"] - r["start"] > 1 og sig[r["start"]] == 0 og sig[r["start"] + 1] < 128 { returner usann }
+        hvis s["end"] - s["start"] > 1 og sig[s["start"]] == 0 og sig[s["start"] + 1] < 128 { returner usann }
+        returner x509.verifiser_data_ecdsa(cert, data, sig)
+    }
+    returner usann
+}
+funksjon _utferdar_feil(cert: liste_heiltall, issuer: liste_heiltall, no_iso: tekst) -> tekst {
+    la leaf = sertifikat_felt(cert)
+    la ca = sertifikat_felt(issuer)
+    hvis ikkje leaf["ok"] eller ikkje ca["ok"] { returner "invalid certificate DER" }
+    hvis ikkje _no_gyldig(no_iso) eller no_iso < ca["not_before"] eller no_iso > ca["not_after"] { returner "issuer validity" }
+    hvis no_iso < leaf["not_before"] eller no_iso > leaf["not_after"] { returner "certificate validity" }
+    hvis ikkje _lik(leaf["issuer"], ca["subject"]) { returner "issuer name mismatch" }
+    hvis ikkje ca["ca"] eller ikkje ca["cert_sign"] { returner "issuer is not a signing CA" }
+    hvis ikkje _signatur(issuer, leaf["algorithm"], leaf["tbs"], leaf["signature"]) { returner "issuer certificate signature mismatch" }
+    returner ""
+}
+# Berre sertifikat frå den allereie validerte kjeda eller eksplisitte tillitsanker.
+funksjon finn_utferdar(kjede: liste, ankere: liste, no_iso: tekst) -> liste_heiltall {
+    hvis lengde(kjede) == 0 eller lengde(kjede) > 16 eller lengde(ankere) > 1024 { returner [] }
+    la i = 1
+    mens i < lengde(kjede) {
+        hvis _utferdar_feil(kjede[0], kjede[i], no_iso) == "" { returner kjede[i] }
+        i = i + 1
+    }
+    for a i ankere { hvis _utferdar_feil(kjede[0], a, no_iso) == "" { returner a } }
+    returner []
+}
+funksjon _crl_ext_feil(d: liste_heiltall, seq: ordbok, entry: boolsk) -> tekst {
+    la ex = _extensions(d, seq)
+    hvis ikkje ex["ok"] { returner "invalid extensions" }
+    for e i ex["items"] {
+        la oid = e["oid"]
+        hvis oid == "551D1B" eller oid == "551D1C" eller oid == "551D1D" eller oid == "551D2E" { returner "delta, scoped or indirect CRL unsupported" }
+        hvis entry og oid == "551D15" {
+            la v = e["value"]
+            la reason = _heil(v, 0, lengde(v), 10)
+            hvis ikkje reason["ok"] eller reason["end"] - reason["start"] != 1 { returner "invalid CRL reason" }
+            la r = v[reason["start"]]
+            hvis r == 7 eller r == 8 eller r > 10 { returner "unsupported CRL reason" }
+        } ellers hvis e["critical"] { returner "unsupported critical CRL extension" }
+    }
+    returner ""
+}
+funksjon valider_crl(d: liste_heiltall, cert: liste_heiltall, issuer: liste_heiltall, no_iso: tekst) -> ordbok {
+    la outer = _heil(d, 0, lengde(d), 48)
+    hvis ikkje outer["ok"] { returner _feil("CRL invalid DER") }
+    la issuer_error = _utferdar_feil(cert, issuer, no_iso)
+    hvis issuer_error != "" { returner _feil("CRL " + issuer_error) }
+    la ca = sertifikat_felt(issuer)
+    hvis ikkje ca["crl_sign"] { returner _feil("CRL issuer keyUsage lacks cRLSign") }
+    la leaf = sertifikat_felt(cert)
+    hvis ikkje leaf["direct_crl_scope"] { returner _feil("CRL certificate distribution scope unsupported") }
+    la tbs = _node(d, outer["start"], outer["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner _feil("CRL invalid TBSCertList") }
+    la alg = _node(d, tbs["next"], outer["end"])
+    la sig = _heil(d, alg["next"], outer["end"], 3)
+    hvis _alg(d, alg) == "" eller ikkje sig["ok"] eller sig["end"] - sig["start"] < 2 eller d[sig["start"]] != 0 { returner _feil("CRL invalid signature encoding") }
+    la n = _node(d, tbs["start"], tbs["end"])
+    la v2 = usann
+    hvis n["tag"] == 2 {
+        hvis n["end"] - n["start"] != 1 eller d[n["start"]] != 1 { returner _feil("CRL unsupported version") }
+        v2 = sann
+        n = _node(d, n["next"], tbs["end"])
+    }
+    hvis ikkje _lik(_raw(d, n), _raw(d, alg)) { returner _feil("CRL signature algorithms differ") }
+    n = _node(d, n["next"], tbs["end"])
+    hvis ikkje n["ok"] eller n["tag"] != 48 eller ikkje _lik(_raw(d, n), ca["subject"]) { returner _feil("CRL issuer name mismatch") }
+    la tu = _node(d, n["next"], tbs["end"])
+    la nu = _node(d, tu["next"], tbs["end"])
+    la this_update = _tid(d, tu)
+    la next_update = _tid(d, nu)
+    hvis this_update == "" eller next_update == "" eller this_update > no_iso eller next_update <= no_iso eller next_update <= this_update { returner _feil("CRL invalid or expired update window; nextUpdate required") }
+    la p = nu["next"]
+    la revoked = usann
+    la entries = _node(d, p, tbs["end"])
+    hvis entries["ok"] og entries["tag"] == 48 {
+        la ep = entries["start"]
+        la count = 0
+        la seen: ordbok = {}
+        mens ep < entries["end"] {
+            count = count + 1
+            hvis count > 10000 { returner _feil("CRL entry limit") }
+            la e = _node(d, ep, entries["end"])
+            hvis ikkje e["ok"] eller e["tag"] != 48 { returner _feil("CRL malformed entry") }
+            la sn = _node(d, e["start"], e["end"])
+            la serial = _serial(d, sn)
+            hvis serial == "" eller finnes_nøkkel(seen, serial) { returner _feil("CRL invalid or duplicate serial") }
+            seen[serial] = sann
+            la date = _node(d, sn["next"], e["end"])
+            la revocation_time = _tid(d, date)
+            hvis revocation_time == "" eller revocation_time > this_update { returner _feil("CRL invalid revocation time") }
+            hvis date["next"] < e["end"] {
+                hvis ikkje v2 { returner _feil("CRL entry extensions require v2") }
+                la err = _crl_ext_feil(d, _heil(d, date["next"], e["end"], 48), sann)
+                hvis err != "" { returner _feil("CRL " + err) }
+            }
+            hvis serial == leaf["serial"] { revoked = sann }
+            ep = e["next"]
+        }
+        p = entries["next"]
+    }
+    hvis p < tbs["end"] {
+        la ex = _heil(d, p, tbs["end"], 160)
+        hvis ikkje v2 eller ikkje ex["ok"] { returner _feil("CRL invalid extensions wrapper") }
+        la err = _crl_ext_feil(d, _heil(d, ex["start"], ex["end"], 48), usann)
+        hvis err != "" { returner _feil("CRL " + err) }
+    }
+    hvis ikkje _signatur(issuer, _alg(d, alg), _raw(d, tbs), _del(d, sig["start"] + 1, sig["end"])) { returner _feil("CRL signature invalid") }
+    hvis revoked { la r = _feil("CRL certificate revoked") r["certificate_status"] = "revoked" returner r }
+    returner _ok()
+}
+funksjon _ocsp_ext_feil(d: liste_heiltall, n: ordbok) -> tekst {
+    hvis ikkje n["ok"] eller n["tag"] != 161 { returner "invalid OCSP extensions wrapper" }
+    la ex = _extensions(d, _heil(d, n["start"], n["end"], 48))
+    hvis ikkje ex["ok"] { returner "invalid OCSP extensions" }
+    for e i ex["items"] { hvis e["critical"] { returner "unsupported critical OCSP extension" } }
+    returner ""
+}
+funksjon _hash(oid: tekst, data: liste_heiltall) -> liste_heiltall {
+    hvis oid == "2B0E03021A" { returner sha1.hash_raw(data) }
+    hvis oid == "608648016503040201" { returner x509._raw_sha256(data) }
+    returner []
+}
+funksjon _certid(d: liste_heiltall, n: ordbok, leaf: ordbok, ca: ordbok) -> ordbok {
+    hvis ikkje n["ok"] eller n["tag"] != 48 { returner {"ok": usann, "match": usann} }
+    la alg = _node(d, n["start"], n["end"])
+    la oid = _alg(d, alg)
+    la name = _node(d, alg["next"], n["end"])
+    la key = _node(d, name["next"], n["end"])
+    la sn = _heil(d, key["next"], n["end"], 2)
+    la serial = _serial(d, sn)
+    hvis serial == "" eller ikkje name["ok"] eller name["tag"] != 4 eller ikkje key["ok"] eller key["tag"] != 4 { returner {"ok": usann, "match": usann} }
+    la nh = _hash(oid, leaf["issuer"])
+    la kh = _hash(oid, ca["public_key"])
+    hvis lengde(nh) == 0 eller name["end"] - name["start"] != lengde(nh) eller key["end"] - key["start"] != lengde(kh) { returner {"ok": usann, "match": usann} }
+    returner {"ok": sann, "match": serial == leaf["serial"] og _lik(nh, _value(d, name)) og _lik(kh, _value(d, key))}
+}
+funksjon valider_ocsp(d: liste_heiltall, cert: liste_heiltall, issuer: liste_heiltall, no_iso: tekst) -> ordbok {
+    la outer = _heil(d, 0, lengde(d), 48)
+    hvis ikkje outer["ok"] { returner _feil("OCSP invalid DER") }
+    la issuer_error = _utferdar_feil(cert, issuer, no_iso)
+    hvis issuer_error != "" { returner _feil("OCSP " + issuer_error) }
+    la leaf = sertifikat_felt(cert)
+    la ca = sertifikat_felt(issuer)
+    hvis ikkje ca["digital_signature"] { returner _feil("OCSP issuer keyUsage lacks digitalSignature") }
+    la status = _node(d, outer["start"], outer["end"])
+    hvis ikkje status["ok"] eller status["tag"] != 10 eller status["end"] - status["start"] != 1 eller d[status["start"]] != 0 { returner _feil("OCSP response not successful") }
+    la rb = _heil(d, status["next"], outer["end"], 160)
+    hvis ikkje rb["ok"] { returner _feil("OCSP missing responseBytes") }
+    la rbs = _heil(d, rb["start"], rb["end"], 48)
+    hvis ikkje rbs["ok"] { returner _feil("OCSP invalid ResponseBytes") }
+    la rt = _node(d, rbs["start"], rbs["end"])
+    hvis _oid(d, rt) != "2B0601050507300101" { returner _feil("OCSP responseType must be basic") }
+    la oct = _heil(d, rt["next"], rbs["end"], 4)
+    hvis ikkje oct["ok"] { returner _feil("OCSP invalid response octets") }
+    la basic = _heil(d, oct["start"], oct["end"], 48)
+    hvis ikkje basic["ok"] { returner _feil("OCSP invalid BasicOCSPResponse") }
+    la tbs = _node(d, basic["start"], basic["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner _feil("OCSP invalid ResponseData") }
+    la alg = _node(d, tbs["next"], basic["end"])
+    la sig = _node(d, alg["next"], basic["end"])
+    hvis _alg(d, alg) == "" eller ikkje sig["ok"] eller sig["tag"] != 3 eller sig["end"] - sig["start"] < 2 eller d[sig["start"]] != 0 { returner _feil("OCSP invalid signature encoding") }
+    hvis sig["next"] < basic["end"] {
+        # Inkluderte sertifikat gir aldri ny tillit; signer må vere issuer sjølv.
+        la wrap = _heil(d, sig["next"], basic["end"], 160)
+        hvis ikkje wrap["ok"] { returner _feil("OCSP invalid certificate wrapper") }
+        la certs = _heil(d, wrap["start"], wrap["end"], 48)
+        hvis ikkje certs["ok"] { returner _feil("OCSP invalid certificate sequence") }
+        la cp = certs["start"]
+        la count = 0
+        mens cp < certs["end"] {
+            la c = _node(d, cp, certs["end"])
+            count = count + 1
+            hvis ikkje c["ok"] eller c["tag"] != 48 eller count > 8 { returner _feil("OCSP invalid embedded certificate") }
+            cp = c["next"]
+        }
+    }
+    la responder = _node(d, tbs["start"], tbs["end"])
+    # DER omitterer DEFAULT v1; eksplisitte versjonar blir avvist i profilen.
+    hvis responder["tag"] == 161 {
+        la name = _heil(d, responder["start"], responder["end"], 48)
+        hvis ikkje name["ok"] eller ikkje _lik(_raw(d, name), ca["subject"]) { returner _feil("OCSP responder name mismatch") }
+    } ellers hvis responder["tag"] == 162 {
+        la key = _heil(d, responder["start"], responder["end"], 4)
+        hvis ikkje key["ok"] eller ikkje _lik(_value(d, key), sha1.hash_raw(ca["public_key"])) { returner _feil("OCSP responder key mismatch") }
+    } ellers { returner _feil("OCSP unsupported responder or version") }
+    la produced = _node(d, responder["next"], tbs["end"])
+    la produced_at = _tid(d, produced)
+    hvis produced["tag"] != 24 eller produced_at == "" eller produced_at > no_iso { returner _feil("OCSP invalid producedAt") }
+    la responses = _node(d, produced["next"], tbs["end"])
+    hvis ikkje responses["ok"] eller responses["tag"] != 48 { returner _feil("OCSP missing SingleResponses") }
+    hvis responses["next"] < tbs["end"] {
+        la ex = _heil(d, responses["next"], tbs["end"], 161)
+        la err = _ocsp_ext_feil(d, ex)
+        hvis err != "" { returner _feil("OCSP " + err) }
+    }
+    la p = responses["start"]
+    la count = 0
+    la matches = 0
+    la result = "unknown"
+    mens p < responses["end"] {
+        count = count + 1
+        hvis count > 64 { returner _feil("OCSP response limit") }
+        la single = _node(d, p, responses["end"])
+        hvis ikkje single["ok"] eller single["tag"] != 48 { returner _feil("OCSP malformed SingleResponse") }
+        la id = _node(d, single["start"], single["end"])
+        la cid = _certid(d, id, leaf, ca)
+        hvis ikkje cid["ok"] { returner _feil("OCSP invalid or unsupported CertID") }
+        la cs = _node(d, id["next"], single["end"])
+        la state = "unknown"
+        hvis cs["ok"] og (cs["tag"] == 128 eller cs["tag"] == 130) og cs["start"] == cs["end"] {
+            hvis cs["tag"] == 128 { state = "good" }
+        } ellers hvis cs["ok"] og cs["tag"] == 161 {
+            la rt = _node(d, cs["start"], cs["end"])
+            la revoked_at = _tid(d, rt)
+            hvis rt["tag"] != 24 eller revoked_at == "" eller revoked_at > produced_at { returner _feil("OCSP invalid revocationTime") }
+            hvis rt["next"] < cs["end"] {
+                la rw = _heil(d, rt["next"], cs["end"], 160)
+                hvis ikkje rw["ok"] { returner _feil("OCSP invalid revocationReason") }
+                la reason = _heil(d, rw["start"], rw["end"], 10)
+                hvis ikkje reason["ok"] eller reason["end"] - reason["start"] != 1 eller d[reason["start"]] > 10 eller d[reason["start"]] == 7 { returner _feil("OCSP invalid revocationReason") }
+            }
+            state = "revoked"
+        } ellers { returner _feil("OCSP invalid certStatus") }
+        la tu = _node(d, cs["next"], single["end"])
+        la this_update = _tid(d, tu)
+        la nw = _node(d, tu["next"], single["end"])
+        hvis ikkje nw["ok"] eller nw["tag"] != 160 { returner _feil("OCSP nextUpdate required") }
+        la nu = _heil(d, nw["start"], nw["end"], 24)
+        la next_update = _tid(d, nu)
+        hvis tu["tag"] != 24 eller this_update == "" eller next_update == "" eller this_update > produced_at eller produced_at > next_update eller this_update > no_iso eller next_update <= no_iso eller next_update <= this_update { returner _feil("OCSP invalid or expired update window") }
+        hvis _sekund(no_iso) - _sekund(this_update) > 604800 { returner _feil("OCSP thisUpdate too old (maximum seven days)") }
+        hvis nw["next"] < single["end"] {
+            la err = _ocsp_ext_feil(d, _heil(d, nw["next"], single["end"], 161))
+            hvis err != "" { returner _feil("OCSP " + err) }
+        }
+        hvis cid["match"] { matches = matches + 1 result = state }
+        p = single["next"]
+    }
+    hvis matches != 1 { returner _feil("OCSP CertID mismatch or duplicate status") }
+    hvis ikkje _signatur(issuer, _alg(d, alg), _raw(d, tbs), _del(d, sig["start"] + 1, sig["end"])) { returner _feil("OCSP signature invalid") }
+    hvis result != "good" { la r = _feil("OCSP certificate " + result) r["certificate_status"] = result returner r }
+    returner _ok()
+}

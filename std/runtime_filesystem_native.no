@@ -10,13 +10,14 @@
 // C-runtimen: {abi, status, handle, data, value, error, event_backend}.
 
 bruk std.windows_filesystem som windows_fs
+bruk std.runtime_filesystem_posix som posix_fs
 
 funksjon abi_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
 
 // Filhandtak (open/read/write/flush/close) for opne_native, native_les, native_skriv,
 // native_lukk og dermed native_kopier_fil/native_flytt_fil. Var «unsupported in native
-// seed». Handtaka lever i ein modulglobal tabell; skriving går rett til fila med
-// fil_append (flush er difor ein no-op), lesing hentar fila éin gong og deler ut bitar.
+// seed». Skrivehandtaka held ein OS-fd gjennom write/flush/close; flush er ein
+// ekte fil- og katalogbarriere. Lesing hentar fila éin gong og deler ut bitar.
 la _fh_tabell = {}
 la _fh_neste: heiltall = 1
 
@@ -61,8 +62,8 @@ funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
     hvis ikkje skriv og (mode == "write" eller mode == "append") {
         returner feilsvar("read_operation kan ikkje opne i modus " + mode)
     }
-    hvis skriv og mode == "read" {
-        returner feilsvar("write_operation kan ikkje opne i modus read")
+    hvis skriv og mode != "write" og mode != "append" {
+        returner feilsvar("write_operation krev modus write eller append")
     }
     la innhald = ""
     la startpos: heiltall = 0
@@ -78,21 +79,21 @@ funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
         hvis er_katalog { returner feilsvar("ikkje ei vanleg fil: " + sti) }
         // Les innhaldet ved open, so handtaket berre kan opnast for ei lesbar fil.
         prøv { innhald = builtin.fil_les(sti) } fang (e) { returner feilsvar("ikkje ei lesbar fil: " + sti) }
-    } ellers hvis mode == "append" {
-        // Append: last eksisterande innhald i bufferen og sett posisjonen til slutten
-        // slik at seek/skriv arbeider mot heile fila (positioned write).
-        prøv { hvis builtin.fil_finnes(sti) { innhald = builtin.fil_les(sti) } } fang (e) { innhald = "" }
-        startpos = lengde(innhald)
-    } ellers {
-        // Trunkér: skrivebufferen er autoritativ og blir persistert ved kvar skriv.
-        prøv { builtin.fil_skriv(sti, "") } fang (e) { returner feilsvar("open feila: " + sti) }
-        innhald = ""
+    }
+    la native = null
+    la storleik = lengde(innhald)
+    hvis skriv {
+        native = posix_fs.opne(felt(req, "root"), felt(req, "relative"), mode)
+        hvis native["status"] != "ok" { returner feilsvar(native["error"]) }
+        storleik = native["size"]
+        hvis mode == "append" { startpos = storleik }
     }
     la id = "fh-" + tekst_fra_heltall(_fh_neste)
     _fh_neste = _fh_neste + 1
-    // lasta=sann: innhald er den autoritative bufferen (lese-handtak lasta ved open,
-    // skrive-handtak held bufferen som blir skriven til fila ved kvar skriv).
-    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "lasta": sann, "innhald": innhald}
+    // Berre lesehandtak held ein innhaldsbuffer. Skrivehandtak held OS-fd,
+    // posisjon og storleik, så seek forbi EOF ikkje treng ein stor nullbuffer.
+    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "size": storleik,
+        "lasta": sann, "innhald": innhald, "native": native}
     la r = svar("open", "", 0, "")
     r["handle"] = id
     returner r
@@ -158,28 +159,22 @@ funksjon fh_skriv(req) -> ordbok_tekst {
     hvis h == null { returner feilsvar("ukjent filhandtak") }
     hvis ikkje h["skriv"] { returner feilsvar("handtaket er ope for lesing") }
     la data = felt(req, "data")
-    // Posisjonert skriving: skriv `data` inn i bufferen ved pos (overskriv/utvid) i
-    // staden for rein append, so seek + skriv gjev same semantikk som lseek+write.
-    la buf: tekst = h["innhald"]
+    // Skriv ved den faktiske seek-posisjonen. OS-et fyller eit eventuelt hol
+    // med nullbyte; ein seek forbi EOF må aldri klemmast tilbake til filslutt.
     la pos: heiltall = h["pos"]
-    la buflen: heiltall = lengde(buf)
-    la prefiks = ""
-    hvis pos < buflen { prefiks = builtin.slice(buf, 0, pos) }
-    ellers { prefiks = buf pos = buflen }
-    la etter_start: heiltall = pos + lengde(data)
-    la suffiks = ""
-    hvis etter_start < buflen { suffiks = builtin.slice(buf, etter_start, buflen) }
-    la nybuf = prefiks + data + suffiks
-    prøv { builtin.fil_skriv(h["sti"], nybuf) } fang (e) { returner feilsvar("write feila: " + h["sti"]) }
-    h["innhald"] = nybuf
-    h["pos"] = pos + lengde(data)
+    la slutt: heiltall = pos + lengde(data)
+    hvis slutt < pos { returner feilsvar("skriveposisjonen er for stor") }
+    la skrive = posix_fs.skriv_data(h["native"], data, pos)
+    hvis skrive["status"] != "ok" { returner feilsvar(skrive["error"]) }
+    h["pos"] = slutt
+    hvis lengde(data) > 0 og slutt > h["size"] { h["size"] = slutt }
     la r = svar("ok", "", lengde(data), "")
     r["handle"] = felt(req, "handle")
     returner r
 }
 
-// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Native seed
-// har ikkje eit eige seek-primitiv; posisjonen lever i handtaket sin buffer.
+// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Posisjonen
+// blir halden separat og brukt av lesebufferen eller neste OS-skriving.
 funksjon fh_seek(req) -> ordbok_tekst {
     la h = fh_hent(req)
     hvis h == null { returner feilsvar("ukjent filhandtak") }
@@ -204,17 +199,24 @@ funksjon fh_ready(req) -> ordbok_tekst {
 funksjon fh_stat(req) -> ordbok_tekst {
     la h = fh_hent(req)
     hvis h == null { returner feilsvar("ukjent filhandtak") }
-    la r = svar("ok", "", lengde(tekst(h["innhald"])), "")
+    la r = svar("ok", "", h["size"], "")
     r["handle"] = felt(req, "handle")
     returner r
 }
 
 funksjon fh_lukk(req) -> ordbok_tekst {
     la id = felt(req, "handle")
-    hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la feil = ""
+    hvis h["skriv"] {
+        la lukka = posix_fs.lukk(h["native"])
+        hvis lukka["status"] != "ok" { feil = lukka["error"] }
+    }
     // Nullstill i staden for å fjerne nøkkelen: «fjern» er liste-indeks-fjerning i
     // native codegen og skal ikkje brukast på ordbøker.
     _fh_tabell[id] = null
+    hvis feil != "" { returner feilsvar(feil) }
     la r = svar("closed", "", 0, "")
     r["handle"] = id
     returner r
@@ -460,7 +462,7 @@ funksjon read_operation(req) -> ordbok_tekst {
     hvis op == "close" { returner fh_lukk(req) }
     hvis op == "seek" { returner fh_seek(req) }
     hvis op == "ready" { returner fh_ready(req) }
-    // Handtak-basert stat (native_stat på eit ope handtak): returner buffer-lengda.
+    // Handtak-basert stat (native_stat på eit ope handtak): returner filstorleiken.
     hvis op == "stat" og felt(req, "handle") != "" { returner fh_stat(req) }
     hvis op == "stat" eller op == "path_stat" {
         la sti = full_sti(req)
@@ -483,8 +485,34 @@ funksjon write_operation(req) -> ordbok_tekst {
     hvis op == "seek" { returner fh_seek(req) }
     hvis op == "ready" { returner fh_ready(req) }
     hvis op == "flush" {
-        hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+        la h = fh_hent(req)
+        hvis h == null { returner feilsvar("ukjent filhandtak") }
+        hvis ikkje h["skriv"] { returner feilsvar("flush krev skrivehandtak") }
+        la r = posix_fs.synkroniser(h["native"])
+        hvis r["status"] != "ok" { returner feilsvar(r["error"]) }
         returner svar("ok", "", 0, "")
+    }
+    hvis op == "write_durable" {
+        hvis full_sti(req) == "" { returner feilsvar("invalid path") }
+        la mode = felt(req, "mode")
+        hvis mode != "write" og mode != "append" { returner feilsvar("invalid durable write mode") }
+        la r = posix_fs.skriv_varig(root, felt(req, "relative"), felt(req, "data"), mode)
+        hvis r["status"] != "ok" { returner feilsvar(r["error"]) }
+        returner svar("ok", "", r["value"], "")
+    }
+    hvis op == "file_replace_durable" {
+        hvis ikkje trygg_relativ(felt(req, "source")) eller ikkje trygg_relativ(felt(req, "target")) {
+            returner feilsvar("invalid durable rename path")
+        }
+        la r = posix_fs.erstatt_varig(root, felt(req, "source"), felt(req, "target"))
+        hvis r["status"] != "ok" { returner feilsvar(r["error"]) }
+        returner svar("replaced", "", 1, "")
+    }
+    hvis op == "delete_durable" {
+        hvis full_sti(req) == "" { returner feilsvar("invalid path") }
+        la r = posix_fs.slett_varig(root, felt(req, "relative"))
+        hvis r["status"] != "ok" { returner feilsvar(r["error"]) }
+        returner svar("deleted", "", 0, "")
     }
     hvis op == "close" { returner fh_lukk(req) }
     hvis op == "mkdir_p" {

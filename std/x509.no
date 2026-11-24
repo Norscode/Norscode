@@ -206,6 +206,7 @@ funksjon pem_til_der(pem: tekst) -> liste_heiltall {
 
 # OCSP-respons-status (RFC 6960): «good»/«revoked»/«unknown»/"" frå fyrste
 # SingleResponse sin certStatus (good=[0] 0x80, revoked=[1] 0xA1, unknown=[2] 0x82).
+# Berre uautentisert metadata. Bruk std.x509_revocation.valider_ocsp for tillit.
 funksjon ocsp_status(ocsp_der) -> tekst {
     la data = ocsp_der
     hvis bytes.er_bytes(ocsp_der) { data = bytes.til_liste(ocsp_der) }
@@ -252,6 +253,7 @@ funksjon crl_pem_til_der(pem: tekst) -> liste_heiltall {
     returner base64.dekod_bytes(body)
 }
 # Tilbakekalla serienummer (hex, utan leiande null) frå ein X509 CRL (DER).
+# Berre uautentisert metadata. Bruk std.x509_revocation.valider_crl for policy.
 funksjon crl_revoked_serials(crl_der) -> liste_tekst {
     la data = crl_der
     hvis bytes.er_bytes(crl_der) { data = bytes.til_liste(crl_der) }
@@ -467,22 +469,33 @@ funksjon _spki_frå_node(data: liste_heiltall, spki: ordbok) -> ordbok {
     hvis ikkje algoid_node["ok"] eller algoid_node["tag"] != 6 { returner {"status": "feil", "error": "manglar nøkkel-OID"} }
     la algoid = _oid(data, algoid_node)
     la keybits = _tlv(data, alg["next"], spki["end"])
-    hvis ikkje keybits["ok"] eller keybits["tag"] != 3 { returner {"status": "feil", "error": "manglar nøkkel-bitstreng"} }
+    hvis ikkje keybits["ok"] eller keybits["tag"] != 3 eller keybits["next"] != spki["end"] eller keybits["end"] - keybits["start"] < 2 eller data[keybits["start"]] != 0 { returner {"status": "feil", "error": "manglar eller ugyldig nøkkel-bitstreng"} }
     la pk = _skjer_bytes(data, keybits["start"] + 1, keybits["end"])
     hvis algoid == "2A864886F70D010101" {
+        hvis algoid_node["next"] < alg["end"] {
+            la param = _tlv(data, algoid_node["next"], alg["end"])
+            hvis ikkje param["ok"] eller param["tag"] != 5 eller param["start"] != param["end"] eller param["next"] != alg["end"] { returner {"status": "feil", "error": "ugyldige RSA-parametrar"} }
+        }
         la seq = _tlv(pk, 0, lengde(pk))
-        hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"status": "feil", "error": "ugyldig RSA-nøkkel"} }
+        hvis ikkje seq["ok"] eller seq["tag"] != 48 eller seq["next"] != lengde(pk) { returner {"status": "feil", "error": "ugyldig RSA-nøkkel"} }
         la nnode = _tlv(pk, seq["start"], seq["end"])
         hvis ikkje nnode["ok"] eller nnode["tag"] != 2 { returner {"status": "feil", "error": "manglar RSA-modulus"} }
         la enode = _tlv(pk, nnode["next"], seq["end"])
-        hvis ikkje enode["ok"] eller enode["tag"] != 2 { returner {"status": "feil", "error": "manglar RSA-eksponent"} }
+        hvis ikkje enode["ok"] eller enode["tag"] != 2 eller enode["next"] != seq["end"] { returner {"status": "feil", "error": "manglar RSA-eksponent"} }
+        hvis nnode["start"] == nnode["end"] eller enode["start"] == enode["end"] { returner {"status": "feil", "error": "tom RSA-nøkkel"} }
+        hvis pk[nnode["start"]] >= 128 eller pk[enode["start"]] >= 128 { returner {"status": "feil", "error": "negativ RSA-nøkkel"} }
+        hvis nnode["end"] - nnode["start"] > 1 og pk[nnode["start"]] == 0 og pk[nnode["start"] + 1] < 128 { returner {"status": "feil", "error": "ikkje-minimal RSA-modulus"} }
+        hvis enode["end"] - enode["start"] > 1 og pk[enode["start"]] == 0 og pk[enode["start"] + 1] < 128 { returner {"status": "feil", "error": "ikkje-minimal RSA-eksponent"} }
         returner {"status": "ok", "type": "rsa", "n": _int_bytes(pk, nnode), "e": _int_bytes(pk, enode)}
     }
     hvis algoid == "2A8648CE3D0201" {
-        hvis lengde(pk) < 65 eller pk[0] != 4 { returner {"status": "feil", "error": "uventa EC-punkt"} }
+        la curve = _tlv(data, algoid_node["next"], alg["end"])
+        hvis ikkje curve["ok"] eller curve["tag"] != 6 eller curve["next"] != alg["end"] eller _oid(data, curve) != "2A8648CE3D030107" { returner {"status": "feil", "error": "ustøtta EC-kurve; P-256 krevst"} }
+        hvis lengde(pk) != 65 eller pk[0] != 4 { returner {"status": "feil", "error": "uventa EC-punkt"} }
         returner {"status": "ok", "type": "ec", "qx": _skjer_bytes(pk, 1, 33), "qy": _skjer_bytes(pk, 33, 65)}
     }
     hvis algoid == "2B6570" {
+        hvis algoid_node["next"] != alg["end"] { returner {"status": "feil", "error": "Ed25519-parametrar må vere fråverande"} }
         hvis lengde(pk) != 32 { returner {"status": "feil", "error": "uventa Ed25519-nøkkellengd"} }
         returner {"status": "ok", "type": "ed25519", "pub": pk}
     }
@@ -519,21 +532,34 @@ funksjon verifiser_signert_av(sertifikat, utferdar) -> boolsk {
     la data = sertifikat
     hvis bytes.er_bytes(sertifikat) { data = bytes.til_liste(sertifikat) }
     la cert = _tlv(data, 0, lengde(data))
-    hvis ikkje cert["ok"] eller cert["tag"] != 48 { returner usann }
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 eller cert["next"] != lengde(data) { returner usann }
     la tbs = _tlv(data, cert["start"], cert["end"])
     hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner usann }
     la tbs_raw = _skjer_bytes(data, cert["start"], tbs["end"])
     la sigalg = _tlv(data, tbs["next"], cert["end"])
     hvis ikkje sigalg["ok"] eller sigalg["tag"] != 48 { returner usann }
+    la oidnode = _tlv(data, sigalg["start"], sigalg["end"])
+    hvis ikkje oidnode["ok"] eller oidnode["tag"] != 6 { returner usann }
+    la oid = _oid(data, oidnode)
+    hvis oidnode["next"] != sigalg["end"] {
+        la param = _tlv(data, oidnode["next"], sigalg["end"])
+        hvis oid != "2A864886F70D01010B" eller ikkje param["ok"] eller param["tag"] != 5 eller param["start"] != param["end"] eller param["next"] != sigalg["end"] { returner usann }
+    }
+    la serial = _tlv(data, tbs["start"], tbs["end"])
+    hvis serial["ok"] og serial["tag"] == 160 { serial = _tlv(data, serial["next"], tbs["end"]) }
+    hvis ikkje serial["ok"] eller serial["tag"] != 2 { returner usann }
+    la inner = _tlv(data, serial["next"], tbs["end"])
+    hvis ikkje inner["ok"] eller inner["tag"] != 48 { returner usann }
+    hvis _hex(data, serial["next"], inner["end"], usann) != _hex(data, tbs["next"], sigalg["end"], usann) { returner usann }
     la sigval = _tlv(data, sigalg["next"], cert["end"])
-    hvis ikkje sigval["ok"] eller sigval["tag"] != 3 { returner usann }
+    hvis ikkje sigval["ok"] eller sigval["tag"] != 3 eller sigval["next"] != cert["end"] eller sigval["end"] - sigval["start"] < 2 eller data[sigval["start"]] != 0 { returner usann }
     la sig = _skjer_bytes(data, sigval["start"] + 1, sigval["end"])
     la nøkkel = hent_offentleg_nøkkel(utferdar)
     hvis nøkkel["status"] != "ok" { returner usann }
-    hvis nøkkel["type"] == "rsa" {
+    hvis nøkkel["type"] == "rsa" og oid == "2A864886F70D01010B" {
         returner rsa.rsa_verify(nøkkel["n"], nøkkel["e"], tbs_raw, sig)
     }
-    hvis nøkkel["type"] == "ec" {
+    hvis nøkkel["type"] == "ec" og oid == "2A8648CE3D040302" {
         # ECDSA-signatur = DER SEQUENCE { INTEGER r, INTEGER s }.
         la sq = _tlv(sig, 0, lengde(sig))
         hvis ikkje sq["ok"] eller sq["tag"] != 48 { returner usann }
@@ -549,7 +575,7 @@ funksjon verifiser_signert_av(sertifikat, utferdar) -> boolsk {
         la qy = bn.fra_bytes(nøkkel["qy"])
         returner ecdsa.ecdsa_verify(qx, qy, hash_bn, r_bn, s_bn)
     }
-    hvis nøkkel["type"] == "ed25519" {
+    hvis nøkkel["type"] == "ed25519" og oid == "2B6570" {
         returner eddsa.verify(nøkkel["pub"], tbs_raw, sig)
     }
     returner usann

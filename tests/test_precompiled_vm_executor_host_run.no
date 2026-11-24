@@ -12,6 +12,8 @@ funksjon env(namn: tekst) -> tekst {
 
 funksjon native_fallback(namn: tekst) -> boolsk {
     returner builtin.starts_with(namn, "std.runtime_filesystem_native.") eller
+        builtin.starts_with(namn, "std.runtime_filesystem_posix.") eller
+        builtin.starts_with(namn, "std.native_sys.") eller
         builtin.starts_with(namn, "std.windows_filesystem.") eller
         builtin.starts_with(namn, "std.windows_abi.")
 }
@@ -20,10 +22,12 @@ funksjon køyr(root: tekst, native: tekst, executor: tekst, mål: tekst) {
     la caps = "env.read,env.write,process.exec,disk.read,disk.write"
     returner prosess.køyr(native, [], root, {
         "NORSCODE_ROOT": root, "NORSCODE_NATIVE_BIN": native,
-        "NORSCODE_CMD": "run", "NORSCODE_FILE": root + "/selfhost/tooling/ncb_host_run_entry.no",
-        "NORSCODE_HOST_NCB_FILE": executor, "NORSCODE_NCB_FILE": mål,
+        // Begge vertsgenerasjonane har run-ncb. Den frosne Windows-seeden
+        // kan då laste JSON direkte utan først å kompilere kjeldedriveren.
+        "NORSCODE_CMD": "run-ncb", "NORSCODE_FILE": executor,
+        "NORSCODE_HOST_NCB_FILE": "", "NORSCODE_NCB_FILE": mål,
         // Fang executor-dispatchen i stdout; han blir berre vist ved feil.
-        "NORSCODE_OUTPUT": "", "NORSCODE_VM_SOURCE": "1", "NORSCODE_VM_QUIET": "0",
+        "NORSCODE_OUTPUT": "", "NORSCODE_VM_SOURCE": "0", "NORSCODE_VM_QUIET": "0",
         "NORSCODE_VM_CAPABILITIES": caps, "NORSCODE_VM_TARGET_CAPABILITIES": caps,
         "NORSCODE_VM_DISK_ROOT": root + ",.", "NORSCODE_VM_TARGET_DISK_ROOT": root + ",."
     }, 120000)
@@ -44,13 +48,15 @@ funksjon start() -> heiltall {
         hvis native_fallback(tekst(namn)) og ikkje builtin.ends_with(tekst(namn), ".__module_init__") {
             la fn = fns[namn]
             hvis finnes_nøkkel(fn, "__ncb_lazy_json__") { fn = builtin.json_parse_raw(fn["__ncb_lazy_json__"]) }
-            fn["code"] = [["PUSH_CONST", "executor-host native fallback reached"], ["CALL", "builtin.feil", 1], ["RETURN"]]
+            fn["code"] = [["PUSH_CONST", "executor-host native fallback reached"], ["THROW"]]
             fns[namn] = fn
             forgifta = forgifta + 1
         }
     }
     assert(forgifta > 0)
     assert(finnes_nøkkel(fns, "std.windows_abi.last_error"))
+    assert(finnes_nøkkel(fns, "std.runtime_filesystem_posix.opne"))
+    assert(finnes_nøkkel(fns, "std.native_sys._nr"))
     // Dette er ein offentleg teststi, ikkje ein kryptografisk nonce. Den
     // gamle Windows-verten manglar random_hex; kompatibilitetstesten skal
     // kunne naa executor-inngangen utan aa krevje ein ny entropi-ABI.
@@ -59,6 +65,8 @@ funksjon start() -> heiltall {
     assert(filops.lag_katalogar(tmp))
     la ep = tmp + "/executor.ncb.json"
     fil_skriv(ep, builtin.json_skriv(executor))
+    // Bruk CALL/POP-forma kompilatoren emitterer for skriv(). Den eldre
+    // Windows-verten returnerer 42 frå program med PRINT utan å skrive noko.
     la fn = {"name": "start", "module": "__compat__", "params": [], "is_async": usann,
         "string_encoding": "decoded-v1", "code": [["PUSH_CONST", "executor-host inner OK\n"],
         ["CALL", "builtin.skriv", 1], ["POP"], ["PUSH_CONST", 42], ["RETURN"]]}
@@ -68,6 +76,46 @@ funksjon start() -> heiltall {
     la stream_sti = tmp + "/inner.ncb.stream"
     fil_skriv(json_sti, builtin.json_skriv(mål))
     fil_skriv(stream_sti, "NORSCODE_NCB_STREAM_V1\nM" + builtin.json_skriv(metadata) + "\nF__compat__.start\t" + builtin.json_skriv(fn) + "\n")
+
+    // Skil feil i den grunnleggjande host-exec-inngangen fraa feil i
+    // PRINT/CALL og executor-payloaden. Ein to-instruksjons-NCB skal gi 42.
+    // Dette er ei ekstra positiv prøve; ho erstattar ingen andre testar.
+    la enkel_sti = tmp + "/minimal.ncb.json"
+    la enkel_fn = {"name": "start", "module": "__compat__", "params": [], "is_async": usann,
+        "string_encoding": "decoded-v1", "code": [["PUSH_CONST", 42], ["RETURN"]]}
+    la enkel_ncb = {"entry": "__compat__.start", "global_names": {"__compat__": []},
+        "functions": {"__compat__.start": enkel_fn}}
+    fil_skriv(enkel_sti, builtin.json_skriv(enkel_ncb))
+    la enkel_res = køyr(root, native, enkel_sti, enkel_sti)
+    hvis tekst(enkel_res["status"]) != "ferdig" eller tekst(enkel_res["exit_code"]) != "42" {
+        skriv("executor-host MINIMAL failed: status=" + tekst(enkel_res["status"]) +
+              " exit=" + tekst(enkel_res["exit_code"]) + " error=" + tekst(enkel_res["error"]) + "\n")
+        la rå = tekst(enkel_res["stdout"]) + tekst(enkel_res["stderr"])
+        la startpos: heiltall = 0
+        hvis lengde(rå) > 600 { startpos = lengde(rå) - 600 }
+        skriv("executor-host MINIMAL tail=" + builtin.slice(rå, startpos, lengde(rå)) + "\n")
+        assert_eq(tekst(enkel_res["status"]) + "/" + tekst(enkel_res["exit_code"]), "ferdig/42")
+    }
+    skriv("executor-host MINIMAL OK\n")
+
+    // Positiv vertskontroll foer den store, forgifta executor-payloaden.
+    // Same vert, run-ncb-inngang og 42-program, utan vm_executor i midten.
+    // Eit avvik her peikar på verts-VM-en eller bytekoden i målprogrammet.
+    la grunnkontroll = køyr(root, native, json_sti, json_sti)
+    hvis tekst(grunnkontroll["status"]) != "ferdig" eller
+       tekst(grunnkontroll["exit_code"]) != "42" eller
+       ikkje builtin.contains(tekst(grunnkontroll["stdout"]), "executor-host inner OK") {
+        skriv("executor-host BASELINE failed: status=" + tekst(grunnkontroll["status"]) +
+              " exit=" + tekst(grunnkontroll["exit_code"]) +
+              " error=" + tekst(grunnkontroll["error"]) + "\n")
+        la bak = tekst(grunnkontroll["stdout"]) + tekst(grunnkontroll["stderr"])
+        la frå: heiltall = 0
+        hvis lengde(bak) > 600 { frå = lengde(bak) - 600 }
+        skriv("executor-host BASELINE tail=" + builtin.slice(bak, frå, lengde(bak)) + "\n")
+        assert_eq(tekst(grunnkontroll["status"]) + "/" + tekst(grunnkontroll["exit_code"]), "ferdig/42")
+        assert(builtin.contains(tekst(grunnkontroll["stdout"]), "executor-host inner OK"))
+    }
+    skriv("executor-host BASELINE OK\n")
     for sti i [json_sti, stream_sti] {
         la r = køyr(root, native, ep, sti)
         hvis tekst(r["status"]) != "ferdig" eller tekst(r["exit_code"]) != "42" {
@@ -80,16 +128,29 @@ funksjon start() -> heiltall {
     }
     // Nei-kontroll: forgift berre det eksplisitte inngangspunktet. Ingen annan
     // funksjon eller modulinitialiser kan då gje den venta feilmeldinga.
-    la negativ = builtin.json_parse_raw(original)
-    negativ["functions"]["std.windows_abi.last_error"]["code"] = [["PUSH_CONST", "executor-host forced entry reached"], ["CALL", "builtin.feil", 1], ["RETURN"]]
-    negativ["entry"] = "std.windows_abi.last_error"
     la nei_sti = tmp + "/forbidden.ncb.json"
-    fil_skriv(nei_sti, builtin.json_skriv(negativ))
-    la nei = køyr(root, native, nei_sti, json_sti)
-    assert_eq(tekst(nei["status"]), "ferdig")
-    assert(tekst(nei["exit_code"]) != "0" og tekst(nei["exit_code"]) != "42")
-    assert(builtin.contains(tekst(nei["stdout"]) + tekst(nei["stderr"]), "executor-host forced entry reached"))
-    for sti i [ep, json_sti, stream_sti, nei_sti] { filops.slett_fil(sti) }
+    for inngang i ["std.windows_abi.last_error", "std.runtime_filesystem_posix.opne", "std.native_sys._nr"] {
+        la negativ = builtin.json_parse_raw(original)
+        la markør = "executor-host forced entry reached: " + inngang
+        // Eit payload-entry blir kalla utan argument. Nullstill berre denne
+        // kontrollfunksjonen sin signatur, så testen når den forgifta kroppen
+        // og ikkje stoppar tidlegare på aritetskontroll.
+        negativ["functions"][inngang]["params"] = []
+        // Vis at kroppen vart nådd sjølv på vertar som berre returnerer
+        // feilkode for eit ufanga unntak.
+        negativ["functions"][inngang]["code"] = [["PUSH_CONST", markør + "\n"],
+            ["CALL", "builtin.skriv", 1], ["POP"], ["PUSH_CONST", markør], ["THROW"]]
+        negativ["entry"] = inngang
+        fil_skriv(nei_sti, builtin.json_skriv(negativ))
+        la nei = køyr(root, native, nei_sti, json_sti)
+        assert_eq(tekst(nei["status"]), "ferdig")
+        assert(tekst(nei["exit_code"]) != "0" og tekst(nei["exit_code"]) != "42")
+        hvis ikkje builtin.contains(tekst(nei["stdout"]) + tekst(nei["stderr"]), markør) {
+            prosess.skriv_resultat(nei)
+        }
+        assert(builtin.contains(tekst(nei["stdout"]) + tekst(nei["stderr"]), markør))
+    }
+    for sti i [ep, enkel_sti, json_sti, stream_sti, nei_sti] { filops.slett_fil(sti) }
     skriv("test_precompiled_vm_executor_host_run OK\n")
     returner 0
 }

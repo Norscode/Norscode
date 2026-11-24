@@ -129,6 +129,10 @@ funksjon build_client_hello(opts: ordbok) -> liste_heiltall {
     _legg(_sigalgs, _u16(SIG_ED25519()))         # 0x0807 ed25519
     _legg(_sigalgs, _u16(2052))                  # 0x0804 rsa_pss_rsae_sha256
     _legg(ext, _ext(EXT_SIG_ALGS(), _vec16(_sigalgs)))
+    hvis finnes_nøkkel(opts, "request_ocsp") og opts["request_ocsp"] {
+        # RFC 6066 status_request: OCSP, tom responder_id_list/request_extensions.
+        _legg(ext, _ext(5, [1, 0, 0, 0, 0]))
+    }
     # supported_versions = tls1.3 (0x0304), CH-form: 1-byte listelengde
     _legg(ext, _ext(EXT_SUPPORTED_VERSIONS(), _vec8(_u16(772))))
     # key_share: client_shares<>: entry group(2)+key_exchange vec16
@@ -158,6 +162,21 @@ funksjon parse_client_hello(d: liste_heiltall, start: heiltall, slutt: heiltall)
     la ext_len = _safe16(d, p, slutt) hvis ext_len < 0 { returner {"ok": usann} } p = p + 2
     la ext_slutt = p + ext_len
     hvis ext_slutt > slutt { returner {"ok": usann} }
+    la signature_algorithms: liste_heiltall = []
+    la sig_ext = finn_ext(d, p, ext_slutt, EXT_SIG_ALGS())
+    hvis sig_ext["funne"] {
+        la sd = sig_ext["data"]
+        hvis lengde(sd) < 4 eller _les16(sd, 0) != lengde(sd) - 2 eller lengde(sd) % 2 != 0 { returner {"ok": usann} }
+        la sp = 2
+        mens sp < lengde(sd) { legg_til(signature_algorithms, _les16(sd, sp)) sp = sp + 2 }
+    }
+    la request_ocsp = usann
+    la status_ext = finn_ext(d, p, ext_slutt, 5)
+    hvis status_ext["funne"] {
+        la od = status_ext["data"]
+        hvis lengde(od) != 5 eller od[0] != 1 eller od[1] != 0 eller od[2] != 0 eller od[3] != 0 eller od[4] != 0 { returner {"ok": usann} }
+        request_ocsp = sann
+    }
     # Trekk ut x25519 key_share og server_name
     la ks_pub: liste_heiltall = []
     la ks = finn_ext(d, p, ext_slutt, EXT_KEY_SHARE())
@@ -185,7 +204,8 @@ funksjon parse_client_hello(d: liste_heiltall, start: heiltall, slutt: heiltall)
         }
     }
     returner {"ok": sann, "version": ver, "random": random, "session_id": session_id, "suites": suites,
-              "key_share_pub": ks_pub, "server_name": sni, "ext_start": p, "ext_end": ext_slutt}
+              "key_share_pub": ks_pub, "server_name": sni, "ext_start": p, "ext_end": ext_slutt,
+              "signature_algorithms": signature_algorithms, "request_ocsp": request_ocsp}
 }
 
 # ============ ServerHello ============
@@ -281,31 +301,68 @@ funksjon build_certificate_stapled(cert_der: liste_heiltall, ocsp_der: liste_hei
     _legg(body, entry)
     returner encode_handshake(HT_CERTIFICATE(), body)
 }
+funksjon build_certificate_chain(chain: liste, ocsp_der: liste_heiltall) -> liste_heiltall {
+    hvis lengde(chain) < 1 eller lengde(chain) > 16 eller lengde(ocsp_der) > 65527 { kast "TLS certificate chain or staple limit" }
+    la entries: liste_heiltall = []
+    la i = 0
+    for cert i chain {
+        hvis lengde(cert) < 1 eller lengde(cert) > 1048576 { kast "TLS certificate size limit" }
+        _legg(entries, _u24(lengde(cert)))
+        _legg(entries, cert)
+        la ext: liste_heiltall = []
+        hvis i == 0 og lengde(ocsp_der) > 0 {
+            la data: liste_heiltall = [1]
+            _legg(data, _u24(lengde(ocsp_der)))
+            _legg(data, ocsp_der)
+            ext = _ext(5, data)
+        }
+        _legg(entries, _vec16(ext))
+        i = i + 1
+    }
+    la body: liste_heiltall = [0]
+    _legg(body, _u24(lengde(entries)))
+    _legg(body, entries)
+    returner encode_handshake(HT_CERTIFICATE(), body)
+}
 funksjon parse_certificate(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
-    hvis slutt > lengde(d) { slutt = lengde(d) }
+    la feil = {"ok": usann, "cert_der": [], "ocsp": []}
+    hvis start < 0 eller slutt > lengde(d) eller start >= slutt { returner feil }
     la p = start
-    la ctx_len = _safe8(d, p, slutt) hvis ctx_len < 0 { returner {"ok": usann, "cert_der": []} } p = p + 1 + ctx_len
-    hvis p + 3 > slutt { returner {"ok": usann, "cert_der": []} }
+    la ctx_len = _safe8(d, p, slutt)
+    hvis ctx_len < 0 { returner feil }
+    p = p + 1 + ctx_len
+    hvis p + 3 > slutt { returner feil }
     la list_len = _les24(d, p) p = p + 3
-    hvis p + 3 > slutt { returner {"ok": usann, "cert_der": []} }
-    la cert_len = _les24(d, p) p = p + 3
-    hvis p + cert_len > slutt { returner {"ok": usann, "cert_der": []} }
-    la cert = _skjer(d, p, p + cert_len)
-    p = p + cert_len
+    hvis list_len == 0 eller p + list_len != slutt { returner feil }
+    la cert: liste_heiltall = []
     la ocsp: liste_heiltall = []
-    hvis p + 2 <= slutt {
-        la extlen = (d[p] << 8) | d[p + 1]
-        p = p + 2
+    la count = 0
+    mens p < slutt {
+        count = count + 1
+        hvis count > 16 eller p + 3 > slutt { returner feil }
+        la cert_len = _les24(d, p) p = p + 3
+        hvis cert_len < 1 eller cert_len > 1048576 eller p + cert_len + 2 > slutt { returner feil }
+        hvis count == 1 { cert = _skjer(d, p, p + cert_len) }
+        p = p + cert_len
+        la extlen = _les16(d, p) p = p + 2
         la extend = p + extlen
-        hvis extend > slutt { extend = slutt }
-        mens p + 4 <= extend {
-            la etype = (d[p] << 8) | d[p + 1]
-            la elen = (d[p + 2] << 8) | d[p + 3]
+        hvis extend > slutt { returner feil }
+        la seen: ordbok = {}
+        la extension_count = 0
+        mens p < extend {
+            extension_count = extension_count + 1
+            hvis extension_count > 64 eller p + 4 > extend { returner feil }
+            la etype = _les16(d, p)
+            la elen = _les16(d, p + 2)
             la edata = p + 4
-            hvis etype == 5 og edata + 4 <= extend og d[edata] == 1 {
-                la olen = (d[edata + 1] << 16) | (d[edata + 2] << 8) | d[edata + 3]
+            hvis edata + elen > extend eller finnes_nøkkel(seen, tekst(etype)) { returner feil }
+            seen[tekst(etype)] = sann
+            hvis etype == 5 {
+                hvis elen < 5 eller d[edata] != 1 { returner feil }
+                la olen = _les24(d, edata + 1)
                 la os = edata + 4
-                hvis os + olen <= extend { ocsp = _skjer(d, os, os + olen) }
+                hvis olen < 1 eller olen + 4 != elen { returner feil }
+                hvis count == 1 { ocsp = _skjer(d, os, os + olen) }
             }
             p = edata + elen
         }
@@ -323,7 +380,7 @@ funksjon parse_certificate_verify(d: liste_heiltall, start: heiltall, slutt: hei
     hvis slutt > lengde(d) { slutt = lengde(d) }
     la alg = _safe16(d, start, slutt) hvis alg < 0 { returner {"ok": usann, "alg": 0, "signatur": []} }
     la sl = _safe16(d, start + 2, slutt) hvis sl < 0 { returner {"ok": usann, "alg": 0, "signatur": []} }
-    hvis start + 4 + sl > slutt { returner {"ok": usann, "alg": 0, "signatur": []} }
+    hvis sl < 1 eller start + 4 + sl != slutt { returner {"ok": usann, "alg": 0, "signatur": []} }
     returner {"ok": sann, "alg": alg, "signatur": _skjer(d, start + 4, start + 4 + sl)}
 }
 

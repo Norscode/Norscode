@@ -1,0 +1,191 @@
+// Eit eige CRT-fritt PE-barn. Raa Win32 I/O provar OS-handhevingen og
+// pipe-livslopet utan at VM-capabilities kan skjule manglande isolasjon.
+bruk std.windows_abi som api
+
+funksjon skriv_bytes(h: heiltall, buf: heiltall, count: heiltall, io: heiltall) -> boolsk {
+    la pos: heiltall = 0
+    mens pos < count {
+        hvis api.call("WriteFile", [h, buf + pos, count - pos, io, 0]) == 0 { returner usann }
+        la wrote = api.read32(io)
+        hvis wrote <= 0 eller wrote > count - pos { returner usann }
+        pos = pos + wrote
+    }
+    returner sann
+}
+
+funksjon nett_probe(buf: heiltall, denied: boolsk) -> heiltall {
+    la port: heiltall = 0
+    prøv { port = heiltall_fra_tekst(miljo_hent("NORSCODE_WINDOWS_IO_PORT")) }
+    fang (e) { returner 23 }
+    hvis port < 1 eller port > 65535 { returner 23 }
+    hvis (api.call("WSAStartup", [514, buf]) & 4294967295) != 0 { returner 20 }
+    la sock = api.call("WSASocketW", [2, 1, 6, 0, 0, 0])
+    hvis sock == 0 - 1 { returner 21 }
+    // AppContainer kan la eit blokkande loopback-connect vente til timeout
+    // utan å returnere WSAEACCES. Prøv same ekte Windows-sokkel utan å
+    // blokkere, og observer SO_ERROR etter ei avgrensa WSAPoll-venting.
+    // Politikken må framleis avvise med WSAEACCES (10013); timeout,
+    // connection-refused og vellukka tilkopling er ikkje godkjende.
+    api.u32(buf + 640, 1)
+    hvis api.call("ioctlsocket", [sock, 2147772030, buf + 640]) != 0 {
+        skriv("network FIONBIO failed: " + tekst(api.last_error()) + "\n")
+        api.call("closesocket", [sock])
+        returner 25
+    }
+    la addr = buf + 512
+    api.u32(addr, 2)
+    builtin.raw_store8(addr + 2, (port >> 8) & 255)
+    builtin.raw_store8(addr + 3, port & 255)
+    builtin.raw_store8(addr + 4, 127)
+    builtin.raw_store8(addr + 7, 1)
+    la connected = api.call("connect", [sock, addr, 16])
+    // OSTAB-porten fangar WSAGetLastError rett etter connect.
+    la err = api.last_error()
+    hvis connected != 0 og (err == 10035 eller err == 10036 eller err == 10037) {
+        la pollfd = buf + 768
+        builtin.raw_store64(pollfd, sock)
+        api.u32(pollfd + 8, 16) // POLLWRNORM; WSAPOLLFD.revents = 0
+        la ready = api.call("WSAPoll", [pollfd, 1, 3000])
+        hvis ready > 0 {
+            api.u32(buf + 800, 0)
+            api.u32(buf + 808, 4)
+            hvis api.call("getsockopt", [sock, 65535, 4103, buf + 800, buf + 808]) == 0 {
+                err = api.read32(buf + 800) // SO_ERROR, ikkje siste trådfeil
+                hvis err == 0 { connected = 0 } ellers { connected = 0 - 1 }
+            } ellers {
+                err = api.last_error()
+                connected = 0 - 1
+            }
+        } ellers {
+            hvis ready == 0 { err = 10060 } // WSAETIMEDOUT er ikkje bevis på isolasjon
+            ellers { err = api.last_error() }
+            connected = 0 - 1
+        }
+    }
+    api.call("closesocket", [sock])
+    hvis ikkje denied {
+        hvis connected != 0 {
+            skriv("network-control failed: connect=" + tekst(connected) + " wsa_error=" + tekst(err) + "\n")
+            returner 24
+        }
+        skriv("network-allowed-ok")
+        returner 0
+    }
+    // Windows Filtering Platform kan blokkere AppContainer-loopback ved
+    // receive/accept-laget og droppe SYN utan TCP reset. Det gjev 10060
+    // (timeout), ikkje alltid 10013 (WSAEACCES). Positiv kontroll mot SAME
+    // levande port både før og etter, samt OS-token/job-verifikasjon og at
+    // den isolerte tilkoplinga ALDRI blir akseptert, ligg i foreldertesten.
+    // Ein timeout utan desse kontrollane er aldri godt nok.
+    hvis connected == 0 eller (err != 10013 og err != 10060) {
+        skriv("network-denial failed: connect=" + tekst(connected) + " wsa_error=" + tekst(err) + "\n")
+        returner 22
+    }
+    hvis err == 10060 {
+        skriv("network-denied-timeout")
+    } ellers {
+        skriv("network-denied-ok")
+    }
+    returner 0
+}
+
+// Vanlege Norscode-verktøy maa kunne opprette eigne barn inne i none-jobben.
+// Kallet er direkte Win32: ein feilaktig ACTIVE_PROCESS=1 blir synleg her.
+funksjon barnebarn() -> heiltall {
+    la executable = miljo_hent("NORSCODE_WINDOWS_IO_EXE")
+    hvis executable == "" { returner 30 }
+    la exe_w = api.wide(executable)
+    la cmd_w = api.wide("\"" + executable + "\" child-exit")
+    la block = api.alloc(160)
+    hvis exe_w == 0 eller cmd_w == 0 eller block == 0 { returner 31 }
+    api.u32(block, 104)
+    api.u32(block + 60, 256)
+    builtin.raw_store64(block + 80, api.call("GetStdHandle", [0 - 10]))
+    builtin.raw_store64(block + 88, api.call("GetStdHandle", [0 - 11]))
+    builtin.raw_store64(block + 96, api.call("GetStdHandle", [0 - 12]))
+    la made = api.call("CreateProcessW", [exe_w, cmd_w, 0, 0, 1, 0, 0, 0, block, block + 112])
+    hvis made == 0 {
+        skriv("nested CreateProcessW error=" + tekst(api.last_error()) + "\n")
+        api.free(block)
+        api.free(cmd_w)
+        api.free(exe_w)
+        returner 32
+    }
+    la process = builtin.raw_load64(block + 112)
+    la thread = builtin.raw_load64(block + 120)
+    la result: heiltall = 33
+    hvis (api.call("WaitForSingleObject", [process, 5000]) & 4294967295) == 0 og
+       api.call("GetExitCodeProcess", [process, block + 144]) != 0 og
+       api.read32(block + 144) == 0 { result = 0 }
+    api.close(thread)
+    api.close(process)
+    api.free(block)
+    api.free(cmd_w)
+    api.free(exe_w)
+    hvis result == 0 { skriv("nested-ok") }
+    returner result
+}
+
+funksjon start() -> heiltall {
+    la args = builtin.argv_list_v1()
+    hvis lengde(args) == 2 og args[1] == "child-exit" {
+        skriv("grandchild-ok")
+        returner 0
+    }
+    la mode = miljo_hent("NORSCODE_WINDOWS_IO_MODE")
+    hvis mode == "nested" { returner barnebarn() }
+    la input = api.call("GetStdHandle", [0 - 10])
+    la output = api.call("GetStdHandle", [0 - 11])
+    la errors = api.call("GetStdHandle", [0 - 12])
+    la buf = api.alloc(4096)
+    la io = api.alloc(32)
+    hvis buf == 0 eller io == 0 { returner 1 }
+    hvis mode == "busy" {
+        // Ingen lesing: forelder maa kunne stoppe ein full stdin-pipe.
+        api.call("Sleep", [20000])
+        returner 2
+    }
+    hvis mode == "closed" {
+        hvis ikkje api.close(input) { returner 3 }
+        api.call("Sleep", [50])
+        skriv("stdin-closed-ok")
+        api.free(buf)
+        api.free(io)
+        returner 0
+    }
+    hvis mode == "network" eller mode == "network-allowed" {
+        la result = nett_probe(buf, mode == "network")
+        api.free(buf)
+        api.free(io)
+        returner result
+    }
+    hvis mode == "duplex" eller mode == "output-limit" {
+        // Begge fang-roeyra overstig pipe-kvoten FOER barnet les stdin.
+        // Ein synkron forelder som skriv heile stdin fyrst vil deadlocke.
+        for stream i [output, errors] {
+            la byte: heiltall = 79
+            hvis stream == errors { byte = 69 }
+            la i: heiltall = 0
+            mens i < 4096 { builtin.raw_store8(buf + i, byte) i = i + 1 }
+            la round: heiltall = 0
+            mens round < 16 {
+                hvis ikkje skriv_bytes(stream, buf, 4096, io) { returner 4 }
+                round = round + 1
+            }
+        }
+    }
+    hvis mode != "echo" og mode != "duplex" og mode != "output-limit" { returner 5 }
+    mens sann {
+        la read = api.call("ReadFile", [input, buf, 4096, io, 0])
+        hvis read == 0 {
+            hvis api.last_error() == 109 { bryt }
+            returner 6
+        }
+        la count = api.read32(io)
+        hvis count == 0 { bryt }
+        hvis count > 4096 eller ikkje skriv_bytes(output, buf, count, io) { returner 7 }
+    }
+    api.free(buf)
+    api.free(io)
+    returner 0
+}

@@ -25,9 +25,37 @@ nc verify-seed
 
 ## Installere frå lokal kjeldekode
 
-Frå repo-rota:
+I ein kald checkout peikar `bin/nc` på `dist/norscode_native`, som ikkje er
+materialisert enno. Start den committa native seeden direkte éin gong.
+Vel fila for vertsmaskina:
+
+| Vert | Native seed |
+|---|---|
+| Linux x86-64 | `bootstrap/stage0/norscode-linux-x86_64` |
+| Linux ARM64 | `bootstrap/stage0/norscode-linux-arm64` |
+| macOS Apple Silicon | `bootstrap/stage0/norscode-macos-arm64` |
+
+Frå repo-rota, til dømes på Linux x86-64:
 
 ```bash
+NORSCODE_ROOT="$PWD" \
+NORSCODE_CMD=run \
+NORSCODE_FILE="$PWD/tools/build_norscode_native.no" \
+NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+./bootstrap/stage0/norscode-linux-x86_64
+```
+
+På Linux ARM64 og macOS Apple Silicon byter du berre seed-fila på siste
+linje. Norscode-verktøyet vel plattformen, kopierer den lokale seeden til
+ein kandidat, køyrer smoke-test og publiserer kandidaten atomisk som
+`dist/norscode_native`. Dette er materialisering av bootstrapen; eit nytt
+bygg frå dagens kompilator- og runtimekjelde er eit eige steg.
+
+Når materialiseringa er ferdig, installer frå repo-rota:
+
+```bash
+./bin/nc verify-seed
 ./bin/nc run tools/install.no
 ```
 

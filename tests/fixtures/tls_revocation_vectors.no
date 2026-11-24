@@ -1,0 +1,115 @@
+# Deterministiske, signerte testvektorar. Ingen eksternt kryptoverktøy i testen.
+bruk std.x509_chain som der
+bruk std.ed25519 som eddsa
+bruk std.sha1 som sha1
+bruk std.x509 som x509
+
+funksjon _opt(o: ordbok, k: tekst, fallback) {
+    hvis finnes_nøkkel(o, k) { returner o[k] }
+    returner fallback
+}
+funksjon seed(v: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    mens lengde(ut) < 32 { legg_til(ut, v) }
+    returner ut
+}
+funksjon saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    der._legg(ut, a) der._legg(ut, b)
+    returner ut
+}
+funksjon alg() -> liste_heiltall { returner der._tlv(48, der._tlv(6, [43, 101, 112])) }
+funksjon tid(s: tekst) -> liste_heiltall {
+    la b: liste_heiltall = []
+    la i = 0
+    mens i < lengde(s) { legg_til(b, builtin.char_code(builtin.slice(s, i, i + 1))) i = i + 1 }
+    returner der._tlv(24, b)
+}
+funksjon ext(oid: liste_heiltall, value: liste_heiltall, critical: boolsk) -> liste_heiltall {
+    la body = der._tlv(6, oid)
+    hvis critical { der._legg(body, [1, 1, 255]) }
+    der._legg(body, der._tlv(4, value))
+    returner der._tlv(48, body)
+}
+funksjon cert(o: ordbok) -> liste_heiltall {
+    la ca = _opt(o, "ca", usann)
+    la issuer_name = _opt(o, "issuer_name", "Revocation CA")
+    la subject_name = _opt(o, "subject_name", hvis ca da "Revocation CA" ellers "localhost")
+    la subject_seed = _opt(o, "subject_seed", hvis ca da seed(1) ellers seed(2))
+    la body = der._tlv(160, der._int([2]))
+    der._legg(body, der._int(_opt(o, "serial", hvis ca da [1] ellers [16])))
+    der._legg(body, _opt(o, "inner_algorithm", alg()))
+    der._legg(body, der._cn_name(issuer_name))
+    der._legg(body, der._tlv(48, saman(der._utctime("250101000000Z"), der._utctime("400101000000Z"))))
+    der._legg(body, der._cn_name(subject_name))
+    der._legg(body, der._spki_ed25519(eddsa.public_key(subject_seed)))
+    la extensions: liste_heiltall = []
+    hvis ca { der._legg(extensions, ext([85, 29, 19], der._tlv(48, [1, 1, 255]), sann)) }
+    la usage = _opt(o, "usage", hvis ca da 134 ellers 128)
+    # To ubrukte bitar for 0x86, sju for digitalSignature åleine.
+    la unused = hvis usage == 128 da 7 ellers 1
+    der._legg(extensions, ext([85, 29, 15], der._tlv(3, [unused, usage]), sann))
+    hvis ikkje ca { der._legg(extensions, der._san_ext(["localhost"])) }
+    der._legg(extensions, _opt(o, "extra_extensions", []))
+    der._legg(body, der._tlv(163, der._tlv(48, extensions)))
+    la tbs = der._tlv(48, body)
+    la signature = eddsa.sign(_opt(o, "signer_seed", seed(1)), tbs)
+    returner der._tlv(48, saman(saman(tbs, _opt(o, "outer_algorithm", alg())), der._bit_string(signature)))
+}
+funksjon crl(o: ordbok) -> liste_heiltall {
+    la body = der._int([1])
+    der._legg(body, _opt(o, "inner_algorithm", alg()))
+    der._legg(body, der._cn_name(_opt(o, "issuer_name", "Revocation CA")))
+    der._legg(body, tid(_opt(o, "this_update", "20261113000000Z")))
+    la next = _opt(o, "next_update", "20261114000000Z")
+    hvis next != "" { der._legg(body, tid(next)) }
+    la entries: liste_heiltall = []
+    for serial i _opt(o, "serials", []) {
+        la entry = saman(der._int(serial), tid("20261112000000Z"))
+        la entry_ext = _opt(o, "entry_extensions", [])
+        hvis lengde(entry_ext) > 0 { der._legg(entry, der._tlv(48, entry_ext)) }
+        der._legg(entries, der._tlv(48, entry))
+    }
+    hvis lengde(entries) > 0 { der._legg(body, der._tlv(48, entries)) }
+    la extensions = _opt(o, "extensions", [])
+    hvis lengde(extensions) > 0 { der._legg(body, der._tlv(160, der._tlv(48, extensions))) }
+    la tbs = der._tlv(48, body)
+    la signature = eddsa.sign(_opt(o, "signer_seed", seed(1)), tbs)
+    returner der._tlv(48, saman(saman(tbs, _opt(o, "outer_algorithm", alg())), der._bit_string(signature)))
+}
+funksjon ocsp(o: ordbok) -> liste_heiltall {
+    la key = eddsa.public_key(seed(1))
+    la name = der._cn_name("Revocation CA")
+    la hash256 = _opt(o, "sha256", usann)
+    la hash_oid = hvis hash256 da [96, 134, 72, 1, 101, 3, 4, 2, 1] ellers [43, 14, 3, 2, 26]
+    la name_hash = hvis hash256 da x509._raw_sha256(name) ellers sha1.hash_raw(name)
+    la key_hash = hvis hash256 da x509._raw_sha256(key) ellers sha1.hash_raw(key)
+    la id = der._tlv(48, saman(der._tlv(6, hash_oid), [5, 0]))
+    der._legg(id, der._tlv(4, _opt(o, "issuer_name_hash", name_hash)))
+    der._legg(id, der._tlv(4, _opt(o, "issuer_key_hash", key_hash)))
+    der._legg(id, der._int(_opt(o, "serial", [16])))
+    la single = der._tlv(48, id)
+    la status = _opt(o, "status", "good")
+    hvis status == "revoked" { der._legg(single, der._tlv(161, tid("20261112000000Z"))) }
+    ellers hvis status == "unknown" { der._legg(single, [130, 0]) }
+    ellers { der._legg(single, [128, 0]) }
+    der._legg(single, tid(_opt(o, "this_update", "20261113000000Z")))
+    la next = _opt(o, "next_update", "20261114000000Z")
+    hvis next != "" { der._legg(single, der._tlv(160, tid(next))) }
+    la single_ext = _opt(o, "single_extensions", [])
+    hvis lengde(single_ext) > 0 { der._legg(single, der._tlv(161, der._tlv(48, single_ext))) }
+    la responses = der._tlv(48, single)
+    hvis _opt(o, "duplicate", usann) { responses = saman(responses, responses) }
+    la responder = der._tlv(161, name)
+    hvis _opt(o, "by_key", usann) { responder = der._tlv(162, der._tlv(4, sha1.hash_raw(key))) }
+    la body = _opt(o, "responder", responder)
+    der._legg(body, tid(_opt(o, "produced_at", "20261113010000Z")))
+    der._legg(body, der._tlv(48, responses))
+    la extensions = _opt(o, "extensions", [])
+    hvis lengde(extensions) > 0 { der._legg(body, der._tlv(161, der._tlv(48, extensions))) }
+    la tbs = der._tlv(48, body)
+    la signature = eddsa.sign(_opt(o, "signer_seed", seed(1)), tbs)
+    la basic = der._tlv(48, saman(saman(tbs, _opt(o, "algorithm", alg())), der._bit_string(signature)))
+    la rb = der._tlv(48, saman(der._tlv(6, [43, 6, 1, 5, 5, 7, 48, 1, 1]), der._tlv(4, basic)))
+    returner der._tlv(48, saman([10, 1, 0], der._tlv(160, rb)))
+}

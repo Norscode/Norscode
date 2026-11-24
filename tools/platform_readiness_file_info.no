@@ -1,0 +1,140 @@
+// Les éin kandidat i ein eigen prosess for den samla attestasjonssjekken.
+bruk tools.platform_readiness_v3600 som readiness
+bruk std.runtime_filesystem som fs
+bruk std.sha256 som sha256
+bruk std.native_sys som sys
+
+funksjon c_str(adr: heiltall, verdi: tekst) {
+    la i = 0
+    mens i < lengde(verdi) {
+        builtin.raw_store8(adr + i, builtin.char_code(builtin.slice(verdi, i, i + 1)) & 255)
+        i = i + 1
+    }
+    builtin.raw_store8(adr + i, 0)
+}
+
+// Linux AF_ALG, dokumentert i docs.kernel.org/crypto/userspace-if.html.
+// Same avgrensa blokk blir hasha i kjernen og brukt til trailersjekken.
+funksjon sha256_linux(storleik: heiltall, buffer: heiltall, fildeskriptor: heiltall, kanal: heiltall) {
+    la tom = {"sha": "", "emb": usann}
+    la hale: liste_heiltall = []
+    la lest = 0
+    mens lest < storleik {
+        la n = builtin.sys6(sys._nr("read"), fildeskriptor, buffer, 65536, 0, 0, 0)
+        hvis n == 0 - sys._errno("EINTR") { fortsett }
+        hvis n <= 0 eller n > storleik - lest { returner tom }
+        lest = lest + n
+        la flagg = sys._flagg("MSG_NOSIGNAL")
+        hvis lest < storleik { flagg = flagg | 32768 } // MSG_MORE
+        la sendt = builtin.sys6(sys._nr("sendto"), kanal, buffer, n, flagg, 0, 0)
+        hvis sendt != n { returner tom }
+        la i = 0
+        hvis n >= 23 { hale = []  i = n - 23 }
+        mens i < n {
+            legg_til(hale, builtin.raw_load64(buffer + i) & 255)
+            i = i + 1
+        }
+        hvis lengde(hale) > 23 { hale = builtin.slice(hale, lengde(hale) - 23, lengde(hale)) }
+    }
+    hvis builtin.sys6(sys._nr("read"), fildeskriptor, buffer, 1, 0, 0, 0) != 0 { returner tom }
+    hvis builtin.sys6(sys._nr("read"), kanal, buffer, 32, 0, 0, 0) != 32 { returner tom }
+    la heks = "0123456789abcdef"
+    la digest = ""
+    la i = 0
+    mens i < 32 {
+        la byte = builtin.raw_load64(buffer + i) & 255
+        la hi = byte >> 4
+        la lo = byte & 15
+        digest = digest + builtin.slice(heks, hi, hi + 1) + builtin.slice(heks, lo, lo + 1)
+        i = i + 1
+    }
+    returner {"sha": digest, "emb": trailer(hale, storleik)}
+}
+
+funksjon prøv_linux(sti: tekst, storleik: heiltall) {
+    la tom = {"sha": "", "emb": usann}
+    hvis storleik <= 0 eller storleik > 67108864 eller lengde(sti) >= 4096 eller builtin.contains(sti, builtin.chr(0)) { returner tom }
+    hvis builtin.native_target() != "linux-x86_64" { returner tom }
+    la b = builtin.sys6(sys._nr("mmap"), 0, 69632, sys._flagg("PROT_READ") | sys._flagg("PROT_WRITE"),
+        sys._flagg("MAP_PRIVATE") | sys._flagg("MAP_ANONYMOUS"), 0 - 1, 0)
+    hvis b <= 0 { returner tom }
+    c_str(b + 65536, sti)
+    la fd = builtin.sys6(sys._nr("openat"), sys._flagg("AT_FDCWD"), b + 65536,
+        sys._flagg("O_CLOEXEC") | sys._flagg("O_NOFOLLOW"), 0, 0, 0)
+    la nett = builtin.sys6(sys._nr("socket"), 38, 5 | sys._flagg("O_CLOEXEC"), 0, 0, 0, 0)
+    la kanal = 0 - 1
+    la info = tom
+    hvis fd >= 0 og nett >= 0 {
+        // sockaddr_alg i den nullstilte mmap-buffaren: familie, type, namn.
+        builtin.raw_store8(b, 38) // AF_ALG
+        c_str(b + 2, "hash")
+        c_str(b + 24, "sha256")
+        hvis builtin.sys6(sys._nr("bind"), nett, b, 88, 0, 0, 0) == 0 {
+            kanal = builtin.sys6(sys._nr("accept"), nett, 0, 0, 0, 0, 0)
+            hvis kanal >= 0 { info = sha256_linux(storleik, b, fd, kanal) }
+        }
+    }
+    hvis kanal >= 0 { builtin.sys6(sys._nr("close"), kanal, 0, 0, 0, 0, 0) }
+    hvis nett >= 0 { builtin.sys6(sys._nr("close"), nett, 0, 0, 0, 0, 0) }
+    hvis fd >= 0 { builtin.sys6(sys._nr("close"), fd, 0, 0, 0, 0, 0) }
+    builtin.sys6(sys._nr("munmap"), b, 69632, 0, 0, 0, 0)
+    hvis readiness.filstorleik(sti) != storleik { returner tom }
+    returner info
+}
+
+funksjon trailer(hale, storleik: heiltall) -> boolsk {
+    returner readiness.sluttmarkør(hale, "NORSCODE_NCB_IMAGE_V1") eller
+        readiness.sluttmarkør(hale, "NORSCODE_NCB_TEXT_V1") eller
+        readiness.har_seed_trailer(hale, storleik, "NORSCODE_NCB_V2") eller
+        readiness.har_seed_trailer(hale, storleik, "NORSCODE_NCB_V1")
+}
+
+funksjon inspiser_straum(sti: tekst, storleik: heiltall) {
+    la tom = {"sha": "", "emb": usann}
+    hvis storleik < 0 eller storleik > 67108864 { returner tom }
+    la delar = fs.native_sti_rot_relativ(sti)
+    la h = fs.opne_native(delar["root"], delar["relative"], "read")
+    hvis h["status"] != "open" { returner tom }
+    la ctx = sha256.ny_kontekst()
+    la hale: liste_heiltall = []
+    la lest = 0
+    prøv {
+        la del = fs.native_les_binær(h, 65536)
+        mens del["status"] == "ok" og del["value"] > 0 og lest < storleik {
+            la bytes = del["data_bytes"]
+            la n = lengde(bytes)
+            hvis n != del["value"] eller n > storleik - lest { kast "ugyldig leselengd" }
+            lest = lest + sha256.oppdater_bytes(ctx, bytes)
+            // Største trailer er 23 byte. Behald berre halen, også ved kort lesing.
+            hvis n >= 23 {
+                hale = builtin.slice(bytes, n - 23, n)
+            } ellers {
+                for b i bytes { legg_til(hale, b) }
+                hvis lengde(hale) > 23 { hale = builtin.slice(hale, lengde(hale) - 23, lengde(hale)) }
+            }
+            del = fs.native_les_binær(h, 65536)
+        }
+        hvis del["status"] != "ok" eller del["value"] != 0 { lest = 0 - 1 }
+    } fang (e) { lest = 0 - 1 }
+    hvis fs.native_lukk(h)["status"] != "closed" eller lest != storleik eller readiness.filstorleik(sti) != storleik {
+        returner tom
+    }
+    returner {"sha": sha256.ferdigstill(ctx), "emb": trailer(hale, storleik)}
+}
+
+funksjon start() -> heiltall {
+    la sti = miljo_hent("NORSCODE_PLATFORM_INSPECT_FILE")
+    hvis sti == "" { returner 2 }
+    la storleik = readiness.filstorleik(sti)
+    la info = {}
+    hvis miljo_hent("NORSCODE_PLATFORM_STREAM_FILE") == "1" {
+        info = prøv_linux(sti, storleik)
+        hvis info["sha"] == "" { info = inspiser_straum(sti, storleik) }
+    } ellers {
+        info = readiness.inspiser_fil(sti, storleik)
+    }
+    la sha = tekst(info["sha"])
+    hvis lengde(sha) != 64 eller ikkje readiness.gyldig_commit(sha) { returner 1 }
+    skriv("NORSCODE_PLATFORM_FILE_INFO " + builtin.json_skriv(info) + "\n")
+    returner 0
+}

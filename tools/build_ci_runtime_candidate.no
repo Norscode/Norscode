@@ -3,7 +3,10 @@
 // No stage0/dist promotion: output stays under build/ci-runtime.
 bruk tools.process_runner som prosess
 bruk std.filops som filops
+bruk std.runtime_filesystem som fs
+bruk std.runtime.process_abi som process_abi
 bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk tools.no_c_python_active_surface som surface
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
@@ -19,9 +22,54 @@ funksjon pin(allow: tekst, rel: tekst) -> tekst {
     returner ""
 }
 
+funksjon hash_stor_fil(sti: tekst) -> tekst {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" eller root == "." { root = tekst(builtin.system_info()["cwd"]) }
+    // Same levande runtime eig kvart hashbarn. Eit ytre NORSCODE_NATIVE_BIN
+    // eller ei varm bytekodefil må ikkje innføre ein annan verifikator.
+    la runtime = tekst(builtin.system_info()["executable"])
+    hvis runtime == "" { kast "ci-runtime: kan ikkje identifisere hashverten" }
+    la helper = root + "/tools/active_surface_file_sha256.no"
+    la caps = "env.read,disk.read"
+    la disk = root + ",.," + sti
+    la miljø = {"PATH": "/nonexistent", "NORSCODE_ROOT": root,
+        "NORSCODE_NATIVE_BIN": runtime, "NC_NATIVE": runtime,
+        "NORSCODE_CMD": "run", "NORSCODE_FILE": helper,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1", "NORSCODE_GC_ALLOC": "1",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "0", "NORSCODE_USE_PRECOMPILED_STDLIB": "0",
+        "NORSCODE_VM_FAST": "1", "NORSCODE_NATIVE_TOOL_CACHE": "0",
+        "NORSCODE_VM_CAPABILITIES": caps, "NORSCODE_VM_DISK_ROOT": disk,
+        "NORSCODE_VM_TARGET_CAPABILITIES": caps, "NORSCODE_VM_TARGET_DISK_ROOT": disk,
+        "NORSCODE_SURFACE_SHA256_FILE": sti}
+    la req = process_abi.request(runtime, ["run", helper], root, "", 120000, 65536)
+    req = process_abi.sett_sandbox(req, "none", 0, 64, usann)
+    req = process_abi.sett_environment(req, miljø)
+    returner surface.sha256_fra_barn(builtin.process_spawn_argv(req))
+}
+
 funksjon hash(sti: tekst) -> tekst {
-    la h: tekst = cgp.sha256_fil(sti)
-    hvis lengde(h) != 64 { kast "ci-runtime: ugyldig SHA-256 for " + sti }
+    la stat = fs.native_stat_sti(sti)
+    hvis stat["status"] != "ok" eller stat["kind"] != "file" {
+        kast "ci-runtime: manglar vanleg fil " + sti
+    }
+    la storleik = heiltall_fra_tekst(tekst(stat["value"]))
+    hvis storleik < 0 { kast "ci-runtime: ugyldig filstorleik " + sti }
+    la h = ""
+    // Fullhost-NCB og runtime har millionar av byte. Hald dei store boksa
+    // byte-listene ute av bygg-VM-en, også i sluttfasen før build.json.
+    hvis storleik > 1048576 {
+        h = hash_stor_fil(sti)
+    } ellers {
+        la bytes = builtin.fil_les_binær(sti)
+        hvis lengde(bytes) != storleik { kast "ci-runtime: avkorta filhash " + sti }
+        h = tekst(builtin.sha256_bytes(bytes))
+    }
+    la etter = fs.native_stat_sti(sti)
+    hvis lengde(h) != 64 eller ikkje surface.er_hexsiffer(h) eller
+       etter["status"] != "ok" eller etter["kind"] != "file" eller
+       heiltall_fra_tekst(tekst(etter["value"])) != storleik {
+        kast "ci-runtime: ugyldig eller endra filhash " + sti
+    }
     returner h
 }
 
@@ -123,16 +171,21 @@ funksjon bygg(root: tekst, ut: tekst) {
     hvis ikkje builtin.contains(smoke, "=== nc_main.no selftest ===") eller ikkje builtin.contains(smoke, "test OK") {
         kast "ci-runtime: kandidaten manglar levande selftest-markørar"
     }
+    skriv("[ci-runtime] source-validation\n")
     hvis cgp.srchash(root, "linux-x86_64") != src eller cgp.depshash(root, "linux-x86_64") != deps eller hash(cg) != cg_sha eller
        cgp.hash_filer(root, cgp.lukking(root, "selfhost/nc_main.no")) != runtime_sha {
         kast "ci-runtime: codegen/kjelder endra seg under bygget"
     }
+    skriv("[ci-runtime] hash-ncb\n")
+    la ncb_sha = hash(ncb)
+    skriv("[ci-runtime] hash-runtime\n")
+    la kandidat_sha = hash(kandidat)
     la report = {"schema": "norscode-ci-runtime-v1", "status": "ok", "source_commit": env("GITHUB_SHA"),
         "bootstrap_sha256": bootstrap_pin, "codegen_sha256": cg_sha,
         "codegen_source_sha256": src, "codegen_dependencies_sha256": deps,
         "runtime_sources_sha256": runtime_sha, "runtime_source_files": lengde(runtime_sources),
         "compiler_driver_functions": driver_functions, "l5_byte_parity": sann,
-        "ncb_sha256": hash(ncb), "candidate_path": kandidat, "candidate_sha256": hash(kandidat),
+        "ncb_sha256": ncb_sha, "candidate_path": kandidat, "candidate_sha256": kandidat_sha,
         "unresolved_builtins": 0, "unexpected_builtins": 0, "selftest": "passed", "promoted": usann}
     fil_skriv(ut + "/build.json", builtin.json_skriv(report) + "\n")
     skriv("[ci-runtime] OK: " + kandidat + " sha256=" + tekst(report["candidate_sha256"]) + "\n")

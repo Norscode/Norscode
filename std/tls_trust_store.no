@@ -1,0 +1,149 @@
+// CA-buntoppdagelse for den reine Norscode TLS-klienten.
+// Berre eksplisitte filer og faste system-PEM-stiar blir lesne. Modulen
+// avgjer ikkje sertifikattillit; TLS-valideraren må framleis kontrollere
+// kjede, algoritmar, namn, gyldigheit og den valde revokasjonspolicyen.
+
+bruk std.runtime_filesystem som fs
+
+funksjon maks_byte() -> heiltall { returner 4194304 }
+funksjon maks_sertifikat() -> heiltall { returner 512 }
+
+funksjon feilsvar(melding: tekst, kjelde: tekst, slag: tekst) -> ordbok {
+    returner {"status": "feil", "ca_pem": "", "source": kjelde,
+              "source_kind": slag, "error": melding}
+}
+
+funksjon system_kandidatar(system: tekst) -> liste_tekst {
+    la os = builtin.lower(system)
+    hvis os == "linux" {
+        returner ["/etc/ssl/certs/ca-certificates.crt",
+                  "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                  "/etc/pki/tls/certs/ca-bundle.crt",
+                  "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"]
+    }
+    hvis os == "darwin" eller os == "macos" {
+        returner ["/etc/ssl/cert.pem"]
+    }
+    // Windows Certificate Store og macOS Keychain er ikkje PEM-filer.
+    // Manglande systembunt gjev aldri ei tom, implisitt tillitsliste.
+    returner []
+}
+
+// Rein prioriteringsfunksjon: ei eksplisitt innstilling gjev nøyaktig éin
+// kandidat. Ein lesefeil i den fila kan dermed ikkje utvide tilliten ved å
+// falle tilbake til ein annan CA-bunt.
+funksjon velg_kandidatar(ca_file: tekst, miljøfil: tekst, system: tekst) -> ordbok {
+    hvis ca_file != "" { returner {"paths": [ca_file], "source_kind": "config"} }
+    hvis miljøfil != "" { returner {"paths": [miljøfil], "source_kind": "environment"} }
+    returner {"paths": system_kandidatar(system), "source_kind": "system"}
+}
+
+// Avgrens arbeidet før DER-/signaturparsing. Ukjende sertifikatalgoritmar
+// blir ikkje avviste her: ein systembunt kan innehalde både støtta og
+// ustøtta røter. Berre ein støtta, verifisert kjede kan gi tillit i TLS.
+funksjon valider_pem_ramme(pem: tekst) -> ordbok {
+    hvis lengde(pem) == 0 eller lengde(pem) > maks_byte() {
+        returner {"status": "feil", "error": "CA-bunten er tom eller overstig bytegrensa"}
+    }
+    la begin = "-----BEGIN CERTIFICATE-----"
+    la end = "-----END CERTIFICATE-----"
+    la pos: heiltall = 0
+    la tal: heiltall = 0
+    mens pos < lengde(pem) {
+        la rest = builtin.slice(pem, pos, lengde(pem))
+        la b = builtin.index_of(rest, begin)
+        la e = builtin.index_of(rest, end)
+        hvis b < 0 {
+            hvis e >= 0 { returner {"status": "feil", "error": "CA-bunten har END utan BEGIN"} }
+            bryt
+        }
+        hvis e >= 0 og e < b { returner {"status": "feil", "error": "CA-bunten har END før BEGIN"} }
+        la body_start = pos + b + lengde(begin)
+        la etter_begin = builtin.slice(pem, body_start, lengde(pem))
+        la slutt = builtin.index_of(etter_begin, end)
+        hvis slutt < 0 { returner {"status": "feil", "error": "CA-bunten har uavslutta sertifikat"} }
+        la body = builtin.slice(etter_begin, 0, slutt)
+        hvis builtin.trim(body) == "" eller builtin.contains(body, begin) {
+            returner {"status": "feil", "error": "CA-bunten har tomt eller nøsta sertifikat"}
+        }
+        tal = tal + 1
+        hvis tal > maks_sertifikat() {
+            returner {"status": "feil", "error": "CA-bunten overstig sertifikatgrensa"}
+        }
+        pos = body_start + slutt + lengde(end)
+    }
+    hvis tal == 0 { returner {"status": "feil", "error": "CA-bunten manglar PEM-sertifikat"} }
+    returner {"status": "ok", "certificates": tal, "error": ""}
+}
+
+funksjon les_kandidat(sti: tekst, slag: tekst) -> ordbok {
+    prøv {
+        la delar = fs.native_sti_rot_relativ(sti)
+        // stat følgjer systemet sine vanlege CA-symlenker. path_stat ville
+        // berre målt sjølve lenkja, ikkje storleiken til PEM-bunten.
+        la st = builtin.filesystem_read_operation({"abi": fs.native_versjon(),
+            "operation": "stat", "root": delar["root"], "relative": delar["relative"]})
+        hvis st["status"] != "ok" eller st["kind"] != "file" {
+            returner feilsvar("CA-bunten er ikkje ei lesbar vanleg fil", sti, slag)
+        }
+        la storleik = heltall_fra_tekst(tekst(st["value"]))
+        hvis storleik < 1 eller storleik > maks_byte() {
+            returner feilsvar("CA-bunten er tom eller overstig bytegrensa", sti, slag)
+        }
+        la pem = builtin.fil_les(sti)
+        // Kontroller òg dei faktisk lesne bytane dersom fila endra seg
+        // mellom stat og lesing. Ingen uavgrensa PEM-parsing følgjer.
+        la kontroll = valider_pem_ramme(pem)
+        hvis kontroll["status"] != "ok" { returner feilsvar(tekst(kontroll["error"]), sti, slag) }
+        returner {"status": "ok", "ca_pem": pem, "source": sti,
+                  "source_kind": slag, "certificates": kontroll["certificates"], "error": ""}
+    } fang (e) { returner feilsvar("CA-bunten kunne ikkje lesast: " + tekst(e), sti, slag) }
+    returner feilsvar("CA-bunten kunne ikkje lesast", sti, slag)
+}
+
+// Separat inngang for deterministiske testar og verktøy som allereie har
+// bunde miljø/plattform. resolve er den vanlege klientinngangen.
+funksjon resolve_med_kontekst(config: ordbok, miljøfil: tekst, system: tekst) -> ordbok {
+    la ca_file = ""
+    hvis finnes_nøkkel(config, "ca_file") og config["ca_file"] != null {
+        hvis builtin.type(config["ca_file"]) != "tekst" {
+            returner feilsvar("ca_file må vere ein tekststi", "", "config")
+        }
+        ca_file = tekst(config["ca_file"])
+    }
+    la val = velg_kandidatar(ca_file, miljøfil, system)
+    la stiar = val["paths"]
+    la slag = tekst(val["source_kind"])
+    hvis lengde(stiar) == 0 {
+        returner feilsvar("system-CA-bunt er utilgjengeleg; oppgje ca_file eller NORSCODE_TLS_CA_FILE", "", slag)
+    }
+    la siste = feilsvar("ingen lesbar system-CA-bunt", "", slag)
+    for sti i stiar {
+        la resultat = les_kandidat(tekst(sti), slag)
+        hvis resultat["status"] == "ok" { returner resultat }
+        hvis slag != "system" { returner resultat }
+        siste = resultat
+    }
+    returner siste
+}
+
+funksjon resolve(config: ordbok) -> ordbok {
+    // Eksplisitt fil treng ikkje lese miljø eller finne systemplattformen.
+    hvis finnes_nøkkel(config, "ca_file") og config["ca_file"] != null {
+        hvis builtin.type(config["ca_file"]) != "tekst" eller tekst(config["ca_file"]) != "" {
+            returner resolve_med_kontekst(config, "", "")
+        }
+    }
+    la miljøfil = ""
+    prøv { miljøfil = miljo_hent("NORSCODE_TLS_CA_FILE") } fang (e) {
+        returner feilsvar("CA-miljøinnstillinga kunne ikkje lesast: " + tekst(e), "", "environment")
+    }
+    hvis miljøfil != "" { returner resolve_med_kontekst(config, miljøfil, "") }
+    la system = ""
+    prøv {
+        la info = builtin.system_info()
+        hvis finnes_nøkkel(info, "system") { system = tekst(info["system"]) }
+        hvis system == "" og finnes_nøkkel(info, "os") { system = tekst(info["os"]) }
+    } fang (e) {}
+    returner resolve_med_kontekst(config, miljøfil, system)
+}

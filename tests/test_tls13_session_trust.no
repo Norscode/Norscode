@@ -3,6 +3,9 @@ bruk std.tls13_session som tls
 bruk std.tls13_handshake som hs
 bruk std.x509 som x509
 bruk std.tls13_klient som klient
+bruk std.tls13_keyschedule som ks
+bruk std.tls13_record som rec
+bruk std.ed25519 som eddsa
 
 funksjon der_saman(a: liste, b: liste) -> liste {
     la ut: liste = []
@@ -48,6 +51,51 @@ funksjon sertifikat(s: ordbok, der: liste_heiltall) -> ordbok {
     returner tls._klient_prosesser_hs(s)
 }
 
+funksjon signaturalgoritme_binding(der: liste_heiltall, seed: liste_heiltall, no_iso: tekst) {
+    la random: liste_heiltall = []
+    mens lengde(random) < 32 { legg_til(random, 1) }
+    la ch = hs.build_client_hello({"random": random, "session_id": [], "key_share_pub": random,
+        "server_name": "localhost"})
+    la header = hs.parse_handshake(ch, 0)
+    la parsed = hs.parse_client_hello(ch, header["start"], header["end"])
+    // Erstatt Ed25519 med ein ukjend signaturalgoritme i den faktiske CH.
+    // Resten av meldinga er uendra, og tenaren har inga anna identitet å velje.
+    la p = parsed["ext_start"]
+    mens p < parsed["ext_end"] {
+        la n = (ch[p + 2] << 8) | ch[p + 3]
+        hvis ((ch[p] << 8) | ch[p + 1]) == hs.EXT_SIG_ALGS() {
+            ch[p + 8] = 255
+            ch[p + 9] = 255
+        }
+        p = p + 4 + n
+    }
+    la refused = tls._tenar_motta({"fase": "start"}, [tls._rec_plain(22, ch)])
+    assert_eq(refused["status"], "feil")
+    assert(builtin.contains(refused["feil"], "tilbyr ikkje Ed25519"))
+
+    la key = random
+    la iv: liste_heiltall = []
+    mens lengde(iv) < 12 { legg_til(iv, 0) }
+    la cert = hs.build_certificate(der)
+    la content = hs.certificate_verify_content("TLS 1.3, client CertificateVerify", ks.transcript_hash(cert))
+    la signature = eddsa.sign(seed, content)
+    for alg i [hs.SIG_ED25519(), 1027] {
+        la flight = der_saman(cert, hs.build_certificate_verify(alg, signature))
+        la record = rec.krypter_post(key, iv, 0, 22, flight)
+        la server = {"fase": "vent_cfin", "ck_hs": {"key": key, "iv": iv},
+            "krev_klient": sann, "transcript": [], "klient_ankere": [der],
+            "no_iso": no_iso, "crl_der": []}
+        la result = tls._tenar_motta(server, [record])
+        assert_eq(result["status"], "feil")
+        hvis alg == hs.SIG_ED25519() {
+            // Positiv kontroll: signaturen og tillita er gode; berre Finished manglar.
+            assert_eq(result["feil"], "forventa Finished")
+        } ellers {
+            assert_eq(result["feil"], "klient CertificateVerify algoritme ikkje tilbode")
+        }
+    }
+}
+
 funksjon start() -> heiltall {
     vertsnamn_injeksjon()
     la der = x509.pem_til_der(builtin.fil_les("tests/fixtures/tls/localhost-ed25519.crt"))
@@ -61,6 +109,7 @@ funksjon start() -> heiltall {
     assert_eq(annan_nokkel["status"], "ok")
     assert(builtin.contains(tls._identitet_feil(der, annan_nokkel["seed"]), "TLS certificate and key mismatch"))
     la no_iso = info["not_before"]
+    signaturalgoritme_binding(der, nokkel["seed"], no_iso)
     assert(ikkje tls._verifiser_tillit(info, der, []))
     assert(ikkje tls._verifiser_tillit({"status": "feil"}, [1, 2, 3], der))
     assert(ikkje tls._verifiser_vertsnamn({"status": "feil"}, "localhost"))
@@ -109,8 +158,8 @@ funksjon start() -> heiltall {
     prøv { tls.ny_klient({"priv": [], "hostname": "localhost"}) } fang (e) { avvist = avvist + 1 }
     prøv { tls.ny_klient({"priv": [], "hostname": "localhost", "ca_der": [1, 2, 3]}) } fang (e) { avvist = avvist + 1 }
     prøv { tls.les_tillitsanker("ikkje eit sertifikat") } fang (e) { avvist = avvist + 1 }
-    prøv { tls.ny_klient({"require_ocsp": sann}) } fang (e) { hvis builtin.contains(tekst(e), "OCSP verification unsupported") { avvist = avvist + 1 } }
-    prøv { tls.ny_tenar({"crl_der": [1, 2, 3]}) } fang (e) { hvis builtin.contains(tekst(e), "CRL verification unsupported") { avvist = avvist + 1 } }
+    prøv { tls.ny_klient({"priv": [], "hostname": "localhost", "require_ocsp": sann}) } fang (e) { hvis builtin.contains(tekst(e), "CA") { avvist = avvist + 1 } }
+    prøv { tls.ny_tenar({"crl_der": [1, 2, 3]}) } fang (e) { hvis builtin.contains(tekst(e), "CRL invalid DER") { avvist = avvist + 1 } }
     assert_eq(avvist, 5)
 
     // Rå testnøkkel: aldri ein generell «insecure»-brytar. Eksakt pin + loopback.

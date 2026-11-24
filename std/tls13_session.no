@@ -15,6 +15,7 @@ bruk std.ed25519 som eddsa
 bruk std.sha256 som sha
 bruk std.x509 som x509
 bruk std.tls13_klient som tillit
+bruk std.x509_revocation som rev
 
 funksjon _kopi(a: liste_heiltall) -> liste_heiltall {
     la ut: liste_heiltall = []
@@ -71,9 +72,49 @@ funksjon _ankere_gyldige(ankere: liste) -> boolsk {
     returner sann
 }
 funksjon les_tillitsanker(pem: tekst) -> liste {
-    la ankere = tillit.pem_sertifikat(pem)
+    hvis lengde(pem) > 4194304 { kast "TLS CA bundle too large" }
+    la alle = tillit.pem_sertifikat(pem)
+    la ankere: liste = []
+    hvis lengde(alle) > 512 { kast "TLS CA bundle has too many certificates" }
+    for a i alle {
+        hvis x509.les_der(a)["status"] != "ok" { kast "TLS CA inneheld ugyldig X.509-sertifikat" }
+        la key = x509.hent_offentleg_nøkkel(a)
+        hvis key["status"] == "ok" { legg_til(ankere, a) }
+        ellers {
+            # Systembundlar kan innehalde t.d. P-384-røter. Dei gir inga
+            # tillit når algoritmen ikkje er implementert; andre røter kan brukast.
+            la unsupported = builtin.contains(key["error"], "ustøtta EC-kurve") eller builtin.contains(key["error"], "ukjend nøkkelalgoritme")
+            hvis ikkje unsupported { kast "TLS CA inneheld ugyldig offentleg nøkkel" }
+        }
+    }
     hvis ikkje _ankere_gyldige(ankere) { kast "TLS CA inneheld ingen gyldige X.509-sertifikat" }
     returner ankere
+}
+funksjon les_crl(pem: tekst) -> liste_heiltall {
+    hvis lengde(pem) > 1572864 { kast "TLS CRL file too large" }
+    la data = x509.crl_pem_til_der(pem)
+    hvis lengde(data) == 0 eller ikkje rev._heil(data, 0, lengde(data), 48)["ok"] { kast "TLS CRL unavailable or invalid" }
+    returner data
+}
+funksjon les_identitetskjede(pem: tekst) -> liste {
+    hvis lengde(pem) > 4194304 { kast "TLS certificate file too large" }
+    la chain = tillit.pem_sertifikat(pem)
+    la markers = builtin.split(pem, "-----BEGIN CERTIFICATE-----")
+    hvis lengde(chain) < 1 eller lengde(chain) > 16 eller lengde(markers) - 1 != lengde(chain) { kast "TLS certificate chain unavailable or invalid" }
+    for c i chain { hvis x509.les_der(c)["status"] != "ok" { kast "TLS certificate chain invalid" } }
+    returner chain
+}
+funksjon _identitetskjede(opts: ordbok, key: tekst, leaf: liste_heiltall) -> liste {
+    hvis finnes_nøkkel(opts, key) {
+        la chain = opts[key]
+        hvis lengde(chain) > 16 { kast "TLS certificate chain limit" }
+        hvis lengde(chain) > 0 {
+            hvis ikkje _lik(chain[0], leaf) { kast "TLS certificate chain leaf mismatch" }
+            returner chain
+        }
+    }
+    hvis lengde(leaf) == 0 { returner [] }
+    returner [leaf]
 }
 // Tenartransporten støttar Ed25519-identitet. Kontroller heile paret før ein
 // lyttar blir opna, slik at ein feil nøkkel ikkje blir rapportert som klar TLS.
@@ -118,16 +159,37 @@ funksjon _peer_tillit_feil(s: ordbok, kjede: liste, info: ordbok) -> tekst {
     hvis ikkje _verifiser_vertsnamn(info, s["hostname"]) { returner "sertifikat gjeld ikkje vertsnamn " + s["hostname"] }
     returner tillit._sjekk_tillit(kjede, s["ankere"], s["no_iso"])
 }
-funksjon ny_klient(opts: ordbok) -> ordbok {
-    hvis finnes_nøkkel(opts, "require_ocsp") og opts["require_ocsp"] {
-        kast "TLS OCSP verification unsupported: signature, CertID and validity checks required"
+funksjon _peer_revocation_feil(s: ordbok) -> tekst {
+    la crl = _opt_liste(s, "crl_der")
+    la ocsp = _opt_liste(s, "ocsp_der")
+    la required = finnes_nøkkel(s, "require_ocsp") og s["require_ocsp"]
+    s["ocsp_status"] = ""
+    hvis required og lengde(ocsp) == 0 { returner "TLS OCSP staple required" }
+    hvis lengde(crl) == 0 og lengde(ocsp) == 0 { returner "" }
+    la issuer = rev.finn_utferdar(s["cert_chain"], s["ankere"], s["no_iso"])
+    hvis lengde(issuer) == 0 { returner "TLS revocation issuer unavailable" }
+    hvis lengde(crl) > 0 {
+        la checked = rev.valider_crl(crl, s["cert_pub"], issuer, s["no_iso"])
+        hvis checked["status"] != "ok" { returner "TLS " + checked["error"] }
     }
+    hvis lengde(ocsp) > 0 {
+        la checked = rev.valider_ocsp(ocsp, s["cert_pub"], issuer, s["no_iso"])
+        hvis checked["status"] != "ok" { returner "TLS " + checked["error"] }
+        s["ocsp_status"] = "good"
+    }
+    returner ""
+}
+funksjon ny_klient(opts: ordbok) -> ordbok {
+    la krev_ocsp = finnes_nøkkel(opts, "require_ocsp") og opts["require_ocsp"]
+    la crl = _opt_liste(opts, "crl_der")
+    hvis lengde(crl) > 0 og ikkje rev._heil(crl, 0, lengde(crl), 48)["ok"] { kast "TLS CRL invalid DER" }
     la c_priv = opts["priv"]
     la ankere: liste = []
     hvis finnes_nøkkel(opts, "ca_ankere") { ankere = opts["ca_ankere"] }
     ellers hvis lengde(_opt_liste(opts, "ca_der")) > 0 { legg_til(ankere, opts["ca_der"]) }
     la pin = _opt_liste(opts, "test_raw_peer_key")
     hvis lengde(pin) > 0 {
+        hvis krev_ocsp eller lengde(crl) > 0 { kast "TLS revocation requires X.509 issuer" }
         hvis lengde(pin) != 32 eller ikkje _loopback(opts["hostname"]) eller lengde(ankere) != 0 {
             kast "rå TLS-testnøkkel krev 32 byte, loopback-vertsnamn og ingen CA"
         }
@@ -141,8 +203,9 @@ funksjon ny_klient(opts: ordbok) -> ordbok {
         "ankere": ankere, "no_iso": _no_iso(opts), "test_raw_peer_key": pin,
         "cert_checked": usann,
         "klient_cert": _opt_liste(opts, "client_cert_der"), "klient_seed": _opt_liste(opts, "client_priv_seed"),
+        "klient_kjede": _identitetskjede(opts, "client_cert_chain", _opt_liste(opts, "client_cert_der")),
         "cert_requested": usann,
-        "require_ocsp": finnes_nøkkel(opts, "require_ocsp") og opts["require_ocsp"],
+        "require_ocsp": krev_ocsp, "crl_der": crl, "cert_chain": [],
         "ocsp_der": [], "ocsp_stapled": usann, "ocsp_status": "",
         "transcript": [], "inbuf": [],
         "seq_r": 0, "seq_w": 0,
@@ -150,9 +213,8 @@ funksjon ny_klient(opts: ordbok) -> ordbok {
     }
 }
 funksjon ny_tenar(opts: ordbok) -> ordbok {
-    hvis lengde(_opt_liste(opts, "crl_der")) > 0 {
-        kast "TLS CRL verification unsupported: CRL structure and validity checks required"
-    }
+    la crl = _opt_liste(opts, "crl_der")
+    hvis lengde(crl) > 0 og ikkje rev._heil(crl, 0, lengde(crl), 48)["ok"] { kast "TLS CRL invalid DER" }
     la s_priv = opts["priv"]
     la t_cert = _opt_liste(opts, "cert_der")
     la t_id_pub: liste_heiltall = []
@@ -163,15 +225,20 @@ funksjon ny_tenar(opts: ordbok) -> ordbok {
         t_id_pub = eddsa.public_key(opts["id_seed"])
     } ellers hvis x509.les_der(t_cert)["status"] != "ok" { kast "ugyldig TLS-tenarsertifikat" }
     la krev_klient = finnes_nøkkel(opts, "require_client_cert") og opts["require_client_cert"]
+    hvis lengde(crl) > 0 og ikkje krev_klient { kast "TLS CRL requires client certificate policy" }
     la klient_ca = _opt_liste(opts, "client_ca_der")
-    hvis krev_klient og ikkje _ankere_gyldige([klient_ca]) { kast "mTLS krev gyldig klient-CA" }
+    la klient_ankere: liste = []
+    hvis finnes_nøkkel(opts, "client_ca_ankere") { klient_ankere = opts["client_ca_ankere"] }
+    ellers hvis lengde(klient_ca) > 0 { klient_ankere = [klient_ca] }
+    hvis krev_klient og ikkje _ankere_gyldige(klient_ankere) { kast "mTLS krev gyldig klient-CA" }
     returner {
         "rolle": "tenar", "fase": "start", "suite": "chacha20",
         "priv": s_priv, "pub": dh.scalarmult_base(s_priv),
         "id_seed": opts["id_seed"], "id_pub": t_id_pub,
         "cert_der": t_cert, "priv_seed": _opt_liste(opts, "priv_seed"),
+        "cert_chain": _identitetskjede(opts, "cert_chain", t_cert),
         "krev_klient": krev_klient, "no_iso": _no_iso(opts),
-        "klient_ca": klient_ca,
+        "klient_ca": klient_ca, "klient_ankere": klient_ankere,
         "crl_der": _opt_liste(opts, "crl_der"),
         "ocsp_der": _opt_liste(opts, "ocsp_der"),
         "transcript": [], "inbuf": [],
@@ -214,7 +281,7 @@ funksjon _feil(melding: tekst) -> ordbok {
 # ─── Klient: bygg ClientHello og send ──────────────────────────────────────
 funksjon start(s: ordbok) -> liste_heiltall {
     hvis s["rolle"] != "klient" { returner [] }
-    la CH = hs.build_client_hello({"random": _rnd32(), "session_id": [], "key_share_pub": s["pub"], "server_name": s["hostname"]})
+    la CH = hs.build_client_hello({"random": _rnd32(), "session_id": [], "key_share_pub": s["pub"], "server_name": s["hostname"], "request_ocsp": s["require_ocsp"]})
     s["transcript"] = _saman(s["transcript"], CH)
     s["fase"] = "vent_sh"
     returner _rec_plain(22, CH)
@@ -265,6 +332,13 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
         hvis ikkje ph["ok"] eller ph["type"] != 1 { returner _feil("ugyldig ClientHello") }
         la cparsed = hs.parse_client_hello(ch, ph["start"], ph["end"])
         hvis ikkje cparsed["ok"] { returner _feil("kunne ikkje parse ClientHello") }
+        // Den aktive tenaridentiteten er Ed25519. Vel berre ein algoritme
+        // klienten faktisk baud fram, og avvis før vi byggjer server-flighten.
+        la id_alg_tilbode = usann
+        for alg i cparsed["signature_algorithms"] {
+            hvis alg == hs.SIG_ED25519() { id_alg_tilbode = sann }
+        }
+        hvis ikkje id_alg_tilbode { returner _feil("ClientHello tilbyr ikkje Ed25519") }
         s["transcript"] = _saman(s["transcript"], _slice(ch, 0, ph["next"]))
         # ServerHello — spegle klientens legacy_session_id (RFC 8446 §4.1.3:
         # ServerHello.legacy_session_id_echo MÅ vere lik ClientHello.legacy_session_id;
@@ -280,8 +354,11 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
         hvis s["krev_klient"] { CREQ = hs.build_certificate_request() s["transcript"] = _saman(s["transcript"], CREQ) }
         la srv_cert = s["cert_der"]
         hvis lengde(srv_cert) == 0 { srv_cert = s["id_pub"] }
-        la CERT: liste_heiltall = []
-        hvis lengde(s["ocsp_der"]) > 0 { CERT = hs.build_certificate_stapled(srv_cert, s["ocsp_der"]) } ellers { CERT = hs.build_certificate(srv_cert) }
+        la server_chain = s["cert_chain"]
+        hvis lengde(server_chain) == 0 { server_chain = [srv_cert] }
+        la staple: liste_heiltall = []
+        hvis lengde(s["ocsp_der"]) > 0 og cparsed["request_ocsp"] { staple = s["ocsp_der"] }
+        la CERT = hs.build_certificate_chain(server_chain, staple)
         s["transcript"] = _saman(s["transcript"], CERT)
         la th_cert = ks.transcript_hash(s["transcript"])
         la cv_content = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
@@ -320,17 +397,25 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
             hvis ikkje vph["ok"] eller vph["type"] != 15 { returner _feil("forventa klient CertificateVerify") }
             la vobj = hs.parse_certificate_verify(cf, vph["start"], vph["end"])
             hvis ikkje vobj["ok"] { returner _feil("ugyldig klient CertificateVerify") }
+            // CertificateRequest tilbyr berre Ed25519. Algoritmefeltet er
+            // del av kontrakten, også om signaturbytane passar ein annan tagg.
+            hvis vobj["alg"] != hs.SIG_ED25519() { returner _feil("klient CertificateVerify algoritme ikkje tilbode") }
             la cvc = hs.certificate_verify_content("TLS 1.3, client CertificateVerify", th_ccert)
             la kk = x509.hent_offentleg_nøkkel(kc_der)
             hvis kk["status"] != "ok" eller kk["type"] != "ed25519" { returner _feil("klientsertifikat ikkje Ed25519") }
             hvis ikkje eddsa.verify(kk["pub"], cvc, vobj["signatur"]) { returner _feil("klient CertificateVerify ugyldig") }
             la kchain = tillit._les_sertifikat(cf, cph["start"], cph["end"])
             hvis ikkje kchain["ok"] { returner _feil("ugyldig klientsertifikatkjede") }
-            la ktrust = tillit._sjekk_tillit(kchain["kjede"], [s["klient_ca"]], s["no_iso"])
+            la ktrust = tillit._sjekk_tillit(kchain["kjede"], s["klient_ankere"], s["no_iso"])
             hvis ktrust != "" { returner _feil("klientsertifikat ikkje tiltrudd: " + ktrust) }
             la kinfo = x509.les_der(kc_der)
             hvis kinfo["status"] == "ok" { s["peer_subject"] = kinfo["subject"] }
-            hvis lengde(s["crl_der"]) > 0 { returner _feil("TLS CRL verification unsupported") }
+            hvis lengde(s["crl_der"]) > 0 {
+                la issuer = rev.finn_utferdar(kchain["kjede"], s["klient_ankere"], s["no_iso"])
+                hvis lengde(issuer) == 0 { returner _feil("TLS CRL issuer unavailable") }
+                la checked = rev.valider_crl(s["crl_der"], kc_der, issuer, s["no_iso"])
+                hvis checked["status"] != "ok" { returner _feil("TLS " + checked["error"]) }
+            }
             s["peer_cert_present"] = sann
             s["peer_verified"] = sann
             s["transcript"] = _saman(s["transcript"], _slice(cf, p, vph["next"]))
@@ -374,10 +459,14 @@ funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
             la chain = tillit._les_sertifikat(buf, mph["start"], mph["end"])
             hvis ikkje chain["ok"] { returner _feil("ugyldig sertifikatkjede") }
             s["cert_pub"] = cobj["cert_der"]
+            s["cert_chain"] = chain["kjede"]
+            s["ocsp_der"] = []
             hvis finnes_nøkkel(cobj, "ocsp") { s["ocsp_der"] = cobj["ocsp"] }
             s["cert_info"] = x509.les_der(cobj["cert_der"])
             la trust_error = _peer_tillit_feil(s, chain["kjede"], s["cert_info"])
             hvis trust_error != "" { returner _feil("sertifikat ikkje tiltrudd: " + trust_error) }
+            la revoke_error = _peer_revocation_feil(s)
+            hvis revoke_error != "" { returner _feil(revoke_error) }
             s["cert_checked"] = sann
             s["cert_key"] = x509.hent_offentleg_nøkkel(cobj["cert_der"])
             s["transcript"] = _saman(s["transcript"], raw)
@@ -498,16 +587,14 @@ funksjon _klient_motta(s: ordbok, records: liste) -> ordbok {
             hvis pr["status"] == "ferdig" {
                 hvis ikkje s["peer_verified"] { returner _feil("mangla CertificateVerify") }
                 s["ocsp_stapled"] = lengde(s["ocsp_der"]) > 0
-                hvis s["ocsp_stapled"] { s["ocsp_status"] = x509.ocsp_status(s["ocsp_der"]) }
-                hvis s["require_ocsp"] {
-                    returner _feil("TLS OCSP verification unsupported: stapled certStatus is not authenticated revocation")
-                }
+                # ocsp_status vart sett først etter autentisert validering av
+                # signatur, issuer, CertID og tid i Certificate-steget.
                 _avled_app(s)
                 s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256"
                 s["tls_version"] = "TLSv1.3"
                 la klient_flight: liste_heiltall = []
                 hvis s["cert_requested"] og lengde(s["klient_cert"]) > 0 {
-                    la CCERT = hs.build_certificate(s["klient_cert"])
+                    la CCERT = hs.build_certificate_chain(s["klient_kjede"], [])
                     s["transcript"] = _saman(s["transcript"], CCERT)
                     la th_cc = ks.transcript_hash(s["transcript"])
                     la ccv_content = hs.certificate_verify_content("TLS 1.3, client CertificateVerify", th_cc)

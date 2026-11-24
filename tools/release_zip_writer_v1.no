@@ -160,43 +160,52 @@ funksjon analyser_fil(root: tekst, namn: tekst) -> ordbok_tekst {
     returner analyser_fil_med_cache(root, namn, crc_cache)
 }
 
-funksjon append_liste(sti: tekst, data: liste_heiltall) -> boolsk {
-    prøv {
-        builtin.fil_append_binary(sti, builtin.bytes_from_list(data))
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
+funksjon skriv_bytes(ut: ordbok_tekst, data: tekst) -> boolsk {
+    la svar = fs.native_skriv(ut, data)
+    returner svar["status"] == "ok" og heiltall_fra_tekst(tekst(svar["value"])) == lengde(data)
 }
 
-funksjon append_fil(sti: tekst, kjelde: tekst) -> boolsk {
-    prøv {
-        // Bevar NC_BYTES-bufferen frå fil_les_binær direkte. Kandidat-EXE-en
-        // blir aldri materialisert som millionar av VM-listeelement.
-        builtin.fil_append_binary(sti, builtin.fil_les_binær(kjelde))
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
+funksjon skriv_liste(ut: ordbok_tekst, data: liste_heiltall) -> boolsk {
+    returner skriv_bytes(ut, builtin.bytes_to_text(builtin.bytes_from_list(data)))
 }
 
-// To pass med kompakte NC_BYTES-bufferar held kandidat-EXE-en ute av
-// operandstacken: pass 1 finn CRC/storleik, pass 2 skriv råbufferen direkte.
-funksjon zip_skriv_stream_med_modus(sti: tekst, root: tekst, filer: liste_tekst,
-                                    modusar: ordbok_tekst) -> boolsk {
-    prøv { builtin.fil_skriv_binær(sti, []) }
-    fang (e) { returner usann }
+funksjon skriv_fil(ut: ordbok_tekst, kjelde: tekst, storleik: heiltall) -> boolsk {
+    la sti = fs.native_sti_rot_relativ(kjelde)
+    la inn = fs.opne_native(sti["root"], sti["relative"], "read")
+    hvis inn["status"] != "open" { returner usann }
+    la kopiert = 0
+    prøv {
+        mens kopiert < storleik {
+            la maks = storleik - kopiert
+            hvis maks > 65536 { maks = 65536 }
+            la del = fs.native_les(inn, maks)
+            la n = heiltall_fra_tekst(tekst(del["value"]))
+            hvis del["status"] != "ok" eller n <= 0 eller n > maks eller n != lengde(del["data"]) { bryt }
+            hvis ikkje skriv_bytes(ut, del["data"]) { bryt }
+            kopiert = kopiert + n
+        }
+    } fang (e) { kopiert = -1 }
+    la lukka = fs.native_lukk(inn)
+    returner lukka["status"] == "closed" og kopiert == storleik
+}
+
+// Eitt skrivehandtak held rett posisjon også på Windows. CRC-analysen
+// brukar kompakte bytebufferar, og sjølve filskrivinga brukar avgrensa blokker.
+funksjon skriv_arkiv(ut: ordbok_tekst, root: tekst, filer: liste_tekst,
+                    modusar: ordbok_tekst) -> heiltall {
     la metadata = []
     la crc_cache: ordbok_tekst = {}
     la posisjon: heiltall = 0
     la i = 0
     mens i < lengde(filer) {
         la namn = filer[i]
-        hvis ikkje trygt_namn(namn) { returner usann }
+        hvis ikkje trygt_namn(namn) { returner -1 }
         la info = analyser_fil_med_cache(root, namn, crc_cache)
-        hvis info["status"] != "ok" { returner usann }
+        hvis info["status"] != "ok" { returner -1 }
         hvis har_nokkel(modusar, namn) { info["mode"] = modusar[namn] }
         la crc = heltall_fra_tekst(tekst(info["crc"]))
         la storleik = heltall_fra_tekst(tekst(info["size"]))
-        hvis storleik > 4294967295 { returner usann }
+        hvis storleik > 4294967295 { returner -1 }
         la namn_data = namn_bytes(namn)
         la header: liste_heiltall = []
         le(header, 67324752, 4)
@@ -210,8 +219,8 @@ funksjon zip_skriv_stream_med_modus(sti: tekst, root: tekst, filer: liste_tekst,
         le(header, storleik, 4)
         le(header, lengde(namn_data), 2)
         le(header, 0, 2)
-        hvis ikkje append_liste(sti, header) eller ikkje append_liste(sti, namn_data) eller
-           ikkje append_fil(sti, root + "/" + namn) { returner usann }
+        hvis ikkje skriv_liste(ut, header) eller ikkje skriv_liste(ut, namn_data) eller
+           ikkje skriv_fil(ut, root + "/" + namn, storleik) { returner -1 }
         legg_til(metadata, {"name": namn, "crc": crc, "size": storleik,
                             "mode": info["mode"], "offset": posisjon})
         posisjon = posisjon + 30 + lengde(namn_data) + storleik
@@ -244,7 +253,7 @@ funksjon zip_skriv_stream_med_modus(sti: tekst, root: tekst, filer: liste_tekst,
         la mode = heltall_fra_tekst(tekst(metadata[i]["mode"])) & 511
         le(header, (32768 | mode) << 16, 4)
         le(header, heltall_fra_tekst(tekst(metadata[i]["offset"])), 4)
-        hvis ikkje append_liste(sti, header) eller ikkje append_liste(sti, namn_data) { returner usann }
+        hvis ikkje skriv_liste(ut, header) eller ikkje skriv_liste(ut, namn_data) { returner -1 }
         posisjon = posisjon + 46 + lengde(namn_data)
         i = i + 1
     }
@@ -257,9 +266,24 @@ funksjon zip_skriv_stream_med_modus(sti: tekst, root: tekst, filer: liste_tekst,
     le(slutt, posisjon - central_start, 4)
     le(slutt, central_start, 4)
     le(slutt, 0, 2)
-    la ok = append_liste(sti, slutt)
-    hvis ikkje ok { fs.native_slett(".", sti) }
-    returner ok
+    hvis ikkje skriv_liste(ut, slutt) { returner -1 }
+    returner posisjon + lengde(slutt)
+}
+
+funksjon zip_skriv_stream_med_modus(sti: tekst, root: tekst, filer: liste_tekst,
+                                    modusar: ordbok_tekst) -> boolsk {
+    la mål = fs.native_sti_rot_relativ(sti)
+    la ut = fs.opne_native(mål["root"], mål["relative"], "write")
+    hvis ut["status"] != "open" { returner usann }
+    la forventa = -1
+    prøv { forventa = skriv_arkiv(ut, root, filer, modusar) } fang (e) {}
+    la lukka = fs.native_lukk(ut)
+    hvis forventa >= 22 og lukka["status"] == "closed" {
+        la stat = fs.native_stat_sti(sti)
+        hvis stat["status"] == "ok" og heltall_fra_tekst(tekst(stat["value"])) == forventa { returner sann }
+    }
+    fs.native_slett(mål["root"], mål["relative"])
+    returner usann
 }
 
 funksjon zip_skriv_stream(sti: tekst, root: tekst, filer: liste_tekst) -> boolsk {

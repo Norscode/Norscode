@@ -1,6 +1,8 @@
 # Windows app-release
 
-Windows app-release pakkar ein ferdig `norscode.exe` inn i ZIP-distribusjon.
+Windows app-release byggjer `norscode.exe` frå Norscode-kjelde på Linux og
+køyrer runtime-testane på ekte Windows. Den same CRT-frie binæren blir
+attestert, pakka i eit ZIP-arkiv og signert med GitHub-provenance.
 
 Køyr alltid lokal preflight før tag eller publisering:
 
@@ -14,5 +16,6 @@ Arbeidsflyten publiserer berre frå `v*`-taggar og lastar opp:
 
 - `norscode-windows-<versjon>.zip`
 - `norscode-windows-<versjon>.zip.sha256`
+- `windows-runtime-attestation.json`
 
 Arbeidsflyten feilar dersom han ikkje finn ein ferdig Windows-native `norscode.exe` i dei dokumenterte release-stiane.
